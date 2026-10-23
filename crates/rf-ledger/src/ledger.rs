@@ -57,12 +57,22 @@ pub struct EntryFailure {
     pub error: String,
 }
 
-/// What [`Ledger::open`] settled for entries a crash left unfinished.
+/// What [`Ledger::open`] settled for the `Pending` entries a crash left, each list in
+/// processing order (newest entry first).
+///
+/// A `Pending` entry beneath a newer entry of the same setting whose value is in place is in no
+/// list: whether its own change reached the system means nothing then, so it stays `Pending`
+/// for a revert to walk back to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReconcileReport {
+    /// Entries whose change the system holds; they are `Applied` now.
     pub confirmed: Vec<EntryId>,
+    /// Entries whose change the system did not hold: their before-state was put back and they
+    /// are no longer recorded.
     pub rolled_back: Vec<EntryId>,
+    /// Entries that stay `Pending` because they could not be settled, or because a newer entry
+    /// of the same setting could not.
     pub failed: Vec<EntryFailure>,
 }
 
@@ -113,6 +123,45 @@ fn is_valid_group(group: &str) -> bool {
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
 }
 
+/// What the newest entry of a setting left for the older entries of that setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotMark {
+    /// It could not be settled and stays recorded. The older entries wait for it without a
+    /// backend call and stay recorded; those that were to be settled are reported as failed.
+    Stuck,
+    /// It found someone else's value. The older entries are dropped without a backend call:
+    /// whatever they recorded, the value is not the app's to overwrite.
+    Foreign,
+    /// It stays recorded with its value in place. The older entries stay as they are.
+    Live,
+}
+
+/// The slot-chain rule that both [`Ledger::revert_all`] and [`Ledger::open`] settle entries by.
+///
+/// Entries are settled newest first, and an entry is settled only while it is the newest one
+/// left of its setting: the system holds that entry's value (or someone else's), so whether an
+/// older entry's value is live means nothing. Once settled, the entry leaves a [`SlotMark`] for
+/// the older entries of its setting, or none if its before-state was put back: then the next
+/// older entry is the newest left and is settled in turn.
+#[derive(Debug, Default)]
+struct SlotChain(Vec<(Target, SlotMark)>);
+
+impl SlotChain {
+    /// The mark a newer entry left for the setting of `target`; `None` if the entry for
+    /// `target` is the newest left of its setting.
+    fn get(&self, target: &Target) -> Option<SlotMark> {
+        self.0
+            .iter()
+            .find(|(slot, _)| slot.same_slot(target))
+            .map(|&(_, mark)| mark)
+    }
+
+    /// Leaves `mark` for the older entries of the setting of `target`.
+    fn mark(&mut self, target: &Target, mark: SlotMark) {
+        self.0.push((target.clone(), mark));
+    }
+}
+
 impl Ledger {
     /// The ledger file's name inside the data folder.
     pub const FILE_NAME: &'static str = "ledger.json";
@@ -124,7 +173,16 @@ impl Ledger {
         paths.data_dir().join(Self::FILE_NAME)
     }
 
-    /// Opens the ledger file, which may not exist yet; nothing is created.
+    /// Opens the ledger file, which may not exist yet; nothing is created. Then settles the
+    /// `Pending` entries a crash left (see [`ReconcileReport`]) and saves the file once if that
+    /// changed anything.
+    ///
+    /// A ledger file that does not parse, or whose entry ids were tampered with, is refused
+    /// with [`LedgerError::Corrupt`]; one a newer build wrote, with
+    /// [`LedgerError::UnsupportedFormat`]. Neither is ever changed, and the backend is not
+    /// called: the file is the only record of the system changes to revert. If the settled
+    /// entries cannot be saved, that error is returned; the next open settles them again, with
+    /// the same result.
     pub fn open(
         paths: &AppPaths,
         backend: Box<dyn SystemBackend>,
@@ -132,27 +190,94 @@ impl Ledger {
         let path = Self::file_path(paths);
         let (entries, next_id) = match store::load(&path)? {
             Some(file) => {
-                let after_last = file
-                    .entries
-                    .iter()
-                    .map(|e| e.id.0.saturating_add(1))
-                    .max()
-                    .unwrap_or(1);
+                // `load` checked that the ids ascend and that the last one is below `u64::MAX`.
+                let after_last = file.entries.last().map_or(1, |e| e.id.0 + 1);
                 (file.entries, file.next_id.max(after_last))
             }
             None => (Vec::new(), 1),
         };
-        let ledger = Self {
+        let mut ledger = Self {
             path,
             portable: paths.mode() == InstallMode::Portable,
             backend,
             next_id,
             entries,
         };
-        Ok((ledger, ReconcileReport::default()))
+        let report = ledger.reconcile()?;
+        Ok((ledger, report))
     }
 
-    /// Reads the recorded entries without a backend.
+    /// Settles the `Pending` entries a crash left, newest first, under the rule of
+    /// [`SlotChain`]; saves the file once if any entry changed.
+    ///
+    /// A `Pending` entry that is the newest left of its setting is confirmed if the system
+    /// holds its value; otherwise its before-state is put back without further check (the
+    /// system may hold a half-written value of ours) and the entry is dropped as rolled back.
+    /// `Applied` entries are never asked about.
+    fn reconcile(&mut self) -> Result<ReconcileReport, LedgerError> {
+        let mut report = ReconcileReport::default();
+        let mut chain = SlotChain::default();
+        // Entries only leave the list at the index being settled, so lower indexes stay valid.
+        for index in (0..self.entries.len()).rev() {
+            let entry = &self.entries[index];
+            let target = &entry.change.target;
+            let id = entry.id;
+            let fail = |error: String| EntryFailure {
+                id,
+                change: target.to_string(),
+                error,
+            };
+
+            match chain.get(target) {
+                None => {}
+                Some(SlotMark::Stuck) => {
+                    if entry.state == EntryState::Pending {
+                        report.failed.push(fail(
+                            "left pending: a newer change to the same setting could not be \
+                             settled first"
+                                .into(),
+                        ));
+                    }
+                    continue;
+                }
+                // A newer entry's value is in place. No setting is found `Foreign` here: an
+                // open never reads a value as someone else's, so it never drops an entry
+                // without putting its before-state back.
+                Some(SlotMark::Live | SlotMark::Foreign) => continue,
+            }
+            if entry.state == EntryState::Applied {
+                chain.mark(target, SlotMark::Live);
+                continue;
+            }
+            match self.backend.is_applied(&entry.change) {
+                Ok(true) => {
+                    chain.mark(target, SlotMark::Live);
+                    self.entries[index].state = EntryState::Applied;
+                    report.confirmed.push(id);
+                }
+                Ok(false) => match self.backend.restore(&entry.change, &entry.before) {
+                    Ok(()) => {
+                        self.entries.remove(index);
+                        report.rolled_back.push(id);
+                    }
+                    Err(e) => {
+                        chain.mark(target, SlotMark::Stuck);
+                        report.failed.push(fail(e.to_string()));
+                    }
+                },
+                Err(e) => {
+                    chain.mark(target, SlotMark::Stuck);
+                    report.failed.push(fail(e.to_string()));
+                }
+            }
+        }
+        if !(report.confirmed.is_empty() && report.rolled_back.is_empty()) {
+            self.persist()?;
+        }
+        Ok(report)
+    }
+
+    /// Reads the recorded entries without a backend; refuses the same files as [`Ledger::open`].
     pub fn inspect(paths: &AppPaths) -> Result<Vec<LedgerEntry>, LedgerError> {
         Ok(store::load(&Self::file_path(paths))?.map_or_else(Vec::new, |file| file.entries))
     }
@@ -185,6 +310,13 @@ impl Ledger {
             return Err(LedgerError::SlotOwned {
                 target: change.target.to_string(),
                 owner: owner.group.clone(),
+            });
+        }
+        // The id this change takes must leave one for the next. Only a tampered file gets here.
+        if self.next_id == u64::MAX {
+            return Err(LedgerError::Corrupt {
+                path: self.path.clone(),
+                reason: "no entry id is left for a new change".into(),
             });
         }
         if self.backend.is_applied(&change)? {
@@ -250,13 +382,10 @@ impl Ledger {
         self.revert_where(|_| true)
     }
 
-    /// Reverts the entries `pick` accepts, newest first.
+    /// Reverts the entries `pick` accepts, newest first, under the rule of [`SlotChain`].
     fn revert_where(&mut self, pick: impl Fn(&LedgerEntry) -> bool) -> RevertReport {
         let mut report = RevertReport::default();
-        // Settings whose newest entry could not be settled.
-        let mut stuck: Vec<Target> = Vec::new();
-        // Settings whose live value is someone else's.
-        let mut foreign: Vec<Target> = Vec::new();
+        let mut chain = SlotChain::default();
         // Entries only leave the list at the index being settled, so lower indexes stay valid.
         for index in (0..self.entries.len()).rev() {
             let entry = &self.entries[index];
@@ -271,38 +400,33 @@ impl Ledger {
                 error,
             };
 
-            if stuck
-                .iter()
-                .any(|slot| slot.same_slot(&entry.change.target))
-            {
-                report.failed.push(fail(
-                    "not reverted: a newer change to the same setting could not be reverted first"
-                        .into(),
-                ));
-                continue;
-            }
-            let ours = if foreign
-                .iter()
-                .any(|slot| slot.same_slot(&entry.change.target))
-            {
+            let ours = match chain.get(&entry.change.target) {
+                // A newer entry of the setting stays recorded (in a revert only because it
+                // failed): this one waits for it.
+                Some(SlotMark::Stuck | SlotMark::Live) => {
+                    report.failed.push(fail(
+                        "not reverted: a newer change to the same setting could not be reverted \
+                         first"
+                            .into(),
+                    ));
+                    continue;
+                }
                 // A newer entry found someone else's value here: whatever this older entry
                 // recorded, the live value is not the app's to overwrite, `Pending` or not.
-                false
-            } else if entry.state == EntryState::Pending {
+                Some(SlotMark::Foreign) => false,
                 // A crash may have left a half-written value of ours: put it back unasked.
-                true
-            } else {
-                match self.backend.is_applied(&entry.change) {
+                None if entry.state == EntryState::Pending => true,
+                None => match self.backend.is_applied(&entry.change) {
                     Ok(applied) => applied,
                     Err(e) => {
-                        stuck.push(entry.change.target.clone());
+                        chain.mark(&entry.change.target, SlotMark::Stuck);
                         report.failed.push(fail(e.to_string()));
                         continue;
                     }
-                }
+                },
             };
             if !ours {
-                foreign.push(entry.change.target.clone());
+                chain.mark(&entry.change.target, SlotMark::Foreign);
                 match self.forget(index) {
                     Ok(()) => report.skipped.push(id),
                     Err(e) => report.failed.push(fail(format!(
@@ -312,7 +436,7 @@ impl Ledger {
                 continue;
             }
             if let Err(e) = self.backend.restore(&entry.change, &entry.before) {
-                stuck.push(entry.change.target.clone());
+                chain.mark(&entry.change.target, SlotMark::Stuck);
                 report.failed.push(fail(e.to_string()));
                 continue;
             }
