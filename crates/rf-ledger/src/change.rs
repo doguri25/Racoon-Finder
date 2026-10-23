@@ -169,8 +169,9 @@ pub fn registry_data(value: &Value) -> Result<(u32, Vec<u8>), LedgerError> {
 impl Target {
     /// Whether `other` is the same slot of system state, which only one change group may own.
     ///
-    /// Registry keys and value names are case-insensitive, so they compare case-insensitively;
-    /// everything else must match exactly.
+    /// Registry keys and value names are case-insensitive, so they compare case-insensitively.
+    /// Of a registry key only the part after the hive counts: `HKCU\X` and
+    /// `HKEY_CURRENT_USER\X` are one slot. Everything else must match exactly.
     pub fn same_slot(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -183,8 +184,12 @@ impl Target {
                     name: name_b,
                 },
             ) => {
-                key_a.to_lowercase() == key_b.to_lowercase()
-                    && name_a.to_lowercase() == name_b.to_lowercase()
+                let same_key = match (hkcu_subkey(key_a), hkcu_subkey(key_b)) {
+                    (Ok(a), Ok(b)) => a.to_lowercase() == b.to_lowercase(),
+                    // Not an `HKCU` key (nothing can be applied to it): the text must match.
+                    _ => key_a.to_lowercase() == key_b.to_lowercase(),
+                };
+                same_key && name_a.to_lowercase() == name_b.to_lowercase()
             }
             (a, b) => a == b,
         }
