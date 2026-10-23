@@ -94,10 +94,12 @@ pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Pl
         }
     }
     let moving = spec.mode == TransferMode::Move;
+    // Many sources of one job are in one folder, which is asked about once.
+    let mut writable = HashMap::new();
     let moved_as_copy = moving
         && found
             .iter()
-            .any(|(item, _)| !source_folder_writable(ctx, &item.source));
+            .any(|(item, _)| !source_folder_writable(ctx, &item.source, &mut writable));
     ctx.report.copied_instead_of_moved = moved_as_copy;
     let mut items = Vec::with_capacity(found.len());
     for (item, scanned) in found {
@@ -183,13 +185,16 @@ fn scan_item(
 }
 
 /// Whether the folder that holds `source` can be written to, so that a move can take the
-/// source out of it. A source in no folder (a volume root) cannot be taken out of one.
-fn source_folder_writable(ctx: &Ctx<'_>, source: &VPath) -> bool {
+/// source out of it. A source in no folder (a volume root) cannot be taken out of one. `known`
+/// keeps the answer for each folder asked about, so that its provider is asked once.
+fn source_folder_writable(ctx: &Ctx<'_>, source: &VPath, known: &mut HashMap<VPath, bool>) -> bool {
     let Some(parent) = source.parent() else {
         return false;
     };
-    ctx.provider(&parent)
-        .is_ok_and(|src| src.capabilities(&parent).contains(Capabilities::WRITE))
+    *known.entry(parent).or_insert_with_key(|parent| {
+        ctx.provider(parent)
+            .is_ok_and(|src| src.capabilities(parent).contains(Capabilities::WRITE))
+    })
 }
 
 /// The folder `target` goes into, and what `stat` says it is. Fails with `NotFound` unless it

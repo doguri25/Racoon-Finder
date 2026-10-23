@@ -134,6 +134,38 @@ pub(super) fn remove_dir(path: &VPath) -> Result<()> {
     std::fs::remove_dir(native(path)?).map_err(|e| Error::io("remove_dir", path.clone(), e))
 }
 
+/// Makes the changes to the entries of the folder `path` durable; see `Provider::sync_dir`.
+///
+/// On Unix the folder is opened for reading and synced (`fsync`, `F_FULLFSYNC` on macOS). A
+/// file system that cannot sync a folder says so with `EINVAL` or `ENOTSUP`, and then there is
+/// nothing more this can do, as PostgreSQL also takes it. On Windows it does nothing: NTFS
+/// keeps the changes to its folders in its journal, and `File::open` cannot open a folder
+/// there.
+pub(super) fn sync_dir(path: &VPath) -> Result<()> {
+    let local = native(path)?;
+    #[cfg(unix)]
+    {
+        let fail = |e| Error::io("sync_dir", path.clone(), e);
+        let dir = File::open(&local).map_err(fail)?;
+        match dir.sync_all() {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                ) =>
+            {
+                Ok(())
+            }
+            synced => synced.map_err(fail),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = local;
+        Ok(())
+    }
+}
+
 /// What the link at `path` leads to; see `Provider::read_link`.
 pub(super) fn read_link(path: &VPath) -> Result<LinkTarget> {
     let local = native(path)?;

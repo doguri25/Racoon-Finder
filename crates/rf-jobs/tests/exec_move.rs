@@ -5,15 +5,17 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use common::*;
 use rf_core::ErrorKind;
 use rf_jobs::testkit::{Fault, FaultyProvider, ScriptedResolver, tree, write_tree};
 use rf_jobs::{
-    ConflictPolicy, ErrorAction, ErrorAnswer, ErrorPolicy, JobSpec, MovedItem, NonInteractive,
-    Outcome, Stage, Totals, TransferItem, TransferMode, TransferOptions, TransferSpec, UndoRecord,
+    ConflictPolicy, Control, ErrorAction, ErrorAnswer, ErrorPolicy, ExecEnv, JobId, JobSpec,
+    MovedItem, NonInteractive, Outcome, Stage, Totals, TransferItem, TransferMode, TransferOptions,
+    TransferSpec, UndoRecord, execute,
 };
 
 fn mv(sources: &[PathBuf], dest: &Path) -> JobSpec {
@@ -408,7 +410,6 @@ fn a_case_only_spelling_without_identities_is_never_two_items() {
 #[cfg(unix)]
 #[test]
 fn a_source_replaced_during_its_copy_is_never_deleted() {
-    use std::time::Duration;
     let f = fx();
     std::fs::write(f.src.join("a.txt"), "A").unwrap();
     let p = FaultyProvider::local(vec![Fault::CrossDevice, Fault::Hold { file: 0 }]);
@@ -631,4 +632,170 @@ fn a_move_carries_links_as_links() {
     );
     assert!(!f.src.join("dir").exists());
     assert_eq!(read(&f.src.join("outside").join("keep.txt")), "keep");
+}
+
+/// A copy whose name in its folder cannot be made durable keeps its source: after a power
+/// loss the delete could be on disk and the copy not.
+#[test]
+fn a_copy_that_cannot_be_made_durable_keeps_its_source() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    let p = FaultyProvider::local(vec![Fault::CrossDevice, Fault::FailSyncDir]);
+    let rep = run_on(
+        &mv(&[f.src.join("a.txt")], &f.dst),
+        &p.vfs(),
+        &NonInteractive,
+    );
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::DeleteSource)
+    );
+    assert!(
+        rep.failures[0]
+            .message
+            .contains("injected sync_dir failure"),
+        "{}",
+        rep.failures[0].message
+    );
+    assert_eq!(
+        (read(&f.src.join("a.txt")), read(&f.dst.join("a.txt"))),
+        ("A".into(), "A".into())
+    );
+    assert_eq!(rep.undo, None);
+}
+
+/// A folder made at the target whose entry cannot be made durable gets nothing moved into it,
+/// and is taken back.
+#[test]
+fn a_folder_made_for_a_move_that_cannot_be_made_durable_is_taken_back() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A")]);
+    let p = FaultyProvider::local(vec![Fault::CrossDevice, Fault::FailSyncDir]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::Write)
+    );
+    assert_eq!(read(&f.src.join("dir").join("a.txt")), "A");
+    assert_eq!(tree(&f.dst), BTreeMap::new());
+    assert_eq!(p.opened_writes(), 0);
+    assert_eq!(rep.undo, None);
+}
+
+/// The target folder is the source folder through a link, and nothing tells them apart by
+/// identity: the copy would replace the source with itself and the move then delete the only
+/// copy. The temporary file shows up next to the source, and the commit is refused.
+#[cfg(unix)]
+#[test]
+fn a_move_into_its_own_folder_through_a_link_never_deletes_it() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    std::os::unix::fs::symlink(&f.src, f.dst.join("alias")).unwrap();
+    let p = FaultyProvider::local(vec![Fault::NoIdentity, Fault::CrossDevice]);
+    let job = spec(
+        TransferMode::Move,
+        &[f.src.join("a.txt")],
+        &f.dst.join("alias"),
+        with(ConflictPolicy::Overwrite),
+    );
+    let rep = run_on(&job, &p.vfs(), &NonInteractive);
+    assert_eq!(
+        (
+            rep.failures.len(),
+            rep.failures[0].stage,
+            rep.failures[0].kind
+        ),
+        (1, Stage::Commit, ErrorKind::Unsupported),
+        "{:?}",
+        rep.failures
+    );
+    // The source, and no temporary file next to it.
+    assert_eq!(tree(&f.src).into_keys().collect::<Vec<_>>(), ["a.txt"]);
+    assert_eq!(read(&f.src.join("a.txt")), "A");
+    assert_eq!(rep.undo, None);
+}
+
+/// A move that the plan turned into a copy still does nothing when it is dropped back onto
+/// its own folder (DND-09), instead of making a numbered copy.
+#[test]
+fn a_move_turned_into_a_copy_onto_its_own_folder_does_nothing() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "me").unwrap();
+    let p = FaultyProvider::local(vec![Fault::ReadOnly { under: v(&f.src) }]);
+    let rep = run_on(
+        &mv(&[f.src.join("a.txt")], &f.src),
+        &p.vfs(),
+        &NonInteractive,
+    );
+    assert!(rep.copied_instead_of_moved);
+    assert_eq!(
+        (rep.outcome, rep.skipped, rep.failures.len()),
+        (Outcome::Completed, 1, 0)
+    );
+    assert_eq!(tree(&f.src).into_keys().collect::<Vec<_>>(), ["a.txt"]);
+    assert_eq!(rep.undo, None);
+}
+
+/// A cancel in the middle of a copy across volumes leaves the source as it was, and nothing
+/// at the target, not even a temporary file.
+#[test]
+fn cancelling_a_move_in_the_middle_of_a_copy_keeps_the_source() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    let p = FaultyProvider::local(vec![Fault::CrossDevice, Fault::Hold { file: 0 }]);
+    let (vfs, control) = (p.vfs(), Control::new());
+    let job = mv(&[f.src.join("a.txt")], &f.dst);
+    let rep = std::thread::scope(|scope| {
+        let running = scope.spawn(|| {
+            let env = ExecEnv::new(&vfs, &NonInteractive).control(control.clone());
+            execute(JobId::generate(), &job, &env)
+        });
+        let held = p.wait_held(Duration::from_secs(10));
+        control.cancel();
+        p.release();
+        assert!(held, "the copy never reached its first write");
+        running.join().unwrap()
+    });
+    assert_eq!(rep.outcome, Outcome::Cancelled);
+    assert_eq!(read(&f.src.join("a.txt")), "A");
+    assert_eq!(tree(&f.dst), BTreeMap::new());
+    assert_eq!(rep.undo, None);
+}
+
+/// A file two levels down that stays keeps both folders above it at the source.
+#[test]
+fn a_grandchild_that_stays_keeps_both_its_source_folders() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
+    // The target of `b.txt` cannot be examined, so `b.txt` is not moved.
+    let p = FaultyProvider::local(vec![
+        Fault::CrossDevice,
+        Fault::FailStat {
+            name: "b.txt".into(),
+        },
+    ]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::Conflict)
+    );
+    assert_eq!(
+        tree(&f.src.join("dir")).into_keys().collect::<Vec<_>>(),
+        ["sub", "sub/b.txt"]
+    );
+    assert_eq!(read(&f.src.join("dir/sub/b.txt")), "B");
+    assert_eq!(read(&f.dst.join("dir/a.txt")), "A");
+    assert_eq!(rep.warnings, Vec::new());
+    let moves = vec![MovedItem {
+        from: v(f.src.join("dir/a.txt")),
+        to: v(f.dst.join("dir/a.txt")),
+    }];
+    assert_eq!(
+        rep.undo,
+        Some(UndoRecord::Moved {
+            moves,
+            created_dirs: vec![v(f.dst.join("dir")), v(f.dst.join("dir/sub"))],
+            removed_dirs: vec![]
+        })
+    );
 }

@@ -200,6 +200,10 @@ impl Provider for LocalProvider {
         ops::remove_dir(path)
     }
 
+    fn sync_dir(&self, path: &VPath) -> Result<()> {
+        ops::sync_dir(path)
+    }
+
     fn fs_name(&self, path: &VPath) -> Option<String> {
         rf_platform::volume_info(path)
             .ok()

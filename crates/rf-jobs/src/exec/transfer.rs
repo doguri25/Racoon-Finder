@@ -53,6 +53,12 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
             fs: planned.fs,
         };
         let (source, target) = (&planned.item.source, &planned.item.target);
+        if plan.moved_as_copy && source == target {
+            // Dropped back onto its own folder: a move does nothing there (DND-09), and so
+            // does the copy it turned into, rather than make a numbered copy.
+            ctx.report.skipped += 1;
+            continue;
+        }
         let to = To {
             path: target,
             planned: target,
@@ -177,7 +183,7 @@ type Flow = ControlFlow<()>;
 
 /// [`Flow`] for an item of a move, which also says whether the item has gone from the source
 /// with everything in it (`Continue(true)`): a folder is removed only once every child has.
-type Moved = ControlFlow<(), bool>;
+type MoveFlow = ControlFlow<(), bool>;
 
 /// The flow after an attempt that ends no differently whether it worked or not.
 fn flow<T>(attempt: &Attempt<T>) -> Flow {
@@ -305,7 +311,7 @@ fn transfer_file(
         } else {
             (target.clone(), RenameMode::NoReplace)
         };
-        copy_file(ctx, from, &*dst, &path, commit).map_err(|failed| failed.writing(&path))?;
+        copy_file(ctx, from, &*dst, &path, commit, None).map_err(|failed| failed.writing(&path))?;
         Ok(Some((path, commit)))
     });
     match copied {
@@ -515,7 +521,7 @@ fn move_entry(
     to: To<'_>,
     level: Level<'_>,
     log: &mut Log,
-) -> Moved {
+) -> MoveFlow {
     if let Some(flow) = refused(ctx, walk, source, to, level) {
         return flow.map_continue(|()| false);
     }
@@ -528,8 +534,10 @@ fn move_entry(
 
 /// Moves the file or link `source`, which `entry` describes, to `to`: with one rename where it
 /// can (see [`settle_move`]), else by a copy (see `copy_file`) and a delete of the source once
-/// the copy is committed (see [`delete_source`]). A `top` item that reaches its target goes to
-/// the outputs.
+/// the copy is committed and its name durable (see [`delete_source`]). A `top` item that
+/// reaches its target goes to the outputs. A source without an identity has its copy refused
+/// when the target folder turns out to be its own folder under another path (`own_folder` of
+/// `copy_file`), since nothing else would tell.
 ///
 /// The delete is a step of its own, so that trying it again after a failure does not copy the
 /// file again. It comes right after the commit, with no checkpoint between them: a pause or a
@@ -544,7 +552,7 @@ fn move_file(
     to: To<'_>,
     top: bool,
     log: &mut Log,
-) -> Moved {
+) -> MoveFlow {
     let target = to.path;
     let placed = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
         // A cancel between items moves nothing more.
@@ -563,7 +571,11 @@ fn move_file(
             // Only two folders merge; a file is never written into one.
             Way::Merge(_) => return Err(Failed::new(Stage::Conflict, taken(target))),
         };
-        copy_file(ctx, from, &*dst, &path, commit).map_err(|failed| failed.writing(&path))?;
+        // Without an identity, nothing else tells whether the target folder is the source's
+        // own folder under another path.
+        let own_folder = source.parent().filter(|_| entry.identity().is_none());
+        copy_file(ctx, from, &*dst, &path, commit, own_folder.as_ref())
+            .map_err(|failed| failed.writing(&path))?;
         Ok(Some((path, true)))
     });
     let (path, copied) = match placed {
@@ -580,7 +592,7 @@ fn move_file(
     }
     let deleted = if copied {
         ctx.attempt(walk.errors, Some(source), Some(&path), |ctx| {
-            delete_source(ctx, source, entry)
+            delete_source(ctx, source, entry, &path)
         })
     } else {
         Attempt::Done(())
@@ -598,13 +610,21 @@ fn move_file(
     ControlFlow::Continue(gone)
 }
 
-/// Deletes `source`, which a move has copied and committed and `entry` describes, for good.
+/// Deletes `source`, which a move has copied and committed to `copy` and `entry` describes,
+/// for good. Every failure is a `Stage::DeleteSource` failure that leaves the source.
 ///
-/// It is `stat`ed first, and left with a `Stage::DeleteSource` failure when it is no longer
-/// what was copied: of another kind (above all a folder, which `delete` would remove with
-/// everything in it) or, when both identities are known, another file, as when a program
-/// replaced it while it was copied. A link is deleted itself, never what it leads to.
-fn delete_source(ctx: &Ctx<'_>, source: &VPath, entry: &Entry) -> Result<(), Failed> {
+/// First the folder of the copy is synced (`Provider::sync_dir`), so that the commit that gave
+/// the copy its name is durable before the source goes: after a power loss the delete could
+/// otherwise be on disk while the copy is still only a temporary file, which crash recovery
+/// removes. Then the source is `stat`ed, and left when it is no longer what was copied: of
+/// another kind (above all a folder, which `delete` would remove with everything in it) or,
+/// when both identities are known, another file, as when a program replaced it while it was
+/// copied. A link is deleted itself, never what it leads to.
+fn delete_source(ctx: &Ctx<'_>, source: &VPath, entry: &Entry, copy: &VPath) -> Result<(), Failed> {
+    if let Some(folder) = copy.parent() {
+        let dst = ctx.provider(copy).at(Stage::DeleteSource)?;
+        dst.sync_dir(&folder).at(Stage::DeleteSource)?;
+    }
     let src = ctx.provider(source).at(Stage::DeleteSource)?;
     let now = src.stat(source).at(Stage::DeleteSource)?;
     let replaced = now.kind != entry.kind
@@ -635,8 +655,9 @@ enum MovedDir {
 ///
 /// One step settles where it goes (see [`settle_move`]). Renamed there, it is moved with
 /// everything in it. Otherwise the same step lists its children and, unless it merges into the
-/// folder at the target, makes a folder there, which its children are copied into. Each child
-/// is then moved as its own step.
+/// folder at the target, makes a folder there whose name is durable (see
+/// [`make_durable_dir`]), which its children are copied into. Each child is then moved as its
+/// own step.
 ///
 /// The source folder is removed after its children, with `remove_dir`, and only once each of
 /// them has gone with everything in it: nothing failed, was skipped, was left out by the
@@ -653,7 +674,7 @@ fn move_dir(
     to: To<'_>,
     level: Level<'_>,
     log: &mut Log,
-) -> Moved {
+) -> MoveFlow {
     let top = level.depth() == 0;
     let opened = ctx.attempt(walk.errors, Some(source), Some(to.path), |ctx| {
         open_moved_dir(ctx, walk, source, entry, to)
@@ -748,8 +769,7 @@ fn open_moved_dir(
     };
     let children = ctx.list(&*src, source).at(Stage::Read)?;
     if made {
-        dst.create_dir(&path)
-            .map_err(|error| Failed::new(Stage::Write, error).writing(&path))?;
+        make_durable_dir(&*dst, &path)?;
     }
     Ok(MovedDir::Opened(Opened {
         path,
@@ -757,6 +777,21 @@ fn open_moved_dir(
         made,
         identity: None,
     }))
+}
+
+/// Makes the folder `path` of `dst` for a move to copy into, and syncs the folder it is in, so
+/// that its name is durable before any source copied into it is deleted. When that sync
+/// fails, the new folder, still empty, is removed again and the step fails as `Stage::Write`.
+fn make_durable_dir(dst: &dyn Provider, path: &VPath) -> Result<(), Failed> {
+    dst.create_dir(path)
+        .map_err(|error| Failed::new(Stage::Write, error).writing(path))?;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    dst.sync_dir(&parent).map_err(|error| {
+        let _ = dst.remove_dir(path);
+        Failed::new(Stage::Write, error).writing(path)
+    })
 }
 
 /// Removes the folder `source`, whose children a move has all taken to `target`, with

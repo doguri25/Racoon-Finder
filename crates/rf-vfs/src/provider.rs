@@ -173,7 +173,8 @@ fn unsupported(op: &str, path: &VPath) -> Error {
 ///
 /// The methods after `watch` have default implementations, so that a provider without links,
 /// metadata or a trash to restore from needs none of them: they fail with
-/// `Error::Unsupported`, except `copy_extras` and `fs_name`, which have nothing to give.
+/// `Error::Unsupported`, except `copy_extras` and `fs_name`, which have nothing to give, and
+/// `sync_dir`, which has nothing to do.
 pub trait Provider: Send + Sync + Debug {
     /// The scheme this provider serves; `Vfs` routes by it.
     fn scheme(&self) -> Scheme;
@@ -313,6 +314,19 @@ pub trait Provider: Send + Sync + Debug {
     /// while what it leads to stays.
     fn remove_dir(&self, path: &VPath) -> Result<()> {
         Err(unsupported("remove_dir", path))
+    }
+
+    /// Makes the changes to the entries of the folder `path` durable: the items made in it and
+    /// the renames into and out of it, such as the commit that gave a copy its final name. The
+    /// content of a file is made durable by `WriteStream::finish`; its name in its folder is
+    /// made durable by this. A move calls it before it deletes a source it copied, so that a
+    /// power loss cannot keep the delete and lose the copy.
+    ///
+    /// It is a no-op where the provider cannot or need not do it, as the default
+    /// implementation is.
+    fn sync_dir(&self, path: &VPath) -> Result<()> {
+        let _ = path;
+        Ok(())
     }
 
     /// The name of the file system that holds `path` (`NTFS`, `FAT32`, `exFAT`, `apfs`, ...)

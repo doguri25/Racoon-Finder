@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use rf_core::{Entry, EntryKind, Error, VPath};
+use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
 use rf_vfs::{DeleteMode, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
 use super::{At, COPY_CHUNK, Ctx, Failed};
@@ -45,12 +45,20 @@ pub(crate) struct Source<'a> {
 /// end. A temporary path longer than the OS allows is refused the same way, as
 /// `Stage::Preflight`: its name is longer than a short final name, so the final path alone may
 /// fit where it does not.
+///
+/// `own_folder` is for a move that cannot tell by identity whether the target folder is the
+/// source's own folder under another path (a link to it): the source's folder, where the
+/// finished temporary file is looked for just before the commit. Found there, the two folders
+/// are one, the commit would put the copy over the source itself and the move would then
+/// delete its only copy, so the commit is refused as `Stage::Commit` and the temporary file
+/// removed.
 pub(crate) fn copy_file(
     ctx: &mut Ctx<'_>,
     from: Source<'_>,
     dst: &dyn Provider,
     target: &VPath,
     commit: RenameMode,
+    own_folder: Option<&VPath>,
 ) -> Result<(), Failed> {
     let Source {
         provider: src,
@@ -80,6 +88,9 @@ pub(crate) fn copy_file(
             path: &tmp,
             armed: true,
         };
+        if let Some(folder) = own_folder {
+            refuse_own_folder(src, folder, &tmp, source)?;
+        }
         dst.rename(&tmp, target, commit).at(Stage::Commit)?;
         guard.armed = false;
         return Ok(());
@@ -117,6 +128,9 @@ pub(crate) fn copy_file(
         );
     }
 
+    if let Some(folder) = own_folder {
+        refuse_own_folder(src, folder, &tmp, source)?;
+    }
     dst.rename(&tmp, target, commit).at(Stage::Commit)?;
     guard.armed = false;
 
@@ -128,6 +142,33 @@ pub(crate) fn copy_file(
         );
     }
     Ok(())
+}
+
+/// Fails as `Stage::Commit` when the temporary file `tmp` of the copy of `source` is in the
+/// folder `folder` of `src` too: the target folder and `folder` are then one folder under two
+/// paths. A `stat` error other than `NotFound` cannot tell, and fails too.
+fn refuse_own_folder(
+    src: &dyn Provider,
+    folder: &VPath,
+    tmp: &VPath,
+    source: &VPath,
+) -> Result<(), Failed> {
+    let Some(name) = tmp.file_name() else {
+        return Ok(());
+    };
+    let there = folder
+        .join(name)
+        .map_err(|error| Failed::new(Stage::Commit, error.into()))?;
+    match src.stat(&there) {
+        Ok(_) => {
+            let error = Error::Unsupported(format!(
+                "cannot move {source} onto itself: its target folder is its own folder"
+            ));
+            Err(Failed::new(Stage::Commit, error))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Failed::new(Stage::Commit, error)),
+    }
 }
 
 /// The smallest buffer a file is copied through.

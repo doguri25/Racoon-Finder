@@ -123,8 +123,25 @@ fn new_methods_refuse_non_local_paths() {
         p.copy_extras(&r, &r),
         p.remove_dir(&r),
         p.restore_trashed(&r, &r),
+        p.sync_dir(&r),
     ]
     .map(|result| result.unwrap_err().kind());
-    assert_eq!(kinds, [ErrorKind::Unsupported; 7]);
+    assert_eq!(kinds, [ErrorKind::Unsupported; 8]);
     assert_eq!(p.fs_name(&r), None);
+}
+
+/// A folder whose entries changed can be synced. Off Windows a missing folder is an error, so
+/// the call really reaches the file system; on Windows it does nothing.
+#[test]
+fn sync_dir_syncs_an_existing_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let p = LocalProvider::new();
+    let dir = VPath::local(t.path()).unwrap();
+    p.create_file(&dir.join("a").unwrap()).unwrap();
+    p.sync_dir(&dir).unwrap();
+    let missing = p.sync_dir(&dir.join("missing").unwrap());
+    #[cfg(unix)]
+    assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
+    #[cfg(windows)]
+    missing.unwrap();
 }

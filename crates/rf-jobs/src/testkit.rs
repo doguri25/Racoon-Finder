@@ -285,6 +285,8 @@ pub enum Fault {
     /// `stat`, `stat_target` and `list` give entries without a volume or file ID, as a file
     /// system that has none (FAT) or reports zeros.
     NoIdentity,
+    /// Every `sync_dir` fails with `injected sync_dir failure`.
+    FailSyncDir,
 }
 
 impl Fault {
@@ -615,6 +617,14 @@ impl Provider for FaultyProvider {
         self.inner.remove_dir(path)
     }
 
+    fn sync_dir(&self, path: &VPath) -> Result<()> {
+        if self.faults.contains(&Fault::FailSyncDir) {
+            let error = io::Error::other("injected sync_dir failure");
+            return Err(Error::io("sync_dir", path.clone(), error));
+        }
+        self.inner.sync_dir(path)
+    }
+
     fn fs_name(&self, path: &VPath) -> Option<String> {
         let injected = self.faults.iter().find_map(|fault| match fault {
             Fault::FsName(name) => Some(name.clone()),
@@ -880,6 +890,28 @@ mod tests {
         assert!(error.to_string().contains("injected create_dir failure"));
         assert!(!dir.path().join("b").exists());
         p.create_dir(&at("b")).unwrap();
+    }
+
+    #[test]
+    fn sync_dir_is_passed_on_unless_it_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = local(dir.path());
+        let p = FaultyProvider::local(vec![]);
+        p.sync_dir(&root).unwrap();
+        // The local provider's own answer, not the default one, which never fails.
+        #[cfg(unix)]
+        assert_eq!(
+            p.sync_dir(&local(&dir.path().join("missing")))
+                .unwrap_err()
+                .kind(),
+            rf_core::ErrorKind::NotFound
+        );
+        let p = FaultyProvider::local(vec![Fault::FailSyncDir]);
+        let error = p.sync_dir(&root).unwrap_err();
+        assert!(
+            error.to_string().contains("injected sync_dir failure"),
+            "{error}"
+        );
     }
 
     #[test]
