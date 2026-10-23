@@ -58,12 +58,39 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// The file or folder does not exist.
     NotFound,
+    /// The OS refused access to the item.
     PermissionDenied,
+    /// The name is already taken.
     AlreadyExists,
+    /// Any [`PathError`] (`PathError::Unsupported` too), or a name Windows rejected as invalid.
     InvalidPath,
+    /// A path component that must be a folder is not one.
+    NotADirectory,
+    /// The operation needs something other than a folder but found one.
+    IsADirectory,
+    /// The folder must be empty and is not.
+    DirectoryNotEmpty,
+    /// The volume is full or a disk quota is used up.
+    StorageFull,
+    /// The volume is read-only.
+    ReadOnly,
+    /// A rename cannot move the item to another volume; copy and delete instead.
+    CrossesDevices,
+    /// Another process holds the item open or locked; a later retry may work.
+    Busy,
+    /// The operation took too long, for example on a network share.
+    TimedOut,
+    /// The OS interrupted the call; a retry may work.
+    Interrupted,
+    /// The file is larger than the file system allows.
+    FileTooLarge,
+    /// The operation is not supported for this item, provider or system.
     Unsupported,
+    /// The operation was cancelled.
     Cancelled,
+    /// Anything else: [`Error::MissingEnv`] and I/O errors no variant above covers.
     Other,
 }
 
@@ -76,18 +103,55 @@ impl Error {
     /// The category of this error.
     pub fn kind(&self) -> ErrorKind {
         match self {
-            // `io::ErrorKind::InvalidFilename` is stable only since 1.87, above the MSRV.
-            Self::Io { source, .. } => match source.kind() {
-                std::io::ErrorKind::NotFound => ErrorKind::NotFound,
-                std::io::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
-                std::io::ErrorKind::AlreadyExists => ErrorKind::AlreadyExists,
-                std::io::ErrorKind::Unsupported => ErrorKind::Unsupported,
-                _ => ErrorKind::Other,
-            },
+            Self::Io { source, .. } => {
+                #[cfg(windows)]
+                if let Some(kind) = windows_code_kind(source) {
+                    return kind;
+                }
+                io_kind(source.kind())
+            }
             Self::Path(_) => ErrorKind::InvalidPath,
             Self::Unsupported(_) => ErrorKind::Unsupported,
             Self::Cancelled => ErrorKind::Cancelled,
             Self::MissingEnv(_) => ErrorKind::Other,
         }
+    }
+}
+
+/// The category of a std I/O error kind.
+fn io_kind(kind: std::io::ErrorKind) -> ErrorKind {
+    use std::io::ErrorKind as Io;
+
+    // `io::ErrorKind::InvalidFilename` is stable only since 1.87, above the MSRV; on
+    // Windows `windows_code_kind` covers it by OS code.
+    match kind {
+        Io::NotFound => ErrorKind::NotFound,
+        Io::PermissionDenied => ErrorKind::PermissionDenied,
+        Io::AlreadyExists => ErrorKind::AlreadyExists,
+        Io::NotADirectory => ErrorKind::NotADirectory,
+        Io::IsADirectory => ErrorKind::IsADirectory,
+        Io::DirectoryNotEmpty => ErrorKind::DirectoryNotEmpty,
+        Io::StorageFull | Io::QuotaExceeded => ErrorKind::StorageFull,
+        Io::ReadOnlyFilesystem => ErrorKind::ReadOnly,
+        Io::CrossesDevices => ErrorKind::CrossesDevices,
+        Io::ResourceBusy => ErrorKind::Busy,
+        Io::TimedOut => ErrorKind::TimedOut,
+        Io::Interrupted => ErrorKind::Interrupted,
+        Io::FileTooLarge => ErrorKind::FileTooLarge,
+        Io::Unsupported => ErrorKind::Unsupported,
+        _ => ErrorKind::Other,
+    }
+}
+
+/// Windows OS codes that std files under no stable kind the MSRV can name
+/// (`Uncategorized`, or `InvalidFilename` from 1.87).
+#[cfg(windows)]
+fn windows_code_kind(error: &std::io::Error) -> Option<ErrorKind> {
+    match error.raw_os_error()? {
+        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+        32 | 33 => Some(ErrorKind::Busy),
+        // ERROR_INVALID_NAME, ERROR_BAD_PATHNAME, ERROR_FILENAME_EXCED_RANGE
+        123 | 161 | 206 => Some(ErrorKind::InvalidPath),
+        _ => None,
     }
 }

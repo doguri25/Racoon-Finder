@@ -29,6 +29,13 @@ fn extension_rules() {
 }
 
 #[test]
+fn special_files_have_no_extension() {
+    let fifo = Entry::new("events.pipe", EntryKind::Other);
+    assert_eq!(fifo.kind, EntryKind::Other);
+    assert_eq!(fifo.extension(), None);
+}
+
+#[test]
 fn identity_needs_both_ids() {
     let mut e = Entry::new("a", EntryKind::File);
     e.volume_id = Some(VolumeId(7));

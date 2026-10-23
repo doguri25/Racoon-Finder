@@ -37,6 +37,8 @@ pub enum EntryKind {
     File,
     Dir,
     Symlink,
+    /// FIFO, socket, block/char device, or other non-regular file; never opened for data.
+    Other,
 }
 
 /// Identifies a volume: the Windows volume serial number, or `st_dev` on Unix.
@@ -59,6 +61,8 @@ pub struct FileId(pub u128);
 pub struct Entry {
     pub name: OsString,
     pub kind: EntryKind,
+    /// The byte length of a file. For folders, symlinks and [`EntryKind::Other`] it means
+    /// nothing (usually 0); it can also be 0 when the size is unknown.
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
@@ -84,10 +88,11 @@ impl Entry {
         }
     }
 
-    /// The text after the last dot, for the extension column. Folders have none,
-    /// and neither do dot files (`.bashrc`) or names ending in a dot (`a.`).
+    /// The text after the last dot, for the extension column. Folders and
+    /// [`EntryKind::Other`] items have none, and neither do dot files (`.bashrc`) or names
+    /// ending in a dot (`a.`).
     pub fn extension(&self) -> Option<&OsStr> {
-        if self.kind == EntryKind::Dir {
+        if matches!(self.kind, EntryKind::Dir | EntryKind::Other) {
             return None;
         }
         Path::new(&self.name)

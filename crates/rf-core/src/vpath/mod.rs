@@ -1,5 +1,30 @@
 //! `VPath`: one address type for every place a file manager can look, with a string form
 //! that loses nothing.
+//!
+//! # Persisted string form
+//!
+//! [`VPath::to_uri`] writes, and [`VPath::parse`] reads back, the text that journals, ledgers,
+//! settings and the metadata database store. It looks like a URI but is not an RFC 3986 one:
+//! `local:` has no `//`, there is no query or fragment, and only the characters below are
+//! escaped.
+//!
+//! - Local: `local:` followed by the stored native path, which is host-specific: the raw bytes
+//!   on Unix (`local:/a/b`, `local:/`), the WTF-8 of the UTF-16 units on Windows with `\`
+//!   separators (`local:C:\a\b`, `local:C:\`, `local:\\srv\share\x`; a share root keeps its
+//!   trailing `\`, as in `local:\\srv\share\`).
+//! - Non-local: `<scheme>://<authority>` and then `/<segment>` for each segment
+//!   (`remote://prof 1/dir/a b`). No trailing `/` is written, so a root is just
+//!   `<scheme>://<authority>` (`shell://thispc`); empty pieces are skipped when read. The
+//!   authority and the segments are UTF-8 text only.
+//! - Escaping: `%` and ASCII control characters (U+0000 to U+001F and U+007F) become `%XX` for
+//!   each UTF-8 byte, and so does `/` inside an authority or a segment (never in a local path).
+//!   Every byte that is not valid UTF-8 (a raw Unix byte, or part of an unpaired surrogate on
+//!   Windows) becomes its own `%XX`. Hex digits are written uppercase; both cases are read.
+//!   Everything else, non-ASCII text included, is written as it is.
+//! - Scheme names are written lowercase; they are read ignoring ASCII case.
+//!
+//! Text with no known `<scheme>:` in front (a single letter before `:` is a drive) is a native
+//! path: [`VPath::parse`] takes it literally and never unescapes it.
 
 mod escape;
 mod local;
@@ -135,7 +160,8 @@ impl VPath {
         }
     }
 
-    /// The lossless string form, `scheme:path`, that [`VPath::parse`] reads back.
+    /// The lossless string form that [`VPath::parse`] reads back: `local:<native path>` or
+    /// `<scheme>://<authority>/<segment>/...`, escaped as the module docs describe.
     pub fn to_uri(&self) -> String {
         match &self.repr {
             Repr::Local(path) => {
@@ -264,6 +290,8 @@ impl VPath {
     /// Whether `base` is this address or one of its ancestors. Names are compared whole,
     /// so `/a/bc` does not start with `/a/b`. A non-local address also needs the same scheme
     /// and authority, and a local address never starts with a non-local one or the reverse.
+    /// The comparison is case-sensitive and component-wise: callers working on a
+    /// case-insensitive volume (NTFS, APFS by default) must handle case themselves.
     pub fn starts_with(&self, base: &VPath) -> bool {
         match (&self.repr, &base.repr) {
             (Repr::Local(path), Repr::Local(prefix)) => path.starts_with(prefix),
@@ -306,8 +334,8 @@ impl VPath {
 impl fmt::Display for VPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            Repr::Local(path) => fmt::Display::fmt(&path.display(), f),
-            Repr::Other { .. } => f.write_str(&self.to_uri()),
+            Repr::Local(path) => f.pad(&path.to_string_lossy()),
+            Repr::Other { .. } => f.pad(&self.to_uri()),
         }
     }
 }

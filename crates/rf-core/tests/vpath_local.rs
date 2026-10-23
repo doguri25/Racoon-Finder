@@ -142,6 +142,20 @@ mod unix {
     }
 
     #[test]
+    fn persisted_form_is_pinned() {
+        let uri = |s: &str| VPath::local(s).unwrap().to_uri();
+        assert_eq!(uri("/a/b"), "local:/a/b");
+        assert_eq!(uri("/"), "local:/");
+    }
+
+    #[test]
+    fn display_pads_even_with_invalid_bytes() {
+        let p = VPath::local(Path::new(OsStr::from_bytes(b"/\xff"))).unwrap();
+        assert_eq!(format!("{p:<4}|"), "/\u{FFFD}  |");
+        assert_eq!(format!("{p:>4}|"), "  /\u{FFFD}|");
+    }
+
+    #[test]
     fn repeated_slashes_collapse() {
         assert_eq!(
             VPath::local("//a///b/").unwrap().as_local(),
@@ -210,6 +224,36 @@ mod windows {
             VPath::local(r"C:\a\b:c"),
             Err(PathError::InvalidName("b:c".into()))
         );
+    }
+
+    #[test]
+    fn persisted_form_is_pinned() {
+        let uri = |s: &str| VPath::local(s).unwrap().to_uri();
+        assert_eq!(uri(r"C:\"), r"local:C:\");
+        assert_eq!(uri(r"C:\a\b"), r"local:C:\a\b");
+        assert_eq!(uri(r"\\srv\share"), r"local:\\srv\share\");
+        assert_eq!(uri(r"\\srv\share\x"), r"local:\\srv\share\x");
+    }
+
+    /// With `/` in the prefix, std reads `//?/C:/x` as a share `C:` on a server named `?`
+    /// (and `//./x` as one on `.`); stored that way it would not survive `to_uri`/`parse`.
+    #[test]
+    fn mixed_separator_verbatim_and_device_forms_are_rejected() {
+        for input in [
+            "//?/C:/x",
+            r"\\?/C:\x",
+            r"/\?\C:\x",
+            "//?/UNC/srv/share/x",
+            "//./C:/x",
+            r"\\./C:\x",
+        ] {
+            assert_eq!(
+                VPath::local(input),
+                Err(PathError::Unsupported(input.into())),
+                "{input}"
+            );
+        }
+        assert_eq!(lp(r"\\?x\share"), Some(PathBuf::from(r"\\?x\share\")));
     }
 
     #[test]

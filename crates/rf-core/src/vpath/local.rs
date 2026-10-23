@@ -65,7 +65,8 @@ pub(super) fn normalize(path: &Path) -> Result<PathBuf, PathError> {
 
 /// Turns an absolute Windows path into its normal form: `\\?\` stripped where a plain form
 /// exists, uppercase drive letter, `\` separators, no `.` or `..`. Relative, drive-relative,
-/// rooted-without-drive and device (`\\.\`) paths are rejected.
+/// rooted-without-drive and device (`\\.\`) paths are rejected, and so are verbatim or device
+/// prefixes written with `/` (`//?/C:/x`), which std reads as a share on a server `?` or `.`.
 #[cfg(windows)]
 pub(super) fn normalize(path: &Path) -> Result<PathBuf, PathError> {
     use std::ffi::OsString;
@@ -91,6 +92,11 @@ pub(super) fn normalize(path: &Path) -> Result<PathBuf, PathError> {
     let mut root = match prefix.kind() {
         Prefix::Disk(letter) => {
             OsString::from(format!("{}:", char::from(letter.to_ascii_uppercase())))
+        }
+        // If kept, `//?/C:/x` would be stored as `\\?\C:\x`, whose `to_uri` text reads back
+        // as `C:\x`.
+        Prefix::UNC(server, _) if server == "?" || server == "." => {
+            return Err(PathError::Unsupported(lossy(input)));
         }
         Prefix::UNC(server, share) => {
             let mut unc = OsString::from(r"\\");

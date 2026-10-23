@@ -77,6 +77,9 @@ pub struct AppPaths {
 
 impl AppPaths {
     /// Locates the folders for the running executable on this machine.
+    ///
+    /// An `Err` is fatal for anything that writes: callers must not fall back to the current
+    /// directory (or any other folder) in its place.
     pub fn detect() -> Result<Self> {
         let exe =
             std::env::current_exe().map_err(|e| Error::Unsupported(format!("current_exe: {e}")))?;

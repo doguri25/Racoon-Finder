@@ -84,6 +84,30 @@ fn starts_with_never_crosses_schemes() {
 }
 
 #[test]
+fn persisted_form_is_pinned() {
+    let p = VPath::new(Scheme::Search, "q/1", &["tab\there", "50%", "é"]).unwrap();
+    assert_eq!(p.to_uri(), "search://q%2F1/tab%09here/50%25/é");
+    // Lowercase hex and an uppercase scheme are read, but written back canonically.
+    let read = VPath::parse("SEARCH://q%2f1/tab%09here/50%25/é/").unwrap();
+    assert_eq!(read, p);
+    assert_eq!(read.to_uri(), "search://q%2F1/tab%09here/50%25/é");
+    let empty = VPath::new(Scheme::Archive, "", &["a"]).unwrap();
+    assert_eq!(empty.to_uri(), "archive:///a");
+}
+
+#[test]
+fn display_respects_width_and_precision() {
+    let root = VPath::new(Scheme::Shell, "thispc", &[]).unwrap();
+    assert_eq!(format!("{root:>16}|"), "  shell://thispc|");
+    assert_eq!(format!("{root:<16}|"), "shell://thispc  |");
+    assert_eq!(format!("{root:.5}"), "shell");
+    let local = local_root().join("ab").unwrap();
+    let shown = local.to_string();
+    assert_eq!(format!("{local:>12}"), format!("{shown:>12}"));
+    assert_eq!(format!("{local:>12}").len(), 12);
+}
+
+#[test]
 fn serde_uses_uri_string() {
     let p = VPath::new(Scheme::Remote, "p1", &["a b"]).unwrap();
     let json = serde_json::to_string(&p).unwrap();
