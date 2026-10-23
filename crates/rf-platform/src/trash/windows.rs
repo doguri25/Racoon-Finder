@@ -12,7 +12,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rf_core::{Error, Result, VPath};
+use rf_core::{Error, ErrorKind, FileId, Result, VPath, VolumeId};
 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
@@ -63,30 +63,53 @@ fn gone(extended: &Path) -> bool {
 /// How long a refused recycle waits before its one retry.
 const RETRY_REFUSED_AFTER: Duration = Duration::from_millis(300);
 
+/// The volume and file ID of an item, as `file_identity` reads them.
+type Identity = (VolumeId, FileId);
+
 /// Recycles the item at `path`. The shell does the work on a thread of its own, because
 /// `CoInitializeEx` ties COM to the calling thread, whose apartment is not ours to change.
 ///
-/// A refused recycle is tried once more after 300 ms if the item is still there. On a fresh
-/// user profile the shell sometimes refuses to recycle (it offers a permanent delete instead)
-/// while several first recycles run at once and the recycle bin is still being set up; in CI
-/// one retry recycled every item refused that way. A refusal changes nothing, so the retry is
-/// safe. The cost is that a genuine refusal (a path the bin cannot take, an item too large for
-/// it, a policy) is reported 300 ms later. A redirected name and an I/O error are not retried.
+/// The identity of the item is read first, and every attempt recycles only the item with that
+/// identity. An item whose file system reports no usable file ID (an ID of 0 or all ones) is
+/// refused, because nothing could confirm that the shell's item is this one.
+///
+/// A refused recycle is tried once more after 300 ms if the same item, by its identity, is
+/// still at `path`. On a fresh user profile the shell sometimes refuses to recycle (it offers a
+/// permanent delete instead) while several first recycles run at once and the recycle bin is
+/// still being set up; in CI one retry recycled every item refused that way. A refusal changes
+/// nothing, so the retry is safe. The cost is that a genuine refusal (a path the bin cannot
+/// take, an item too large for it, a policy) is reported 300 ms later. A redirected name and
+/// an I/O error are not retried.
 pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
     let (Some(local), Some(extended)) = (path.as_local(), path.to_extended_length()) else {
         return Err(Error::Unsupported(format!(
             "trash needs a local path: {path}"
         )));
     };
+    let wanted = match file_identity(path) {
+        Ok(wanted) => wanted,
+        Err(e) if e.kind() == ErrorKind::Unsupported => {
+            return Err(Error::Unsupported(format!(
+                "cannot recycle {path}: its file system reports no file identity, so the item \
+                 the shell would recycle cannot be confirmed; delete permanently instead"
+            )));
+        }
+        Err(Error::Io { source, .. }) => return Err(Error::io("trash", path.clone(), source)),
+        Err(e) => return Err(e),
+    };
     // Each attempt is a whole recycle on a new thread, the identity check included.
     let attempt = || {
-        let (requested, local) = (path.clone(), local.to_path_buf());
-        std::thread::spawn(move || recycle(&requested, &local))
+        let local = local.to_path_buf();
+        std::thread::spawn(move || recycle(wanted, &local))
             .join()
             .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))))
     };
     let mut outcome = attempt();
-    if matches!(outcome, Err(Failure::Refused)) && !gone(&extended) {
+    // Only while the very item asked for is still there: not if it is gone, and not if another
+    // item has taken its name in the meantime.
+    if matches!(outcome, Err(Failure::Refused))
+        && file_identity(path).is_ok_and(|now| now == wanted)
+    {
         // The bin of a fresh profile may refuse first recycles that run at the same time.
         std::thread::sleep(RETRY_REFUSED_AFTER);
         outcome = attempt();
@@ -132,7 +155,7 @@ impl Drop for ComScope {
 }
 
 /// Runs on its own thread: COM in, work, COM out.
-fn recycle(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+fn recycle(wanted: Identity, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     // SAFETY: no reserved pointer; the thread is new, so no apartment is set yet.
     let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
     if init.is_err() {
@@ -142,10 +165,10 @@ fn recycle(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBu
     }
     // `run` has dropped every COM object when it returns, before the scope ends.
     let _scope = ComScope;
-    run(requested, local)
+    run(wanted, local)
 }
 
-fn run(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+fn run(wanted: Identity, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     let fail = |e: windows::core::Error| Failure::Io(to_io(&e));
     let name = wide(local.as_os_str());
 
@@ -166,7 +189,7 @@ fn run(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, 
     // The shell drops a trailing dot or space while parsing, so the item may be a sibling of the
     // one asked for. Check that it is the very item before anything is queued; a name that
     // cannot be read counts as a mismatch.
-    if !file_system_path(&item).is_some_and(|resolved| same_item(requested, &resolved)) {
+    if !file_system_path(&item).is_some_and(|resolved| is_item(wanted, &resolved)) {
         return Err(Failure::Redirected);
     }
 
@@ -203,20 +226,18 @@ fn file_system_path(item: &IShellItem) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Whether `resolved`, the path the shell gives for its parsed item, is the item `requested`.
+/// Whether `resolved`, the path the shell gives for its parsed item, is the item whose identity
+/// is `wanted`, the one asked for.
 ///
 /// This compares file identities (volume and file index, without following a final link), not
 /// text: the shell returns long names where the request may hold 8.3 short names, and it can
-/// differ in case, but it also turns `report.` into `report`, which is another file. If either
-/// identity cannot be read, the answer is no.
-fn same_item(requested: &VPath, resolved: &Path) -> bool {
-    let Ok(resolved) = VPath::local(resolved) else {
-        return false;
-    };
-    matches!(
-        (file_identity(requested), file_identity(&resolved)),
-        (Ok(wanted), Ok(found)) if wanted == found
-    )
+/// differ in case, but it also turns `report.` into `report`, which is another file. If the
+/// identity of `resolved` cannot be read, the answer is no.
+fn is_item(wanted: Identity, resolved: &Path) -> bool {
+    VPath::local(resolved)
+        .ok()
+        .and_then(|resolved| file_identity(&resolved).ok())
+        .is_some_and(|found| found == wanted)
 }
 
 /// The progress sink, in a module of its own because the `implement` macro writes code that
