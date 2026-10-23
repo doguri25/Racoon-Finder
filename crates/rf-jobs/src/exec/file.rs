@@ -1,0 +1,315 @@
+//! Copying one file: write a temporary file next to the target, make it durable, commit it
+//! under the final name with one rename, then copy the metadata. No partly written file ever
+//! carries the final name.
+
+use std::io::{self, Write};
+use std::sync::Arc;
+
+use rf_core::{Entry, EntryKind, Error, VPath};
+use rf_vfs::{DeleteMode, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
+
+use super::{At, COPY_CHUNK, Ctx, Failed};
+use crate::report::Stage;
+
+/// Copies the file `source` of `src`, which `entry` describes, to `target` of `dst`.
+///
+/// The content goes to a new temporary file in the target's folder, which is flushed and
+/// synced, given the source's extras (when both sides are of one provider) and times, and
+/// renamed to `target` with `commit`. On an error, a cancel or a panic the temporary file is
+/// removed; a file that was at the temporary path before is not ours and is never touched. The
+/// attributes (read-only among
+/// them) are put on `target` only after the commit, because Windows cannot remove a read-only
+/// temporary file. A metadata failure is a warning; the copy itself has worked.
+///
+/// A source that is no regular file is refused before anything is opened or created: a FIFO
+/// blocks a reader until a writer comes, and a device can be read without end.
+pub(crate) fn copy_file(
+    ctx: &mut Ctx<'_>,
+    src: &Arc<dyn Provider>,
+    source: &VPath,
+    entry: &Entry,
+    dst: &Arc<dyn Provider>,
+    target: &VPath,
+    commit: RenameMode,
+) -> Result<(), Failed> {
+    match entry.kind {
+        EntryKind::File => {}
+        EntryKind::Symlink => {
+            let error = Error::Unsupported("links are not implemented yet".to_owned());
+            return Err(Failed::new(Stage::Plan, error));
+        }
+        EntryKind::Dir | EntryKind::Other => {
+            let error = Error::Unsupported(format!("not a regular file: {source}"));
+            return Err(Failed::new(Stage::Plan, error));
+        }
+    }
+    ctx.working_on(source);
+    let tmp = ctx.temp_for(target).at(Stage::Write)?;
+    let mut reader = src.open_read(source).at(Stage::Read)?;
+    let writer = dst
+        .open_write(&tmp, WriteMode::CreateNew)
+        .at(Stage::Write)?;
+    // Only now is there a file of ours at `tmp`. If `CreateNew` failed, whatever is at that
+    // path is not ours and stays.
+    let mut guard = TempGuard {
+        provider: &**dst,
+        path: &tmp,
+        armed: true,
+    };
+    // `write_content` owns the writer, so the handle is closed before the guard removes the
+    // file (Windows does not remove an open file).
+    write_content(ctx, &mut *reader, writer, source, &tmp, entry.size)?;
+    drop(reader);
+
+    if src.scheme() == dst.scheme() {
+        if let Err(error) = dst.copy_extras(source, &tmp) {
+            ctx.warn(
+                Failed::new(Stage::Metadata, error),
+                Some(source),
+                Some(target),
+            );
+        }
+    }
+    if let Err(error) = dst.set_metadata(&tmp, &MetadataPatch::times_of(entry)) {
+        ctx.warn(
+            Failed::new(Stage::Metadata, error),
+            Some(source),
+            Some(target),
+        );
+    }
+
+    dst.rename(&tmp, target, commit).at(Stage::Commit)?;
+    guard.armed = false;
+
+    if let Err(error) = dst.set_metadata(target, &MetadataPatch::attributes_of(entry)) {
+        ctx.warn(
+            Failed::new(Stage::Metadata, error),
+            Some(source),
+            Some(target),
+        );
+    }
+    Ok(())
+}
+
+/// Copies `reader` into `writer` one chunk at a time, stopping at a pause or a cancel between
+/// chunks, then finishes (flushes and syncs) the writer. `size` is the planned size of the
+/// source, which decides whether the first chunk gets its own progress event.
+fn write_content(
+    ctx: &mut Ctx<'_>,
+    reader: &mut dyn ReadStream,
+    mut writer: Box<dyn WriteStream>,
+    source: &VPath,
+    tmp: &VPath,
+    size: u64,
+) -> Result<(), Failed> {
+    let large = size > bytes(COPY_CHUNK);
+    let mut buf = vec![0; COPY_CHUNK];
+    let mut first = true;
+    loop {
+        ctx.check().at(Stage::Write)?;
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                return Err(Failed::new(
+                    Stage::Read,
+                    Error::io("read", source.clone(), e),
+                ));
+            }
+        };
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| Failed::new(Stage::Write, Error::io("write", tmp.clone(), e)))?;
+        ctx.add_bytes(bytes(n), source, first && large);
+        first = false;
+    }
+    writer.finish().at(Stage::Write)
+}
+
+/// A byte count as a `u64`; no `usize` this code sees is larger.
+fn bytes(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// Removes the temporary file at `path` when it goes out of scope still armed: after an
+/// error, a cancel, or while a panic unwinds. The removal is best effort; a file it cannot
+/// remove keeps its temporary name, which crash recovery looks for.
+struct TempGuard<'a> {
+    provider: &'a dyn Provider,
+    path: &'a VPath,
+    armed: bool,
+}
+
+impl Drop for TempGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.provider.delete(self.path, DeleteMode::Permanent);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    use rf_core::{ErrorKind, VPath};
+    use rf_vfs::Vfs;
+
+    use crate::testkit::{Fault, FaultyProvider, temp_files, tree};
+    use crate::{
+        ExecEnv, JobId, JobReport, JobSpec, NonInteractive, Outcome, Stage, TransferMode,
+        TransferOptions, TransferSpec, execute, temp_name,
+    };
+
+    struct Dirs {
+        _root: tempfile::TempDir,
+        src: PathBuf,
+        dst: PathBuf,
+    }
+
+    fn dirs() -> Dirs {
+        let root = tempfile::tempdir().unwrap();
+        let (src, dst) = (root.path().join("src"), root.path().join("dst"));
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        Dirs {
+            _root: root,
+            src,
+            dst,
+        }
+    }
+
+    fn v(path: &Path) -> VPath {
+        VPath::local(path).unwrap()
+    }
+
+    fn copy(id: JobId, source: &Path, dest_dir: &Path, vfs: &Vfs) -> JobReport {
+        let spec = TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[v(source)],
+            &v(dest_dir),
+            TransferOptions::default(),
+        )
+        .unwrap();
+        let env = ExecEnv::new(vfs, &NonInteractive);
+        execute(id, &JobSpec::Transfer(spec), &env)
+    }
+
+    fn first_failure(report: &JobReport) -> (Stage, ErrorKind) {
+        (report.failures[0].stage, report.failures[0].kind)
+    }
+
+    #[test]
+    fn a_taken_temp_name_is_never_removed() {
+        let d = dirs();
+        std::fs::write(d.src.join("a.txt"), "new").unwrap();
+        let id = JobId(7);
+        let taken = d.dst.join(temp_name(id, 0));
+        std::fs::write(&taken, "not ours").unwrap();
+        let report = copy(id, &d.src.join("a.txt"), &d.dst, &Vfs::with_local());
+        assert_eq!(
+            first_failure(&report),
+            (Stage::Write, ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "not ours");
+        assert!(!d.dst.join("a.txt").exists());
+    }
+
+    #[test]
+    fn an_existing_target_fails_the_commit_and_keeps_its_content() {
+        let d = dirs();
+        std::fs::write(d.src.join("a.txt"), "new").unwrap();
+        std::fs::write(d.dst.join("a.txt"), "old").unwrap();
+        let report = copy(
+            JobId::generate(),
+            &d.src.join("a.txt"),
+            &d.dst,
+            &Vfs::with_local(),
+        );
+        assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+        assert_eq!(
+            first_failure(&report),
+            (Stage::Commit, ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read_to_string(d.dst.join("a.txt")).unwrap(), "old");
+        assert_eq!(temp_files(&d.dst), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_panic_is_reported_and_its_temp_file_removed() {
+        let d = dirs();
+        std::fs::write(d.src.join("a.txt"), "a").unwrap();
+        let p = FaultyProvider::local(vec![Fault::Panic { file: 0 }]);
+        let report = copy(JobId::generate(), &d.src.join("a.txt"), &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::Aborted);
+        assert_eq!(first_failure(&report), (Stage::Internal, ErrorKind::Other));
+        assert_eq!(report.failures[0].message, "internal error: injected panic");
+        assert_eq!(tree(&d.dst), BTreeMap::new());
+    }
+
+    /// A socket stands in for every item that is no file, folder or link: opening it for data
+    /// would fail, so a refusal at `Stage::Plan` shows it was never opened.
+    #[cfg(unix)]
+    #[test]
+    fn a_special_file_is_never_opened() {
+        let d = dirs();
+        let socket = d.src.join("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let report = copy(JobId::generate(), &socket, &d.dst, &Vfs::with_local());
+        assert_eq!(
+            first_failure(&report),
+            (Stage::Plan, ErrorKind::Unsupported)
+        );
+        assert_eq!(report.planned, crate::Totals::default());
+        assert_eq!(tree(&d.dst), BTreeMap::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_source_is_counted_but_not_yet_copied() {
+        let d = dirs();
+        std::fs::write(d.src.join("a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink("a.txt", d.src.join("link")).unwrap();
+        let p = FaultyProvider::local(vec![]);
+        let report = copy(JobId::generate(), &d.src.join("link"), &d.dst, &p.vfs());
+        assert_eq!(
+            first_failure(&report),
+            (Stage::Plan, ErrorKind::Unsupported)
+        );
+        assert!(
+            report.failures[0]
+                .message
+                .contains("links are not implemented yet")
+        );
+        let one_link = crate::Totals {
+            files: 1,
+            dirs: 0,
+            bytes: 0,
+        };
+        assert_eq!(
+            (report.planned, report.done),
+            (one_link, crate::Totals::default())
+        );
+        assert_eq!(p.opened_writes(), 0);
+        assert_eq!(tree(&d.dst), BTreeMap::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_target_folder_reached_through_a_link_is_accepted() {
+        let d = dirs();
+        std::fs::write(d.src.join("a.txt"), "a").unwrap();
+        let link = d.dst.with_file_name("dst-link");
+        std::os::unix::fs::symlink(&d.dst, &link).unwrap();
+        let report = copy(
+            JobId::generate(),
+            &d.src.join("a.txt"),
+            &link,
+            &Vfs::with_local(),
+        );
+        assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
+        assert_eq!(std::fs::read_to_string(d.dst.join("a.txt")).unwrap(), "a");
+    }
+}

@@ -126,15 +126,6 @@ pub struct JobReport {
 
 impl JobReport {
     /// The report of a job that has not done anything yet: completed, with nothing counted.
-    // No executor builds a report until the transfer job lands; this attribute then fails the
-    // build, and its removal is the whole change.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the executors that build reports come in later tasks"
-        )
-    )]
     pub(crate) fn new(id: JobId, spec: &JobSpec) -> JobReport {
         JobReport {
             id,
