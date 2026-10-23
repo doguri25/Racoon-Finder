@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rf_core::{Attributes, ErrorKind, FileId, Scheme, VPath, VolumeId};
-use rf_platform::{entry_attributes, file_identity};
+use rf_platform::{entry_attributes, file_identity, metadata_identity};
 
 fn attrs(p: &Path) -> Attributes {
     entry_attributes(
@@ -119,4 +119,17 @@ fn identity_errors() {
         file_identity(&remote).unwrap_err().kind(),
         ErrorKind::Unsupported
     );
+}
+
+/// Unix metadata holds the identity that `file_identity` reads; Windows metadata holds none.
+#[test]
+fn metadata_identity_matches_file_identity() {
+    let t = tempfile::tempdir().unwrap();
+    let f = t.path().join("f.txt");
+    std::fs::write(&f, b"f").unwrap();
+    for p in [f.as_path(), t.path()] {
+        let meta = std::fs::symlink_metadata(p).unwrap();
+        let want = cfg!(unix).then(|| id(p));
+        assert_eq!(metadata_identity(&meta), want, "{}", p.display());
+    }
 }
