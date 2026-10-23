@@ -166,9 +166,10 @@ fn restores_a_dictionary_value_exactly() {
     assert_eq!(defaults_read(&d, "Dict"), None);
 }
 
-/// A value of another type is not the app's value, even where `CFEqual` might call the two
-/// equal (an integer 1 and the boolean `true` are both `NSNumber`s): the app's value is
-/// applied over it, and the revert brings back the value with its type.
+/// A value of another type is not the app's value, even though `CFPreferences` finds the two
+/// equal (an integer 1 and the boolean `true` are both `NSNumber`s) and skips a plain write of
+/// one over the other: the app's value is applied over it with its own type, and the revert
+/// brings back the value with its type.
 #[test]
 fn the_type_is_part_of_the_value() {
     let d = test_domain("");
@@ -184,24 +185,42 @@ fn the_type_is_part_of_the_value() {
         ),
     ];
     for (theirs, their_type, ours, our_type) in cases {
+        let case = format!("{our_type} over {their_type}");
         let mut backend = os_backend();
         let seed = Change::preference(&d, "Typed", Some(theirs)).unwrap();
         backend.apply(&seed).unwrap();
-        let ours = Change::preference(&d, "Typed", Some(ours)).unwrap();
-        assert!(
-            !backend.is_applied(&ours).unwrap(),
-            "{our_type} over {their_type}"
+        assert_eq!(
+            defaults_type(&d, "Typed").as_deref(),
+            Some(their_type),
+            "{case}: seed"
         );
+        let ours = Change::preference(&d, "Typed", Some(ours)).unwrap();
+        assert!(!backend.is_applied(&ours).unwrap(), "{case}");
         let fx = common::installed();
         let (mut l, _) = Ledger::open(&fx.paths, os_backend()).unwrap();
-        assert!(matches!(
-            l.apply("test", ours).unwrap(),
-            ApplyOutcome::Recorded(_)
-        ));
-        assert_eq!(defaults_type(&d, "Typed").as_deref(), Some(our_type));
-        assert!(l.revert_all().is_clean());
-        assert_eq!(defaults_type(&d, "Typed").as_deref(), Some(their_type));
-        assert_eq!(defaults_read(&d, "Typed").as_deref(), Some("1"));
+        // An error names the type found after the write.
+        let outcome = l.apply("test", ours.clone());
+        assert!(
+            matches!(outcome, Ok(ApplyOutcome::Recorded(_))),
+            "{case}: {outcome:?}"
+        );
+        assert_eq!(
+            defaults_type(&d, "Typed").as_deref(),
+            Some(our_type),
+            "{case}: applied"
+        );
+        assert!(backend.is_applied(&ours).unwrap(), "{case}: applied");
+        let r = l.revert_all();
+        assert!(r.is_clean() && r.reverted.len() == 1, "{case}: {r:?}");
+        assert_eq!(
+            (
+                defaults_type(&d, "Typed").as_deref(),
+                defaults_read(&d, "Typed").as_deref()
+            ),
+            (Some(their_type), Some("1")),
+            "{case}: reverted"
+        );
+        assert!(backend.is_applied(&seed).unwrap(), "{case}: reverted");
         backend
             .apply(&Change::preference(&d, "Typed", None).unwrap())
             .unwrap();
@@ -307,11 +326,12 @@ fn refuses_other_kinds_and_domains_it_does_not_own() {
         ));
     }
 
-    // Only the app's own domains can be cleared, never the global one.
-    let lookalike = format!("{BUNDLE_ID}x");
-    for domain in [GLOBAL_DOMAIN, "com.apple.finder", &lookalike] {
+    // Only the app's own domains can be cleared (`owns_domain`, tested in change.rs). These two
+    // are not the app's, and no one else's either: a broken check would clear nothing that
+    // matters.
+    for domain in [format!("{BUNDLE_ID}x"), format!("{BUNDLE_ID}.")] {
         assert!(
-            matches!(b.clear_domain(domain), Err(LedgerError::InvalidTarget(_))),
+            matches!(b.clear_domain(&domain), Err(LedgerError::InvalidTarget(_))),
             "{domain}"
         );
     }

@@ -1,5 +1,5 @@
 use rf_core::identity::BUNDLE_ID;
-use rf_ledger::change::{FILE_VIEWER_KEY, GLOBAL_DOMAIN, hkcu_subkey, registry_data};
+use rf_ledger::change::{FILE_VIEWER_KEY, GLOBAL_DOMAIN, hkcu_subkey, owns_domain, registry_data};
 use rf_ledger::{Change, LedgerError, ServiceKind, Target, Value};
 
 fn reg_err(key: &str) -> Option<LedgerError> {
@@ -106,6 +106,54 @@ fn preference_changes_reject_paths_and_registry_values() {
             Change::preference("a.b", "k", Some(v)),
             Err(LedgerError::InvalidValue(_))
         ));
+    }
+}
+
+/// `CFPreferences` takes these names for its own constants, so they would alias the global or
+/// the current application's domain.
+#[test]
+fn preference_domains_cannot_name_cfpreferences_constants() {
+    for domain in [
+        "kCFPreferencesAnyApplication",
+        "kCFPreferencesCurrentApplication",
+        "kCFPreferencesAnyUser",
+        "KCFPREFERENCESANYAPPLICATION",
+        "kCFPreferences",
+    ] {
+        assert!(
+            matches!(
+                Change::preference(domain, "k", None),
+                Err(LedgerError::InvalidTarget(d)) if d == domain
+            ),
+            "{domain}"
+        );
+    }
+    assert!(Change::preference("kCFPref", "k", None).is_ok());
+}
+
+#[test]
+fn owns_only_the_apps_own_preferences_domains() {
+    let sub = format!("{BUNDLE_ID}.ledgertest");
+    for owned in [BUNDLE_ID, sub.as_str()] {
+        assert!(owns_domain(owned), "{owned}");
+    }
+    let lookalike = format!("{BUNDLE_ID}x");
+    let bare_dot = format!("{BUNDLE_ID}.");
+    let shorter = &BUNDLE_ID[..BUNDLE_ID.len() - 1];
+    let upper = BUNDLE_ID.to_uppercase();
+    let parent = BUNDLE_ID.rsplit_once('.').unwrap().0;
+    for foreign in [
+        GLOBAL_DOMAIN,
+        "com.apple.finder",
+        "kCFPreferencesAnyApplication",
+        "",
+        lookalike.as_str(),
+        bare_dot.as_str(),
+        shorter,
+        upper.as_str(),
+        parent,
+    ] {
+        assert!(!owns_domain(foreign), "{foreign}");
     }
 }
 

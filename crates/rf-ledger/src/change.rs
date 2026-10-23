@@ -14,6 +14,9 @@ pub const GLOBAL_DOMAIN: &str = "NSGlobalDomain";
 /// The `NSGlobalDomain` key naming the app that opens folders from other apps ("Show in Finder").
 pub const FILE_VIEWER_KEY: &str = "NSFileViewer";
 
+/// How the names of the `CFPreferences` constants (`kCFPreferencesAnyApplication`, …) start.
+const CF_CONSTANT_PREFIX: &str = "kCFPreferences";
+
 /// Longest registry key component, in UTF-16 code units.
 const MAX_KEY_COMPONENT_UNITS: usize = 255;
 /// Longest registry value name, in UTF-16 code units.
@@ -105,6 +108,17 @@ pub struct Before {
 /// Number of UTF-16 code units of `s`, the unit the Windows registry limits are written in.
 fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
+}
+
+/// Whether `domain` is a preferences domain of the app: its bundle ID, or a domain below it
+/// (`<bundle ID>.<name>`, with a name after the dot). Only these may be cleared whole (INST-05).
+pub fn owns_domain(domain: &str) -> bool {
+    let bundle_id = rf_core::identity::BUNDLE_ID;
+    domain == bundle_id
+        || domain
+            .strip_prefix(bundle_id)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|name| !name.is_empty())
 }
 
 /// Checks that `key` lives under `HKEY_CURRENT_USER` and returns the part after the hive.
@@ -204,10 +218,16 @@ impl Target {
                 }
             }
             Self::Preference { domain, key } => {
-                // `CFPreferences` treats a path as a domain and then writes that file.
+                // `CFPreferences` treats a path as a domain and then writes that file. It also
+                // compares a domain with its own constants by value, so a domain spelled like
+                // `kCFPreferencesAnyApplication` would be the global domain under another name
+                // (another slot for `same_slot`).
                 if domain.is_empty()
                     || domain.contains(['/', '\0'])
                     || domain.starts_with(['.', '~'])
+                    || domain
+                        .get(..CF_CONSTANT_PREFIX.len())
+                        .is_some_and(|start| start.eq_ignore_ascii_case(CF_CONSTANT_PREFIX))
                 {
                     return Err(LedgerError::InvalidTarget(domain.clone()));
                 }
