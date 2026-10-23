@@ -31,13 +31,19 @@ struct State {
     live: BTreeMap<Target, Value>,
     calls: Vec<FakeOp>,
     faults: Vec<(FakeOp, Target, Fault)>,
+    /// The keys a capture of a change that sets the target reports as created.
+    created_keys: BTreeMap<Target, Vec<String>>,
+    /// The before-state of every `restore` call, oldest first.
+    restored: Vec<Before>,
 }
 
 /// A [`SystemBackend`] that keeps its slots in memory.
 ///
 /// Clones share one state, so a test hands one clone to the ledger and inspects the other.
 /// A slot is identified by the exact [`Target`]; the case rules of registry names belong to
-/// the ledger (`Target::same_slot`), not to this fake. Any kind of target is accepted.
+/// the ledger (`Target::same_slot`), not to this fake. Any kind of target is accepted. The fake
+/// keeps no registry keys: a capture reports the keys [`FakeBackend::create_keys`] names, and
+/// [`FakeBackend::restored`] shows which keys each `restore` was asked to remove.
 #[derive(Clone, Debug, Default)]
 pub struct FakeBackend {
     state: Arc<Mutex<State>>,
@@ -66,6 +72,20 @@ impl FakeBackend {
     /// Every trait method called so far, oldest first, whatever its result.
     pub fn calls(&self) -> Vec<FakeOp> {
         self.lock().calls.clone()
+    }
+
+    /// Makes every later `capture` of a change that sets `target` (not one that removes it)
+    /// report `keys` as the registry keys `apply` creates, the way the registry backend reports
+    /// the keys missing on the way to a value (canonical form, shallowest first).
+    pub fn create_keys(&self, target: &Target, keys: &[&str]) {
+        let keys = keys.iter().map(|&key| key.to_owned()).collect();
+        self.lock().created_keys.insert(target.clone(), keys);
+    }
+
+    /// The before-state every `restore` call was given so far, oldest first, whatever its
+    /// result: its `created_keys` are the keys that call was asked to remove.
+    pub fn restored(&self) -> Vec<Before> {
+        self.lock().restored.clone()
     }
 
     /// Makes the next `op` on `target` fail with [`LedgerError::Backend`] and no effect.
@@ -119,9 +139,13 @@ fn put(live: &mut BTreeMap<Target, Value>, slot: &Target, value: Option<&Value>)
 
 impl SystemBackend for FakeBackend {
     fn capture(&mut self, change: &Change) -> Result<Before, LedgerError> {
+        let created_keys = match change.value {
+            Some(_) => self.lock().created_keys.get(&change.target).cloned(),
+            None => None,
+        };
         self.step(FakeOp::Capture, &change.target, |live| Before {
             value: live.get(&change.target).cloned(),
-            created_keys: Vec::new(),
+            created_keys: created_keys.unwrap_or_default(),
         })
     }
 
@@ -132,6 +156,7 @@ impl SystemBackend for FakeBackend {
     }
 
     fn restore(&mut self, change: &Change, before: &Before) -> Result<(), LedgerError> {
+        self.lock().restored.push(before.clone());
         self.step(FakeOp::Restore, &change.target, |live| {
             put(live, &change.target, before.value.as_ref());
         })

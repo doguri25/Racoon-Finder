@@ -141,6 +141,29 @@ pub fn hkcu_subkey(key: &str) -> Result<&str, LedgerError> {
     }
 }
 
+/// The names of `key` below `HKEY_CURRENT_USER`, folded to compare as [`Target::same_slot`]
+/// compares them; `None` for a key outside `HKEY_CURRENT_USER`.
+fn folded_names(key: &str) -> Option<Vec<String>> {
+    Some(
+        hkcu_subkey(key)
+            .ok()?
+            .split('\\')
+            .map(str::to_lowercase)
+            .collect(),
+    )
+}
+
+/// Whether the registry key `outer` is `inner` or a key above it, cut at a `\` between names.
+///
+/// Keys compare as [`Target::same_slot`] compares them: only the part after the hive counts,
+/// and names compare case-insensitively. A key outside `HKEY_CURRENT_USER` holds no key.
+pub(crate) fn key_holds(outer: &str, inner: &str) -> bool {
+    match (folded_names(outer), folded_names(inner)) {
+        (Some(outer), Some(inner)) => inner.starts_with(&outer),
+        _ => false,
+    }
+}
+
 /// The registry type code and data bytes of `value`, exactly as the Windows registry stores it.
 ///
 /// Strings are UTF-16LE with one terminating NUL unit; a multi-string ends every element with

@@ -3,7 +3,7 @@ mod common;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use common::*;
-use rf_ledger::{EntryId, FakeOp, Ledger};
+use rf_ledger::{EntryId, FakeOp, Ledger, Target};
 
 #[test]
 fn revert_all_restores_in_reverse_order() {
@@ -401,4 +401,93 @@ fn an_unsaved_skip_still_marks_the_setting_foreign() {
     );
     assert_eq!(l.entries().len(), 2);
     assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 2);
+}
+
+fn registry(key: &str, name: &str) -> Target {
+    Target::Registry {
+        key: key.into(),
+        name: name.into(),
+    }
+}
+
+/// Feature A created the key `X` for its value; feature B's value sits in `X\Y`. When A is
+/// turned off, its revert cannot remove `X`, which B's key keeps from being empty, so B's
+/// entry takes the key over: turning B off then removes `X\Y` and `X` (INST-07).
+#[test]
+fn a_created_key_that_another_features_key_sits_in_goes_to_that_feature() {
+    let fx = installed();
+    let (x, xy) = (r"HKCU\Software\T", r"HKCU\Software\T\Y");
+    let (a, b) = (registry(x, "a"), registry(xy, "b"));
+    fx.fake.create_keys(&a, &[x]);
+    fx.fake.create_keys(&b, &[xy]);
+    let mut l = fx.open();
+    l.apply("winx.a", set(&a, "1")).unwrap();
+    l.apply("winx.b", set(&b, "2")).unwrap();
+    assert_eq!(l.revert_group("winx.a").reverted, [EntryId(1)]);
+    // A's restore was asked to remove `X`; B's entry owns it now, in the file too.
+    assert_eq!(fx.fake.restored()[0].created_keys, [x]);
+    assert_eq!(l.entries()[0].before.created_keys, [x, xy]);
+    assert_eq!(
+        Ledger::inspect(&fx.paths).unwrap()[0].before.created_keys,
+        [x, xy]
+    );
+    assert_eq!(l.revert_group("winx.b").reverted, [EntryId(2)]);
+    // Shallowest first, so the backend removes `X\Y` and then `X`.
+    assert_eq!(fx.fake.restored()[1].created_keys, [x, xy]);
+}
+
+/// A created key goes only to a key that is it or below it at a `\`, compared the way the
+/// registry compares names: `T` holds `t\y` (in another case and hive spelling) but not `TZ`.
+#[test]
+fn a_created_key_goes_only_to_a_key_below_it() {
+    let fx = installed();
+    let x = r"HKCU\Software\T";
+    let a = registry(x, "a");
+    fx.fake.create_keys(&a, &[x]);
+    let mut l = fx.open();
+    l.apply("winx.a", set(&a, "1")).unwrap();
+    l.apply("winx.s", set(&registry(r"HKCU\Software\TZ", "s"), "2"))
+        .unwrap();
+    l.apply(
+        "winx.b",
+        set(&registry(r"HKEY_CURRENT_USER\software\t\y", "b"), "3"),
+    )
+    .unwrap();
+    l.revert_group("winx.a");
+    let owned: Vec<(&str, Vec<String>)> = l
+        .entries()
+        .iter()
+        .map(|e| (e.group.as_str(), e.before.created_keys.clone()))
+        .collect();
+    assert_eq!(owned, [("winx.s", vec![]), ("winx.b", vec![x.to_owned()])]);
+}
+
+/// Of two entries whose keys sit in the created key, the newest takes it over; when that one
+/// goes, the key moves on to the other, whose revert finally asks for it to be removed.
+#[test]
+fn a_created_key_moves_on_until_the_last_key_in_it_is_reverted() {
+    let fx = installed();
+    let x = r"HKCU\Software\T";
+    let a = registry(x, "a");
+    fx.fake.create_keys(&a, &[x]);
+    let mut l = fx.open();
+    l.apply("winx.a", set(&a, "1")).unwrap();
+    l.apply("winx.b", set(&registry(r"HKCU\Software\T\B", "b"), "2"))
+        .unwrap();
+    l.apply("winx.c", set(&registry(r"HKCU\Software\T\C", "c"), "3"))
+        .unwrap();
+    l.revert_group("winx.a");
+    let owned = |l: &Ledger| -> Vec<Vec<String>> {
+        l.entries()
+            .iter()
+            .map(|e| e.before.created_keys.clone())
+            .collect()
+    };
+    assert_eq!(owned(&l), [vec![], vec![x.to_owned()]]);
+    l.revert_group("winx.c");
+    assert_eq!(fx.fake.restored()[1].created_keys, [x]);
+    assert_eq!(owned(&l), [vec![x.to_owned()]]);
+    l.revert_group("winx.b");
+    assert_eq!(fx.fake.restored()[2].created_keys, [x]);
+    assert_eq!(l.entries(), []);
 }

@@ -6,7 +6,7 @@ use rf_core::{AppPaths, InstallMode};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::SystemBackend;
-use crate::change::{Before, Change, Target, Value};
+use crate::change::{Before, Change, Target, Value, key_holds};
 use crate::error::LedgerError;
 use crate::store::{self, LedgerFile};
 
@@ -213,6 +213,20 @@ fn holds(backend: &mut dyn SystemBackend, entry: &LedgerEntry) -> Result<Holds, 
     Ok(Holds::Other)
 }
 
+/// Adds the registry key `key` to `created_keys`, which stay shallowest first, unless it is
+/// there already.
+fn adopt(created_keys: &mut Vec<String>, key: &str) {
+    if created_keys
+        .iter()
+        .any(|own| key_holds(own, key) && key_holds(key, own))
+    {
+        return;
+    }
+    created_keys.push(key.to_owned());
+    // They are all the heir's key or above it, so the deeper key has more names.
+    created_keys.sort_by_key(|key| key.matches('\\').count());
+}
+
 impl Ledger {
     /// The ledger file's name inside the data folder.
     pub const FILE_NAME: &'static str = "ledger.json";
@@ -312,7 +326,7 @@ impl Ledger {
                 // A newer entry found someone else's value: whatever this older entry recorded,
                 // the live value is not the app's to overwrite, `Pending` or not.
                 Some(SlotMark::Foreign) => {
-                    self.entries.remove(index);
+                    self.take(index);
                     report.skipped.push(id);
                     continue;
                 }
@@ -329,13 +343,13 @@ impl Ledger {
                 }
                 Ok(Holds::Other) => {
                     chain.mark(target, SlotMark::Foreign);
-                    self.entries.remove(index);
+                    self.take(index);
                     report.skipped.push(id);
                 }
                 Ok(Holds::Before | Holds::Nothing) => {
                     match self.backend.restore(&entry.change, &entry.before) {
                         Ok(()) => {
-                            self.entries.remove(index);
+                            self.take(index);
                             report.rolled_back.push(id);
                         }
                         Err(e) => {
@@ -443,7 +457,7 @@ impl Ledger {
         let entry = &self.entries[index];
         if let Err(apply_error) = self.backend.apply(&entry.change) {
             if self.backend.restore(&entry.change, &entry.before).is_ok() {
-                self.entries.pop();
+                self.take(index);
                 // A failed save leaves a `Pending` entry on disk; the next open settles it.
                 let _ = self.persist();
             }
@@ -559,12 +573,36 @@ impl Ledger {
         report
     }
 
-    /// Drops the entry at `index` and saves the file. If the file cannot be saved, the entry is
-    /// put back so that memory and disk agree.
+    /// Drops the entry at `index` (see [`Ledger::take`]) and saves the file. If the file cannot
+    /// be saved, the entries are put back as they were, so that memory and disk agree.
     fn forget(&mut self, index: usize) -> Result<(), LedgerError> {
+        let kept = self.entries.clone();
+        self.take(index);
+        let saved = self.persist();
+        if saved.is_err() {
+            self.entries = kept;
+        }
+        saved
+    }
+
+    /// Takes the entry at `index` out of the list.
+    ///
+    /// Each registry key the entry created goes to the newest entry left whose key is that key
+    /// or one below it: the key is not empty while that entry's key is in it, so the entry's
+    /// restore could not remove it, and the revert of the entry it goes to removes it instead.
+    /// Without this, turning off one feature would leave a key it created behind for good once
+    /// another feature's key had been put in it (INST-07).
+    fn take(&mut self, index: usize) -> LedgerEntry {
         let entry = self.entries.remove(index);
-        self.persist()
-            .inspect_err(|_| self.entries.insert(index, entry))
+        for created in &entry.before.created_keys {
+            let heir = self.entries.iter_mut().rev().find(|other| {
+                matches!(&other.change.target, Target::Registry { key, .. } if key_holds(created, key))
+            });
+            if let Some(heir) = heir {
+                adopt(&mut heir.before.created_keys, created);
+            }
+        }
+        entry
     }
 
     /// Writes the current entries to the ledger file.

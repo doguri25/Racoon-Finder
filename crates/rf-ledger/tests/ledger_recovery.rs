@@ -397,3 +397,32 @@ fn someone_elses_value_drops_the_older_entries_of_its_setting_unasked() {
         [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::IsApplied]
     );
 }
+
+/// An entry an open rolls back hands the keys it created over like a reverted one: here to the
+/// newer entry of another feature whose key sits in them.
+#[test]
+fn a_rolled_back_entry_hands_its_created_keys_to_the_entry_below_them() {
+    let fx = installed();
+    let (x, xy) = (r"HKCU\Software\T", r"HKCU\Software\T\Y");
+    let a = Target::Registry {
+        key: x.into(),
+        name: "a".into(),
+    };
+    let b = Target::Registry {
+        key: xy.into(),
+        name: "b".into(),
+    };
+    fx.fake.create_keys(&a, &[x]);
+    let mut l = fx.open();
+    leave_pending(&fx, &mut l, &a, "1");
+    l.apply("winx.b", set(&b, "2")).unwrap();
+    drop(l);
+    let (l, report) = reopen(&fx);
+    assert_eq!(report.rolled_back, [EntryId(1)]);
+    assert_eq!(fx.fake.restored().last().unwrap().created_keys, [x]);
+    assert_eq!(l.entries()[0].before.created_keys, [x]);
+    assert_eq!(
+        Ledger::inspect(&fx.paths).unwrap()[0].before.created_keys,
+        [x]
+    );
+}
