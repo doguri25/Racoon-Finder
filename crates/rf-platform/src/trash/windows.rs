@@ -1,4 +1,11 @@
 #![allow(unsafe_code, reason = "IFileOperation COM")]
+#![allow(
+    clippy::pedantic,
+    clippy::print_stderr,
+    clippy::undocumented_unsafe_blocks,
+    clippy::used_underscore_binding,
+    reason = "temporary diagnostics"
+)]
 
 //! The Windows recycle bin through the shell's `IFileOperation`.
 //!
