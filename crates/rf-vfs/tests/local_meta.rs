@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{Duration, SystemTime};
 
 use rf_core::{Attributes, Entry, EntryKind, ErrorKind, Scheme, VPath};
@@ -173,4 +173,34 @@ fn write_streams_can_leave_holes() {
             .write_hole(1)
             .unwrap()
     );
+}
+
+/// A read stream reports the ranges of the file it reads, also after an app saved over its
+/// path by replacing the file, when the path answers for the new file.
+#[test]
+fn read_streams_report_the_ranges_of_their_own_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = LocalProvider::new();
+    let file = VPath::local(dir.path().join("s.bin")).unwrap();
+    let mut writer = p.open_write(&file, WriteMode::CreateNew).unwrap();
+    writer.write_all(b"a").unwrap();
+    assert!(writer.write_hole(4 << 20).unwrap());
+    writer.write_all(b"b").unwrap();
+    writer.finish().unwrap();
+    let sparse = p.data_ranges(&file).unwrap();
+    if cfg!(target_os = "macos") {
+        assert_eq!(sparse, None, "macOS never reports holes");
+    } else if cfg!(windows) {
+        assert!(sparse.is_some(), "NTFS keeps holes");
+    }
+    let mut reader = p.open_read(&file).unwrap();
+    let dense = dir.path().join("dense.bin");
+    std::fs::write(&dense, vec![7u8; 256 * 1024]).unwrap();
+    std::fs::rename(&dense, dir.path().join("s.bin")).unwrap();
+    assert_eq!(p.data_ranges(&file).unwrap(), None);
+    assert_eq!(reader.data_ranges().unwrap(), sparse);
+    let mut first = [0; 1];
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    reader.read_exact(&mut first).unwrap();
+    assert_eq!(first, *b"a");
 }

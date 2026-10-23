@@ -164,4 +164,6 @@ fn disk_space_is_exported_from_provider_and_root() {
 fn data_ranges_default_is_none() {
     let p = VPath::new(Scheme::Remote, "c", &["x"]).unwrap();
     assert_eq!(Fake(Scheme::Remote).data_ranges(&p).unwrap(), None);
+    let mut stream = std::io::Cursor::new(vec![0u8; 4]);
+    assert_eq!(ReadStream::data_ranges(&mut stream).unwrap(), None);
 }

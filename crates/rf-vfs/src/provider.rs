@@ -75,11 +75,30 @@ pub enum WriteMode {
     Append,
 }
 
-/// A file opened for reading. Implemented by every `Read + Seek + Send + Debug` type, for
-/// example `std::fs::File`.
-pub trait ReadStream: Read + Seek + Send + Debug {}
+/// A file opened for reading. `std::fs::File` and `std::io::Cursor` are streams as they are,
+/// without data ranges.
+pub trait ReadStream: Read + Seek + Send + Debug {
+    /// The ranges of the open file that hold data, in ascending order and not overlapping, so
+    /// that a copy can leave the gaps between them as holes (`WriteStream::write_hole`,
+    /// XFER-11). They are taken from the open file itself, so they describe the bytes this
+    /// stream reads even when its path names another file by now (an app that saves by
+    /// replacing the file). For the local provider it is what `rf_platform::file_data_ranges`
+    /// gives.
+    ///
+    /// `None` means that the file has no holes to keep, or that the stream cannot tell or
+    /// cannot be trusted to; the file is then copied whole, which gives the same content. The
+    /// ranges describe the file as it was when it was looked at, so a reader must check them
+    /// against the length it reads and that it gets every byte of them. The position of the
+    /// stream afterwards is unspecified: seek before reading. The default implementation gives
+    /// `Ok(None)`.
+    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+        Ok(None)
+    }
+}
 
-impl<T: Read + Seek + Send + Debug> ReadStream for T {}
+impl ReadStream for std::fs::File {}
+
+impl<T: AsRef<[u8]> + Send + Debug> ReadStream for std::io::Cursor<T> {}
 
 /// A file opened for writing.
 pub trait WriteStream: Write + Send + Debug {
@@ -377,10 +396,10 @@ pub trait Provider: Send + Sync + Debug {
     /// so that a copy can leave the gaps between them as holes (`WriteStream::write_hole`,
     /// XFER-11). For the local provider it is what `rf_platform::data_ranges` gives.
     ///
-    /// `None` means that the file has no holes to keep, or that the provider cannot tell; the
-    /// file is then copied whole, which gives the same content. The ranges describe the file
-    /// as it was when it was looked at, so a reader must check that it gets every byte of
-    /// them. The default implementation gives `Ok(None)`.
+    /// A copy asks the stream it reads instead (`ReadStream::data_ranges`): the path can name
+    /// another file by the time it is read. `None` means that the file has no holes to keep,
+    /// or that the provider cannot tell; the file is then copied whole, which gives the same
+    /// content. The default implementation gives `Ok(None)`.
     fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
         let _ = path;
         Ok(None)

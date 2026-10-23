@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs::ReadDir;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -335,9 +335,10 @@ pub enum Fault {
     /// as the same items show through a second mount of their file system (bindfs, an NFS or
     /// SMB loopback, one share mounted twice). Their file IDs stay as they are.
     OtherVolume { under: VPath },
-    /// `data_ranges` of an item called `name` gives `ranges`, as for a sparse file, whatever the
-    /// file holds: ranges that are out of date by the time they are read, or that call a
-    /// stretch of zeros a hole.
+    /// `ReadStream::data_ranges` of a stream that reads an item called `name` gives `ranges`,
+    /// as for a sparse file, whatever the file holds: ranges that call a stretch of zeros a
+    /// hole, or answers that break the promises of `data_ranges`. `Provider::data_ranges` is
+    /// passed on as it is.
     DataRanges {
         name: OsString,
         ranges: Vec<Range<u64>>,
@@ -635,7 +636,14 @@ impl Provider for FaultyProvider {
     }
 
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>> {
-        self.inner.open_read(path)
+        let inner = self.inner.open_read(path)?;
+        let ranges = self.faults.iter().find_map(|fault| match fault {
+            Fault::DataRanges { name, ranges } if path.file_name() == Some(name.as_os_str()) => {
+                Some(ranges.clone())
+            }
+            _ => None,
+        });
+        Ok(Box::new(FaultyReader { inner, ranges }))
     }
 
     fn open_write(&self, path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteStream>> {
@@ -729,15 +737,35 @@ impl Provider for FaultyProvider {
     }
 
     fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
-        let injected = self.faults.iter().find_map(|fault| match fault {
-            Fault::DataRanges { name, ranges } if path.file_name() == Some(name.as_os_str()) => {
-                Some(ranges.clone())
-            }
-            _ => None,
-        });
-        match injected {
-            Some(ranges) => Ok(Some(ranges)),
-            None => self.inner.data_ranges(path),
+        self.inner.data_ranges(path)
+    }
+}
+
+/// A file a [`FaultyProvider`] reads: the inner stream, and the ranges of the
+/// [`Fault::DataRanges`] for its item, if there is one.
+#[derive(Debug)]
+struct FaultyReader {
+    inner: Box<dyn ReadStream>,
+    ranges: Option<Vec<Range<u64>>>,
+}
+
+impl Read for FaultyReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for FaultyReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl ReadStream for FaultyReader {
+    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+        match &self.ranges {
+            Some(ranges) => Ok(Some(ranges.clone())),
+            None => self.inner.data_ranges(),
         }
     }
 }
@@ -991,11 +1019,17 @@ mod tests {
             name: "a".into(),
             ranges: vec![1..2, 4..5],
         }]);
-        assert_eq!(p.data_ranges(&a).unwrap(), Some(vec![1..2, 4..5]));
-        assert_eq!(
-            p.data_ranges(&b).unwrap(),
-            LocalProvider::new().data_ranges(&b).unwrap()
-        );
+        let local = LocalProvider::new();
+        let streamed = |p: &dyn Provider, path| p.open_read(path).unwrap().data_ranges().unwrap();
+        // The fault is for the streams of `a`; everything else is passed on.
+        assert_eq!(streamed(&*p, &a), Some(vec![1..2, 4..5]));
+        assert_eq!(streamed(&*p, &b), streamed(&local, &b));
+        for path in [&a, &b] {
+            assert_eq!(
+                p.data_ranges(path).unwrap(),
+                local.data_ranges(path).unwrap()
+            );
+        }
     }
 
     #[test]

@@ -1,25 +1,54 @@
 //! Sparse files: where a file holds data and where it has holes, so that a copy can keep the
 //! holes instead of writing their zeros (XFER-11).
+//!
+//! Keeping holes is best effort, and an answer is only used where it cannot hide data. A file
+//! system that calls a range a hole when the data is only kept elsewhere would turn a copy into
+//! zeros without an error, so wherever that is known to happen the answer is "no holes", and
+//! the file is copied byte by byte, with the same content.
 
 use std::fs::File;
+use std::io;
 use std::ops::Range;
 
 use rf_core::{Error, Result, VPath};
 
-/// The ranges of the file at `path` that hold data, in ascending order and not overlapping.
+/// The ranges of the file at `path` that hold data; [`file_data_ranges`] of the file opened
+/// for reading. Links are followed, as opening the file follows them. A non-local path gives
+/// `Error::Unsupported`; other errors carry the op `"data_ranges"`.
+pub fn data_ranges(path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
+    let Some(local) = path.to_extended_length() else {
+        return Err(Error::Unsupported(format!(
+            "data ranges need a local path: {path}"
+        )));
+    };
+    let fail = |e| Error::io("data_ranges", path.clone(), e);
+    let file = File::open(local).map_err(fail)?;
+    file_data_ranges(&file).map_err(fail)
+}
+
+/// The ranges of the open file `file` that hold data, in ascending order and not overlapping.
 /// The gaps between them, and before the first and after the last up to the file's length,
-/// are holes: they read as zeros and take no space on the disk.
+/// are holes: they read as zeros and take no space on the disk. The length and the ranges are
+/// both taken from `file`, so they describe the file that was opened, even when its path names
+/// another file by now (an app that saves by replacing the file).
 ///
-/// `Ok(None)` means there are no holes to keep:
-/// - Unix: a file whose allocated blocks (`st_blocks` × 512) cover its length has none, and is
-///   not looked at further. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks the file
-///   until `ENXIO`. A file system that does not know them (`EINVAL`, `ENOTSUP`) gives `None`.
-///   APFS keeps holes; HFS+ does not (it allocates every range a file is extended by and fills
-///   it with zeros), so its files never get past the block check.
-/// - Windows: a file without the sparse attribute (`Attributes::SPARSE`) has none, and is not
-///   opened. For one with it, `FSCTL_QUERY_ALLOCATED_RANGES` is asked until it stops answering
-///   `ERROR_MORE_DATA`; a file system that does not know it (`ERROR_INVALID_FUNCTION`) gives
-///   `None`.
+/// `Ok(None)` means there are no holes to keep, or that the answer cannot be trusted:
+/// - Linux and other Unix systems: a file whose allocated blocks (`st_blocks` × 512) cover its
+///   length has none. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks the file. A file
+///   system that does not know them (`EINVAL`, `ENOTSUP`) gives `None`, and so does an `ENXIO`
+///   ("no data from here on") for an offset that `SEEK_HOLE` does not confirm as the start of a
+///   hole: some file systems answer `ENXIO` for data they keep elsewhere (QEMU issue 3124). The
+///   walk moves the file's offset, so seek before reading from `file`.
+/// - macOS: always. A file compressed by the file system (decmpfs, `UF_COMPRESSED`) has fewer
+///   blocks than its length and answers `ENXIO` to `SEEK_DATA` inside it, and APFS answers to
+///   `SEEK_HOLE` have lost data before (GNU coreutils bugs 51857 and 61386), so its files are
+///   copied whole.
+/// - Windows: a file that is not sparse has none. A reparse point (a Cloud Files or `ProjFS`
+///   placeholder, a deduplicated file) and a file marked offline or to be recalled on access
+///   get their data from a file system filter or from elsewhere, which its allocated ranges do
+///   not show, so they give `None` too. For any other sparse file
+///   `FSCTL_QUERY_ALLOCATED_RANGES` is asked until it stops answering `ERROR_MORE_DATA`; a file
+///   system that does not know it (`ERROR_INVALID_FUNCTION`) gives `None`.
 ///
 /// One range that covers the whole file is no hole either and gives `None`, as does an answer
 /// that does not make sense (a range that goes backwards, a walk that does not advance): a
@@ -28,17 +57,17 @@ use rf_core::{Error, Result, VPath};
 ///
 /// The ranges describe the file as it was when it was looked at: no range reaches past the
 /// length it had then. A file that changes afterwards can end before a range does, so a
-/// caller that reads the ranges must check that it gets every byte of them. Links are
-/// followed, as opening the file follows them. A non-local path gives `Error::Unsupported`;
-/// other errors carry the op `"data_ranges"`.
-pub fn data_ranges(path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
-    let Some(local) = path.to_extended_length() else {
-        return Err(Error::Unsupported(format!(
-            "data ranges need a local path: {path}"
-        )));
-    };
-    let found = imp::data_ranges(&local).map_err(|e| Error::io("data_ranges", path.clone(), e))?;
-    Ok(found.and_then(|(len, ranges)| tidy(len, ranges)))
+/// caller that reads the ranges must check that it gets every byte of them.
+pub fn file_data_ranges(file: &File) -> io::Result<Option<Vec<Range<u64>>>> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = file;
+        Ok(None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(imp::data_ranges(file)?.and_then(|(len, ranges)| tidy(len, ranges)))
+    }
 }
 
 /// Lets the file `file`, open for writing, have holes: on Windows it sets the sparse attribute
@@ -47,7 +76,7 @@ pub fn data_ranges(path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
 ///
 /// Elsewhere it does nothing: a range that is skipped by seeking past it stays a hole wherever
 /// the file system keeps holes, and reads as zeros everywhere.
-pub fn mark_sparse(file: &File) -> std::io::Result<()> {
+pub fn mark_sparse(file: &File) -> io::Result<()> {
     #[cfg(windows)]
     {
         imp::mark_sparse(file)
@@ -60,9 +89,14 @@ pub fn mark_sparse(file: &File) -> std::io::Result<()> {
 }
 
 /// `ranges`, the data ranges of a file of `len` bytes as the OS listed them, made what
-/// [`data_ranges`] promises: in ascending order, cut at `len`, without empty ones, and joined
-/// where they touch or overlap. `None` for a file without holes: an empty one, or one whose
-/// ranges cover all of it.
+/// [`file_data_ranges`] promises: in ascending order, cut at `len`, without empty ones, and
+/// joined where they touch or overlap (a range is never made smaller than what the OS listed,
+/// so no data is ever taken for a hole). `None` for a file without holes: an empty one, or one
+/// whose ranges cover all of it.
+#[cfg_attr(
+    target_os = "macos",
+    allow(dead_code, reason = "used off macOS; tested on every OS")
+)]
 fn tidy(len: u64, mut ranges: Vec<Range<u64>>) -> Option<Vec<Range<u64>>> {
     ranges.sort_unstable_by_key(|range| range.start);
     let mut joined: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
@@ -80,56 +114,126 @@ fn tidy(len: u64, mut ranges: Vec<Range<u64>>) -> Option<Vec<Range<u64>>> {
     (len > 0 && !whole).then_some(joined)
 }
 
-#[cfg(unix)]
+/// Where one seek of a [`walk`] goes: to the first data, or the first hole, at or after an
+/// offset (`SEEK_DATA`, `SEEK_HOLE`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    any(windows, target_os = "macos"),
+    allow(dead_code, reason = "used on Linux; tested on every OS")
+)]
+enum To {
+    Data(u64),
+    Hole(u64),
+}
+
+/// What one seek of a [`walk`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    any(windows, target_os = "macos"),
+    allow(dead_code, reason = "used on Linux; tested on every OS")
+)]
+enum Found {
+    /// The offset it found.
+    At(u64),
+    /// Nothing of the kind from the offset on (`ENXIO`).
+    Nothing,
+    /// The file system cannot seek to data and holes (`EINVAL`, `ENOTSUP`).
+    Unknown,
+}
+
+/// The data ranges of a file of `len` bytes, found by seeking with `seek` from data to hole and
+/// on until no data is left, or `None` when the answers cannot be trusted to show all the data.
+///
+/// "No data from here on" (`Found::Nothing` for `To::Data`) is believed only if the same offset
+/// is the start of a hole (`To::Hole` finds it itself): a file system that keeps data elsewhere
+/// can say there is none in a file full of it (QEMU issue 3124).
+#[cfg_attr(
+    any(windows, target_os = "macos"),
+    allow(dead_code, reason = "used on Linux; tested on every OS")
+)]
+fn walk(
+    len: u64,
+    mut seek: impl FnMut(To) -> io::Result<Found>,
+) -> io::Result<Option<Vec<Range<u64>>>> {
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while at < len {
+        let start = match seek(To::Data(at))? {
+            Found::At(start) => start,
+            Found::Nothing => {
+                let in_a_hole = seek(To::Hole(at))? == Found::At(at);
+                return Ok(in_a_hole.then_some(ranges));
+            }
+            Found::Unknown => return Ok(None),
+        };
+        // `Nothing` here means the file got shorter since its data was found.
+        let Found::At(end) = seek(To::Hole(start))? else {
+            return Ok(None);
+        };
+        // A walk that does not advance cannot be trusted to have found all the data.
+        if start < at || end <= start {
+            return Ok(None);
+        }
+        ranges.push(start..end);
+        at = end;
+    }
+    Ok(Some(ranges))
+}
+
+/// The Windows `FILE_ATTRIBUTE_SPARSE_FILE` bit.
+const SPARSE_FILE: u32 = 0x200;
+
+/// The Windows attribute bits of a file whose content need not lie in its allocated ranges:
+/// `REPARSE_POINT` (Cloud Files and `ProjFS` placeholders and deduplicated files, whose data a
+/// file system filter supplies), `OFFLINE`, `RECALL_ON_OPEN` and `RECALL_ON_DATA_ACCESS`.
+const SERVED_ELSEWHERE: u32 = 0x400 | 0x1000 | 0x4_0000 | 0x40_0000;
+
+/// Whether the allocated ranges of a Windows file with the attribute bits `attributes` show
+/// where its data is: only for a sparse file whose content is not served from elsewhere.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by Windows code; tested on every OS")
+)]
+fn allocation_shows_data(attributes: u32) -> bool {
+    attributes & SPARSE_FILE != 0 && attributes & SERVED_ELSEWHERE == 0
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 mod imp {
     use std::fs::File;
     use std::io;
     use std::ops::Range;
     use std::os::unix::fs::MetadataExt;
-    use std::path::Path;
 
     use rustix::fs::SeekFrom;
     use rustix::io::Errno;
 
-    /// The length of the file at `local` and its data ranges as `lseek` finds them, or `None`
-    /// when it has no holes or the file system cannot tell.
-    pub fn data_ranges(local: &Path) -> io::Result<Option<(u64, Vec<Range<u64>>)>> {
-        let meta = std::fs::metadata(local)?;
+    use super::{Found, To, walk};
+
+    /// The length of `file` and its data ranges as `lseek` finds them, or `None` when it has
+    /// no holes or the answers cannot be trusted.
+    pub fn data_ranges(file: &File) -> io::Result<Option<(u64, Vec<Range<u64>>)>> {
+        let meta = file.metadata()?;
         let len = meta.len();
-        // Linux and macOS count `st_blocks` in units of 512 bytes.
+        // Linux counts `st_blocks` in units of 512 bytes.
         if meta.blocks().saturating_mul(512) >= len {
             return Ok(None);
         }
-        let file = File::open(local)?;
-        let mut ranges = Vec::new();
-        let mut at = 0;
-        while at < len {
-            let start = match rustix::fs::seek(&file, SeekFrom::Data(at)) {
-                Ok(start) => start,
-                // No data from `at` on: the rest of the file is a hole.
-                Err(Errno::NXIO) => break,
-                Err(e) if unknown(e) => return Ok(None),
-                Err(e) => return Err(e.into()),
+        let ranges = walk(len, |to| {
+            let target = match to {
+                To::Data(offset) => SeekFrom::Data(offset),
+                To::Hole(offset) => SeekFrom::Hole(offset),
             };
-            let end = match rustix::fs::seek(&file, SeekFrom::Hole(start)) {
-                Ok(end) => end,
-                // The file got shorter since its data was found: it is copied whole.
-                Err(e) if e == Errno::NXIO || unknown(e) => return Ok(None),
-                Err(e) => return Err(e.into()),
-            };
-            // A walk that does not advance cannot be trusted to have found all the data.
-            if start < at || end <= start {
-                return Ok(None);
+            match rustix::fs::seek(file, target) {
+                Ok(offset) => Ok(Found::At(offset)),
+                Err(Errno::NXIO) => Ok(Found::Nothing),
+                Err(e) if e == Errno::INVAL || e == Errno::NOTSUP || e == Errno::OPNOTSUPP => {
+                    Ok(Found::Unknown)
+                }
+                Err(e) => Err(e.into()),
             }
-            ranges.push(start..end);
-            at = end;
-        }
-        Ok(Some((len, ranges)))
-    }
-
-    /// Whether `e` says that the file system cannot seek to data and holes.
-    fn unknown(e: Errno) -> bool {
-        e == Errno::INVAL || e == Errno::NOTSUP || e == Errno::OPNOTSUPP
+        })?;
+        Ok(ranges.map(|ranges| (len, ranges)))
     }
 }
 
@@ -144,29 +248,28 @@ mod imp {
     use std::ops::Range;
     use std::os::windows::fs::MetadataExt;
     use std::os::windows::io::AsRawHandle;
-    use std::path::Path;
 
     use windows::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_MORE_DATA, HANDLE};
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
     use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::System::Ioctl::{
         FILE_ALLOCATED_RANGE_BUFFER, FSCTL_QUERY_ALLOCATED_RANGES, FSCTL_SET_SPARSE,
     };
 
+    use super::allocation_shows_data;
     use crate::win_util::to_io;
 
     /// How many ranges one `FSCTL_QUERY_ALLOCATED_RANGES` call returns at most.
     const BATCH: usize = 512;
 
-    /// The length of the file at `local` and its allocated ranges, or `None` when it is not
-    /// sparse or the file system cannot tell.
-    pub fn data_ranges(local: &Path) -> io::Result<Option<(u64, Vec<Range<u64>>)>> {
-        let meta = std::fs::metadata(local)?;
-        if meta.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE.0 == 0 {
+    /// The length of `file` and its allocated ranges, or `None` when they do not show where
+    /// its data is or the file system cannot tell.
+    pub fn data_ranges(file: &File) -> io::Result<Option<(u64, Vec<Range<u64>>)>> {
+        // `GetFileInformationByHandle` of the open file: its attributes and its length.
+        let meta = file.metadata()?;
+        if !allocation_shows_data(meta.file_attributes()) {
             return Ok(None);
         }
         let len = meta.len();
-        let file = File::open(local)?;
         let handle = HANDLE(file.as_raw_handle());
         let range_size = size_of::<FILE_ALLOCATED_RANGE_BUFFER>();
         let query_size = u32::try_from(range_size).expect("a range is 16 bytes");
@@ -251,7 +354,10 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::tidy;
+    use std::io;
+    use std::ops::Range;
+
+    use super::{Found, SERVED_ELSEWHERE, SPARSE_FILE, To, allocation_shows_data, tidy, walk};
 
     #[test]
     fn ranges_are_sorted_cut_and_joined() {
@@ -267,5 +373,95 @@ mod tests {
         assert_eq!(tidy(100, vec![0..50, 50..100]), None);
         assert_eq!(tidy(100, std::iter::once(0..200).collect()), None);
         assert_eq!(tidy(0, vec![]), None);
+    }
+
+    /// `SEEK_DATA` and `SEEK_HOLE` on a file of `len` bytes with data in `data`, as a file
+    /// system that answers truly does.
+    fn honest(data: &[Range<u64>], len: u64) -> impl FnMut(To) -> io::Result<Found> + '_ {
+        move |to| {
+            Ok(match to {
+                To::Data(at) => data
+                    .iter()
+                    .find(|r| r.end > at)
+                    .map_or(Found::Nothing, |r| Found::At(r.start.max(at))),
+                To::Hole(at) if at >= len => Found::Nothing,
+                To::Hole(at) => {
+                    Found::At(data.iter().find(|r| r.contains(&at)).map_or(at, |r| r.end))
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn a_walk_finds_the_data_and_the_holes_after_it() {
+        let data = [0..10, 50..60];
+        assert_eq!(walk(100, honest(&data, 100)).unwrap(), Some(data.to_vec()));
+        // All hole: the first `SEEK_DATA` finds nothing, and offset 0 starts a hole.
+        assert_eq!(walk(100, honest(&[], 100)).unwrap(), Some(vec![]));
+    }
+
+    #[test]
+    fn no_data_is_believed_only_where_a_hole_starts() {
+        // Data the file system keeps elsewhere (decmpfs): "no data" at 0, where `SEEK_HOLE`
+        // finds the first hole only at the end of the file.
+        let mut lying = |to| match to {
+            To::Data(_) => Ok(Found::Nothing),
+            To::Hole(_) => Ok(Found::At(100)),
+        };
+        assert_eq!(walk(100, &mut lying).unwrap(), None);
+        // The same after a first range, at an offset that `SEEK_HOLE` itself does not take for
+        // the start of a hole.
+        let mut lying = |to| match to {
+            To::Data(0) => Ok(Found::At(0)),
+            To::Hole(0) => Ok(Found::At(10)),
+            To::Data(_) => Ok(Found::Nothing),
+            To::Hole(at) => Ok(Found::At(at + 1)),
+        };
+        assert_eq!(walk(100, &mut lying).unwrap(), None);
+    }
+
+    #[test]
+    fn answers_that_cannot_be_trusted_give_no_ranges() {
+        assert_eq!(walk(100, |_| Ok(Found::Unknown)).unwrap(), None);
+        // A hole that does not come after its data.
+        assert_eq!(walk(100, |_| Ok(Found::At(5))).unwrap(), None);
+        // A file that got shorter between the two seeks.
+        let mut shrunk = |to| match to {
+            To::Data(at) => Ok(Found::At(at)),
+            To::Hole(_) => Ok(Found::Nothing),
+        };
+        assert_eq!(walk(100, &mut shrunk).unwrap(), None);
+        let failing = |_| Err(io::Error::other("seek failed"));
+        assert!(walk(100, failing).is_err());
+    }
+
+    #[test]
+    fn only_plain_sparse_files_show_their_data_in_their_allocation() {
+        assert!(allocation_shows_data(SPARSE_FILE));
+        // Read-only, hidden, archive: still a plain sparse file.
+        assert!(allocation_shows_data(SPARSE_FILE | 0x1 | 0x2 | 0x20));
+        assert!(!allocation_shows_data(0));
+        for served_elsewhere in [0x400, 0x1000, 0x4_0000, 0x40_0000] {
+            assert_eq!(SERVED_ELSEWHERE & served_elsewhere, served_elsewhere);
+            assert!(!allocation_shows_data(SPARSE_FILE | served_elsewhere));
+        }
+    }
+
+    /// The bits are the ones Windows itself defines.
+    #[cfg(windows)]
+    #[test]
+    fn the_attribute_bits_are_the_windows_ones() {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_ATTRIBUTE_SPARSE_FILE,
+        };
+
+        assert_eq!(SPARSE_FILE, FILE_ATTRIBUTE_SPARSE_FILE.0);
+        let served_elsewhere = FILE_ATTRIBUTE_REPARSE_POINT
+            | FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+        assert_eq!(SERVED_ELSEWHERE, served_elsewhere.0);
     }
 }

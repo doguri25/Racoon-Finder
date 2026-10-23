@@ -22,18 +22,24 @@ fn sparse_files_stay_sparse() {
     file.seek(SeekFrom::Start(63 * MIB)).unwrap();
     file.write_all(&pattern(MIB)).unwrap();
     drop(file);
-    if rf_platform::data_ranges(&v(&a)).unwrap().is_none() {
-        // NTFS and APFS keep holes, so there the test must not be skipped.
-        let keeps_holes = cfg!(any(windows, target_os = "macos"));
-        assert!(!keeps_holes, "NTFS and APFS keep holes");
-        eprintln!("skipped: this temp file system keeps no holes");
-        return;
-    }
     let r = run(&copy(std::slice::from_ref(&a), &f.dst));
     assert_eq!(r.outcome, Outcome::Completed, "{:?}", r.failures);
     assert_eq!((r.planned.bytes, r.done.bytes), (64 * MIB, 64 * MIB));
     let b = f.dst.join("disk.img");
     assert_eq!(std::fs::read(&b).unwrap(), std::fs::read(&a).unwrap());
+    let source_holes = rf_platform::data_ranges(&v(&a)).unwrap();
+    // macOS never reports holes, because its answers can hide data: the copy is whole there.
+    if cfg!(target_os = "macos") {
+        assert_eq!(source_holes, None);
+        return;
+    }
+    if source_holes.is_none() {
+        // NTFS keeps holes, so there the test must not stop here.
+        let keeps_holes = cfg!(windows);
+        assert!(!keeps_holes, "NTFS keeps holes");
+        eprintln!("this temp file system keeps no holes: only the content was checked");
+        return;
+    }
     let ranges = rf_platform::data_ranges(&v(&b))
         .unwrap()
         .expect("the copy has holes too");

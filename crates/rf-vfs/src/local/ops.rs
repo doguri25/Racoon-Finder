@@ -1,7 +1,8 @@
 //! Renaming, deleting, links, metadata, and the read and write streams.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 
 use rf_core::{Error, ErrorKind, Result, VPath};
 
@@ -243,10 +244,41 @@ pub(super) fn set_metadata(path: &VPath, patch: &MetadataPatch) -> Result<()> {
     Ok(())
 }
 
-/// Opens `path` for reading; the `File` itself is the stream.
+/// Opens `path` for reading.
 pub(super) fn open_read(path: &VPath) -> Result<Box<dyn ReadStream>> {
     let file = File::open(native(path)?).map_err(|e| Error::io("open_read", path.clone(), e))?;
-    Ok(Box::new(file))
+    Ok(Box::new(LocalReader {
+        file,
+        path: path.clone(),
+    }))
+}
+
+/// A file being read. `path` is for error messages only.
+#[derive(Debug)]
+struct LocalReader {
+    file: File,
+    path: VPath,
+}
+
+impl Read for LocalReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for LocalReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl ReadStream for LocalReader {
+    /// `rf_platform::file_data_ranges` of the open file, so the ranges are those of the bytes
+    /// this stream reads. On Linux the walk moves the file's position.
+    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+        rf_platform::file_data_ranges(&self.file)
+            .map_err(|e| Error::io("data_ranges", self.path.clone(), e))
+    }
 }
 
 /// Opens `path` for writing as `mode` says.

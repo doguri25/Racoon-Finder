@@ -2,7 +2,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use rf_core::{ErrorKind, Scheme, VPath};
-use rf_platform::{data_ranges, mark_sparse};
+use rf_platform::{data_ranges, file_data_ranges, mark_sparse};
 
 const MIB: u64 = 1 << 20;
 
@@ -21,10 +21,16 @@ fn holey(dir: &Path) -> VPath {
 #[test]
 fn holes_are_the_gaps_between_data_ranges() {
     let t = tempfile::tempdir().unwrap();
-    let Some(ranges) = data_ranges(&holey(t.path())).unwrap() else {
-        // NTFS and APFS keep holes, so there the test must not be skipped.
-        let keeps_holes = cfg!(any(windows, target_os = "macos"));
-        assert!(!keeps_holes, "NTFS and APFS keep holes");
+    let found = data_ranges(&holey(t.path())).unwrap();
+    // macOS never reports holes, because its answers can hide data.
+    if cfg!(target_os = "macos") {
+        assert_eq!(found, None);
+        return;
+    }
+    let Some(ranges) = found else {
+        // NTFS keeps holes, so there the test must not be skipped.
+        let keeps_holes = cfg!(windows);
+        assert!(!keeps_holes, "NTFS keeps holes");
         eprintln!("skipped: this temp file system keeps no holes");
         return;
     };
@@ -52,6 +58,22 @@ fn dense_files_have_no_ranges() {
     let p = t.path().join("dense.bin");
     std::fs::write(&p, vec![7u8; 256 * 1024]).unwrap();
     assert_eq!(data_ranges(&VPath::local(&p).unwrap()).unwrap(), None);
+}
+
+/// An open file answers for itself, also after an app saved over its path by replacing it.
+#[test]
+fn an_open_file_answers_for_itself() {
+    let t = tempfile::tempdir().unwrap();
+    let path = holey(t.path());
+    let local = path.as_local().unwrap().to_path_buf();
+    let opened = std::fs::File::open(&local).unwrap();
+    let before = file_data_ranges(&opened).unwrap();
+    assert_eq!(before, data_ranges(&path).unwrap());
+    let dense = t.path().join("dense.bin");
+    std::fs::write(&dense, vec![7u8; 256 * 1024]).unwrap();
+    std::fs::rename(&dense, &local).unwrap();
+    assert_eq!(data_ranges(&path).unwrap(), None);
+    assert_eq!(file_data_ranges(&opened).unwrap(), before);
 }
 
 #[test]

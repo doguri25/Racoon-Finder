@@ -179,7 +179,7 @@ const MIN_BUFFER: usize = 64 << 10;
 
 /// Copies the content of `from` from `reader` into `writer` one chunk at a time, stopping at a
 /// pause or a cancel between chunks, then finishes (flushes and syncs) the writer. A sparse
-/// source (`Provider::data_ranges`) is copied range by range with holes between the ranges
+/// source (`ReadStream::data_ranges`) is copied range by range with holes between the ranges
 /// ([`Content::sparse`]); any other one from start to end ([`Content::rest`]).
 ///
 /// The planned size of the source decides whether the first chunk gets its own progress event,
@@ -192,7 +192,7 @@ fn write_content(
     mut writer: Box<dyn WriteStream>,
     tmp: &VPath,
 ) -> Result<(), Failed> {
-    let layout = data_layout(from, reader)?;
+    let layout = data_layout(reader, from.path)?;
     let size = from.entry.size;
     let buffer =
         usize::try_from(size).map_or(COPY_CHUNK, |size| size.clamp(MIN_BUFFER, COPY_CHUNK));
@@ -212,33 +212,46 @@ fn write_content(
     writer.finish().at(Stage::Write)
 }
 
-/// Where a sparse source holds data.
+/// Where a sparse source holds data. Only [`data_layout`] makes one, and only from ranges that
+/// passed [`usable`]: each range ends after it starts, within `len`, before the next one.
 struct Layout {
     /// The length of the source.
     len: u64,
-    /// The ranges with data, as `Provider::data_ranges` gives them.
+    /// The ranges with data, as `ReadStream::data_ranges` gives them.
     ranges: Vec<Range<u64>>,
 }
 
-/// Where `from` holds data, for a copy that keeps its holes; `None` for a copy from start to
-/// end, with `reader` at its start. Keeping holes is best effort: a source without holes, or
-/// whose provider cannot tell or fails to, is copied whole, which gives the same content.
+/// Where the source that `reader` reads holds data, for a copy that keeps its holes; `None`
+/// for a copy from start to end, with `reader` at its start. Keeping holes is best effort: a
+/// source without holes, or whose stream cannot tell, fails to, or gives ranges that are not
+/// [`usable`], is copied whole, which gives the same content.
 ///
-/// The length is taken before the ranges, so that data the source gains in between lies in a
-/// range and is never taken for a hole; what it gains after the ranges lies past the length,
-/// where [`Content::sparse`] copies it as [`Content::rest`] would. The first question keeps a
-/// file without holes, the common case, from the seek and the second question.
-fn data_layout(from: Source<'_>, reader: &mut dyn ReadStream) -> Result<Option<Layout>, Failed> {
-    if !matches!(from.provider.data_ranges(from.path), Ok(Some(_))) {
-        return Ok(None);
-    }
-    let read_error = |e| Failed::new(Stage::Read, Error::io("read", from.path.clone(), e));
+/// Both the length and the ranges come from the open stream, never from the path, which an app
+/// can have given to another file by now. The length is taken first, so that data the source
+/// gains in between lies past it, where a range fails [`usable`]; what it gains after the
+/// ranges lies past the length too, where [`Content::sparse`] copies it as [`Content::rest`]
+/// would.
+fn data_layout(reader: &mut dyn ReadStream, source: &VPath) -> Result<Option<Layout>, Failed> {
+    let read_error = |e| Failed::new(Stage::Read, Error::io("read", source.clone(), e));
     let len = reader.seek(SeekFrom::End(0)).map_err(read_error)?;
-    if let Ok(Some(ranges)) = from.provider.data_ranges(from.path) {
-        return Ok(Some(Layout { len, ranges }));
+    if let Ok(Some(ranges)) = reader.data_ranges() {
+        if usable(&ranges, len) {
+            return Ok(Some(Layout { len, ranges }));
+        }
     }
     reader.rewind().map_err(read_error)?;
     Ok(None)
+}
+
+/// Whether `ranges` keep the promises of `ReadStream::data_ranges` for a source of `len` bytes:
+/// each range holds data (it ends after it starts), lies within `len`, and starts where the one
+/// before it ended or later. An answer that breaks any of them is not used at all, never in
+/// part: a range moved or cut to fit could turn data into a hole.
+fn usable(ranges: &[Range<u64>], len: u64) -> bool {
+    ranges
+        .iter()
+        .all(|range| range.start < range.end && range.end <= len)
+        && ranges.windows(2).all(|pair| pair[0].end <= pair[1].start)
 }
 
 /// The content of one file on its way from the reader to the writer, through one buffer.
@@ -282,25 +295,20 @@ impl Content<'_, '_> {
     fn sparse(&mut self, layout: &Layout) -> Result<(), Failed> {
         let mut at = 0;
         for range in &layout.ranges {
-            // The ranges come in order and apart; should one not, the copy still never goes
-            // back.
-            let start = range.start.max(at);
-            let end = range.end.max(start);
-            self.hole(start - at)?;
-            self.seek(start)?;
-            self.exactly(end - start)?;
-            at = end;
+            self.hole(range.start - at)?;
+            self.seek(range.start)?;
+            self.exactly(range.end - range.start)?;
+            at = range.end;
         }
-        let end = at.max(layout.len);
-        self.hole(end - at)?;
+        self.hole(layout.len - at)?;
         let now = self
             .reader
             .seek(SeekFrom::End(0))
             .map_err(|e| self.read_error(e))?;
-        if now < end {
+        if now < layout.len {
             return Err(self.read_error(io::ErrorKind::UnexpectedEof.into()));
         }
-        self.seek(end)?;
+        self.seek(layout.len)?;
         self.rest()
     }
 
@@ -402,6 +410,7 @@ impl Drop for TempGuard<'_> {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use rf_core::{ErrorKind, VPath};
@@ -411,8 +420,8 @@ mod tests {
     use crate::testkit::Node;
     use crate::testkit::{Fault, FaultyProvider, temp_files, tree};
     use crate::{
-        ExecEnv, JobId, JobReport, JobSpec, NonInteractive, Outcome, Stage, TransferMode,
-        TransferOptions, TransferSpec, execute, temp_name,
+        ExecEnv, ExecEvent, JobId, JobReport, JobSpec, NonInteractive, Outcome, Stage,
+        TransferMode, TransferOptions, TransferSpec, execute, temp_name,
     };
 
     struct Dirs {
@@ -442,6 +451,10 @@ mod tests {
     }
 
     fn copy_all(id: JobId, sources: &[&Path], dest_dir: &Path, vfs: &Vfs) -> JobReport {
+        copy_in(id, sources, dest_dir, &ExecEnv::new(vfs, &NonInteractive))
+    }
+
+    fn copy_in(id: JobId, sources: &[&Path], dest_dir: &Path, env: &ExecEnv<'_>) -> JobReport {
         let sources: Vec<VPath> = sources.iter().map(|source| v(source)).collect();
         let spec = TransferSpec::into_dir(
             TransferMode::Copy,
@@ -450,8 +463,38 @@ mod tests {
             TransferOptions::default(),
         )
         .unwrap();
-        let env = ExecEnv::new(vfs, &NonInteractive);
-        execute(id, &JobSpec::Transfer(spec), &env)
+        execute(id, &JobSpec::Transfer(spec), env)
+    }
+
+    /// Copies `a` with `faults` while another app cuts it to `len` bytes: right after the copy
+    /// has read its first chunk, which a [`Fault::Hold`] on its first write holds back.
+    fn copy_cut_short(d: &Dirs, a: &Path, len: u64, mut faults: Vec<Fault>) -> JobReport {
+        faults.push(Fault::Hold { file: 0 });
+        let p = FaultyProvider::local(faults);
+        let vfs = p.vfs();
+        std::thread::scope(|scope| {
+            let job = scope.spawn(|| copy(JobId::generate(), a, &d.dst, &vfs));
+            let held = p.wait_held(Duration::from_secs(10));
+            let file = std::fs::OpenOptions::new().write(true).open(a).unwrap();
+            file.set_len(len).unwrap();
+            drop(file);
+            p.release();
+            assert!(held, "the copy never reached its first write");
+            job.join().unwrap()
+        })
+    }
+
+    /// Checks that `report` failed its only item reading a source that ended too early, and
+    /// left nothing behind: no copy, no temporary file, no byte counted.
+    fn assert_cut_short(report: &JobReport, d: &Dirs) {
+        assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+        assert_eq!(first_failure(report), (Stage::Read, ErrorKind::Other));
+        let message = &report.failures[0].message;
+        let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof).to_string();
+        assert!(message.starts_with("read failed for "), "{message}");
+        assert!(message.ends_with(&eof), "{message}");
+        assert_eq!(report.done.bytes, 0);
+        assert_eq!(tree(&d.dst), BTreeMap::new());
     }
 
     fn first_failure(report: &JobReport) -> (Stage, ErrorKind) {
@@ -477,29 +520,43 @@ mod tests {
         assert_eq!(tree(&d.dst).into_keys().collect::<Vec<_>>(), ["b.bin"]);
     }
 
-    /// The holes a sparse copy counted go back with the rest when it fails.
+    /// The holes a sparse copy counted go back with the rest when it fails: the progress shows
+    /// them counted, the report has taken them back.
     #[test]
     fn a_failed_sparse_file_takes_back_its_holes() {
         let d = dirs();
         let (a, b) = (d.src.join("a.bin"), d.src.join("b.bin"));
         let mut content = vec![0; 3 << 20];
-        content[..1 << 20].fill(1);
         content[2 << 20..].fill(2);
         std::fs::write(&a, &content).unwrap();
         std::fs::write(&b, vec![3; 5_000]).unwrap();
-        // The first range and the hole after it are counted before the second range fails.
+        // The leading hole is the first count of a large file, so it gets a progress event of
+        // its own; then the first write of the range fails.
         let p = FaultyProvider::local(vec![
             Fault::DataRanges {
                 name: "a.bin".into(),
-                ranges: vec![0..1 << 20, 2 << 20..3 << 20],
+                ranges: std::iter::once(2 << 20..3 << 20).collect(),
             },
             Fault::FailWrite {
                 file: 0,
-                after: 3 << 19,
+                after: 1 << 19,
             },
         ]);
-        let report = copy_all(JobId::generate(), &[&a, &b], &d.dst, &p.vfs());
+        let vfs = p.vfs();
+        let most = Mutex::new(0);
+        let on = |event: ExecEvent| {
+            if let ExecEvent::Progress(progress) = event {
+                let mut most = most.lock().unwrap();
+                *most = (*most).max(progress.done.bytes);
+            }
+        };
+        let env = ExecEnv::new(&vfs, &NonInteractive).on_event(&on);
+        let report = copy_in(JobId::generate(), &[&a, &b], &d.dst, &env);
         assert_eq!(first_failure(&report), (Stage::Write, ErrorKind::Other));
+        assert!(
+            *most.lock().unwrap() >= 2 << 20,
+            "the hole was never counted"
+        );
         assert_eq!((report.done.files, report.done.bytes), (1, 5_000));
         assert_eq!(tree(&d.dst).into_keys().collect::<Vec<_>>(), ["b.bin"]);
     }
@@ -530,26 +587,70 @@ mod tests {
         assert_eq!(std::fs::read(d.dst.join("a.bin")).unwrap(), content);
     }
 
-    /// Ranges that reach past the end of the source, as those of a file cut short after they
-    /// were taken, fail the read: no copy is committed, and no byte is counted.
+    /// Ranges that are out of order, overlap, hold nothing or reach past the end of the source
+    /// are not used, not even in part: the file is copied whole and comes out the same. Used,
+    /// each of them would have turned some of the data into a hole of zeros.
     #[test]
-    fn ranges_past_the_end_fail_the_read_and_commit_nothing() {
+    fn ranges_that_break_their_promises_are_not_used() {
+        let d = dirs();
+        let bad = [
+            ("unsorted", vec![50..60, 10..20]),
+            ("overlapping", vec![0..30, 20..40]),
+            ("empty", vec![0..10, 30..30, 50..60]),
+            (
+                "backwards",
+                vec![0..10, std::ops::Range { start: 40, end: 30 }],
+            ),
+            ("past-the-end", vec![0..10, 90..200]),
+        ];
+        let content: Vec<u8> = (1..=100).collect();
+        let mut faults = Vec::new();
+        let mut sources = Vec::new();
+        for (name, ranges) in bad {
+            let source = d.src.join(name);
+            std::fs::write(&source, &content).unwrap();
+            sources.push(source);
+            faults.push(Fault::DataRanges {
+                name: name.into(),
+                ranges,
+            });
+        }
+        let p = FaultyProvider::local(faults);
+        let sources: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+        let report = copy_all(JobId::generate(), &sources, &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
+        for source in sources {
+            let copy = d.dst.join(source.file_name().unwrap());
+            assert_eq!(std::fs::read(&copy).unwrap(), content, "{}", copy.display());
+        }
+    }
+
+    /// A source cut short inside a range after its ranges were taken fails the read: no copy is
+    /// committed, and no byte is counted.
+    #[test]
+    fn a_source_cut_short_inside_a_range_fails_the_read() {
         let d = dirs();
         let a = d.src.join("a.bin");
         std::fs::write(&a, vec![1; 100]).unwrap();
-        let p = FaultyProvider::local(vec![Fault::DataRanges {
+        let ranges = Fault::DataRanges {
             name: "a.bin".into(),
-            ranges: vec![0..10, 50..200],
-        }]);
-        let report = copy(JobId::generate(), &a, &d.dst, &p.vfs());
-        assert_eq!(report.outcome, Outcome::CompletedWithErrors);
-        assert_eq!(first_failure(&report), (Stage::Read, ErrorKind::Other));
-        let message = &report.failures[0].message;
-        let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof).to_string();
-        assert!(message.starts_with("read failed for "), "{message}");
-        assert!(message.ends_with(&eof), "{message}");
-        assert_eq!(report.done.bytes, 0);
-        assert_eq!(tree(&d.dst), BTreeMap::new());
+            ranges: vec![0..10, 50..100],
+        };
+        assert_cut_short(&copy_cut_short(&d, &a, 60, vec![ranges]), &d);
+    }
+
+    /// A source cut short inside its last hole fails the read too, once that hole is written:
+    /// the copy would be longer than the source.
+    #[test]
+    fn a_source_cut_short_inside_its_last_hole_fails_the_read() {
+        let d = dirs();
+        let a = d.src.join("a.bin");
+        std::fs::write(&a, vec![1; 100]).unwrap();
+        let ranges = Fault::DataRanges {
+            name: "a.bin".into(),
+            ranges: std::iter::once(0..10).collect(),
+        };
+        assert_cut_short(&copy_cut_short(&d, &a, 50, vec![ranges]), &d);
     }
 
     #[test]
