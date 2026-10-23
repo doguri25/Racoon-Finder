@@ -22,11 +22,14 @@
 //! byte for byte. A new field gets `#[serde(default)]`, with a default that means what builds
 //! without the field did, so that older lines still parse; a build that does not know the
 //! field ignores it when it reads the line, and its compaction keeps the line as it was
-//! written. A new enum variant needs nothing: a build that does not know it skips the line.
-//! Any other change of shape (a field or a variant renamed or removed, a field's type changed,
-//! a new field that a job must not run without) takes a new format number, so that builds skip
-//! the lines of the other number instead of misreading them. A skipped line is not kept by
-//! compaction: after going back to an older build, the jobs it cannot read are not recovered.
+//! written. A new enum variant needs no new format number. A build that does not know it skips
+//! the line, except a `Finished` line, which still ends its job whatever its outcome says, so
+//! that a new outcome does not bring a finished job back. A build that cannot read a job's
+//! `Submitted` line does not know the job: its compaction drops every line of that job, the
+//! `TempDir` lines included. That is safe, but the temporary files those lines point to are
+//! then never removed. Any other change of shape (a field or a variant renamed or removed, a
+//! field's type changed, a new field that a job must not run without) takes a new format
+//! number, so that builds skip the lines of the other number instead of misreading them.
 
 #![cfg_attr(
     not(test),
@@ -41,7 +44,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, JoinHandle, ThreadId};
 use std::time::SystemTime;
 
 use rf_core::{EntryKind, Error, VPath};
@@ -66,6 +69,7 @@ const FORMAT: u32 = 1;
 /// the job was queued or running.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncompleteJob {
+    /// The job's ID, as it was submitted. Its temporary files carry it in their names.
     pub id: JobId,
     /// What the job was asked to do.
     pub spec: JobSpec,
@@ -135,6 +139,24 @@ fn decode(line: &[u8]) -> Option<Record> {
     (line.v == FORMAT).then_some(line.rec)
 }
 
+/// The job of a `Finished` line of this format that [`decode`] cannot read, such as one with an
+/// outcome a newer build added: whatever the outcome, the job ended. `None` for any other line.
+fn finished_job(line: &[u8]) -> Option<JobId> {
+    /// A line read for its `Finished` record's job only; other fields are ignored.
+    #[derive(Deserialize)]
+    struct FinishedLine {
+        v: u32,
+        rec: FinishedRecord,
+    }
+    #[derive(Deserialize)]
+    enum FinishedRecord {
+        Finished { job: JobId },
+    }
+    let line: FinishedLine = serde_json::from_slice(line).ok()?;
+    let FinishedRecord::Finished { job } = line.rec;
+    (line.v == FORMAT).then_some(job)
+}
+
 /// The error of a journal step that failed with `error` on `path`.
 fn journal_error(path: &Path, error: io::Error) -> Error {
     match VPath::local(path) {
@@ -143,36 +165,58 @@ fn journal_error(path: &Path, error: io::Error) -> Error {
     }
 }
 
+/// What [`recover`] found in the journal.
+#[derive(Debug)]
+pub(crate) struct Recovered {
+    /// The jobs that were submitted and never finished, in the order they were submitted.
+    pub jobs: Vec<IncompleteJob>,
+    /// Why the journal could not be compacted, if it could not. The jobs are found all the
+    /// same, and the journal on the disk still holds every record of them: the old journal
+    /// stays until the compacted one is renamed over it, and when only the flush after that
+    /// rename fails, the old and the new journal both hold them, whichever a crash leaves.
+    pub compaction: Option<Error>,
+}
+
 /// The jobs the journal in the folder `dir` holds that were submitted and never finished, in
 /// the order they were submitted. The journal then keeps only their records.
 ///
 /// No journal file is no job, and nothing is made then. A line that does not parse (the torn
-/// last line of a crash) or is of another format is skipped. The lines of the jobs found are
-/// written, as they were, to `jobs.journal.tmp`, flushed to the disk and renamed over the
-/// journal, and the rename is made durable too, so that a crash leaves the old journal or the
-/// new one, never a mix; with no job left the journal is empty. A journal that would not change
-/// is left as it is. When a step fails the old journal stays as it was and the error is
-/// returned: every record is still there for the next recovery.
+/// last line of a crash) or is of another format is skipped; a `Finished` line this build
+/// cannot read in full still ends its job. The lines of the jobs found are written, as they
+/// were, to `jobs.journal.tmp`, flushed to the disk and renamed over the journal, and the
+/// rename is made durable too, so that a crash leaves the old journal or the new one, never a
+/// mix; with no job left the journal is empty. A journal that would not change is left as it
+/// is.
+///
+/// Only a journal that cannot be read fails it. A compaction that fails (a full disk, a file
+/// another program holds, something in the way of `jobs.journal.tmp`) gives the jobs all the
+/// same, with the error in [`Recovered::compaction`], so that their temporary files can still
+/// be removed.
 ///
 /// A record appended while this runs can be lost with the old file, so it runs before the
 /// journal thread writes anything: the engine runs it as that thread's `on_start`.
-pub(crate) fn recover(dir: &Path) -> rf_core::Result<Vec<IncompleteJob>> {
+pub(crate) fn recover(dir: &Path) -> rf_core::Result<Recovered> {
     let path = dir.join(JOURNAL_FILE);
-    let content = match fs::read(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(journal_error(&path, error)),
+    let Some(content) = read_journal(dir, &path)? else {
+        return Ok(Recovered {
+            jobs: Vec::new(),
+            compaction: None,
+        });
     };
+    let mut records: Vec<(&[u8], Record)> = Vec::new();
+    let mut finished = HashSet::new();
     // Split at bytes, not as text: a line torn inside a character is not UTF-8.
-    let records: Vec<(&[u8], Record)> = content
-        .split(|&byte| byte == b'\n')
-        .filter_map(|line| Some((line, decode(line)?)))
-        .collect();
-    let finished: HashSet<JobId> = records
-        .iter()
-        .filter(|(_, record)| matches!(record, Record::Finished { .. }))
-        .map(|(_, record)| record.job())
-        .collect();
+    for line in content.split(|&byte| byte == b'\n') {
+        match decode(line) {
+            Some(record) => {
+                if let Record::Finished { job, .. } = record {
+                    finished.insert(job);
+                }
+                records.push((line, record));
+            }
+            None => finished.extend(finished_job(line)),
+        }
+    }
     let mut jobs = Vec::new();
     let mut index = HashMap::new();
     for (_, record) in &records {
@@ -207,10 +251,39 @@ pub(crate) fn recover(dir: &Path) -> rf_core::Result<Vec<IncompleteJob>> {
         kept.extend_from_slice(line);
         kept.push(b'\n');
     }
-    if kept != content {
-        compact(dir, &path, &kept)?;
+    let compaction = if kept == content {
+        None
+    } else {
+        compact(dir, &path, &kept).err()
+    };
+    Ok(Recovered { jobs, compaction })
+}
+
+/// The content of the journal `path` in the folder `dir`, or `None` when there is none.
+///
+/// A file system whose rename over a file deletes the old file before it renames the new one
+/// (FAT, exFAT) can lose the journal to a crash in the middle of a compaction and leave only
+/// the compacted file. That file is complete, since it is renamed only after it is flushed, so
+/// a compacted file found without a journal is renamed into place first and read. A folder or
+/// a link of that name is not.
+fn read_journal(dir: &Path, path: &Path) -> rf_core::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(content) => return Ok(Some(content)),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(journal_error(path, error));
+        }
+        Err(_) => {}
     }
-    Ok(jobs)
+    let compacted = dir.join(COMPACTED_FILE);
+    if !fs::symlink_metadata(&compacted).is_ok_and(|meta| meta.is_file()) {
+        return Ok(None);
+    }
+    // No flush is needed: a crash before this rename is on the disk leaves the same state,
+    // which the next recovery puts right in the same way.
+    fs::rename(&compacted, path).map_err(|error| journal_error(path, error))?;
+    fs::read(path)
+        .map(Some)
+        .map_err(|error| journal_error(path, error))
 }
 
 /// Replaces the journal `path` in the folder `dir` with `content`, as [`recover`] describes.
@@ -303,10 +376,11 @@ pub(crate) struct JournalHandle {
     queue: Option<Queue>,
 }
 
-/// The queue of a journal thread, and the file it writes.
+/// The queue of a journal thread, the thread, and the file it writes.
 #[derive(Clone, Debug)]
 struct Queue {
     sender: Sender<Message>,
+    thread: ThreadId,
     file: PathBuf,
 }
 
@@ -334,8 +408,9 @@ impl JournalHandle {
     /// `on_error`, on the thread; a failure is `Error::io("journal", file, …)`.
     ///
     /// Records sent while `on_start` runs wait for it, and so do the writers of durable ones.
-    /// Neither `on_start` nor `on_error` may wait for a durable record: the thread would wait
-    /// for itself.
+    /// `on_start` and `on_error` may [`append`](Self::append), but a durable record from them
+    /// would have the thread wait for itself, so [`append_durable`](Self::append_durable)
+    /// refuses it there.
     pub(crate) fn spawn(
         dir: PathBuf,
         on_start: Box<dyn FnOnce() + Send>,
@@ -363,7 +438,11 @@ impl JournalHandle {
                 }
             })
             .expect("the journal thread could not be started");
-        let queue = Queue { sender, file };
+        let queue = Queue {
+            sender,
+            thread: thread.thread().id(),
+            file,
+        };
         (JournalHandle { queue: Some(queue) }, thread)
     }
 
@@ -379,10 +458,21 @@ impl JournalHandle {
     /// Writes `record` and waits until it is flushed to the disk. A failure is returned, and
     /// passed to the thread's `on_error` as well; after [`shutdown`](Self::shutdown) the record
     /// fails without being written. A disabled handle writes nothing and returns `Ok`.
+    ///
+    /// On the journal thread itself (in `on_start` or `on_error`) the record would wait for
+    /// the thread that waits for it: it is not written, and the error's I/O kind is
+    /// `io::ErrorKind::Deadlock`. `on_error` is not called for it.
     pub(crate) fn append_durable(&self, record: Record) -> rf_core::Result<()> {
         let Some(queue) = &self.queue else {
             return Ok(());
         };
+        if thread::current().id() == queue.thread {
+            let deadlock = io::Error::new(
+                io::ErrorKind::Deadlock,
+                "the journal thread cannot wait for its own durable record",
+            );
+            return Err(journal_error(&queue.file, deadlock));
+        }
         let (done, answer) = mpsc::channel();
         let message = Message::Write {
             record,
@@ -606,8 +696,15 @@ mod tests {
         (t, d, at)
     }
 
+    /// The jobs `recover` finds in `dir`, after a compaction that worked.
+    fn jobs(dir: &Path) -> Vec<IncompleteJob> {
+        let recovered = recover(dir).unwrap();
+        assert!(recovered.compaction.is_none(), "{:?}", recovered.compaction);
+        recovered.jobs
+    }
+
     fn ids(dir: &Path) -> Vec<JobId> {
-        recover(dir).unwrap().iter().map(|j| j.id).collect()
+        jobs(dir).iter().map(|j| j.id).collect()
     }
 
     #[test]
@@ -620,15 +717,15 @@ mod tests {
             started: true,
             temp_dirs: vec![d],
         };
-        assert_eq!(recover(t.path()).unwrap(), [want]);
+        assert_eq!(jobs(t.path()), [want]);
     }
 
     #[test]
     fn recovery_compacts_the_file() {
         let (t, _, _) = a_done_b_running();
-        let first = recover(t.path()).unwrap();
+        let first = jobs(t.path());
         assert_eq!(lines(t.path()), 3);
-        assert_eq!(recover(t.path()).unwrap(), first);
+        assert_eq!(jobs(t.path()), first);
     }
 
     #[test]
@@ -662,7 +759,7 @@ mod tests {
     fn nothing_is_created_before_the_first_record() {
         let t = tempfile::tempdir().unwrap();
         let state = t.path().join("state");
-        assert_eq!(recover(&state).unwrap(), Vec::<IncompleteJob>::new());
+        assert_eq!(jobs(&state), Vec::<IncompleteJob>::new());
         assert!(!state.exists());
         let (h, j) =
             JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")));
@@ -982,7 +1079,11 @@ mod tests {
         // A folder where the compacted copy is written makes the compaction fail.
         let blocker = t.path().join("jobs.journal.tmp");
         fs::create_dir(&blocker).unwrap();
-        let error = recover(t.path()).unwrap_err();
+        let recovered = recover(t.path()).unwrap();
+        // The jobs are found all the same, and the failure is not hidden.
+        let found: Vec<JobId> = recovered.jobs.iter().map(|j| j.id).collect();
+        assert_eq!(found, [B]);
+        let error = recovered.compaction.expect("the compaction failed");
         assert!(is_journal_error(&error), "{error}");
         assert_eq!(fs::read(&file).unwrap(), before);
         assert!(blocker.is_dir());
@@ -1055,7 +1156,7 @@ mod tests {
         assert!(p.wait_crashed(WAIT));
         h.shutdown();
         thread.join().unwrap();
-        let jobs = recover(&state).unwrap();
+        let found = jobs(&state);
         let want = IncompleteJob {
             id: C,
             spec,
@@ -1063,7 +1164,7 @@ mod tests {
             started: true,
             temp_dirs: vec![v(&dst)],
         };
-        assert_eq!(jobs, std::slice::from_ref(&want));
+        assert_eq!(found, std::slice::from_ref(&want));
         assert_eq!(temp_files(&dst).len(), 1);
         assert_eq!(remove_orphans(&Vfs::with_local(), &want), 1);
         assert_eq!(temp_files(&dst), Vec::<String>::new());
@@ -1134,5 +1235,87 @@ mod tests {
         thread.join().unwrap();
         assert_eq!(errors.load(Ordering::SeqCst), 1);
         assert!(!t.path().join(JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn a_finished_line_with_an_unknown_outcome_still_ends_its_job() {
+        let (t, _, _) = a_done_b_running();
+        // Another format number is not read, whatever it says.
+        append_raw(
+            t.path(),
+            "{\"v\":2,\"rec\":{\"Finished\":{\"job\":2,\"outcome\":\"Later\"}}}\n",
+        );
+        assert_eq!(ids(t.path()), [B]);
+        // An outcome a newer build added.
+        append_raw(
+            t.path(),
+            "{\"v\":1,\"rec\":{\"Finished\":{\"job\":2,\"outcome\":\"Later\"}}}\n",
+        );
+        assert_eq!(ids(t.path()), Vec::<JobId>::new());
+    }
+
+    #[test]
+    fn a_compaction_cut_off_between_its_delete_and_rename_is_completed() {
+        let (t, _, _) = a_done_b_running();
+        assert_eq!(ids(t.path()), [B]);
+        // A rename over a file on FAT or exFAT deletes the old file first; the crash came
+        // between the two.
+        fs::rename(t.path().join(JOURNAL_FILE), t.path().join(COMPACTED_FILE)).unwrap();
+        assert_eq!(ids(t.path()), [B]);
+        assert!(t.path().join(JOURNAL_FILE).is_file());
+        assert!(!t.path().join(COMPACTED_FILE).exists());
+        assert_eq!(lines(t.path()), 3);
+    }
+
+    #[test]
+    fn a_compaction_folder_without_a_journal_is_no_journal() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir(t.path().join(COMPACTED_FILE)).unwrap();
+        assert_eq!(ids(t.path()), Vec::<JobId>::new());
+        assert!(t.path().join(COMPACTED_FILE).is_dir());
+        assert!(!t.path().join(JOURNAL_FILE).exists());
+    }
+
+    #[test]
+    fn a_durable_record_from_the_journal_thread_fails_instead_of_waiting() {
+        let t = tempfile::tempdir().unwrap();
+        let (give, take) = mpsc::channel::<JournalHandle>();
+        let (tell, told) = mpsc::channel();
+        let (h, thread) = JournalHandle::spawn(
+            t.path().to_path_buf(),
+            Box::new(move || {
+                let h = take.recv().unwrap();
+                let refused = h.append_durable(Record::Started { job: A });
+                // A record that is not waited for is fine; it is queued before the test
+                // hears back, so before its shutdown.
+                h.append(Record::Started { job: B });
+                tell.send(refused).unwrap();
+            }),
+            Box::new(|e| panic!("{e}")),
+        );
+        give.send(h.clone()).unwrap();
+        let error = told
+            .recv_timeout(WAIT)
+            .expect("the journal thread waits for itself")
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Io { op: "journal", source, .. } if source.kind() == io::ErrorKind::Deadlock),
+            "{error}"
+        );
+        h.shutdown();
+        thread.join().unwrap();
+        assert_eq!(records(t.path()), [Record::Started { job: B }]);
+    }
+
+    #[test]
+    fn compaction_keeps_a_line_as_it_was_written() {
+        let (t, _, _) = a_done_b_running();
+        // A field this build does not know, as a newer build may add.
+        let line = r#"{"v":1,"rec":{"Started":{"job":2,"later":1}}}"#;
+        append_raw(t.path(), format!("{line}\n"));
+        assert_eq!(ids(t.path()), [B]);
+        let text = fs::read_to_string(t.path().join(JOURNAL_FILE)).unwrap();
+        assert_eq!(text.lines().count(), 4);
+        assert_eq!(text.lines().skip(3).collect::<Vec<_>>(), [line]);
     }
 }
