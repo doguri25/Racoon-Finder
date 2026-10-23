@@ -36,9 +36,11 @@ pub fn trash_supported(path: &VPath) -> bool {
 /// a way that "Restore" works, and on macOS through Finder so that "Put Back" works, if
 /// Finder may be automated.
 ///
-/// The item is never deleted permanently instead. A non-local path, and a place without a
-/// trash, give `Error::Unsupported`, and a missing item gives `ErrorKind::NotFound`; in every
-/// error case the item is left where it was.
+/// The item is never deleted permanently instead, and never swapped for another one: a
+/// symbolic link is moved itself, not what it points to, and a name that the Windows shell
+/// would read as a different item (`report.` as `report`) is refused. A non-local path, and a
+/// place without a trash, give `Error::Unsupported`, and a missing item gives
+/// `ErrorKind::NotFound`; in every error case the item is left where it was.
 ///
 /// This call blocks, and on macOS it can wait for Finder for up to 20 seconds.
 pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {

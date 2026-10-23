@@ -114,3 +114,91 @@ fn linux_has_no_trash_and_keeps_the_file() {
     );
     assert!(f.exists());
 }
+
+/// Makes `link` a directory link to `target`.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+/// Makes `link` a directory link to `target`.
+#[cfg(target_os = "macos")]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Whether `location` lies inside a recycle bin or trash folder.
+#[cfg(any(windows, target_os = "macos"))]
+fn in_trash(location: &Path) -> bool {
+    location.components().any(|part| {
+        let part = part.as_os_str().to_string_lossy().to_lowercase();
+        matches!(part.as_str(), ".trash" | ".trashes" | "$recycle.bin")
+    })
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn trashes_a_symlink_not_its_target() {
+    let t = tempfile::tempdir().unwrap();
+    let target = unique(t.path(), "-target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("keep.txt"), b"keep").unwrap();
+    let link = unique(t.path(), "-link");
+    if let Err(e) = link_dir(&target, &link) {
+        // Windows lets only an administrator or a developer-mode user make symbolic links.
+        assert!(
+            cfg!(windows)
+                && (e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.raw_os_error() == Some(1314)),
+            "cannot create the link: {e}"
+        );
+        eprintln!("skipped: no right to create symbolic links ({e})");
+        return;
+    }
+    let outcome = move_to_trash(&VPath::local(&link).unwrap());
+    let link_gone =
+        std::fs::symlink_metadata(&link).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    let target_intact = std::fs::read(target.join("keep.txt")).is_ok_and(|bytes| bytes == b"keep");
+    let location = outcome.as_ref().ok().cloned().flatten();
+    let in_bin = location.as_deref().is_none_or(in_trash);
+    // Clean the trash before asserting, so a failed assertion leaves nothing behind.
+    if let Some(location) = &location {
+        purge(location);
+    }
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(link_gone, "the link is still there");
+    assert!(target_intact, "the link target lost its content");
+    assert!(in_bin, "{location:?} is not inside the trash");
+}
+
+#[cfg(windows)]
+#[test]
+fn trailing_dot_name_never_trashes_its_sibling() {
+    let t = tempfile::tempdir().unwrap();
+    let plain = unique(t.path(), "");
+    let mut dotted = plain.clone().into_os_string();
+    dotted.push(".");
+    let dotted = VPath::local(PathBuf::from(dotted)).unwrap();
+    let dotted_ext = dotted.to_extended_length().unwrap();
+    std::fs::write(&plain, b"plain").unwrap();
+    std::fs::write(&dotted_ext, b"dotted").unwrap();
+
+    let outcome = move_to_trash(&dotted);
+
+    assert_eq!(std::fs::read(&plain).unwrap(), b"plain", "{outcome:?}");
+    let dotted_gone = std::fs::symlink_metadata(&dotted_ext)
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    match outcome {
+        Err(e) => {
+            assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
+            assert!(!dotted_gone, "the file vanished although trashing failed");
+            std::fs::remove_file(&dotted_ext).unwrap();
+        }
+        // The shell kept the dot after all: only `x.` may have been recycled.
+        Ok(Some(location)) => {
+            assert!(dotted_gone);
+            purge(&location);
+        }
+        Ok(None) => panic!("trashed without a recycle bin entry"),
+    }
+}

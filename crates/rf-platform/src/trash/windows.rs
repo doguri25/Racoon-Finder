@@ -6,18 +6,23 @@
 //! over `MAX_PATH`, an item larger than the bin allows). A progress sink looks at every delete
 //! before it happens and aborts the one that would be permanent.
 
+use std::ffi::{OsString, c_void};
 use std::io;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use rf_core::winpath::strip_extended_length;
 use rf_core::{Error, Result, VPath};
+use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
-    CoUninitialize, IBindCtx,
+    CoTaskMemFree, CoUninitialize, IBindCtx,
 };
 use windows::Win32::UI::Shell::{
     FOF_ALLOWUNDO, FOF_NO_UI, FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FileOperation,
     IFileOperation, IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
+    SIGDN_FILESYSPATH,
 };
 use windows::core::{IUnknown, PCWSTR};
 
@@ -43,7 +48,16 @@ pub fn supported(local: &Path) -> bool {
 enum Failure {
     /// The progress sink stopped a delete that would have been permanent.
     Refused,
+    /// The shell parsed the path to a different item (`report.` becomes `report`), so deleting
+    /// it would recycle something the caller did not ask for.
+    Redirected,
     Io(io::Error),
+}
+
+/// Whether nothing is left at `extended`. Any other answer, an error included, counts as
+/// "still there".
+fn gone(extended: &Path) -> bool {
+    std::fs::symlink_metadata(extended).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
 }
 
 /// Recycles the item at `path`. The shell does the work on a thread of its own, because
@@ -59,13 +73,17 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
         .join()
         .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))));
     match outcome {
-        Ok(Some(location)) => Ok(Some(location)),
+        // The shell must also have removed the item that was asked for, not another one.
+        Ok(Some(location)) if gone(&extended) => Ok(Some(location)),
+        Ok(Some(_)) => Err(Error::io(
+            "trash",
+            path.clone(),
+            io::Error::other("the recycle bin reported success but the item is still there"),
+        )),
         // The shell reported success without naming a bin entry. `Ok(None)` is not an option
         // here: either the item was deleted for good, or nothing happened.
         Ok(None) => {
-            let message = if std::fs::symlink_metadata(&extended)
-                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
-            {
+            let message = if gone(&extended) {
                 "deleted permanently instead of recycled"
             } else {
                 "the recycle bin took nothing"
@@ -74,6 +92,10 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
         }
         Err(Failure::Refused) => Err(Error::Unsupported(format!(
             "the recycle bin cannot take {path}; delete permanently instead"
+        ))),
+        Err(Failure::Redirected) => Err(Error::Unsupported(format!(
+            "cannot recycle {path}: the shell resolves it to a different item; \
+             delete permanently instead"
         ))),
         Err(Failure::Io(e)) => Err(Error::io("trash", path.clone(), e)),
     }
@@ -122,6 +144,12 @@ fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     let item: IShellItem =
         unsafe { SHCreateItemFromParsingName(PCWSTR(name.as_ptr()), None::<&IBindCtx>) }
             .map_err(fail)?;
+    // The shell drops a trailing dot or space while parsing, so the item may be a sibling of the
+    // one asked for. Compare before anything is queued; a name that cannot be read counts as a
+    // mismatch.
+    if !file_system_path(&item).is_some_and(|resolved| same_path(local, &resolved)) {
+        return Err(Failure::Redirected);
+    }
 
     let guard = RecycleGuard::new();
     let sink: IFileOperationProgressSink = guard.to_interface();
@@ -145,6 +173,27 @@ fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     Ok(guard.get().take_location())
 }
 
+/// The file-system path of `item`, if it has one.
+fn file_system_path(item: &IShellItem) -> Option<PathBuf> {
+    // SAFETY: `item` is a live interface pointer.
+    let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+    // SAFETY: on success `name` is a NUL-terminated string that the shell allocated.
+    let path = PathBuf::from(OsString::from_wide(unsafe { name.as_wide() }));
+    // SAFETY: the shell allocated `name` with `CoTaskMemAlloc`, and it is freed only here.
+    unsafe { CoTaskMemFree(Some(name.0.cast::<c_void>().cast_const())) };
+    Some(path)
+}
+
+/// Whether two paths are the same text, compared by UTF-16 unit and without regard to case
+/// (the way NTFS compares names), after dropping a `\\?\` prefix.
+fn same_path(requested: &Path, resolved: &Path) -> bool {
+    let units =
+        |path: &Path| strip_extended_length(&path.as_os_str().encode_wide().collect::<Vec<_>>());
+    let (requested, resolved) = (units(requested), units(resolved));
+    // SAFETY: both arguments are valid slices that the call only reads.
+    unsafe { CompareStringOrdinal(&requested, &resolved, true) == CSTR_EQUAL }
+}
+
 /// The progress sink, in a module of its own because the `implement` macro writes code that
 /// trips two pedantic lints.
 #[allow(
@@ -154,17 +203,16 @@ fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
 )]
 mod sink {
     use std::cell::{Cell, RefCell};
-    use std::ffi::{OsString, c_void};
-    use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
 
     use windows::Win32::Foundation::E_ABORT;
-    use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
-        IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SIGDN_FILESYSPATH,
+        IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem,
         TSF_DELETE_RECYCLE_IF_POSSIBLE,
     };
     use windows::core::{ComObject, HRESULT, PCWSTR, Ref, implement};
+
+    use super::file_system_path;
 
     /// A progress sink that lets a delete go ahead only if the shell will recycle the item, and
     /// records where the item lands.
@@ -193,17 +241,6 @@ mod sink {
         pub(super) fn take_location(&self) -> Option<PathBuf> {
             self.location.take()
         }
-    }
-
-    /// The file-system path of `item`, if it has one.
-    fn file_system_path(item: &IShellItem) -> Option<PathBuf> {
-        // SAFETY: `item` is a live interface pointer.
-        let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
-        // SAFETY: on success `name` is a NUL-terminated string that the shell allocated.
-        let path = PathBuf::from(OsString::from_wide(unsafe { name.as_wide() }));
-        // SAFETY: the shell allocated `name` with `CoTaskMemAlloc`, and it is freed only here.
-        unsafe { CoTaskMemFree(Some(name.0.cast::<c_void>().cast_const())) };
-        Some(path)
     }
 
     impl IFileOperationProgressSink_Impl for RecycleGuard_Impl {

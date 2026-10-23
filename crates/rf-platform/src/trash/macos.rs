@@ -40,10 +40,16 @@ const SCRIPT: [&str; 6] = [
     "end run",
 ];
 
-/// Whether the user's trash folder can be found for the volume of `local`.
+/// Whether the user's trash folder can be found for the volume of `local`. A link counts for the
+/// volume that holds the link, not the one it points to, because the link is what gets moved.
 pub fn supported(local: &Path) -> bool {
+    let probe = if is_symlink(local) {
+        local.parent().unwrap_or(local)
+    } else {
+        local
+    };
     autoreleasepool(|_| {
-        let Some(url) = file_url(local) else {
+        let Some(url) = file_url(probe) else {
             return false;
         };
         NSFileManager::defaultManager()
@@ -63,15 +69,34 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
             "trash needs a local path: {path}"
         )));
     };
+    // Finder resolves a link, so it would move what the link points to and leave the link
+    // dangling. A link goes to `NSFileManager`, which moves the link itself.
+    let link = is_symlink(local);
     autoreleasepool(|_| {
-        if !FINDER_UNUSABLE.load(Ordering::Relaxed) {
+        if !link && !FINDER_UNUSABLE.load(Ordering::Relaxed) {
             if let Finder::Trashed(location) = via_finder(local) {
                 return Ok(location);
             }
         }
         via_file_manager(local)
     })
+    // Whoever reported success, the item that was asked for must be gone from its place;
+    // otherwise something else moved, and the caller must not be told it worked.
+    .and_then(|location| {
+        if gone(local) {
+            Ok(location)
+        } else {
+            Err(io::Error::other(
+                "the trash reported success but the item is still there",
+            ))
+        }
+    })
     .map_err(|e| Error::io("trash", path.clone(), e))
+}
+
+/// Whether `local` is a symbolic link itself, not whether it points to one.
+fn is_symlink(local: &Path) -> bool {
+    std::fs::symlink_metadata(local).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// The file URL of `local`, or `None` if the path is not valid UTF-8, which `NSString` needs.
