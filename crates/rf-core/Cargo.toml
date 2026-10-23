@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bitflags = "2.13.2"
 serde = "1.0.229"
 thiserror = "2.0.21"
 
