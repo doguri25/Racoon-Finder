@@ -1,11 +1,14 @@
 //! Virtual file system layer: providers, the local provider, sorting and filtering.
 
 pub mod cancel;
+pub mod local;
 pub mod provider;
 pub mod registry;
+pub mod testkit;
 pub mod watch;
 
 pub use cancel::CancelToken;
+pub use local::LocalProvider;
 pub use provider::{
     Capabilities, DeleteMode, Deleted, LIST_BATCH_SIZE, Provider, ReadStream, RenameMode,
     WriteMode, WriteStream,

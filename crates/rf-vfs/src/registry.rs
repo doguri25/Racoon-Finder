@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use rf_core::{Error, Result, Scheme, VPath};
 
+use crate::local::LocalProvider;
 use crate::provider::Provider;
 
 /// The providers of the app, by scheme. Cloning is cheap and shares the providers.
@@ -18,6 +19,13 @@ impl Vfs {
     /// A registry with no providers.
     pub fn new() -> Vfs {
         Vfs::default()
+    }
+
+    /// A registry whose only provider is `LocalProvider`.
+    pub fn with_local() -> Vfs {
+        let mut vfs = Vfs::new();
+        vfs.register(Arc::new(LocalProvider::new()));
+        vfs
     }
 
     /// Serves the scheme of `provider` with it. Returns the provider it replaced, if any.
