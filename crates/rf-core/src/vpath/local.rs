@@ -111,6 +111,29 @@ pub(super) fn normalize(path: &Path) -> Result<PathBuf, PathError> {
     push_components(PathBuf::from(root), components)
 }
 
+/// The extended-length (`\\?\`) form of a normalized local path, for Windows file APIs.
+/// Every `VPath` is absolute, so the conversion always applies; the fallback returns the
+/// input unchanged and cannot be reached.
+#[cfg(windows)]
+pub(super) fn extended_length(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    use crate::winpath;
+
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    match winpath::to_extended_length(&units) {
+        Some(extended) => PathBuf::from(OsString::from_wide(&extended)),
+        None => path.to_path_buf(),
+    }
+}
+
+/// Other systems have no separate long-path form: the path is used as it is.
+#[cfg(not(windows))]
+pub(super) fn extended_length(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

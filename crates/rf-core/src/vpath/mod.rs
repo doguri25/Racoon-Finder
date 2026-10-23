@@ -5,6 +5,7 @@ mod escape;
 mod local;
 mod scheme;
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -96,6 +97,54 @@ impl VPath {
     pub fn as_local(&self) -> Option<&Path> {
         match &self.repr {
             Repr::Local(path) => Some(path),
+        }
+    }
+
+    /// The last name, or `None` for a root (`/`, `C:\`, `\\server\share\`).
+    pub fn file_name(&self) -> Option<&OsStr> {
+        match &self.repr {
+            Repr::Local(path) => path.file_name(),
+        }
+    }
+
+    /// The containing folder, or `None` for a root. The stored path is already in normal
+    /// form, so the parent needs no further normalization.
+    pub fn parent(&self) -> Option<VPath> {
+        match &self.repr {
+            Repr::Local(path) => path.parent().map(|parent| Self {
+                repr: Repr::Local(parent.to_path_buf()),
+            }),
+        }
+    }
+
+    /// Appends one name. A name that is empty, `.`, `..`, or contains a separator or NUL
+    /// (on Windows also `\` or `:`) is rejected, so a join can never leave the folder.
+    pub fn join(&self, name: impl AsRef<OsStr>) -> Result<VPath, PathError> {
+        let name = name.as_ref();
+        local::check_name(name)?;
+        match &self.repr {
+            Repr::Local(path) => Ok(Self {
+                repr: Repr::Local(path.join(name)),
+            }),
+        }
+    }
+
+    /// Whether `base` is this address or one of its ancestors. Names are compared whole,
+    /// so `/a/bc` does not start with `/a/b`.
+    pub fn starts_with(&self, base: &VPath) -> bool {
+        match (&self.repr, &base.repr) {
+            (Repr::Local(path), Repr::Local(prefix)) => path.starts_with(prefix),
+        }
+    }
+
+    /// The path to hand to Windows file APIs. On Windows it is always in the `\\?\` form,
+    /// which lifts the 260-character limit and passes reserved names (`CON`) and names with
+    /// a trailing dot or space (`foo.`) to the file system exactly as written. Shell APIs
+    /// (`ShellExecute` and the like) do not reliably accept it; give them [`VPath::as_local`].
+    /// On other systems this is the local path itself. Non-local addresses give `None`.
+    pub fn to_extended_length(&self) -> Option<PathBuf> {
+        match &self.repr {
+            Repr::Local(path) => Some(local::extended_length(path)),
         }
     }
 }
