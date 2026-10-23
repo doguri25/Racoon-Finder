@@ -4,12 +4,13 @@
 //! Three threads are involved. The backend thread of `rf_platform` only forwards each
 //! notification into a channel. The pump thread of this module collects the notifications of
 //! one window, reads the entries' final state and calls the sink. The caller's thread holds
-//! the `WatchHandle`; dropping it closes the sink and then stops the backend.
+//! the `WatchHandle`; dropping it closes the sink and then has the backend stopped.
 //!
 //! Neither the pump nor the backend thread ever drops the `rf_platform::DirWatch`, because
-//! dropping it can wait for the backend thread (Windows joins its watch thread, `FSEvents`
-//! joins its run loop). The `DirWatch` belongs to the `LocalWatch` guard, so it is dropped on
-//! whichever thread drops the `WatchHandle`.
+//! dropping it waits for the backend thread (Windows joins its watch thread, `FSEvents` joins
+//! its run loop), which would then wait for itself. Neither does the thread that drops the
+//! `WatchHandle`, which may be the UI thread: the `LocalWatch` guard hands the `DirWatch` to a
+//! short-lived thread of its own once the sink is closed.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -58,20 +59,35 @@ pub(super) fn start(dir: &VPath, sink: WatchSink) -> Result<WatchHandle> {
         .map_err(|e| Error::io("watch", dir.clone(), e))?;
     Ok(WatchHandle::new(LocalWatch {
         slot,
-        _platform: platform,
+        backend: Some(platform),
     }))
 }
 
-/// What a `WatchHandle` of the local provider keeps alive.
-struct LocalWatch {
+/// What a `WatchHandle` of the local provider keeps alive. `B` is the `rf_platform::DirWatch`;
+/// a test puts a stand-in there.
+struct LocalWatch<B: Send + 'static> {
     slot: Arc<SinkSlot>,
-    /// Dropped after `LocalWatch::drop` has closed the slot.
-    _platform: rf_platform::DirWatch,
+    /// Stopped on a thread of its own once `LocalWatch::drop` has closed the slot.
+    backend: Option<B>,
 }
 
-impl Drop for LocalWatch {
+impl<B: Send + 'static> Drop for LocalWatch<B> {
+    /// Closes the slot, which waits for a sink call in progress and keeps every later one from
+    /// happening, then hands the backend to a short-lived thread that stops it.
+    ///
+    /// Stopping a backend can block (Windows cancels its pending read and joins its thread, at
+    /// least 10 ms; `FSEvents` joins its run loop), and the handle may be dropped on the UI
+    /// thread. The stop cannot hang: the backend's handler only sends into an unbounded
+    /// channel, which never blocks, and the sink is closed already. If no thread can be
+    /// started, the closure that owns the backend is dropped right here, so the backend is
+    /// stopped on this thread instead.
     fn drop(&mut self) {
         self.slot.close();
+        if let Some(backend) = self.backend.take() {
+            let _ = std::thread::Builder::new()
+                .name("vfs-watch-stop".into())
+                .spawn(move || drop(backend));
+        }
     }
 }
 
@@ -469,5 +485,47 @@ mod tests {
         rig.slot.close();
         join_within(rig.pump, WAIT);
         drop(rig.tx);
+    }
+
+    /// Stands in for the platform watch: stopping it lasts until the test releases it, as a
+    /// Windows watch lasts until its thread has left `ReadDirectoryChangesW`.
+    struct SlowBackend {
+        release: Receiver<()>,
+        stopped: mpsc::Sender<()>,
+    }
+
+    impl Drop for SlowBackend {
+        fn drop(&mut self) {
+            let _ = self.release.recv_timeout(WAIT);
+            let _ = self.stopped.send(());
+        }
+    }
+
+    /// Dropping the handle closes the sink before it returns, but leaves stopping the backend
+    /// to another thread: a drop on the UI thread must not wait for it.
+    #[test]
+    fn dropping_the_watch_does_not_wait_for_the_backend() {
+        let (release, release_rx) = mpsc::channel();
+        let (stopped_tx, stopped) = mpsc::channel();
+        let (sink, _events) = channel_sink();
+        let slot = Arc::new(SinkSlot::new(sink));
+        let watch = LocalWatch {
+            slot: Arc::clone(&slot),
+            backend: Some(SlowBackend {
+                release: release_rx,
+                stopped: stopped_tx,
+            }),
+        };
+        drop(watch);
+        assert!(slot.is_closed(), "the sink is closed when the drop returns");
+        assert_eq!(
+            stopped.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
+            "the drop waited for the backend to stop"
+        );
+        release.send(()).unwrap();
+        stopped
+            .recv_timeout(WAIT)
+            .expect("the backend is stopped in the background");
     }
 }

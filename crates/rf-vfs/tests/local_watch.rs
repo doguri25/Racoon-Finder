@@ -193,6 +193,27 @@ fn dropping_the_handle_stops_the_sink() {
     assert_eq!(count.load(Ordering::SeqCst), n);
 }
 
+/// Dropping a handle, maybe on the UI thread, must not wait for the OS watch to stop: on
+/// Windows that takes at least 10 ms. The fastest of five drops is judged, so that a busy
+/// machine does not fail the test.
+#[test]
+fn dropping_the_handle_does_not_wait_for_the_os_watch() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = VPath::local(t.path()).unwrap();
+    let fastest = (0..5)
+        .map(|_| {
+            let h = LocalProvider::new().watch(&dir, Box::new(|_| {})).unwrap();
+            // Long enough for the backend to be waiting for changes.
+            std::thread::sleep(Duration::from_millis(50));
+            let started = Instant::now();
+            drop(h);
+            started.elapsed()
+        })
+        .min()
+        .unwrap();
+    assert!(fastest < Duration::from_millis(5), "{fastest:?}");
+}
+
 /// The notify backend may call its handler once more after the watch is dropped, and events
 /// that are already queued reach the pump of the provider after the drop. None of them may
 /// reach the sink.

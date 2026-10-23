@@ -79,6 +79,7 @@ pub(super) fn start(dir: &Path, handler: DirEventHandler) -> io::Result<Watcher>
 }
 
 impl Drop for Watcher {
+    /// Blocks until the watch thread is gone, at least one 10 ms pause; see `DirWatch`.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let Some(thread) = self.thread.take() else {
@@ -141,8 +142,10 @@ fn run(folder: &File, stop: &AtomicBool, mut handler: DirEventHandler) {
                 handler(DirEvent::Overflow);
             }
             // Deleting the watched folder permanently fails the call with `ERROR_ACCESS_DENIED`;
-            // any other failure means that the watch is dead as well. A move or rename of the
-            // folder does not fail the call: the handle follows the folder.
+            // any other failure means that the watch is dead as well, though the folder may
+            // still be there (a network share that dropped, a file system without change
+            // notifications). `Ended` does not tell the two apart; the receiver looks. A move or
+            // rename of the folder does not fail the call: the handle follows the folder.
             Err(_) => {
                 handler(DirEvent::Ended);
                 return;

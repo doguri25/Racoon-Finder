@@ -41,6 +41,11 @@ pub enum DirEvent {
     /// watch follows the open folder handle, so moving, renaming or recycling the watched
     /// folder (Explorer's Delete, `move_to_trash`) is not reported. A caller that needs to
     /// notice such a move checks the path itself.
+    ///
+    /// The event does not say why. A watch also fails while the folder is still there (a
+    /// network share that dropped for a moment, a file system without change notifications),
+    /// so a receiver that needs to tell a lost folder from a lost watch looks at the folder
+    /// with `stat`.
     Ended,
 }
 
@@ -49,6 +54,11 @@ pub enum DirEvent {
 pub type DirEventHandler = Box<dyn FnMut(DirEvent) + Send>;
 
 /// A running watch. Dropping it stops the watch.
+///
+/// The drop blocks until the backend has stopped: on Windows it cancels the pending read and
+/// joins the watch thread, which takes at least 10 ms, and `FSEvents` joins its run loop. A
+/// caller that must not wait, such as a UI thread, drops the watch on another thread; the VFS
+/// layer does so.
 ///
 /// On Windows the handler is not called again once the drop has returned. The `notify` backend
 /// (inotify, `FSEvents`) can still call it once more right after the drop, so a caller that must

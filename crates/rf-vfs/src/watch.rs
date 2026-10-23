@@ -40,6 +40,12 @@ pub enum WatchEvent {
     /// as the two spellings of a case-only rename); the receiver lists the folder again.
     Rescan,
     /// The watch cannot go on and no event follows. The receiver drops the `WatchHandle`.
+    ///
+    /// It covers two cases that the event does not tell apart: the watched folder is gone
+    /// (removed, moved, renamed, recycled or replaced by another folder), or the watch failed
+    /// while the folder is still there (a network share that dropped for a moment, a file
+    /// system without change notifications). The receiver calls `stat` on the folder after
+    /// `Ended` to know which, for example to start a new watch or fall back to manual refresh.
     Ended,
 }
 
@@ -51,7 +57,8 @@ pub type WatchSink = Box<dyn FnMut(WatchEvent) + Send>;
 ///
 /// Dropping it waits for a sink call that is in progress, so never drop it from inside the sink,
 /// and never while holding a lock (or anything else) the sink may wait on: the two would wait
-/// for each other.
+/// for each other. Apart from that wait the drop is quick, so the UI thread may drop it: the
+/// local provider stops the OS watch on a thread of its own.
 pub struct WatchHandle {
     _guard: Box<dyn Any + Send>,
 }
