@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use rf_ledger::{FakeOp, Ledger, LedgerError};
+use rf_ledger::{Change, FakeOp, Ledger, LedgerError, Target};
 
 #[test]
 fn portable_mode_never_calls_the_backend() {
@@ -16,6 +16,27 @@ fn portable_mode_never_calls_the_backend() {
     ));
     assert_eq!(l.revert_all().reverted, []);
     assert_eq!(l.revert_group("g").reverted, []);
+    assert_eq!(fx.fake.calls(), []);
+    assert!(!fx.paths.data_dir().exists());
+}
+
+/// Portable mode refuses every change before it looks at the change: an invalid group or a
+/// target outside `HKEY_CURRENT_USER` gets `PortableMode` too, not a validation error.
+#[test]
+fn portable_mode_refuses_a_change_before_checking_it() {
+    let fx = portable();
+    let (mut l, _) = Ledger::open(&fx.paths, Box::new(fx.fake.clone())).unwrap();
+    let hklm = Change {
+        target: Target::Registry {
+            key: r"HKLM\Software\X".into(),
+            name: String::new(),
+        },
+        value: None,
+    };
+    for (group, change) in [("g", hklm), ("Not A Group", set(&slot(1), "x"))] {
+        let err = l.apply(group, change).unwrap_err();
+        assert!(matches!(err, LedgerError::PortableMode), "{group}: {err:?}");
+    }
     assert_eq!(fx.fake.calls(), []);
     assert!(!fx.paths.data_dir().exists());
 }
