@@ -12,6 +12,8 @@ const DOT: u16 = b'.' as u16;
 
 /// Code points `U+D800..=U+DFFF`: valid as a WTF-8 unit but not as a `char`.
 const SURROGATES: std::ops::RangeInclusive<u32> = 0xD800..=0xDFFF;
+const HIGH_SURROGATES: std::ops::RangeInclusive<u16> = 0xD800..=0xDBFF;
+const LOW_SURROGATES: std::ops::RangeInclusive<u16> = 0xDC00..=0xDFFF;
 
 fn is_separator(unit: u16) -> bool {
     unit == BACKSLASH || unit == SLASH
@@ -106,7 +108,9 @@ pub fn to_wtf8(units: &[u16]) -> Vec<u8> {
 }
 
 /// Decodes WTF-8 back to UTF-16 code units. Returns `None` for truncated sequences,
-/// stray continuation bytes, overlong forms and code points above `U+10FFFF`.
+/// stray continuation bytes, overlong forms, code points above `U+10FFFF`, and a surrogate
+/// pair written as two 3-byte sequences (the pair must be one 4-byte sequence), so every
+/// accepted byte string is exactly what [`to_wtf8`] produces for the decoded units.
 pub fn from_wtf8(bytes: &[u8]) -> Option<Vec<u16>> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut rest = bytes;
@@ -132,7 +136,20 @@ pub fn from_wtf8(bytes: &[u8]) -> Option<Vec<u16>> {
         }
         match char::from_u32(code_point) {
             Some(c) => out.extend_from_slice(c.encode_utf16(&mut [0; 2])),
-            None if SURROGATES.contains(&code_point) => out.push(u16::try_from(code_point).ok()?),
+            None if SURROGATES.contains(&code_point) => {
+                let unit = u16::try_from(code_point).ok()?;
+                // Only a 3-byte sequence can leave a high surrogate as the last unit (a 4-byte
+                // one pushes its pair whole). A low surrogate right after it would be a pair
+                // spelled as two 3-byte sequences, which WTF-8 forbids: it must be one 4-byte
+                // sequence, or two byte strings would decode to the same path.
+                let after_high = out
+                    .last()
+                    .is_some_and(|prev| HIGH_SURROGATES.contains(prev));
+                if after_high && LOW_SURROGATES.contains(&unit) {
+                    return None;
+                }
+                out.push(unit);
+            }
             None => return None,
         }
         rest = after_lead.get(len - 1..)?;
@@ -224,10 +241,55 @@ mod tests {
         assert_eq!(from_wtf8("한".as_bytes()), Some(vec![0xD55C]));
     }
 
+    #[test]
+    fn wtf8_rejects_a_surrogate_pair_spelled_as_two_3_byte_sequences() {
+        // High then low surrogate, each as a 3-byte sequence: non-canonical.
+        assert_eq!(from_wtf8(&[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80]), None);
+        // The same pair as one 4-byte sequence is the canonical form.
+        assert_eq!(from_wtf8("😀".as_bytes()), Some(vec![0xD83D, 0xDE00]));
+        // Unpaired surrogates next to each other or next to a 4-byte character stay valid.
+        assert_eq!(
+            from_wtf8(&[0xED, 0xB0, 0x80, 0xED, 0xA0, 0x80]),
+            Some(vec![0xDC00, 0xD800])
+        );
+        assert_eq!(
+            from_wtf8(&[0xED, 0xA0, 0x80, 0xED, 0xA0, 0x80]),
+            Some(vec![0xD800, 0xD800])
+        );
+        assert_eq!(
+            from_wtf8(&[0xED, 0xB0, 0x80, 0xED, 0xB0, 0x80]),
+            Some(vec![0xDC00, 0xDC00])
+        );
+        let mut high_then_emoji = vec![0xED, 0xA0, 0x80];
+        high_then_emoji.extend_from_slice("😀".as_bytes());
+        assert_eq!(
+            from_wtf8(&high_then_emoji),
+            Some(vec![0xD800, 0xD83D, 0xDE00])
+        );
+        let mut emoji_then_low = "😀".as_bytes().to_vec();
+        emoji_then_low.extend_from_slice(&[0xED, 0xB0, 0x80]);
+        assert_eq!(
+            from_wtf8(&emoji_then_low),
+            Some(vec![0xD83D, 0xDE00, 0xDC00])
+        );
+    }
+
     proptest! {
         #[test]
         fn wtf8_roundtrips_any_units(u in proptest::collection::vec(any::<u16>(), 0..64)) {
             prop_assert_eq!(from_wtf8(&to_wtf8(&u)), Some(u));
+        }
+
+        #[test]
+        fn wtf8_accepts_only_canonical_bytes(
+            b in proptest::collection::vec(
+                prop::sample::select(vec![0x41_u8, 0xED, 0xA0, 0xB0, 0x80, 0xBF, 0xF0, 0x9F, 0x98]),
+                0..12,
+            ),
+        ) {
+            if let Some(units) = from_wtf8(&b) {
+                prop_assert_eq!(to_wtf8(&units), b);
+            }
         }
     }
 }
