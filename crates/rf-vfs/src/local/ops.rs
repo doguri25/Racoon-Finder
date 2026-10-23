@@ -137,10 +137,17 @@ pub(super) fn remove_dir(path: &VPath) -> Result<()> {
 /// Makes the changes to the entries of the folder `path` durable; see `Provider::sync_dir`.
 ///
 /// On Unix the folder is opened for reading and synced (`fsync`, `F_FULLFSYNC` on macOS). A
-/// file system that cannot sync a folder says so with `EINVAL` or `ENOTSUP`, and then there is
-/// nothing more this can do, as PostgreSQL also takes it. On Windows it does nothing: NTFS
-/// keeps the changes to its folders in its journal, and `File::open` cannot open a folder
-/// there.
+/// file system that cannot sync a folder says so with `EINVAL`, which PostgreSQL's
+/// `fsync_fname_ext` also ignores for a folder (with `EBADF`), or with an error that std
+/// reports as `ErrorKind::Unsupported` (`EOPNOTSUPP`, `ENOSYS`); then there is nothing more
+/// this can do, and it returns `Ok`. The macOS `ENOTSUP` (45, not `EOPNOTSUPP`, 102) is
+/// neither, and fails: a move then keeps its source. So does a folder that can be written to
+/// and entered but not read (write and execute only, as the macOS `~/Public/Drop Box`): it
+/// cannot be opened for reading, the sync fails with `PermissionDenied`, and a move across
+/// volumes into it keeps its sources.
+///
+/// On Windows it does nothing: NTFS keeps the changes to its folders in its journal, and
+/// `File::open` cannot open a folder there.
 pub(super) fn sync_dir(path: &VPath) -> Result<()> {
     let local = native(path)?;
     #[cfg(unix)]

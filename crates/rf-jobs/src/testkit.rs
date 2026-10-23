@@ -287,6 +287,8 @@ pub enum Fault {
     NoIdentity,
     /// Every `sync_dir` fails with `injected sync_dir failure`.
     FailSyncDir,
+    /// Every `remove_dir` fails with `injected remove_dir failure` and removes nothing.
+    FailRemoveDir,
 }
 
 impl Fault {
@@ -614,6 +616,10 @@ impl Provider for FaultyProvider {
     }
 
     fn remove_dir(&self, path: &VPath) -> Result<()> {
+        if self.faults.contains(&Fault::FailRemoveDir) {
+            let error = io::Error::other("injected remove_dir failure");
+            return Err(Error::io("remove_dir", path.clone(), error));
+        }
         self.inner.remove_dir(path)
     }
 
@@ -912,6 +918,24 @@ mod tests {
             error.to_string().contains("injected sync_dir failure"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_remove_dir_fault_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let p = FaultyProvider::local(vec![Fault::FailRemoveDir]);
+        let error = p.remove_dir(&local(&empty)).unwrap_err();
+        assert!(
+            error.to_string().contains("injected remove_dir failure"),
+            "{error}"
+        );
+        assert!(empty.is_dir());
+        FaultyProvider::local(vec![])
+            .remove_dir(&local(&empty))
+            .unwrap();
+        assert!(!empty.exists());
     }
 
     #[test]

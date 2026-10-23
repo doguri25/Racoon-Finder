@@ -799,3 +799,143 @@ fn a_grandchild_that_stays_keeps_both_its_source_folders() {
         })
     );
 }
+
+/// Folders moved into their own folder through a link, without identities: each merges into
+/// itself, so every empty folder in it would look moved and be removed. A merged folder whose
+/// identity is unknown is kept instead, with a warning, and nothing at the source is lost.
+#[cfg(unix)]
+#[test]
+fn a_folder_merged_into_itself_through_a_link_is_kept() {
+    for faults in [
+        vec![Fault::NoIdentity],
+        vec![Fault::NoIdentity, Fault::CrossDevice],
+    ] {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[
+                ("dir/a.txt", "A"),
+                ("dir/empty/", ""),
+                ("only/e1/", ""),
+                ("only/e2/", ""),
+            ],
+        );
+        let before = tree(&f.src);
+        std::os::unix::fs::symlink(&f.src, f.dst.join("alias")).unwrap();
+        let p = FaultyProvider::local(faults.clone());
+        let job = mv(
+            &[f.src.join("dir"), f.src.join("only")],
+            &f.dst.join("alias"),
+        );
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        assert_eq!(tree(&f.src), before, "{faults:?}");
+        assert_eq!(
+            (rep.outcome, rep.skipped, rep.failures.len()),
+            (Outcome::Completed, 1, 0),
+            "{faults:?}: {:?}",
+            rep.failures
+        );
+        assert!(
+            rep.warnings.iter().all(|w| w.stage == Stage::DeleteSource),
+            "{faults:?}: {:?}",
+            rep.warnings
+        );
+        let kept: BTreeSet<_> = rep
+            .warnings
+            .iter()
+            .filter_map(|w| w.source.clone())
+            .collect();
+        let expected = ["dir/empty", "only/e1", "only/e2"].map(|dir| v(f.src.join(dir)));
+        assert_eq!(
+            (rep.warnings.len(), kept),
+            (3, BTreeSet::from(expected)),
+            "{faults:?}"
+        );
+        assert_eq!(rep.undo, None, "{faults:?}");
+    }
+}
+
+/// Files moved onto themselves through a link, without identities: a rename onto itself does
+/// nothing and is no move, and a copy onto itself is refused. Nothing is lost or recorded.
+#[cfg(unix)]
+#[test]
+fn files_moved_onto_themselves_through_a_link_are_not_moves() {
+    for (faults, skipped, refused) in [
+        (vec![Fault::NoIdentity], 2, 0),
+        (vec![Fault::NoIdentity, Fault::CrossDevice], 0, 2),
+    ] {
+        let f = fx();
+        write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
+        let before = tree(&f.src);
+        std::os::unix::fs::symlink(&f.src, f.dst.join("alias")).unwrap();
+        let p = FaultyProvider::local(faults.clone());
+        let job = spec(
+            TransferMode::Move,
+            &[f.src.join("dir")],
+            &f.dst.join("alias"),
+            with(ConflictPolicy::Overwrite),
+        );
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        assert_eq!(tree(&f.src), before, "{faults:?}");
+        let failures: Vec<_> = rep.failures.iter().map(|x| (x.stage, x.kind)).collect();
+        assert_eq!(
+            (rep.skipped, failures),
+            (
+                skipped,
+                vec![(Stage::Commit, ErrorKind::Unsupported); refused]
+            ),
+            "{faults:?}"
+        );
+        assert_eq!(rep.warnings, Vec::new(), "{faults:?}");
+        assert_eq!(rep.undo, None, "{faults:?}");
+    }
+}
+
+/// A move turned into a copy, whose target is a second name of the source itself (a hard
+/// link), does nothing, as a move would, instead of making a numbered copy.
+#[cfg(unix)]
+#[test]
+fn a_move_turned_into_a_copy_onto_a_second_name_of_itself_does_nothing() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "me").unwrap();
+    std::fs::hard_link(f.src.join("a.txt"), f.dst.join("a.txt")).unwrap();
+    let p = FaultyProvider::local(vec![Fault::ReadOnly { under: v(&f.src) }]);
+    let rep = run_on(
+        &mv(&[f.src.join("a.txt")], &f.dst),
+        &p.vfs(),
+        &NonInteractive,
+    );
+    assert!(rep.copied_instead_of_moved);
+    assert_eq!(
+        (rep.outcome, rep.skipped, rep.failures.len()),
+        (Outcome::Completed, 1, 0)
+    );
+    assert_eq!(tree(&f.dst).into_keys().collect::<Vec<_>>(), ["a.txt"]);
+    assert_eq!(rep.undo, None);
+}
+
+/// A folder made for a move whose name cannot be made durable, and which cannot be removed
+/// again either, stays, and the report says so.
+#[test]
+fn a_made_folder_that_cannot_be_taken_back_is_reported() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A")]);
+    let p = FaultyProvider::local(vec![
+        Fault::CrossDevice,
+        Fault::FailSyncDir,
+        Fault::FailRemoveDir,
+    ]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::Write)
+    );
+    let warnings: Vec<_> = rep
+        .warnings
+        .iter()
+        .map(|w| (w.stage, w.target.clone()))
+        .collect();
+    assert_eq!(warnings, [(Stage::Write, Some(v(f.dst.join("dir"))))]);
+    assert!(f.dst.join("dir").is_dir());
+    assert_eq!(read(&f.src.join("dir").join("a.txt")), "A");
+}

@@ -11,7 +11,7 @@ use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_vfs::{DeleteMode, MetadataPatch, Provider, RenameMode};
 
 use super::file::{Source, copy_file};
-use super::scan::{follow_link, follows_links, scan_transfer};
+use super::scan::{Planned, follow_link, follows_links, scan_transfer};
 use super::{
     At, Attempt, Cause, Ctx, Failed, Identity, Level, MAX_DEPTH, fold_path, folder_identity,
     link_loop,
@@ -53,9 +53,10 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
             fs: planned.fs,
         };
         let (source, target) = (&planned.item.source, &planned.item.target);
-        if plan.moved_as_copy && source == target {
-            // Dropped back onto its own folder: a move does nothing there (DND-09), and so
-            // does the copy it turned into, rather than make a numbered copy.
+        if plan.moved_as_copy && targets_itself(ctx, planned) {
+            // Dropped back onto its own folder, or onto another name of itself: a move does
+            // nothing there (DND-09), and so does the copy it turned into, rather than make a
+            // numbered copy.
             ctx.report.skipped += 1;
             continue;
         }
@@ -75,6 +76,28 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
         }
     }
     ctx.report.undo = log.into_record(moving);
+}
+
+/// Whether the target of `planned` is its source itself, as [`is_same_item`] tells: the same
+/// path, the same identity when both are known, or without them the same folded path on a
+/// target that ignores case. A target that cannot be examined is not.
+fn targets_itself(ctx: &Ctx<'_>, planned: &Planned) -> bool {
+    let (source, target) = (&planned.item.source, &planned.item.target);
+    if source == target {
+        return true;
+    }
+    let (Ok(src), Ok(dst)) = (ctx.provider(source), ctx.provider(target)) else {
+        return false;
+    };
+    let Ok(existing) = dst.stat(target) else {
+        return false;
+    };
+    let from = Source {
+        provider: &*src,
+        path: source,
+        entry: &planned.entry,
+    };
+    is_same_item(from, target, &existing, planned.fs)
 }
 
 /// What every item under one planned item is transferred with.
@@ -663,9 +686,12 @@ enum MovedDir {
 /// them has gone with everything in it: nothing failed, was skipped, was left out by the
 /// pre-flight review or was too deep. A file that another program put in it meanwhile keeps
 /// it, since `remove_dir` removes only an empty folder; that and any other failed removal is a
-/// `Stage::DeleteSource` warning. A folder this job made gets the extras, times and attributes
-/// of the source before that, while the source is still there to give them. Only a top-level
-/// folder that was renamed or made goes to the outputs; one merged into was there before.
+/// `Stage::DeleteSource` warning. A folder merged into an existing one is removed only when
+/// its identity shows it is a folder of its own (see [`merged_from_elsewhere`]); a folder
+/// made at the target cannot be the source. A folder this job made gets the extras, times and
+/// attributes of the source before that, while the source is still there to give them. Only a
+/// top-level folder that was renamed or made goes to the outputs; one merged into was there
+/// before.
 fn move_dir(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
@@ -739,9 +765,38 @@ fn move_dir(
     if opened.made {
         finish_dir(ctx, source, entry, &opened.path);
     }
-    let gone = all_gone && remove_source_dir(ctx, source, &opened.path, log);
+    let gone = all_gone
+        && (opened.made || merged_from_elsewhere(ctx, source, entry, &opened.path))
+        && remove_source_dir(ctx, source, &opened.path, log);
     ctx.item_done(false, true);
     ControlFlow::Continue(gone)
+}
+
+/// Whether the source folder `source`, which `entry` describes and whose children went into
+/// the existing folder `target`, is known to be a folder of its own, so that removing it once
+/// it is empty removes nothing that was not moved.
+///
+/// Only its identity tells: the listed entry's, else the one `stat` gives (a Windows listing
+/// has none). Without one, `target` may be the source folder itself under another path (a link
+/// to it), every child then merged into itself, and an empty folder in it would look moved
+/// when nothing was. Such a folder is kept, with a `Stage::DeleteSource` warning.
+fn merged_from_elsewhere(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, target: &VPath) -> bool {
+    let known = entry.identity().is_some()
+        || ctx
+            .provider(source)
+            .and_then(|src| src.stat(source))
+            .is_ok_and(|now| now.identity().is_some());
+    if !known {
+        let error = Error::Unsupported(format!(
+            "kept {source}: cannot tell whether it is the target folder"
+        ));
+        ctx.warn(
+            Failed::new(Stage::DeleteSource, error),
+            Some(source),
+            Some(target),
+        );
+    }
+    known
 }
 
 /// The first step of moving the folder `source`, which `entry` describes, to `to`: where it
@@ -769,7 +824,7 @@ fn open_moved_dir(
     };
     let children = ctx.list(&*src, source).at(Stage::Read)?;
     if made {
-        make_durable_dir(&*dst, &path)?;
+        make_durable_dir(ctx, &*dst, source, &path)?;
     }
     Ok(MovedDir::Opened(Opened {
         path,
@@ -779,19 +834,29 @@ fn open_moved_dir(
     }))
 }
 
-/// Makes the folder `path` of `dst` for a move to copy into, and syncs the folder it is in, so
-/// that its name is durable before any source copied into it is deleted. When that sync
-/// fails, the new folder, still empty, is removed again and the step fails as `Stage::Write`.
-fn make_durable_dir(dst: &dyn Provider, path: &VPath) -> Result<(), Failed> {
+/// Makes the folder `path` of `dst` for the move of the folder `source` to copy into, and
+/// syncs the folder it is in, so that its name is durable before any source copied into it is
+/// deleted. When that sync fails, the new folder, still empty, is removed again and the step
+/// fails as `Stage::Write`; a folder that cannot be removed stays, with a `Stage::Write`
+/// warning.
+fn make_durable_dir(
+    ctx: &mut Ctx<'_>,
+    dst: &dyn Provider,
+    source: &VPath,
+    path: &VPath,
+) -> Result<(), Failed> {
     dst.create_dir(path)
         .map_err(|error| Failed::new(Stage::Write, error).writing(path))?;
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    dst.sync_dir(&parent).map_err(|error| {
-        let _ = dst.remove_dir(path);
-        Failed::new(Stage::Write, error).writing(path)
-    })
+    let Err(error) = dst.sync_dir(&parent) else {
+        return Ok(());
+    };
+    if let Err(left) = dst.remove_dir(path) {
+        ctx.warn(Failed::new(Stage::Write, left), Some(source), Some(path));
+    }
+    Err(Failed::new(Stage::Write, error).writing(path))
 }
 
 /// Removes the folder `source`, whose children a move has all taken to `target`, with
@@ -842,9 +907,11 @@ enum Way {
 ///    folder into a folder (never into a link to one), or give the path and the commit mode
 ///    (`Replace` when the policy overwrites) to put it at.
 /// 5. Of one provider, and unless the folder it goes into was made for a copy across volumes
-///    (`Folder::Made`), it is renamed there with that mode. A `CrossesDevices` error makes it
-///    a copy. `AlreadyExists`, a target that appeared since step 2, merges two real folders
-///    (by `stat`) and fails anything else. Any other error fails the item as `Stage::Commit`;
+///    (`Folder::Made`), it is renamed there with that mode. A rename that worked but left a
+///    source without an identity where it was is a rename onto itself, and the item stays
+///    (see [`renamed_onto_itself`]). A `CrossesDevices` error makes it a copy.
+///    `AlreadyExists`, a target that appeared since step 2, merges two real folders (by
+///    `stat`) and fails anything else. Any other error fails the item as `Stage::Commit`;
 ///    nothing is tried again on its own, since the next try would meet the same error (a move
 ///    into a subfolder of itself through a link, say).
 fn settle_move(
@@ -879,6 +946,7 @@ fn settle_move(
         return Ok(Way::Copy { path, commit });
     }
     match dst.rename(from.path, &path, commit) {
+        Ok(()) if renamed_onto_itself(from) => Ok(Way::Stay),
         Ok(()) => Ok(Way::Renamed(path)),
         Err(error) if error.kind() == ErrorKind::CrossesDevices => Ok(Way::Copy { path, commit }),
         Err(error)
@@ -888,6 +956,13 @@ fn settle_move(
         }
         Err(error) => Err(Failed::new(Stage::Commit, error).writing(&path)),
     }
+}
+
+/// Whether the rename of `from`, which worked, did nothing. When the source has no identity,
+/// nothing told beforehand that its target is the source itself under another path (a link to
+/// its folder), and a rename onto itself leaves the source where it was: it is still there.
+fn renamed_onto_itself(from: Source<'_>) -> bool {
+    from.entry.identity().is_none() && from.provider.stat(from.path).is_ok()
 }
 
 /// Whether the source `from` and the item at `path` of `dst` are both real folders by `stat`.
