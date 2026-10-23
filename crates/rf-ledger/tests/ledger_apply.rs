@@ -37,6 +37,8 @@ fn apply_captures_before_state_then_changes_the_slot() {
 fn crash_during_apply_leaves_a_pending_record() {
     let fx = installed();
     let t = slot(1);
+    // A seeded slot, so the record's before-state differs from `Before::default()`.
+    fx.fake.set(&t, s("orig"));
     let mut l = fx.open();
     fx.fake.panic_after_next(FakeOp::Apply, &t);
     assert!(catch_unwind(AssertUnwindSafe(|| l.apply("g", set(&t, "ours")))).is_err());
@@ -44,7 +46,7 @@ fn crash_during_apply_leaves_a_pending_record() {
     assert_eq!(on_disk.len(), 1);
     assert_eq!(
         (on_disk[0].state, on_disk[0].before.value.clone()),
-        (EntryState::Pending, None)
+        (EntryState::Pending, s("orig"))
     );
     assert_eq!(fx.fake.get(&t), s("ours"));
 }
@@ -159,6 +161,25 @@ fn capture_failure_writes_nothing() {
     fx.fake.fail_next(FakeOp::Capture, &t);
     assert!(l.apply("g", set(&t, "ours")).is_err());
     assert!(!fx.paths.data_dir().exists());
+}
+
+#[test]
+fn a_failed_write_ahead_save_stops_before_the_system_changes() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    // A regular file where the data folder must go, so the ledger file cannot be saved.
+    let data_dir = fx.paths.data_dir();
+    std::fs::create_dir_all(data_dir.parent().unwrap()).unwrap();
+    std::fs::write(data_dir, b"").unwrap();
+    assert!(matches!(
+        l.apply("g", set(&t, "ours")),
+        Err(LedgerError::Core(_))
+    ));
+    assert_eq!(fx.fake.calls(), [FakeOp::IsApplied, FakeOp::Capture]);
+    assert_eq!(fx.fake.get(&t), s("orig"));
+    assert_eq!(l.entries(), []);
 }
 
 #[test]
