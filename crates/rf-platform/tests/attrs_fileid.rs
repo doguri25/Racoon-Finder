@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rf_core::{Attributes, ErrorKind, FileId, Scheme, VPath, VolumeId};
-use rf_platform::{entry_attributes, file_identity, metadata_identity};
+use rf_platform::{entry_attributes, file_identity, metadata_identity, resolved_file_identity};
 
 fn attrs(p: &Path) -> Attributes {
     entry_attributes(
@@ -118,6 +118,53 @@ fn identity_errors() {
     assert_eq!(
         file_identity(&remote).unwrap_err().kind(),
         ErrorKind::Unsupported
+    );
+}
+
+/// Makes `link` lead to the folder `target`: a symbolic link on Unix.
+#[cfg(unix)]
+fn dir_alias(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Makes `link` lead to the folder `target`: a junction on Windows, which unlike a directory
+/// symbolic link needs no privilege.
+#[cfg(windows)]
+fn dir_alias(target: &Path, link: &Path) -> std::io::Result<()> {
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("mklink /J failed: {status}")))
+    }
+}
+
+/// A link has an identity of its own; following it gives the identity of the folder it leads
+/// to, and without a link both calls agree.
+#[test]
+fn resolved_identity_follows_links() {
+    let t = tempfile::tempdir().unwrap();
+    let (target, link) = (t.path().join("target"), t.path().join("link"));
+    std::fs::create_dir(&target).unwrap();
+    if let Err(e) = dir_alias(&target, &link) {
+        eprintln!("skipped: cannot make a folder link here: {e}");
+        return;
+    }
+    let (link, target_v) = (VPath::local(&link).unwrap(), VPath::local(&target).unwrap());
+    assert_eq!(resolved_file_identity(&link).unwrap(), id(&target));
+    assert_ne!(file_identity(&link).unwrap(), id(&target));
+    assert_eq!(resolved_file_identity(&target_v).unwrap(), id(&target));
+    let missing = VPath::local(t.path().join("missing")).unwrap();
+    assert_eq!(
+        resolved_file_identity(&missing).unwrap_err().kind(),
+        ErrorKind::NotFound
     );
 }
 

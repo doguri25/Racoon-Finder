@@ -19,12 +19,23 @@ use rf_core::{Error, FileId, Result, VPath, VolumeId};
 /// for every file), or all ones, Windows' `FILE_INVALID_FILE_ID`. Such an ID would make every
 /// item look like the same one. A non-local `path` gives `Error::Unsupported` too.
 pub fn file_identity(path: &VPath) -> Result<(VolumeId, FileId)> {
+    identity(path, false)
+}
+
+/// The volume and file ID of the item that `path` leads to, following links all the way, also
+/// a final one: what the OS opens when `path` is the folder an item is put into. Otherwise the
+/// same as `file_identity`.
+pub fn resolved_file_identity(path: &VPath) -> Result<(VolumeId, FileId)> {
+    identity(path, true)
+}
+
+fn identity(path: &VPath, follow_links: bool) -> Result<(VolumeId, FileId)> {
     let Some(local) = path.to_extended_length() else {
         return Err(Error::Unsupported(format!(
             "file identity needs a local path: {path}"
         )));
     };
-    imp::identity(path, &local)
+    imp::identity(path, &local, follow_links)
 }
 
 /// The identity stored in `meta`, metadata read without following a final link, when it holds
@@ -65,9 +76,13 @@ mod imp {
 
     use super::{identity_from_raw, usable_file_id};
 
-    pub fn identity(path: &VPath, local: &Path) -> Result<(VolumeId, FileId)> {
-        let meta = std::fs::symlink_metadata(local)
-            .map_err(|e| Error::io("file_identity", path.clone(), e))?;
+    pub fn identity(path: &VPath, local: &Path, follow_links: bool) -> Result<(VolumeId, FileId)> {
+        let meta = if follow_links {
+            std::fs::metadata(local)
+        } else {
+            std::fs::symlink_metadata(local)
+        }
+        .map_err(|e| Error::io("file_identity", path.clone(), e))?;
         identity_from_raw(path, meta.dev(), u128::from(meta.ino()))
     }
 
@@ -98,13 +113,19 @@ mod imp {
     use super::identity_from_raw;
     use crate::win_util::to_io;
 
-    pub fn identity(path: &VPath, local: &Path) -> Result<(VolumeId, FileId)> {
+    pub fn identity(path: &VPath, local: &Path, follow_links: bool) -> Result<(VolumeId, FileId)> {
         // Attribute-only access with full sharing opens files that are in use; backup semantics
-        // let a folder open; the reparse flag keeps a final link from being followed.
+        // let a folder open; the reparse flag keeps a final link (or junction) from being
+        // followed.
+        let flags = if follow_links {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        };
         let file = OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES.0)
             .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
-            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .custom_flags(flags.0)
             .open(local)
             .map_err(|e| Error::io("file_identity", path.clone(), e))?;
         let handle = HANDLE(file.as_raw_handle());

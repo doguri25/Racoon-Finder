@@ -13,7 +13,7 @@ mod win_util;
 pub use attrs::{
     attributes_from_bsd_flags, attributes_from_windows, entry_attributes, is_dot_file,
 };
-pub use fileid::{file_identity, metadata_identity};
+pub use fileid::{file_identity, metadata_identity, resolved_file_identity};
 pub use fsops::rename_no_replace;
 pub use known::{KnownFolder, known_folder};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};

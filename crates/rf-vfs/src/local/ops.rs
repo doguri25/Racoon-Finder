@@ -11,13 +11,14 @@ use crate::provider::{DeleteMode, Deleted, ReadStream, RenameMode, WriteMode, Wr
 
 /// Renames or moves `from` to `to`; see `Provider::rename`.
 ///
-/// A folder is never moved into itself. `RenameMode::NoReplace` goes through
+/// A folder is never moved into itself, whether `to` names it by the same text or by another
+/// path (`lands_inside`). `RenameMode::NoReplace` goes through
 /// `rf_platform::rename_no_replace`, so an existing target is never overwritten. The one thing
 /// it cannot do is change only the case of a name on a volume that ignores case (`b.txt` to
 /// `B.TXT`), because the OS then sees the target as taken; that case is renamed plainly after
 /// checking that both names are the same item.
 pub(super) fn rename(from: &VPath, to: &VPath, mode: RenameMode) -> Result<()> {
-    if to != from && to.starts_with(from) {
+    if (to != from && to.starts_with(from)) || lands_inside(from, to) {
         return Err(Error::Unsupported(format!(
             "cannot move {from} into itself"
         )));
@@ -31,6 +32,35 @@ pub(super) fn rename(from: &VPath, to: &VPath, mode: RenameMode) -> Result<()> {
             result => result,
         },
     }
+}
+
+/// Whether `to` lies inside the folder `from` although its text does not start with the text of
+/// `from`: another letter case on a volume that ignores case (`C:\x\a\sub` for the folder
+/// `C:\x\A`), an 8.3 short name, or a link or junction that leads to `from` (`alias/sub`).
+///
+/// Every folder above `to` that exists is compared with `from` by file identity. Those folders
+/// are followed through links, as the OS follows them when it puts `to` in place; `from` is
+/// not, because a link is moved itself and may go anywhere. Only a folder can be moved into
+/// itself, and a rename within one folder never is, so a file or a rename in place costs one
+/// `stat` at most. An identity that cannot be read proves nothing and decides nothing: the OS
+/// then has the last word, and it refuses a move into itself too, with a less telling error.
+/// So does a link that leads into a subfolder of `from`, which this walk does not see.
+fn lands_inside(from: &VPath, to: &VPath) -> bool {
+    if from.parent() == to.parent() {
+        return false;
+    }
+    let is_folder = native(from)
+        .ok()
+        .and_then(|local| std::fs::symlink_metadata(local).ok())
+        .is_some_and(|meta| meta.is_dir());
+    if !is_folder {
+        return false;
+    }
+    let Ok(folder) = rf_platform::file_identity(from) else {
+        return false;
+    };
+    std::iter::successors(to.parent(), VPath::parent)
+        .any(|dir| rf_platform::resolved_file_identity(&dir).is_ok_and(|id| id == folder))
 }
 
 /// `std::fs::rename`, which replaces an existing file at `to`.

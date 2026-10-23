@@ -200,3 +200,101 @@ fn names_differing_only_in_case_never_overwrite_each_other() {
     assert_eq!(std::fs::read(lower.as_local().unwrap()).unwrap(), b"lower");
     assert_eq!(std::fs::read(upper.as_local().unwrap()).unwrap(), b"upper");
 }
+
+/// Makes `link` lead to the folder `target`: a symbolic link on Unix.
+#[cfg(unix)]
+fn dir_alias(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Makes `link` lead to the folder `target`: a junction on Windows, which unlike a directory
+/// symbolic link needs no privilege.
+#[cfg(windows)]
+fn dir_alias(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("mklink /J failed: {status}")))
+    }
+}
+
+/// Asserts that renaming `from` to `to` is refused as a move into itself in both modes, and
+/// that `from` still holds `keep.txt` and nothing else.
+fn assert_refused_as_into_itself(p: LocalProvider, from: &VPath, to: &VPath) {
+    for mode in [RenameMode::NoReplace, RenameMode::Replace] {
+        let r = p.rename(from, to, mode);
+        assert_eq!(
+            r.as_ref().map_err(rf_core::Error::kind),
+            Err(ErrorKind::Unsupported),
+            "{mode:?}: {r:?}"
+        );
+        let keep = from.join("keep.txt").unwrap();
+        assert_eq!(std::fs::read(keep.as_local().unwrap()).unwrap(), b"keep");
+        assert_eq!(
+            rf_vfs::testkit::names(&p, from),
+            std::collections::BTreeSet::from(["keep.txt".into()])
+        );
+    }
+}
+
+/// A folder reached through a link (a junction on Windows) is still the folder itself, so
+/// moving it below that link is a move into itself (DND-09), refused before the OS sees it.
+#[test]
+fn a_folder_never_moves_into_itself_through_a_link_to_it() {
+    let (t, root) = tmp();
+    let p = LocalProvider::new();
+    let from = root.join("from").unwrap();
+    p.create_dir(&from).unwrap();
+    std::fs::write(t.path().join("from").join("keep.txt"), b"keep").unwrap();
+    if let Err(e) = dir_alias(&t.path().join("from"), &t.path().join("alias")) {
+        eprintln!("skipped: cannot make a folder link here: {e}");
+        return;
+    }
+    let below_alias = root.join("alias").unwrap().join("sub").unwrap();
+    assert_refused_as_into_itself(p, &from, &below_alias);
+    // Deeper below the link, under folders that do not exist yet, is inside the folder too.
+    let deeper = root.join("alias").unwrap().join("x").unwrap();
+    assert_refused_as_into_itself(p, &from, &deeper.join("y").unwrap());
+}
+
+/// A link to another folder is no reason to refuse: the move goes through.
+#[test]
+fn a_folder_moves_through_a_link_to_another_folder() {
+    let (t, root) = tmp();
+    let p = LocalProvider::new();
+    let (from, other) = (root.join("from").unwrap(), root.join("other").unwrap());
+    p.create_dir(&from).unwrap();
+    p.create_dir(&other).unwrap();
+    if let Err(e) = dir_alias(&t.path().join("other"), &t.path().join("alias")) {
+        eprintln!("skipped: cannot make a folder link here: {e}");
+        return;
+    }
+    let to = root.join("alias").unwrap().join("moved").unwrap();
+    p.rename(&from, &to, RenameMode::NoReplace).unwrap();
+    assert!(t.path().join("other").join("moved").is_dir());
+    assert_eq!(p.stat(&from).unwrap_err().kind(), ErrorKind::NotFound);
+}
+
+/// On a volume that ignores case (NTFS, default APFS) `a` is the folder `A`, so moving `A` to
+/// `a/sub` is a move into itself although the text of the paths differs.
+#[test]
+fn a_folder_never_moves_into_itself_under_another_case() {
+    let (t, root) = tmp();
+    let p = LocalProvider::new();
+    let (upper, lower) = (root.join("A").unwrap(), root.join("a").unwrap());
+    p.create_dir(&upper).unwrap();
+    std::fs::write(t.path().join("A").join("keep.txt"), b"keep").unwrap();
+    if p.stat(&lower).is_err() {
+        eprintln!("skipped: this volume tells `A` and `a` apart");
+        return;
+    }
+    assert_refused_as_into_itself(p, &upper, &lower.join("sub").unwrap());
+}
