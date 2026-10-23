@@ -58,10 +58,11 @@ fn macos_known_folders_are_home_subfolders() {
 fn disk_space_is_consistent() {
     let (_t, v) = tmp();
     let s = disk_space(&v).unwrap();
-    assert!(
-        s.total > 0 && s.free <= s.total && s.available <= s.free,
-        "{s:?}"
-    );
+    assert!(s.total > 0, "{s:?}");
+    assert!(s.available <= s.free && s.available <= s.total, "{s:?}");
+    // With per-user quotas on Windows, `free` (whole volume) can exceed `total` (user share).
+    #[cfg(not(windows))]
+    assert!(s.free <= s.total, "{s:?}");
 }
 
 #[test]

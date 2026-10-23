@@ -5,13 +5,21 @@ use std::path::PathBuf;
 use rf_core::{Error, Result, VPath};
 
 /// Byte counts of one volume.
+///
+/// Only `available <= free` and `available <= total` are guaranteed. `free <= total` is not:
+/// on Windows with per-user quotas, `free` counts the whole volume while `total` counts only
+/// the part the current user may use. Callers that want the space left before a copy use
+/// `available`, and must not compute `total - free`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiskSpace {
-    /// Size of the volume.
+    /// Size of the volume; on Windows with per-user quotas, the part of it the current user
+    /// may use.
     pub total: u64,
     /// Free bytes on the whole volume.
     pub free: u64,
-    /// Free bytes the current user can write, which a disk quota can make smaller than `free`.
+    /// Free bytes the current user can use. It is smaller than `free` when space is held back
+    /// for someone else: root-reserved blocks on Unix (`f_bavail < f_bfree`), or disk quotas
+    /// on Windows.
     pub available: u64,
 }
 
