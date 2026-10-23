@@ -1,6 +1,7 @@
 //! `LocalProvider`, the provider for the file systems of this computer.
 
 mod list;
+mod ops;
 
 use std::ffi::OsString;
 use std::fs::{FileType, Metadata, OpenOptions};
@@ -141,20 +142,20 @@ impl Provider for LocalProvider {
             .map_err(|e| Error::io("create_file", path.clone(), e))
     }
 
-    fn rename(&self, _from: &VPath, _to: &VPath, _mode: RenameMode) -> Result<()> {
-        not_implemented("rename")
+    fn rename(&self, from: &VPath, to: &VPath, mode: RenameMode) -> Result<()> {
+        ops::rename(from, to, mode)
     }
 
-    fn delete(&self, _path: &VPath, _mode: DeleteMode) -> Result<Deleted> {
-        not_implemented("delete")
+    fn delete(&self, path: &VPath, mode: DeleteMode) -> Result<Deleted> {
+        ops::delete(path, mode)
     }
 
-    fn open_read(&self, _path: &VPath) -> Result<Box<dyn ReadStream>> {
-        not_implemented("open_read")
+    fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>> {
+        ops::open_read(path)
     }
 
-    fn open_write(&self, _path: &VPath, _mode: WriteMode) -> Result<Box<dyn WriteStream>> {
-        not_implemented("open_write")
+    fn open_write(&self, path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteStream>> {
+        ops::open_write(path, mode)
     }
 
     fn space(&self, path: &VPath) -> Result<Option<DiskSpace>> {

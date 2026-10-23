@@ -23,3 +23,18 @@ fn list_batches_are_full_except_the_last() {
 fn list_cancel() {
     run(testkit::check_list_cancel);
 }
+
+#[test]
+fn rename() {
+    run(testkit::check_rename);
+}
+
+#[test]
+fn read_write() {
+    run(testkit::check_read_write);
+}
+
+#[test]
+fn delete_permanent() {
+    run(testkit::check_delete_permanent);
+}
