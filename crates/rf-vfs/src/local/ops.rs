@@ -39,6 +39,9 @@ fn rename_plain(from: &VPath, to: &VPath) -> Result<()> {
 
 /// Whether `to` is `from` in the same folder with only the letter case changed, and both names
 /// already lead to one item. Only then is a taken target the item itself, not another one.
+///
+/// An identity that cannot be read, on a file system without usable file IDs too, counts as
+/// two different items, so the rename keeps failing with `AlreadyExists`.
 fn is_case_only_rename(from: &VPath, to: &VPath) -> bool {
     let same_folder = from.parent() == to.parent();
     let same_name_ignoring_case = matches!(

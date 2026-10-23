@@ -53,8 +53,9 @@ pub(crate) fn kind_of(file_type: FileType) -> EntryKind {
 }
 
 /// Builds the `Entry` named `name` from `meta`, which must have been taken without following
-/// links. On Unix the volume and file IDs come from the metadata; on Windows they need an open
-/// handle per file, so they stay empty here.
+/// links. On Unix the volume and file IDs come from the metadata, unless the file system
+/// reports no usable ID (inode 0); on Windows they need an open handle per file. In both of
+/// those cases they stay empty here.
 pub(crate) fn entry_from_metadata(name: OsString, meta: &Metadata) -> Entry {
     let kind = kind_of(meta.file_type());
     let attributes = rf_platform::entry_attributes(&name, meta);
@@ -66,12 +67,9 @@ pub(crate) fn entry_from_metadata(name: OsString, meta: &Metadata) -> Entry {
     entry.created = meta.created().ok();
     entry.accessed = meta.accessed().ok();
     entry.attributes = attributes;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        entry.volume_id = Some(rf_core::VolumeId(meta.dev()));
-        entry.file_id = Some(rf_core::FileId(u128::from(meta.ino())));
+    if let Some((volume, file)) = rf_platform::metadata_identity(meta) {
+        entry.volume_id = Some(volume);
+        entry.file_id = Some(file);
     }
     entry
 }
@@ -115,7 +113,8 @@ impl Provider for LocalProvider {
             .unwrap_or_default();
         let mut entry = entry_from_metadata(name.to_owned(), &meta);
         if entry.identity().is_none() {
-            // Windows: the IDs need a handle. Without them the entry is still correct.
+            // Windows: the IDs need a handle. A file system without usable IDs fails this too,
+            // and without them the entry is still correct.
             if let Ok((volume, file)) = rf_platform::file_identity(path) {
                 entry.volume_id = Some(volume);
                 entry.file_id = Some(file);
