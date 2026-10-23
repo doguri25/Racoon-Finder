@@ -198,26 +198,47 @@ fn cleanup_refuses_to_delete_when_the_ledger_is_unreadable() {
     assert_eq!(std::fs::read(&file).unwrap(), newer);
 }
 
-/// A temp folder that is there but cannot be listed is an error, not "nothing to delete": the
-/// revert is done (and saved), but nothing owned is deleted, so a next run can finish.
+/// A shared temp folder that is there but cannot be listed is a failed step, not "nothing to
+/// delete", and not a reason to keep the app's own folders: the revert and the deletes of the
+/// owned folders still run, and the uninstall is reported incomplete.
 #[test]
-fn cleanup_stops_before_deleting_when_the_temp_folder_cannot_be_listed() {
+fn cleanup_reports_an_unlistable_temp_folder_and_still_deletes_the_owned_folders() {
     let fx = installed();
     used(&fx);
-    let temp = fx.paths.temp_dir();
-    std::fs::remove_dir_all(temp).unwrap();
-    std::fs::write(temp, b"not a folder").unwrap();
-    assert!(matches!(plan_cleanup(&fx.paths), Err(LedgerError::Core(_))));
-    assert!(matches!(
-        run_cleanup(&fx.paths, Box::new(fx.fake.clone())),
-        Err(LedgerError::Core(_))
-    ));
+    let temp = fx.paths.temp_dir().to_path_buf();
+    std::fs::remove_dir_all(&temp).unwrap();
+    std::fs::write(&temp, b"not a folder").unwrap();
+    let owned = as_deletes(fx.paths.owned_paths());
+    let list_temp = CleanupAction::ListTemp(temp.clone());
+    let plan = plan_cleanup(&fx.paths).unwrap();
+    assert_eq!(plan[2..plan.len() - 1], owned);
+    assert_eq!(plan.last(), Some(&list_temp));
+
+    let r = cleanup(&fx);
+    assert_eq!(r.reverted.reverted, [EntryId(2), EntryId(1)]);
+    assert_eq!(r.done, owned);
+    assert_eq!(
+        r.failed.iter().map(|(step, _)| step).collect::<Vec<_>>(),
+        [&list_temp]
+    );
+    assert!(
+        r.failed[0].1.starts_with("read_dir failed for "),
+        "{}",
+        r.failed[0].1
+    );
+    assert!(!r.is_complete() && !r.deletes_skipped);
     assert_eq!(
         (fx.fake.get(&slot(1)), fx.fake.get(&slot(2))),
         (s("orig"), None)
     );
+    assert!(
+        fx.paths
+            .owned_paths()
+            .iter()
+            .all(|p| p.symlink_metadata().is_err())
+    );
     assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
-    assert!(fx.paths.owned_paths().iter().all(|p| p.exists()));
+    assert_eq!(std::fs::read(&temp).unwrap(), b"not a folder");
 }
 
 #[cfg(unix)]
@@ -291,6 +312,12 @@ fn cleanup_removes_windows_symlinks_but_not_what_they_point_to() {
     let made = std::os::windows::fs::symlink_dir(outside.join("config"), fx.paths.config_dir())
         .and_then(|()| std::os::windows::fs::symlink_file(outside.join("keep.tmp"), &temp_link));
     if let Err(e) = made {
+        // CI runners run as an administrator, who may create symbolic links: a failure there is
+        // a broken test, not a reason to skip it.
+        assert!(
+            std::env::var_os("GITHUB_ACTIONS").is_none(),
+            "cannot create symbolic links on CI: {e}"
+        );
         eprintln!("skipped: cannot create symbolic links here: {e}");
         return;
     }

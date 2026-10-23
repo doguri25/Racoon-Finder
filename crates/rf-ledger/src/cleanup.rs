@@ -33,6 +33,10 @@ pub enum CleanupAction {
     /// else's files too. A folder that still holds anything is left as it is, and that is no
     /// failure.
     RemoveIfEmpty(PathBuf),
+    /// List the shared temp folder for the entries the app left there. Planned only when the
+    /// folder is there but cannot be listed: the step then fails with why, so the entries the
+    /// app may have left there are not reported deleted, and the other steps still run.
+    ListTemp(PathBuf),
 }
 
 /// What [`run_cleanup`] did.
@@ -72,16 +76,23 @@ impl CleanupReport {
 ///    owned link, which removes only the link; anything else there (a file of the user's)
 ///    gets no step.
 /// 4. `Delete` for every entry of the shared temp folder whose name starts with
-///    `identity::TEMP_PREFIX`, by name; none if the folder is missing. A temp folder inside an
-///    owned path (portable mode) is not listed: it is one of the app's folders above and goes
-///    whole.
+///    `identity::TEMP_PREFIX`, by name; none if the folder is missing. A temp folder that is
+///    there but cannot be listed gets `ListTemp` instead, a step that fails with why when it
+///    runs. A temp folder inside an owned path (portable mode) is not listed: it is one of the
+///    app's folders above and goes whole.
 ///
 /// A ledger file that [`Ledger::open`] refuses (it does not parse, or a newer build wrote it)
-/// is refused here with the same error. A temp folder that cannot be listed is an error too.
+/// is refused here with the same error.
 ///
 /// In portable mode the ledger file is not read and no preferences domain is cleared: the list
 /// is the app's folders in the data folder and the data folder alone.
 pub fn plan_cleanup(paths: &AppPaths) -> Result<Vec<CleanupAction>, LedgerError> {
+    Ok(plan(paths)?.into_iter().map(|(action, _)| action).collect())
+}
+
+/// The steps of [`plan_cleanup`], each with the error that already makes it fail when it is
+/// planned: only `ListTemp` has one, why the temp folder could not be listed.
+fn plan(paths: &AppPaths) -> Result<Vec<(CleanupAction, Option<String>)>, LedgerError> {
     let mut plan: Vec<CleanupAction> = Ledger::inspect(paths)?
         .into_iter()
         .rev()
@@ -107,9 +118,23 @@ pub fn plan_cleanup(paths: &AppPaths) -> Result<Vec<CleanupAction>, LedgerError>
                 .map(CleanupAction::Delete),
         );
     }
+    let mut plan: Vec<(CleanupAction, Option<String>)> =
+        plan.into_iter().map(|action| (action, None)).collect();
     let temp = paths.temp_dir();
     if !owned.iter().any(|path| temp.starts_with(path)) {
-        plan.extend(temp_entries(temp)?.into_iter().map(CleanupAction::Delete));
+        match temp_entries(temp) {
+            Ok(entries) => plan.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| (CleanupAction::Delete(entry), None)),
+            ),
+            // The entries the app may have left there are unknown: a step that fails says so,
+            // and the app's own folders still go.
+            Err(e) => plan.push((
+                CleanupAction::ListTemp(temp.to_path_buf()),
+                Some(e.to_string()),
+            )),
+        }
     }
     Ok(plan)
 }
@@ -127,7 +152,8 @@ pub fn plan_cleanup(paths: &AppPaths) -> Result<Vec<CleanupAction>, LedgerError>
 ///
 /// A ledger file that [`Ledger::open`] refuses stops everything with that error: nothing is
 /// reverted or deleted. A step after the revert that fails is reported in `failed`, and the
-/// steps after it still run; running this again retries what is left.
+/// steps after it still run; running this again retries what is left. A shared temp folder
+/// that cannot be listed is such a step (`ListTemp`): it does not keep the app's own folders.
 ///
 /// The caller (the uninstaller, the macOS "delete completely" command) first ends the app's
 /// other processes (INST-04 (1)) and closes its own log file: Windows cannot delete an open
@@ -149,26 +175,31 @@ pub fn run_cleanup(
         report.deletes_skipped = true;
         return Ok(report);
     }
-    let plan = plan_cleanup(paths)?;
+    let plan = plan(paths)?;
     // The plan reads the ledger file again. After a clean revert it records nothing; should it
     // record a change after all, deleting the file would forget what is owed.
     if plan
         .iter()
-        .any(|action| matches!(action, CleanupAction::Revert { .. }))
+        .any(|(action, _)| matches!(action, CleanupAction::Revert { .. }))
     {
         report.deletes_skipped = true;
         return Ok(report);
     }
-    for action in plan {
-        let result = match &action {
+    for (action, failure) in plan {
+        let result = match (&action, failure) {
+            (_, Some(error)) => Err(error),
             // There is none, as checked above.
-            CleanupAction::Revert { .. } => continue,
-            CleanupAction::ClearDomain(domain) => ledger
+            (CleanupAction::Revert { .. }, None) => continue,
+            (CleanupAction::ClearDomain(domain), None) => ledger
                 .backend_mut()
                 .clear_domain(domain)
                 .map_err(|e| e.to_string()),
-            CleanupAction::Delete(path) => delete(path).map_err(|e| e.to_string()),
-            CleanupAction::RemoveIfEmpty(path) => remove_if_empty(path).map_err(|e| e.to_string()),
+            (CleanupAction::Delete(path), None) => delete(path).map_err(|e| e.to_string()),
+            (CleanupAction::RemoveIfEmpty(path), None) => {
+                remove_if_empty(path).map_err(|e| e.to_string())
+            }
+            // Planned only with why the folder could not be listed; never reported done.
+            (CleanupAction::ListTemp(_), None) => Err("the temp folder was not listed".into()),
         };
         match result {
             Ok(()) => report.done.push(action),
