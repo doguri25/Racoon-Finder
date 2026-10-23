@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+thiserror = "2.0.21"
 
 [dev-dependencies]
 proptest = "1.11.0"
