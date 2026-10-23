@@ -1,0 +1,1246 @@
+//! The job engine (XFER-01, XFER-15, REL-02, REL-03): the queue, the lanes that run the jobs
+//! on background threads, pause, resume, cancel and reordering, the events a window follows,
+//! and the recovery of the jobs a crash cut off.
+//!
+//! The app process owns one engine for its whole life, whatever its windows do: a job runs to
+//! its end with or without anyone listening (XFER-15). Every public method of [`JobEngine`]
+//! only takes a lock in memory and sends on channels; none touches a file or waits for a
+//! worker, so the UI thread may call them (REL-03). [`JobEngine::shutdown`] alone waits, when
+//! the app ends after its windows are closed.
+//!
+//! # Lanes
+//!
+//! A [`LanePolicy`] gives each job a lane. A lane runs its jobs one at a time, in queue order,
+//! on its own thread `rf-jobs-lane-{n}`, started when the lane gets its first job, and passes
+//! over a queued job that is paused. Different lanes run at the same time, so a rename does not
+//! wait behind a long copy ([`DefaultLanes`]).
+//!
+//! # Events
+//!
+//! Every subscriber gets every [`JobEvent`] from the moment it subscribed, in the order the
+//! changes happened. The channels are unbounded, so sending never blocks: events are sent
+//! under the state lock, which keeps their order, and a subscriber that is gone is dropped at
+//! the next event. A job is announced as `State(Queued)` and `Queue` when it is submitted and
+//! ends with exactly one `Finished`.
+//!
+//! # Journal
+//!
+//! With a journal folder, transfers and deletes ([`JobSpec::journaled`]) are noted in the
+//! journal: `Submitted` when they are queued, `Started` (durably) before a worker runs them,
+//! the folders of their temporary files as the executor makes them, and `Finished` when they
+//! end. At start the journal thread first recovers the jobs the journal holds that never
+//! finished; a short-lived thread `rf-jobs-recovery` then removes their temporary files and
+//! announces them with one [`JobEvent::Recovered`], even when there are none. The user then
+//! resubmits or dismisses each one.
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::mem;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime};
+
+use rf_core::{Error, ErrorKind, Os};
+use rf_vfs::Vfs;
+
+use crate::control::Control;
+use crate::exec::{ExecEnv, ExecEvent, execute};
+use crate::id::JobId;
+use crate::journal::{self, IncompleteJob, JournalHandle, Record, Recovered};
+use crate::progress::Progress;
+use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
+use crate::resolver::Resolver;
+use crate::spec::{JobKind, JobSpec};
+
+/// How often [`JobEngine::shutdown`] looks whether the threads have ended.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
+
+/// A lane of the engine. The jobs of one lane run one at a time, in queue order; the jobs of
+/// different lanes run at the same time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LaneId(pub u32);
+
+impl LaneId {
+    /// The lane of the long jobs: transfers and deletes.
+    pub const MAIN: LaneId = LaneId(0);
+    /// The lane of the one-step jobs, renames and creates, which should not wait behind a copy.
+    pub const QUICK: LaneId = LaneId(1);
+}
+
+/// Which lane a job runs in.
+pub trait LanePolicy: Send + Sync + fmt::Debug {
+    /// The lane of `spec`. It is called on the thread that submits the job, the UI thread
+    /// included, so it must not block: no I/O.
+    fn lane(&self, spec: &JobSpec) -> LaneId;
+}
+
+/// Renames and creates in [`LaneId::QUICK`], everything else in [`LaneId::MAIN`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultLanes;
+
+impl LanePolicy for DefaultLanes {
+    fn lane(&self, spec: &JobSpec) -> LaneId {
+        match spec {
+            JobSpec::Rename { .. } | JobSpec::Create { .. } => LaneId::QUICK,
+            JobSpec::Transfer(_) | JobSpec::Delete(_) => LaneId::MAIN,
+        }
+    }
+}
+
+/// What an engine runs with. The app builds it as
+/// `EngineConfig::new(Vfs::with_local(), ui_resolver).with_journal(app_paths.data_dir())`.
+pub struct EngineConfig {
+    /// Where the jobs find their providers.
+    pub vfs: Vfs,
+    /// Who answers the questions of every job, on the job's worker thread.
+    pub resolver: Arc<dyn Resolver>,
+    /// The folder the journal is kept in, or `None` for no journal: then nothing is recovered
+    /// after a crash.
+    pub journal_dir: Option<PathBuf>,
+    /// Which lane each job runs in.
+    pub lanes: Arc<dyn LanePolicy>,
+    /// The naming rule of new items (`a (2).txt` or `a 2.txt`).
+    pub naming_os: Os,
+}
+
+impl EngineConfig {
+    /// An engine with the providers of `vfs` and the answers of `resolver`, no journal,
+    /// [`DefaultLanes`] and the naming rule of this OS.
+    pub fn new(vfs: Vfs, resolver: Arc<dyn Resolver>) -> EngineConfig {
+        EngineConfig {
+            vfs,
+            resolver,
+            journal_dir: None,
+            lanes: Arc::new(DefaultLanes),
+            naming_os: Os::CURRENT,
+        }
+    }
+
+    /// Keeps the journal in the folder `dir`, which is made with the first record.
+    #[must_use]
+    pub fn with_journal(mut self, dir: impl Into<PathBuf>) -> EngineConfig {
+        self.journal_dir = Some(dir.into());
+        self
+    }
+}
+
+impl fmt::Debug for EngineConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineConfig")
+            .field("vfs", &self.vfs)
+            .field("journal_dir", &self.journal_dir)
+            .field("lanes", &self.lanes)
+            .field("naming_os", &self.naming_os)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a job is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JobState {
+    /// In the queue, waiting for its lane.
+    Queued,
+    /// In the queue and passed over by its lane, or running and held at its next checkpoint.
+    /// A running job that waits for an answer shows as `Waiting` until it has the answer, and
+    /// then as `Paused`.
+    Paused,
+    /// A worker has taken the job up and it counts what it will do.
+    Planning,
+    /// The job works through its items.
+    Running,
+    /// The job waits for its resolver to answer a question.
+    Waiting,
+    /// The job has ended. The engine forgets a job when it ends ([`JobEvent::Finished`]), so
+    /// this state is in no snapshot and no event; it is for a list that keeps ended jobs on
+    /// show.
+    Finished(Outcome),
+}
+
+/// A job the engine has not finished, as [`JobEngine::jobs`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobSnapshot {
+    pub id: JobId,
+    pub kind: JobKind,
+    pub lane: LaneId,
+    pub state: JobState,
+    /// The last progress the job reported; all zeros before it starts.
+    pub progress: Progress,
+}
+
+/// What the engine tells its subscribers.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum JobEvent {
+    /// The job is now in `state`.
+    State { id: JobId, state: JobState },
+    /// The queued jobs, paused ones included, in the order they wait in. Sent when a job joins
+    /// the queue, is moved in it, or leaves it (cancelled, or taken up by its lane).
+    Queue { order: Vec<JobId> },
+    /// The job's plan is made: what it expects to process, and how many problems the
+    /// pre-flight check found on the target.
+    Planned {
+        id: JobId,
+        totals: Totals,
+        issues: usize,
+    },
+    /// How far the job has got.
+    Progress { id: JobId, progress: Progress },
+    /// The job has ended, and the engine has forgotten it. Its last word.
+    Finished { id: JobId, report: Arc<JobReport> },
+    /// The journal's jobs that never finished, found at start, and how many temporary files
+    /// they had left that were removed. Sent once by an engine with a journal, after the
+    /// journal was read, even when nothing was found or the journal could not be read.
+    Recovered {
+        jobs: Vec<IncompleteJob>,
+        temp_files_removed: usize,
+    },
+    /// The journal could not be read, compacted or written; the log text, in English. The
+    /// jobs run all the same, but one that a crash cuts off may not be recovered.
+    JournalError { message: String },
+}
+
+/// The queue of jobs and the lanes that run them. Clones share one engine, which lives as
+/// long as the app process: dropping the last handle stops nothing, [`shutdown`](Self::shutdown)
+/// does. `Send + Sync`, so any thread may hold a handle.
+#[derive(Clone)]
+pub struct JobEngine {
+    shared: Arc<Shared>,
+}
+
+impl JobEngine {
+    /// Starts an engine with `config`, and gives the receiver of its first subscriber, made
+    /// before any thread of the engine runs so that it misses no event (the
+    /// [`JobEvent::Recovered`] of the journal included).
+    ///
+    /// With a journal, the journal thread first reads the journal and finds the jobs that never
+    /// finished; then, on the thread `rf-jobs-recovery`, the temporary files each of them left
+    /// are removed, [`recovered`](Self::recovered) lists them and `Recovered` is sent. A journal
+    /// that cannot be read or compacted is a [`JobEvent::JournalError`]; the engine runs on and
+    /// keeps the journal of its new jobs.
+    pub fn start(config: EngineConfig) -> (JobEngine, Receiver<JobEvent>) {
+        let EngineConfig {
+            vfs,
+            resolver,
+            journal_dir,
+            lanes,
+            naming_os,
+        } = config;
+        let (subscriber, events) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            vfs,
+            resolver,
+            lanes,
+            naming_os,
+            state: Mutex::new(State::new(subscriber)),
+            work: Condvar::new(),
+        });
+        if let Some(dir) = journal_dir {
+            start_journal(&shared, dir);
+        }
+        (JobEngine { shared }, events)
+    }
+
+    /// A new subscriber, which gets every event from now on.
+    pub fn subscribe(&self) -> Receiver<JobEvent> {
+        let (subscriber, events) = mpsc::channel();
+        self.shared.lock().subscribers.push(subscriber);
+        events
+    }
+
+    /// Puts `spec` at the end of the queue as a new job and gives its ID; `State(Queued)` and
+    /// `Queue` announce it. A journaled job is noted as submitted (without waiting for the
+    /// journal). The first job of a lane starts the lane's worker.
+    ///
+    /// The job ends at once, with only its `Finished` event and having done nothing, as
+    /// [`Outcome::Cancelled`] after [`shutdown`](Self::shutdown), and as [`Outcome::Aborted`]
+    /// with a [`Stage::Internal`] failure when the worker of its lane cannot be started.
+    pub fn submit(&self, spec: JobSpec) -> JobId {
+        let id = JobId::generate();
+        // Outside the lock: the policy is the caller's code.
+        let lane = self.shared.lanes.lane(&spec);
+        let mut state = self.shared.lock();
+        if state.shut_down {
+            let report = cancelled_report(id, &spec);
+            state.broadcast(&JobEvent::Finished { id, report });
+            return id;
+        }
+        if let Err(error) = self.shared.start_worker(&mut state, lane) {
+            let mut report = JobReport::new(id, &spec);
+            report.outcome = Outcome::Aborted;
+            report.failures.push(ItemFailure {
+                source: None,
+                target: None,
+                stage: Stage::Internal,
+                kind: ErrorKind::Other,
+                message: format!("the worker thread could not be started: {error}"),
+            });
+            let report = Arc::new(report);
+            state.broadcast(&JobEvent::Finished { id, report });
+            return id;
+        }
+        if spec.journaled() {
+            state.journal.append(Record::Submitted {
+                job: id,
+                spec: spec.clone(),
+                at: SystemTime::now(),
+            });
+        }
+        state.queue.push(QueuedJob {
+            id,
+            spec,
+            lane,
+            paused: false,
+        });
+        state.broadcast(&JobEvent::State {
+            id,
+            state: JobState::Queued,
+        });
+        state.announce_queue();
+        drop(state);
+        self.shared.work.notify_all();
+        id
+    }
+
+    /// Pauses the job `id`. A queued job becomes `Paused` and its lane passes over it; a running
+    /// one stops at its next checkpoint ([`Control::pause`]) and becomes `Paused`, or, if it is
+    /// waiting for an answer, once it has the answer. `true` if the job is queued or running and
+    /// not being cancelled, paused already or not; `false` otherwise.
+    pub fn pause(&self, id: JobId) -> bool {
+        let mut state = self.shared.lock();
+        if let Some(job) = state.queued_mut(id) {
+            if !job.paused {
+                job.paused = true;
+                state.broadcast(&JobEvent::State {
+                    id,
+                    state: JobState::Paused,
+                });
+            }
+            return true;
+        }
+        state.set_paused(id, true)
+    }
+
+    /// Lets the paused job `id` go on: a queued one becomes `Queued` again, a running one goes
+    /// back to the state it was in ([`Control::resume`]). `true` if the job is queued or
+    /// running and not being cancelled, paused or not; `false` otherwise.
+    pub fn resume(&self, id: JobId) -> bool {
+        let mut state = self.shared.lock();
+        if let Some(job) = state.queued_mut(id) {
+            if job.paused {
+                job.paused = false;
+                state.broadcast(&JobEvent::State {
+                    id,
+                    state: JobState::Queued,
+                });
+                drop(state);
+                self.shared.work.notify_all();
+            }
+            return true;
+        }
+        state.set_paused(id, false)
+    }
+
+    /// Cancels the job `id`. A queued job leaves the queue and ends at once as
+    /// [`Outcome::Cancelled`], having done nothing. A running one is cancelled through its
+    /// [`Control`]: it stops at its next checkpoint, or when a provider call that takes the
+    /// cancel token returns, removes what it was writing and ends (a job waiting for its
+    /// resolver stops once the answer is back). `false` for a job that has ended or is unknown.
+    pub fn cancel(&self, id: JobId) -> bool {
+        let mut state = self.shared.lock();
+        if let Some(index) = state.queued_index(id) {
+            let job = state.queue.remove(index);
+            state.announce_queue();
+            state.end_unrun(&job);
+            return true;
+        }
+        let Some(job) = state.running_mut(id) else {
+            return false;
+        };
+        job.cancelled = true;
+        job.control.cancel();
+        true
+    }
+
+    /// Moves the queued job `id`, paused or not, to `position` in the queue (0 is next; a
+    /// position past the end is the end) and announces the new order. `false` for a job that is
+    /// not queued.
+    pub fn move_to(&self, id: JobId, position: usize) -> bool {
+        let mut state = self.shared.lock();
+        let Some(index) = state.queued_index(id) else {
+            return false;
+        };
+        let job = state.queue.remove(index);
+        let position = position.min(state.queue.len());
+        state.queue.insert(position, job);
+        state.announce_queue();
+        true
+    }
+
+    /// The jobs that have not ended: the running ones in the order they started, then the
+    /// queued ones in queue order.
+    pub fn jobs(&self) -> Vec<JobSnapshot> {
+        let state = self.shared.lock();
+        let running = state.running.iter().map(RunningJob::snapshot);
+        running
+            .chain(state.queue.iter().map(QueuedJob::snapshot))
+            .collect()
+    }
+
+    /// The jobs recovered from the journal at start that are neither resubmitted nor dismissed
+    /// yet, in the order they were submitted. Empty until [`JobEvent::Recovered`] is sent.
+    pub fn recovered(&self) -> Vec<IncompleteJob> {
+        self.shared.lock().recovered.clone()
+    }
+
+    /// Forgets the recovered job `id`: it leaves [`recovered`](Self::recovered) and the journal
+    /// notes it as dismissed, so it is not recovered again. `false` for a job that is not
+    /// listed there.
+    pub fn dismiss_recovered(&self, id: JobId) -> bool {
+        self.shared.lock().dismiss(id).is_some()
+    }
+
+    /// Dismisses the recovered job `id` and submits what it was asked to do as a new job, whose
+    /// ID it gives. `None` for a job that is not listed in [`recovered`](Self::recovered).
+    pub fn resubmit_recovered(&self, id: JobId) -> Option<JobId> {
+        let job = self.shared.lock().dismiss(id)?;
+        Some(self.submit(job.spec))
+    }
+
+    /// Ends the engine, when the app ends: every queued job ends as [`Outcome::Cancelled`],
+    /// every running one is cancelled, and later submits end at once. Then, without the state
+    /// lock, it waits up to `timeout` in all, looking every 10 ms, for the lane workers to end,
+    /// then lets the journal write what it has and waits for its threads too. `true` if every
+    /// thread of the engine has ended.
+    ///
+    /// The journal is stopped only after the workers (or the timeout), so that the jobs
+    /// cancelled here are noted as finished rather than recovered at the next start. A job that
+    /// is still running when the time is up is noted as it was then, and is recovered at the
+    /// next start like a job cut off by a crash.
+    pub fn shutdown(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        let journal = {
+            let mut state = self.shared.lock();
+            state.shut_down = true;
+            let queued = mem::take(&mut state.queue);
+            if !queued.is_empty() {
+                state.announce_queue();
+            }
+            for job in &queued {
+                state.end_unrun(job);
+            }
+            for job in &mut state.running {
+                // A paused worker holds its own clone of the control; only a cancel wakes it.
+                job.cancelled = true;
+                job.control.cancel();
+            }
+            state.journal.clone()
+        };
+        self.shared.work.notify_all();
+        self.shared.wait_until(started, timeout, |state| {
+            state.workers.values().all(JoinHandle::is_finished)
+        });
+        journal.shutdown();
+        self.shared.wait_until(started, timeout, |state| {
+            state
+                .workers
+                .values()
+                .chain(&state.journal_threads)
+                .all(JoinHandle::is_finished)
+        })
+    }
+}
+
+impl fmt::Debug for JobEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobEngine")
+            .field("vfs", &self.shared.vfs)
+            .field("lanes", &self.shared.lanes)
+            .field("naming_os", &self.shared.naming_os)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Starts the journal thread on the folder `dir`, with its recovery, and the thread that ends
+/// the recovery.
+fn start_journal(shared: &Arc<Shared>, dir: PathBuf) {
+    let (found, recovery) = mpsc::channel();
+    let on_start = {
+        let dir = dir.clone();
+        // Only the recovery: the temporary files are removed on a thread of their own, so that
+        // a folder that does not answer (an offline share) does not hold up the journal and
+        // with it every job.
+        Box::new(move || {
+            // The recovery thread waits for this; it is gone only if it could not start.
+            let _ = found.send(journal::recover(&dir));
+        })
+    };
+    let on_error = {
+        let shared = Arc::clone(shared);
+        Box::new(move |error: &Error| shared.journal_error(error.to_string()))
+    };
+    let (journal, journal_thread) = JournalHandle::spawn(dir, on_start, on_error);
+    let recovery_thread = {
+        let shared = Arc::clone(shared);
+        thread::Builder::new()
+            .name("rf-jobs-recovery".to_owned())
+            .spawn(move || shared.finish_recovery(recovery.recv().ok()))
+            .expect("the recovery thread could not be started")
+    };
+    let mut state = shared.lock();
+    state.journal = journal;
+    state.journal_threads = vec![journal_thread, recovery_thread];
+}
+
+/// The report of the job `id`, cancelled before it ran: it did nothing.
+fn cancelled_report(id: JobId, spec: &JobSpec) -> Arc<JobReport> {
+    let mut report = JobReport::new(id, spec);
+    report.outcome = Outcome::Cancelled;
+    Arc::new(report)
+}
+
+/// What the engine and its threads share.
+struct Shared {
+    vfs: Vfs,
+    resolver: Arc<dyn Resolver>,
+    lanes: Arc<dyn LanePolicy>,
+    naming_os: Os,
+    state: Mutex<State>,
+    /// Signalled when a lane may have a job to take: one was queued or resumed, or the engine
+    /// shut down.
+    work: Condvar,
+}
+
+impl Shared {
+    /// The state lock. No update leaves the state half-made where it could panic, so a
+    /// poisoned lock is used as it is.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts the worker of `lane`, unless it runs already.
+    fn start_worker(self: &Arc<Self>, state: &mut State, lane: LaneId) -> std::io::Result<()> {
+        if state.workers.contains_key(&lane) {
+            return Ok(());
+        }
+        let shared = Arc::clone(self);
+        let worker = thread::Builder::new()
+            .name(format!("rf-jobs-lane-{}", lane.0))
+            .spawn(move || shared.work(lane))?;
+        state.workers.insert(lane, worker);
+        Ok(())
+    }
+
+    /// The worker of `lane`: runs its jobs one by one until the engine shuts down.
+    fn work(&self, lane: LaneId) {
+        while let Some(job) = self.take(lane) {
+            self.run(job);
+        }
+    }
+
+    /// The first queued job of `lane` that is not paused, now running, once there is one.
+    /// `None` once the engine has shut down.
+    fn take(&self, lane: LaneId) -> Option<Taken> {
+        let mut state = self.lock();
+        loop {
+            let next = state
+                .queue
+                .iter()
+                .position(|job| job.lane == lane && !job.paused);
+            if let Some(index) = next {
+                return Some(state.start(index));
+            }
+            if state.shut_down {
+                return None;
+            }
+            state = self
+                .work
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Runs the job a worker took, without the state lock, and ends it: its `Finished` record,
+    /// then out of the state, then [`JobEvent::Finished`].
+    fn run(&self, job: Taken) {
+        let Taken {
+            id,
+            spec,
+            control,
+            journal,
+        } = job;
+        let journaled = spec.journaled();
+        if journaled {
+            // A failure goes to the journal's error handler, which reports it; the job runs all
+            // the same.
+            let _ = journal.append_durable(Record::Started { job: id });
+        }
+        let on_event = |event: ExecEvent| self.exec_event(id, event);
+        let env = ExecEnv::new(&self.vfs, self.resolver.as_ref())
+            .naming_os(self.naming_os)
+            .control(control)
+            .on_event(&on_event);
+        let env = if journaled {
+            env.journal(&journal)
+        } else {
+            env
+        };
+        let report = execute(id, &spec, &env);
+        if journaled {
+            journal.append(Record::Finished {
+                job: id,
+                outcome: Some(report.outcome),
+            });
+        }
+        let mut state = self.lock();
+        state.running.retain(|job| job.id != id);
+        let report = Arc::new(report);
+        state.broadcast(&JobEvent::Finished { id, report });
+    }
+
+    /// Takes in what the running job `id` tells, on its worker thread.
+    fn exec_event(&self, id: JobId, event: ExecEvent) {
+        let mut state = self.lock();
+        match event {
+            ExecEvent::Planned { totals, issues } => {
+                if let Some(job) = state.running_mut(id) {
+                    job.progress.total = totals;
+                }
+                state.broadcast(&JobEvent::Planned { id, totals, issues });
+                state.set_phase(id, JobState::Running);
+            }
+            ExecEvent::Progress(progress) => {
+                if let Some(job) = state.running_mut(id) {
+                    job.progress = progress.clone();
+                }
+                state.broadcast(&JobEvent::Progress { id, progress });
+            }
+            ExecEvent::Waiting(true) => state.set_phase(id, JobState::Waiting),
+            ExecEvent::Waiting(false) => state.set_phase(id, JobState::Running),
+        }
+    }
+
+    /// Ends the recovery with what the journal thread `found`: reports a journal that could
+    /// not be read or compacted, removes the temporary files of the jobs found, lists them and
+    /// announces them. `None` when the journal thread ended without an answer.
+    fn finish_recovery(&self, found: Option<rf_core::Result<Recovered>>) {
+        let jobs = match found {
+            Some(Ok(Recovered { jobs, compaction })) => {
+                if let Some(error) = compaction {
+                    self.journal_error(error.to_string());
+                }
+                jobs
+            }
+            Some(Err(error)) => {
+                self.journal_error(error.to_string());
+                Vec::new()
+            }
+            None => {
+                self.journal_error("the journal thread ended before the recovery".to_owned());
+                Vec::new()
+            }
+        };
+        let temp_files_removed = jobs
+            .iter()
+            .map(|job| journal::remove_orphans(&self.vfs, job))
+            .sum();
+        let mut state = self.lock();
+        state.recovered.clone_from(&jobs);
+        state.broadcast(&JobEvent::Recovered {
+            jobs,
+            temp_files_removed,
+        });
+    }
+
+    fn journal_error(&self, message: String) {
+        self.lock().broadcast(&JobEvent::JournalError { message });
+    }
+
+    /// Waits until `done` holds or `timeout` has passed since `started`, and says whether it
+    /// holds. The state lock is held only to look, every [`SHUTDOWN_POLL`].
+    fn wait_until(
+        &self,
+        started: Instant,
+        timeout: Duration,
+        done: impl Fn(&State) -> bool,
+    ) -> bool {
+        loop {
+            if done(&self.lock()) {
+                return true;
+            }
+            let left = timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return false;
+            }
+            thread::sleep(left.min(SHUTDOWN_POLL));
+        }
+    }
+}
+
+/// A job a worker has taken up, with what it runs with.
+struct Taken {
+    id: JobId,
+    spec: JobSpec,
+    /// The worker's handle to the job's control; the state keeps the other.
+    control: Control,
+    journal: JournalHandle,
+}
+
+/// The engine's jobs, subscribers and threads, behind its one lock.
+#[derive(Debug)]
+struct State {
+    /// The queued jobs of every lane, in queue order.
+    queue: Vec<QueuedJob>,
+    /// The running jobs, in the order they started.
+    running: Vec<RunningJob>,
+    subscribers: Vec<Sender<JobEvent>>,
+    /// The recovered jobs not yet resubmitted or dismissed.
+    recovered: Vec<IncompleteJob>,
+    /// A disabled handle without a journal.
+    journal: JournalHandle,
+    /// The worker of each lane that has had a job.
+    workers: BTreeMap<LaneId, JoinHandle<()>>,
+    /// The journal thread and the recovery thread, with a journal.
+    journal_threads: Vec<JoinHandle<()>>,
+    shut_down: bool,
+}
+
+impl State {
+    fn new(subscriber: Sender<JobEvent>) -> State {
+        State {
+            queue: Vec::new(),
+            running: Vec::new(),
+            subscribers: vec![subscriber],
+            recovered: Vec::new(),
+            journal: JournalHandle::disabled(),
+            workers: BTreeMap::new(),
+            journal_threads: Vec::new(),
+            shut_down: false,
+        }
+    }
+
+    /// Sends `event` to every subscriber and drops the ones that are gone. The channels are
+    /// unbounded, so this never blocks.
+    fn broadcast(&mut self, event: &JobEvent) {
+        self.subscribers
+            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+    }
+
+    fn announce_queue(&mut self) {
+        let order = self.queue.iter().map(|job| job.id).collect();
+        self.broadcast(&JobEvent::Queue { order });
+    }
+
+    fn queued_index(&self, id: JobId) -> Option<usize> {
+        self.queue.iter().position(|job| job.id == id)
+    }
+
+    fn queued_mut(&mut self, id: JobId) -> Option<&mut QueuedJob> {
+        self.queue.iter_mut().find(|job| job.id == id)
+    }
+
+    fn running_mut(&mut self, id: JobId) -> Option<&mut RunningJob> {
+        self.running.iter_mut().find(|job| job.id == id)
+    }
+
+    /// Takes the queued job at `index` up: it leaves the queue, runs as `Planning` with a new
+    /// control, and is announced.
+    fn start(&mut self, index: usize) -> Taken {
+        let QueuedJob { id, spec, lane, .. } = self.queue.remove(index);
+        let control = Control::new();
+        self.running.push(RunningJob {
+            id,
+            kind: spec.kind(),
+            lane,
+            phase: JobState::Planning,
+            paused: false,
+            cancelled: false,
+            progress: Progress::default(),
+            control: control.clone(),
+        });
+        self.broadcast(&JobEvent::State {
+            id,
+            state: JobState::Planning,
+        });
+        self.announce_queue();
+        Taken {
+            id,
+            spec,
+            control,
+            journal: self.journal.clone(),
+        }
+    }
+
+    /// Ends `job`, taken out of the queue before it ran, as cancelled.
+    fn end_unrun(&mut self, job: &QueuedJob) {
+        if job.spec.journaled() {
+            self.journal.append(Record::Finished {
+                job: job.id,
+                outcome: Some(Outcome::Cancelled),
+            });
+        }
+        let report = cancelled_report(job.id, &job.spec);
+        self.broadcast(&JobEvent::Finished { id: job.id, report });
+    }
+
+    /// Moves the running job `id` to `phase` and announces its state if that changed.
+    fn set_phase(&mut self, id: JobId, phase: JobState) {
+        let Some(job) = self.running_mut(id) else {
+            return;
+        };
+        let before = job.state();
+        job.phase = phase;
+        let after = job.state();
+        if after != before {
+            self.broadcast(&JobEvent::State { id, state: after });
+        }
+    }
+
+    /// Pauses or resumes the running job `id` and announces its state if that changed. `false`
+    /// when the job is not running or is being cancelled.
+    fn set_paused(&mut self, id: JobId, paused: bool) -> bool {
+        let Some(job) = self.running_mut(id) else {
+            return false;
+        };
+        if job.cancelled {
+            return false;
+        }
+        if paused {
+            job.control.pause();
+        } else {
+            job.control.resume();
+        }
+        let before = job.state();
+        job.paused = paused;
+        let after = job.state();
+        if after != before {
+            self.broadcast(&JobEvent::State { id, state: after });
+        }
+        true
+    }
+
+    /// Takes the recovered job `id` off the list and notes in the journal that it was
+    /// dismissed.
+    fn dismiss(&mut self, id: JobId) -> Option<IncompleteJob> {
+        let index = self.recovered.iter().position(|job| job.id == id)?;
+        let job = self.recovered.remove(index);
+        self.journal.append(Record::Finished {
+            job: id,
+            outcome: None,
+        });
+        Some(job)
+    }
+}
+
+/// A job in the queue.
+#[derive(Debug)]
+struct QueuedJob {
+    id: JobId,
+    spec: JobSpec,
+    lane: LaneId,
+    paused: bool,
+}
+
+impl QueuedJob {
+    fn snapshot(&self) -> JobSnapshot {
+        JobSnapshot {
+            id: self.id,
+            kind: self.spec.kind(),
+            lane: self.lane,
+            state: if self.paused {
+                JobState::Paused
+            } else {
+                JobState::Queued
+            },
+            progress: Progress::default(),
+        }
+    }
+}
+
+/// A job a worker runs.
+#[derive(Debug)]
+struct RunningJob {
+    id: JobId,
+    kind: JobKind,
+    lane: LaneId,
+    /// `Planning`, `Running` or `Waiting`: how far the job has got, paused or not.
+    phase: JobState,
+    /// Whether the job was paused and not resumed since. It shows once the job is not waiting
+    /// for an answer, so a pause made while it planned or waited is kept.
+    paused: bool,
+    /// Whether the job was cancelled; it then only ends.
+    cancelled: bool,
+    progress: Progress,
+    /// The engine's handle to the job's control.
+    control: Control,
+}
+
+impl RunningJob {
+    fn state(&self) -> JobState {
+        match self.phase {
+            JobState::Waiting => JobState::Waiting,
+            _ if self.paused => JobState::Paused,
+            phase => phase,
+        }
+    }
+
+    fn snapshot(&self) -> JobSnapshot {
+        JobSnapshot {
+            id: self.id,
+            kind: self.kind,
+            lane: self.lane,
+            state: self.state(),
+            progress: self.progress.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use rf_core::VPath;
+
+    use super::*;
+    use crate::conflict::{Conflict, ConflictAction, ConflictAnswer};
+    use crate::naming::temp_name;
+    use crate::preflight::Issue;
+    use crate::resolver::{ErrorAction, ErrorAnswer, NonInteractive, PreflightAnswer};
+    use crate::spec::{
+        DeleteMethod, DeleteSpec, ErrorPolicy, TransferMode, TransferOptions, TransferSpec,
+    };
+    use crate::testkit::{Fault, FaultyProvider, wait_finished, wait_for};
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    // Any thread of the app may hold the engine.
+    const _: () = {
+        const fn send_sync<T: Send + Sync>() {}
+        send_sync::<JobEngine>();
+    };
+
+    fn v(path: &Path) -> VPath {
+        VPath::local(path).unwrap()
+    }
+
+    /// A folder `src` with the file `name` of `len` bytes, an empty folder `dst`, and a copy of
+    /// the file into `dst`.
+    fn copy_fixture(name: &str, len: usize) -> (tempfile::TempDir, PathBuf, JobSpec) {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        std::fs::write(src.join(name), vec![7; len]).unwrap();
+        let sources = [v(&src.join(name))];
+        let options = TransferOptions::default();
+        let spec = TransferSpec::into_dir(TransferMode::Copy, &sources, &v(&dst), options);
+        (t, dst, JobSpec::Transfer(spec.unwrap()))
+    }
+
+    fn local_engine(journal: Option<&Path>) -> (JobEngine, Receiver<JobEvent>) {
+        let config = EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive));
+        JobEngine::start(match journal {
+            Some(dir) => config.with_journal(dir),
+            None => config,
+        })
+    }
+
+    /// The IDs and the removed count of the next `Recovered` event.
+    fn recovered(events: &Receiver<JobEvent>) -> (Vec<JobId>, usize) {
+        let event = wait_for(events, WAIT, |e| matches!(e, JobEvent::Recovered { .. }));
+        let JobEvent::Recovered {
+            jobs,
+            temp_files_removed,
+        } = event
+        else {
+            unreachable!()
+        };
+        (jobs.iter().map(|job| job.id).collect(), temp_files_removed)
+    }
+
+    /// An engine without threads whose only job, `id`, a worker has just taken up.
+    fn taken_up(id: JobId) -> (JobEngine, Receiver<JobEvent>) {
+        let (subscriber, events) = mpsc::channel();
+        let mut state = State::new(subscriber);
+        state.running.push(RunningJob {
+            id,
+            kind: JobKind::Copy,
+            lane: LaneId::MAIN,
+            phase: JobState::Planning,
+            paused: false,
+            cancelled: false,
+            progress: Progress::default(),
+            control: Control::new(),
+        });
+        let shared = Arc::new(Shared {
+            vfs: Vfs::new(),
+            resolver: Arc::new(NonInteractive),
+            lanes: Arc::new(DefaultLanes),
+            naming_os: Os::CURRENT,
+            state: Mutex::new(state),
+            work: Condvar::new(),
+        });
+        (JobEngine { shared }, events)
+    }
+
+    /// The states announced since the last call.
+    fn states(events: &Receiver<JobEvent>) -> Vec<JobState> {
+        let states = events.try_iter().filter_map(|event| match event {
+            JobEvent::State { state, .. } => Some(state),
+            _ => None,
+        });
+        states.collect()
+    }
+
+    const ONE_FILE: Totals = Totals {
+        files: 1,
+        dirs: 0,
+        bytes: 0,
+    };
+
+    const PLANNED: ExecEvent = ExecEvent::Planned {
+        totals: ONE_FILE,
+        issues: 0,
+    };
+
+    #[test]
+    fn a_pause_made_while_planning_or_waiting_is_kept() {
+        let id = JobId(1);
+        let (e, events) = taken_up(id);
+        assert!(e.pause(id));
+        assert!(e.shared.lock().running[0].control.is_paused());
+        e.shared.exec_event(id, PLANNED);
+        assert_eq!(states(&events), [JobState::Paused]);
+        // An open question shows; the pause is back with its answer.
+        e.shared.exec_event(id, ExecEvent::Waiting(true));
+        e.shared.exec_event(id, ExecEvent::Waiting(false));
+        assert_eq!(states(&events), [JobState::Waiting, JobState::Paused]);
+        assert!(e.resume(id));
+        assert_eq!(states(&events), [JobState::Running]);
+        // A pause made during a question shows once the question is answered.
+        e.shared.exec_event(id, ExecEvent::Waiting(true));
+        assert!(e.pause(id));
+        e.shared.exec_event(id, ExecEvent::Waiting(false));
+        assert_eq!(states(&events), [JobState::Waiting, JobState::Paused]);
+        assert_eq!(e.jobs()[0].state, JobState::Paused);
+    }
+
+    #[test]
+    fn a_job_resumed_before_its_plan_is_planning_again() {
+        let id = JobId(1);
+        let (e, events) = taken_up(id);
+        assert!(e.pause(id) && e.resume(id));
+        assert!(!e.shared.lock().running[0].control.is_paused());
+        e.shared.exec_event(id, PLANNED);
+        assert_eq!(
+            states(&events),
+            [JobState::Paused, JobState::Planning, JobState::Running]
+        );
+        assert_eq!(e.jobs()[0].progress.total, ONE_FILE);
+    }
+
+    #[test]
+    fn a_cancelled_job_only_ends_and_unknown_jobs_are_refused() {
+        let id = JobId(1);
+        let (e, _events) = taken_up(id);
+        assert!(e.cancel(id));
+        assert!(e.shared.lock().running[0].control.is_cancelled());
+        assert!(!e.pause(id) && !e.resume(id));
+        assert!(e.cancel(id), "it has not ended yet");
+        let unknown = JobId(2);
+        assert!(!e.pause(unknown) && !e.resume(unknown) && !e.cancel(unknown));
+        assert!(!e.move_to(unknown, 0) && !e.dismiss_recovered(unknown));
+        assert_eq!(e.resubmit_recovered(unknown), None);
+    }
+
+    #[test]
+    fn a_job_is_announced_from_its_queue_to_its_end() {
+        let (_t, _dst, spec) = copy_fixture("a.bin", 10);
+        let (e, events) = local_engine(None);
+        let id = e.submit(spec);
+        let mut seen = Vec::new();
+        loop {
+            match wait_for(&events, WAIT, |_| true) {
+                JobEvent::State { state, .. } => seen.push(format!("{state:?}")),
+                JobEvent::Queue { order } => seen.push(format!("queue {}", order.len())),
+                JobEvent::Planned { totals, .. } => seen.push(format!("planned {}", totals.files)),
+                JobEvent::Finished { id: done, .. } if done == id => break,
+                _ => {}
+            }
+        }
+        let want = [
+            "Queued",
+            "queue 1",
+            "Planning",
+            "queue 0",
+            "planned 1",
+            "Running",
+        ];
+        assert_eq!(seen, want);
+        assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_job_submitted_after_shutdown_ends_without_running() {
+        let (_t, dst, spec) = copy_fixture("a.bin", 10);
+        let (e, events) = local_engine(None);
+        assert!(e.shutdown(WAIT));
+        let id = e.submit(spec);
+        let report = wait_finished(&events, id, WAIT);
+        assert_eq!(
+            (report.outcome, report.done),
+            (Outcome::Cancelled, Totals::default())
+        );
+        assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 0);
+        assert_eq!(e.jobs(), Vec::new());
+        assert!(e.shared.lock().workers.is_empty());
+    }
+
+    #[test]
+    fn jobs_cancelled_by_shutdown_are_not_recovered() {
+        let (t, dst, held) = copy_fixture("a.bin", 4 << 20);
+        let (_t2, _, queued) = copy_fixture("b.bin", 10);
+        let journal = t.path().join("state");
+        let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
+        let config = EngineConfig::new(p.vfs(), Arc::new(NonInteractive)).with_journal(&journal);
+        let (e, _events) = JobEngine::start(config);
+        e.submit(held);
+        assert!(p.wait_held(WAIT));
+        e.submit(queued);
+        let releaser = {
+            let p = Arc::clone(&p);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                p.release();
+            })
+        };
+        // The cancelled running job's `Finished` is written before the journal stops.
+        assert!(e.shutdown(WAIT));
+        releaser.join().unwrap();
+        assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 0);
+        let (again, events) = local_engine(Some(&journal));
+        assert_eq!(recovered(&events), (Vec::new(), 0));
+        assert!(again.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_journal_that_cannot_be_read_is_reported_and_the_engine_runs_on() {
+        let (t, dst, spec) = copy_fixture("a.bin", 10);
+        let journal = t.path().join("state");
+        // A folder in place of the journal file can be neither read nor written.
+        std::fs::create_dir_all(journal.join(journal::JOURNAL_FILE)).unwrap();
+        let (e, events) = local_engine(Some(&journal));
+        wait_for(&events, WAIT, |e| {
+            matches!(e, JobEvent::JournalError { .. })
+        });
+        assert_eq!(recovered(&events), (Vec::new(), 0));
+        let id = e.submit(spec);
+        assert_eq!(wait_finished(&events, id, WAIT).outcome, Outcome::Completed);
+        assert_eq!(std::fs::read(dst.join("a.bin")).unwrap(), [7; 10]);
+        assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_journal_that_cannot_be_compacted_still_gives_its_jobs() {
+        let t = tempfile::tempdir().unwrap();
+        let journal = t.path().join("state");
+        let (done, cut_off) = (JobId(1), JobId(2));
+        let spec = JobSpec::Delete(DeleteSpec {
+            paths: vec![v(t.path())],
+            method: DeleteMethod::Trash,
+            errors: ErrorPolicy::Continue,
+        });
+        let at = SystemTime::now();
+        let records = [
+            Record::Submitted {
+                job: done,
+                spec: spec.clone(),
+                at,
+            },
+            Record::Finished {
+                job: done,
+                outcome: Some(Outcome::Completed),
+            },
+            Record::Submitted {
+                job: cut_off,
+                spec,
+                at,
+            },
+            Record::Started { job: cut_off },
+            Record::TempDir {
+                job: cut_off,
+                dir: v(t.path()),
+            },
+        ];
+        let (writer, thread) = JournalHandle::spawn(
+            journal.clone(),
+            Box::new(|| {}),
+            Box::new(|e| panic!("{e}")),
+        );
+        for record in records {
+            writer.append_durable(record).unwrap();
+        }
+        writer.shutdown();
+        thread.join().unwrap();
+        let orphan = t.path().join(temp_name(cut_off, 0));
+        std::fs::write(&orphan, "x").unwrap();
+        // A folder where the compacted journal is written makes the compaction fail.
+        std::fs::create_dir(journal.join("jobs.journal.tmp")).unwrap();
+        let (e, events) = local_engine(Some(&journal));
+        wait_for(&events, WAIT, |e| {
+            matches!(e, JobEvent::JournalError { .. })
+        });
+        assert_eq!(recovered(&events), (vec![cut_off], 1));
+        assert!(!orphan.exists());
+        assert_eq!(e.recovered().len(), 1);
+        assert!(e.shutdown(WAIT));
+    }
+
+    /// Answers like [`NonInteractive`] and notes the thread each conflict is asked on.
+    #[derive(Debug, Default)]
+    struct WhereAsked(Mutex<Vec<Option<String>>>);
+
+    impl Resolver for WhereAsked {
+        fn conflict(&self, _job: JobId, _conflict: &Conflict) -> ConflictAnswer {
+            let name = thread::current().name().map(str::to_owned);
+            self.0.lock().unwrap().push(name);
+            ConflictAnswer::once(ConflictAction::Skip)
+        }
+
+        fn error(&self, _job: JobId, _failure: &ItemFailure) -> ErrorAnswer {
+            ErrorAnswer {
+                action: ErrorAction::Skip,
+                apply_to_all: false,
+            }
+        }
+
+        fn preflight(&self, _job: JobId, _issues: &[Issue]) -> PreflightAnswer {
+            PreflightAnswer::SkipBlocked
+        }
+    }
+
+    #[derive(Debug)]
+    struct LaneSeven;
+
+    impl LanePolicy for LaneSeven {
+        fn lane(&self, _spec: &JobSpec) -> LaneId {
+            LaneId(7)
+        }
+    }
+
+    #[test]
+    fn a_lane_runs_its_jobs_on_a_thread_named_after_it() {
+        let (_t, dst, spec) = copy_fixture("a.bin", 10);
+        std::fs::write(dst.join("a.bin"), "taken").unwrap();
+        let asked = Arc::new(WhereAsked::default());
+        let mut config = EngineConfig::new(Vfs::with_local(), Arc::clone(&asked) as _);
+        config.lanes = Arc::new(LaneSeven);
+        let (e, events) = JobEngine::start(config);
+        let id = e.submit(spec);
+        assert_eq!(wait_finished(&events, id, WAIT).skipped, 1);
+        let names = asked.0.lock().unwrap().clone();
+        assert_eq!(names, [Some("rf-jobs-lane-7".to_owned())]);
+        assert!(e.shutdown(WAIT));
+    }
+}

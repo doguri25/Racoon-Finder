@@ -2,6 +2,7 @@
 
 pub mod conflict;
 pub mod control;
+pub mod engine;
 pub mod exec;
 pub mod id;
 pub mod journal;
@@ -16,6 +17,9 @@ pub mod undo;
 
 pub use conflict::{Conflict, ConflictAction, ConflictAnswer, Decision, MTIME_TOLERANCE, decide};
 pub use control::Control;
+pub use engine::{
+    DefaultLanes, EngineConfig, JobEngine, JobEvent, JobSnapshot, JobState, LaneId, LanePolicy,
+};
 pub use exec::{ExecEnv, ExecEvent, MAX_DEPTH, execute};
 pub use id::JobId;
 pub use journal::{IncompleteJob, JOURNAL_FILE};

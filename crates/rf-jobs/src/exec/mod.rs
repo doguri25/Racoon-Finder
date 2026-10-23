@@ -104,13 +104,6 @@ impl<'a> ExecEnv<'a> {
     /// Notes in `journal`, durably, each folder the job makes temporary files in, before the
     /// first one there, so that crash recovery finds what the job left if it never ends.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "unused until the engine is implemented, which must remove this"
-        )
-    )]
     pub(crate) fn journal(mut self, journal: &'a JournalHandle) -> Self {
         self.journal = Some(journal);
         self

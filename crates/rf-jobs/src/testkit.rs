@@ -6,8 +6,9 @@ use std::ffi::{OsStr, OsString};
 use std::fs::ReadDir;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rf_core::{Entry, Error, Result, Scheme, VPath, VolumeId};
 use rf_vfs::{
@@ -17,10 +18,11 @@ use rf_vfs::{
 };
 
 use crate::conflict::{Conflict, ConflictAnswer};
+use crate::engine::JobEvent;
 use crate::id::JobId;
 use crate::naming::{TEMP_SUFFIX, temp_job};
 use crate::preflight::Issue;
-use crate::report::{ItemFailure, Stage};
+use crate::report::{ItemFailure, JobReport, Stage};
 use crate::resolver::{ErrorAnswer, PreflightAnswer, Resolver};
 
 /// One question a [`ScriptedResolver`] was asked.
@@ -226,6 +228,42 @@ pub fn temp_files(root: &Path) -> Vec<String> {
         .into_keys()
         .filter(|key| key.ends_with(TEMP_SUFFIX))
         .collect()
+}
+
+/// The first event from `rx` that `pred` accepts; the events before it are dropped. It waits
+/// up to `timeout` in all and panics when no such event comes in that time, or when the engine
+/// has ended and no event will come.
+pub fn wait_for(
+    rx: &Receiver<JobEvent>,
+    timeout: Duration,
+    mut pred: impl FnMut(&JobEvent) -> bool,
+) -> JobEvent {
+    let started = Instant::now();
+    loop {
+        let left = timeout.saturating_sub(started.elapsed());
+        match rx.recv_timeout(left) {
+            Ok(event) if pred(&event) => return event,
+            // Past the deadline, events that are ready are still looked at, once each.
+            Ok(_) if !left.is_zero() => {}
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {
+                panic!("wait_for: no matching job event within {timeout:?}")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("wait_for: the engine ended before a matching job event")
+            }
+        }
+    }
+}
+
+/// The report of the job `id`, from its [`JobEvent::Finished`]; the events before it are
+/// dropped. Panics as [`wait_for`] does.
+pub fn wait_finished(rx: &Receiver<JobEvent>, id: JobId, timeout: Duration) -> Arc<JobReport> {
+    let finished =
+        |event: &JobEvent| matches!(event, JobEvent::Finished { id: done, .. } if *done == id);
+    let JobEvent::Finished { report, .. } = wait_for(rx, timeout, finished) else {
+        unreachable!("wait_for gives only an event its predicate accepts")
+    };
+    report
 }
 
 /// A fault for a [`FaultyProvider`] to inject.

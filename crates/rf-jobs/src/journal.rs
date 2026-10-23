@@ -31,14 +31,6 @@
 //! field's type changed, a new field that a job must not run without) takes a new format
 //! number, so that builds skip the lines of the other number instead of misreading them.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "mostly unused until the engine is implemented, which must remove this"
-    )
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
