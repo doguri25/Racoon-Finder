@@ -16,10 +16,10 @@ use crate::report::Stage;
 /// The content goes to a new temporary file in the target's folder, which is flushed and
 /// synced, given the source's extras (when both sides are of one provider) and times, and
 /// renamed to `target` with `commit`. On an error, a cancel or a panic the temporary file is
-/// removed; a file that was at the temporary path before is not ours and is never touched. The
-/// attributes (read-only among
-/// them) are put on `target` only after the commit, because Windows cannot remove a read-only
-/// temporary file. A metadata failure is a warning; the copy itself has worked.
+/// removed; a file that was at the temporary path before is not ours and is never touched.
+/// The attributes (read-only among them) are put on `target` only after the commit, because
+/// Windows cannot remove a read-only temporary file. A metadata failure is a warning; the
+/// copy itself has worked.
 ///
 /// A source that is no regular file is refused before anything is opened or created: a FIFO
 /// blocks a reader until a writer comes, and a device can be read without end.
@@ -91,9 +91,14 @@ pub(crate) fn copy_file(
     Ok(())
 }
 
+/// The smallest buffer a file is copied through.
+const MIN_BUFFER: usize = 64 << 10;
+
 /// Copies `reader` into `writer` one chunk at a time, stopping at a pause or a cancel between
 /// chunks, then finishes (flushes and syncs) the writer. `size` is the planned size of the
-/// source, which decides whether the first chunk gets its own progress event.
+/// source: it decides whether the first chunk gets its own progress event, and the buffer is
+/// no larger than it needs (at least [`MIN_BUFFER`], at most [`COPY_CHUNK`]). A source that
+/// grew after the plan only takes more chunks.
 fn write_content(
     ctx: &mut Ctx<'_>,
     reader: &mut dyn ReadStream,
@@ -103,7 +108,9 @@ fn write_content(
     size: u64,
 ) -> Result<(), Failed> {
     let large = size > bytes(COPY_CHUNK);
-    let mut buf = vec![0; COPY_CHUNK];
+    let buffer =
+        usize::try_from(size).map_or(COPY_CHUNK, |size| size.clamp(MIN_BUFFER, COPY_CHUNK));
+    let mut buf = vec![0; buffer];
     let mut first = true;
     loop {
         ctx.check().at(Stage::Write)?;
@@ -186,9 +193,14 @@ mod tests {
     }
 
     fn copy(id: JobId, source: &Path, dest_dir: &Path, vfs: &Vfs) -> JobReport {
+        copy_all(id, &[source], dest_dir, vfs)
+    }
+
+    fn copy_all(id: JobId, sources: &[&Path], dest_dir: &Path, vfs: &Vfs) -> JobReport {
+        let sources: Vec<VPath> = sources.iter().map(|source| v(source)).collect();
         let spec = TransferSpec::into_dir(
             TransferMode::Copy,
-            &[v(source)],
+            &sources,
             &v(dest_dir),
             TransferOptions::default(),
         )
@@ -199,6 +211,25 @@ mod tests {
 
     fn first_failure(report: &JobReport) -> (Stage, ErrorKind) {
         (report.failures[0].stage, report.failures[0].kind)
+    }
+
+    #[test]
+    fn a_failed_file_adds_no_bytes() {
+        let d = dirs();
+        let (a, b) = (d.src.join("a.bin"), d.src.join("b.bin"));
+        std::fs::write(&a, vec![1; 3 << 20]).unwrap();
+        std::fs::write(&b, vec![2; 5_000]).unwrap();
+        // Two whole chunks of `a` are written and counted before its third write fails.
+        let p = FaultyProvider::local(vec![Fault::FailWrite {
+            file: 0,
+            after: 2 << 20,
+        }]);
+        let report = copy_all(JobId::generate(), &[&a, &b], &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+        assert_eq!(first_failure(&report), (Stage::Write, ErrorKind::Other));
+        assert_eq!((report.done.files, report.done.bytes), (1, 5_000));
+        assert_eq!(report.planned.bytes, (3 << 20) + 5_000);
+        assert_eq!(tree(&d.dst).into_keys().collect::<Vec<_>>(), ["b.bin"]);
     }
 
     #[test]

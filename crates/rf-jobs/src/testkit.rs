@@ -143,17 +143,17 @@ pub enum Node {
 
 /// Everything under `root` (not `root` itself), keyed by the path relative to `root` with its
 /// names joined by `/` (lossily converted to text). Links are not followed: a link is a
-/// [`Node::Link`] with what [`std::fs::read_link`] gives. A missing `root` gives an empty map.
+/// [`Node::Link`] with what [`std::fs::read_link`] gives.
 ///
-/// Panics on anything that is not a file, a folder or a link (a FIFO, a socket, a device),
-/// which it never opens, and on any error other than a missing `root`.
+/// Panics when `root` cannot be listed, a missing `root` included: an empty map always means
+/// an existing, empty folder, so a test that expects "nothing written" cannot pass because the
+/// folder itself is gone. Panics too on any other error and on anything that is not a file, a
+/// folder or a link (a FIFO, a socket, a device), which it never opens.
 pub fn tree(root: &Path) -> BTreeMap<String, Node> {
+    let entries = std::fs::read_dir(root)
+        .unwrap_or_else(|e| panic!("tree: cannot list {}: {e}", root.display()));
     let mut nodes = BTreeMap::new();
-    match std::fs::read_dir(root) {
-        Ok(entries) => walk(entries, root, None, &mut nodes),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => panic!("tree: cannot list {}: {e}", root.display()),
-    }
+    walk(entries, root, None, &mut nodes);
     nodes
 }
 
@@ -232,11 +232,17 @@ pub fn temp_files(root: &Path) -> Vec<String> {
 ///
 /// `file` counts the provider's `open_write` calls from 0, in the order they were made, failed
 /// ones included; `call` counts its `rename` calls the same way.
+///
+/// The faults with `after` (`FailWrite`, `DiskFull`, `Crash`) strike on the first `write`
+/// that would take the file past `after` bytes in all: that write passes its first bytes up
+/// to `after` on and then fails (or crashes). Writes that stay at or below `after` are not
+/// touched, so a file of exactly `after` bytes, or a smaller one, is never hit. With
+/// `after: 0` the first write of any data strikes and passes nothing on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Fault {
-    /// The write that would take file `file` past `after` bytes writes up to `after` and fails
-    /// with `injected write failure`.
+    /// The write that would take file `file` past `after` bytes passes them on up to `after`
+    /// and fails with `injected write failure`.
     FailWrite { file: usize, after: u64 },
     /// Like `FailWrite`, but the error is `io::ErrorKind::StorageFull` (`injected disk full`).
     DiskFull { file: usize, after: u64 },
@@ -248,9 +254,10 @@ pub enum Fault {
     /// The first write to file `file` waits until [`FaultyProvider::release`]. It wakes
     /// [`FaultyProvider::wait_held`] before it waits.
     Hold { file: usize },
-    /// Like a killed process: once file `file` has `after` bytes, the inner stream is flushed
-    /// and closed, [`FaultyProvider::wait_crashed`] wakes, and the writing thread stops for
-    /// good. No later code, no `Drop`, runs on it.
+    /// Like a killed process: the write that would take file `file` past `after` bytes passes
+    /// them on up to `after`, then the inner stream is flushed and closed,
+    /// [`FaultyProvider::wait_crashed`] wakes, and the writing thread stops for good. No later
+    /// code, no `Drop`, runs on it.
     Crash { file: usize, after: u64 },
     /// Rename number `call` fails with `injected rename failure`.
     FailRename { call: usize },
@@ -720,6 +727,7 @@ mod tests {
             vec![
                 Fault::DiskFull { file: 1, after: 6 },
                 Fault::FailFinish { file: 2 },
+                Fault::FailWrite { file: 3, after: 8 },
             ],
         );
         write_file(&p, dir.path(), "0", 10).unwrap();
@@ -729,7 +737,16 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join("1")).unwrap(), b"xxxxxx");
         let unsynced = write_file(&p, dir.path(), "2", 3).unwrap_err();
         assert!(unsynced.to_string().contains("injected fsync failure"));
-        assert_eq!(p.opened_writes(), 3);
+        // Exactly `after` bytes never pass `after`.
+        write_file(&p, dir.path(), "3", 8).unwrap();
+        assert_eq!(p.opened_writes(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "tree: cannot list")]
+    fn tree_of_a_missing_folder_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(&dir.path().join("missing"));
     }
 
     #[test]

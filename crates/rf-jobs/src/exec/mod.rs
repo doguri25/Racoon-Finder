@@ -98,9 +98,10 @@ impl fmt::Debug for ExecEnv<'_> {
 /// on a worker thread, never on the UI thread.
 ///
 /// The job plans first (it counts what it will do and sends [`ExecEvent::Planned`]), then
-/// runs, then sends a last [`ExecEvent::Progress`]. A panic anywhere in the job is caught
-/// and reported as a [`Stage::Internal`] failure of an aborted job; the temporary file the
-/// job was writing is removed as the panic unwinds.
+/// runs, then sends a last [`ExecEvent::Progress`]. A panic anywhere in the job, the event
+/// listener's and the resolver's included, is caught and reported as a [`Stage::Internal`]
+/// failure of an aborted job; the temporary file the job was writing is removed as the panic
+/// unwinds. A panic of the listener on the last event is ignored. No panic leaves `execute`.
 ///
 /// The outcome is [`Outcome::Cancelled`] if the job was cancelled, [`Outcome::Aborted`] if
 /// it stopped on an error, [`Outcome::CompletedWithErrors`] if some items failed, and
@@ -117,10 +118,12 @@ pub fn execute(id: JobId, spec: &JobSpec, env: &ExecEnv<'_>) -> JobReport {
             kind: ErrorKind::Other,
             message: format!("internal error: {}", panic_text(payload.as_ref())),
         });
-        ctx.aborted = true;
+        ctx.stop(Stopped::Aborted);
     }
     ctx.current = None;
-    ctx.send_progress();
+    // The job is over and its report is what counts; a listener that panics here loses only
+    // this event.
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| ctx.send_progress()));
     ctx.finish(started)
 }
 
@@ -178,6 +181,18 @@ pub(crate) enum Attempt<T> {
     Stop,
 }
 
+/// Why a job stopped before its end, if it did. A later variant outranks an earlier one, as
+/// in the outcome: a job both cancelled and aborted ends as cancelled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Stopped {
+    #[default]
+    No,
+    /// On an error: a policy or an answer said so, or a panic.
+    Aborted,
+    /// A step ended with `Error::Cancelled`, whatever cancelled it.
+    Cancelled,
+}
+
 /// The state of one running job, handed to every step.
 pub(crate) struct Ctx<'e> {
     pub id: JobId,
@@ -193,8 +208,11 @@ pub(crate) struct Ctx<'e> {
     meter: SpeedMeter,
     /// Every later failure is skipped without asking ("skip all").
     skip_failures: bool,
-    /// The job stopped on an error (a policy or an answer said so, or a panic).
-    aborted: bool,
+    /// Whether, and why, the job stopped early.
+    stopped: Stopped,
+    /// The bytes [`add_bytes`](Self::add_bytes) counted for the step in progress. They stay
+    /// in `report.done` only if the step works; a failed or cancelled step takes them back.
+    step_bytes: u64,
     /// The number the next temporary file gets.
     temp_seq: u64,
 }
@@ -210,7 +228,8 @@ impl<'e> Ctx<'e> {
             last_progress: None,
             meter: SpeedMeter::new(SPEED_WINDOW),
             skip_failures: false,
-            aborted: false,
+            stopped: Stopped::No,
+            step_bytes: 0,
             temp_seq: 0,
         }
     }
@@ -233,7 +252,27 @@ impl<'e> Ctx<'e> {
     /// it is skipped): `Retry` runs `op` again without recording the failure, `Skip` records
     /// and skips it (for every later failure too with `apply_to_all`), `Abort` records it and
     /// stops the job.
+    ///
+    /// `report.done.bytes` keeps only the bytes of steps that worked: a step that fails or is
+    /// cancelled takes back what it counted, so a file tried again is counted once. The
+    /// progress shown can step back by that much. What a step run inside this one counted
+    /// stays once that inner step has worked.
     pub(crate) fn attempt<T>(
+        &mut self,
+        policy: ErrorPolicy,
+        source: Option<&VPath>,
+        target: Option<&VPath>,
+        op: impl FnMut(&mut Ctx<'e>) -> Result<T, Failed>,
+    ) -> Attempt<T> {
+        // An outer step's own count is set aside while this one runs.
+        let outer = std::mem::take(&mut self.step_bytes);
+        let attempt = self.attempt_step(policy, source, target, op);
+        self.step_bytes = outer;
+        attempt
+    }
+
+    /// [`attempt`](Self::attempt), with the outer step's byte count set aside.
+    fn attempt_step<T>(
         &mut self,
         policy: ErrorPolicy,
         source: Option<&VPath>,
@@ -241,11 +280,15 @@ impl<'e> Ctx<'e> {
         mut op: impl FnMut(&mut Ctx<'e>) -> Result<T, Failed>,
     ) -> Attempt<T> {
         loop {
-            let failed = match op(self) {
+            let result = op(self);
+            let counted = std::mem::take(&mut self.step_bytes);
+            let failed = match result {
                 Ok(value) => return Attempt::Done(value),
                 Err(failed) => failed,
             };
+            self.report.done.bytes = self.report.done.bytes.saturating_sub(counted);
             if failed.error.kind() == ErrorKind::Cancelled {
+                self.stop(Stopped::Cancelled);
                 return Attempt::Stop;
             }
             let failure = ItemFailure::new(failed.stage, source, target, &failed.error);
@@ -270,7 +313,7 @@ impl<'e> Ctx<'e> {
                 }
                 ErrorAction::Abort => {
                     self.report.failures.push(failure);
-                    self.aborted = true;
+                    self.stop(Stopped::Aborted);
                     return Attempt::Stop;
                 }
             }
@@ -308,6 +351,7 @@ impl<'e> Ctx<'e> {
     /// first chunk of a file larger than one chunk, and otherwise when one is due.
     pub(crate) fn add_bytes(&mut self, n: u64, current: &VPath, first_chunk_of_large: bool) {
         self.report.done.bytes += n;
+        self.step_bytes += n;
         self.working_on(current);
         if first_chunk_of_large || self.progress_due() {
             self.send_progress();
@@ -325,11 +369,14 @@ impl<'e> Ctx<'e> {
     }
 
     /// Runs `f`, a question to the resolver, between `Waiting(true)` and `Waiting(false)`.
+    /// `Waiting(false)` is sent even when `f` panics; the panic then goes on.
     pub(crate) fn waiting<T>(&self, f: impl FnOnce() -> T) -> T {
         self.emit(ExecEvent::Waiting(true));
-        let answer = f();
+        // Caught and resumed rather than sent from a drop guard: the event is sent outside
+        // any unwinding, so a listener that panics too is one plain panic, not a nested one.
+        let answer = panic::catch_unwind(AssertUnwindSafe(f));
         self.emit(ExecEvent::Waiting(false));
-        answer
+        answer.unwrap_or_else(|payload| panic::resume_unwind(payload))
     }
 
     /// Names `source` in the progress events from now on.
@@ -382,16 +429,129 @@ impl<'e> Ctx<'e> {
 
     /// The report of the finished job, with its outcome and the time since `started`.
     fn finish(mut self, started: Instant) -> JobReport {
-        self.report.outcome = if self.env.control.is_cancelled() {
-            Outcome::Cancelled
-        } else if self.aborted {
-            Outcome::Aborted
-        } else if !self.report.failures.is_empty() {
-            Outcome::CompletedWithErrors
-        } else {
-            Outcome::Completed
+        if self.env.control.is_cancelled() {
+            self.stop(Stopped::Cancelled);
+        }
+        self.report.outcome = match self.stopped {
+            Stopped::Cancelled => Outcome::Cancelled,
+            Stopped::Aborted => Outcome::Aborted,
+            Stopped::No if self.report.failures.is_empty() => Outcome::Completed,
+            Stopped::No => Outcome::CompletedWithErrors,
         };
         self.report.elapsed = started.elapsed();
         self.report
+    }
+
+    /// Notes that the job stopped early, and why; a cancel outranks an abort.
+    fn stop(&mut self, why: Stopped) {
+        self.stopped = self.stopped.max(why);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::resolver::NonInteractive;
+    use crate::spec::{TransferMode, TransferOptions, TransferSpec};
+    use crate::testkit::ScriptedResolver;
+
+    /// A copy of `missing.txt`, which does not exist, under `errors`.
+    fn copy_of_a_missing_file(errors: ErrorPolicy) -> (tempfile::TempDir, JobSpec) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = VPath::local(dir.path()).unwrap();
+        let options = TransferOptions {
+            errors,
+            ..TransferOptions::default()
+        };
+        let sources = [root.join("missing.txt").unwrap()];
+        let spec = TransferSpec::into_dir(TransferMode::Copy, &sources, &root, options).unwrap();
+        (dir, JobSpec::Transfer(spec))
+    }
+
+    fn empty_copy() -> JobSpec {
+        JobSpec::Transfer(TransferSpec {
+            mode: TransferMode::Copy,
+            items: Vec::new(),
+            options: TransferOptions::default(),
+        })
+    }
+
+    fn unsupported(what: &str) -> Failed {
+        Failed::new(Stage::Write, Error::Unsupported(what.to_owned()))
+    }
+
+    #[test]
+    fn a_panicking_listener_never_escapes_execute() {
+        let (_dir, job) = copy_of_a_missing_file(ErrorPolicy::Continue);
+        let vfs = Vfs::with_local();
+        let on = |_: ExecEvent| panic!("listener");
+        let env = ExecEnv::new(&vfs, &NonInteractive).on_event(&on);
+        let report = execute(JobId(1), &job, &env);
+        assert_eq!(report.outcome, Outcome::Aborted);
+        let last = report.failures.last().unwrap();
+        assert_eq!(
+            (last.stage, last.message.as_str()),
+            (Stage::Internal, "internal error: listener")
+        );
+    }
+
+    #[test]
+    fn a_panicking_resolver_still_ends_the_wait() {
+        let (_dir, job) = copy_of_a_missing_file(ErrorPolicy::Ask);
+        let vfs = Vfs::with_local();
+        // It has no answer, so the question panics.
+        let resolver = ScriptedResolver::new();
+        let waits = Mutex::new(Vec::new());
+        let on = |event: ExecEvent| {
+            if let ExecEvent::Waiting(waiting) = event {
+                waits.lock().unwrap().push(waiting);
+            }
+        };
+        let report = execute(JobId(1), &job, &ExecEnv::new(&vfs, &resolver).on_event(&on));
+        assert_eq!(waits.into_inner().unwrap(), [true, false]);
+        assert_eq!(
+            (report.outcome, report.failures[0].stage),
+            (Outcome::Aborted, Stage::Internal)
+        );
+    }
+
+    #[test]
+    fn a_cancelled_step_cancels_the_job_whatever_cancelled_it() {
+        let (vfs, spec) = (Vfs::with_local(), empty_copy());
+        let env = ExecEnv::new(&vfs, &NonInteractive);
+        let mut ctx = Ctx::new(JobId(1), &env, JobReport::new(JobId(1), &spec));
+        let attempt = ctx.attempt(ErrorPolicy::Continue, None, None, |_| {
+            Err::<(), _>(Failed::new(Stage::Write, Error::Cancelled))
+        });
+        assert!(matches!(attempt, Attempt::Stop));
+        assert!(!env.control.is_cancelled());
+        assert_eq!(ctx.finish(Instant::now()).outcome, Outcome::Cancelled);
+    }
+
+    #[test]
+    fn a_failed_step_takes_back_only_its_own_bytes() {
+        let (vfs, spec) = (Vfs::with_local(), empty_copy());
+        let env = ExecEnv::new(&vfs, &NonInteractive);
+        let mut ctx = Ctx::new(JobId(1), &env, JobReport::new(JobId(1), &spec));
+        let path = VPath::local(std::env::temp_dir()).unwrap();
+        let outer = ctx.attempt(ErrorPolicy::Continue, None, None, |ctx| {
+            ctx.add_bytes(5, &path, false);
+            let worked = ctx.attempt(ErrorPolicy::Continue, None, None, |ctx| {
+                ctx.add_bytes(3, &path, false);
+                Ok(())
+            });
+            assert!(matches!(worked, Attempt::Done(())));
+            let failed = ctx.attempt(ErrorPolicy::Continue, None, None, |ctx| {
+                ctx.add_bytes(7, &path, false);
+                Err::<(), _>(unsupported("inner"))
+            });
+            assert!(matches!(failed, Attempt::Skipped));
+            assert_eq!(ctx.report.done.bytes, 5 + 3);
+            Err::<(), _>(unsupported("outer"))
+        });
+        assert!(matches!(outer, Attempt::Skipped));
+        assert_eq!(ctx.report.done.bytes, 3);
     }
 }

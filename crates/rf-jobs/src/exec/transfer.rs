@@ -37,8 +37,10 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
         });
         match copied {
             Attempt::Done(()) => {
-                ctx.item_done(true, false);
+                // Before `item_done`, which may call the listener: a committed file is in
+                // the outputs whatever the listener does.
                 ctx.report.outputs.push(target.clone());
+                ctx.item_done(true, false);
             }
             Attempt::Skipped => {}
             Attempt::Stop => return,
