@@ -166,6 +166,28 @@ fn cleanup_refuses_to_delete_when_the_ledger_is_unreadable() {
     assert_eq!(std::fs::read(&file).unwrap(), newer);
 }
 
+/// A temp folder that is there but cannot be listed is an error, not "nothing to delete": the
+/// revert is done (and saved), but nothing owned is deleted, so a next run can finish.
+#[test]
+fn cleanup_stops_before_deleting_when_the_temp_folder_cannot_be_listed() {
+    let fx = installed();
+    used(&fx);
+    let temp = fx.paths.temp_dir();
+    std::fs::remove_dir_all(temp).unwrap();
+    std::fs::write(temp, b"not a folder").unwrap();
+    assert!(matches!(plan_cleanup(&fx.paths), Err(LedgerError::Core(_))));
+    assert!(matches!(
+        run_cleanup(&fx.paths, Box::new(fx.fake.clone())),
+        Err(LedgerError::Core(_))
+    ));
+    assert_eq!(
+        (fx.fake.get(&slot(1)), fx.fake.get(&slot(2))),
+        (s("orig"), None)
+    );
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+    assert!(fx.paths.owned_paths().iter().all(|p| p.exists()));
+}
+
 #[cfg(unix)]
 #[test]
 fn cleanup_removes_links_but_not_what_they_point_to() {
@@ -206,12 +228,9 @@ fn cleanup_removes_junctions_but_not_what_they_point_to() {
     }
     std::fs::create_dir_all(fx.paths.cache_dir().parent().unwrap()).unwrap();
     std::fs::create_dir_all(fx.paths.config_dir().parent().unwrap()).unwrap();
-    let made = junction(&outside.join("cache"), fx.paths.cache_dir())
-        .and_then(|()| junction(&outside.join("config"), fx.paths.config_dir()));
-    if let Err(e) = made {
-        eprintln!("skipped: cannot create junctions here: {e}");
-        return;
-    }
+    junction(&outside.join("cache"), fx.paths.cache_dir()).expect("a junction needs no privilege");
+    junction(&outside.join("config"), fx.paths.config_dir())
+        .expect("a junction needs no privilege");
     assert!(fx.paths.config_dir().join("keep.toml").exists());
     let r = cleanup(&fx);
     assert!(r.is_complete(), "{r:?}");
@@ -276,16 +295,67 @@ fn junction(target: &std::path::Path, link: &std::path::Path) -> std::io::Result
     }
 }
 
+/// The app's folders in the data folder go, then the data folder itself, which that left
+/// empty; the executable and the marker next to it stay.
 #[test]
 fn portable_cleanup_deletes_only_the_data_folder() {
     let fx = portable();
     std::fs::create_dir_all(fx.paths.cache_dir()).unwrap();
     let exe = fx.root().join("bin").join("app.exe");
     std::fs::write(&exe, b"exe").unwrap();
+    let root = fx.paths.owned_paths()[0].clone();
     let r = cleanup(&fx);
-    assert_eq!(r.done, as_deletes(fx.paths.owned_paths()));
+    assert_eq!(
+        r.done,
+        [
+            CleanupAction::Delete(fx.paths.cache_dir().to_path_buf()),
+            CleanupAction::RemoveIfEmpty(root.clone())
+        ]
+    );
+    assert!(root.symlink_metadata().is_err());
     assert!(exe.exists() && fx.root().join("bin").join(PORTABLE_MARKER).exists());
     assert_eq!(fx.fake.calls(), []);
+}
+
+/// A temp entry of the portable layout lives in the app's temp folder, which is deleted as a
+/// whole: the entry is not listed again on its own.
+#[test]
+fn portable_temp_entries_go_with_the_temp_folder() {
+    let fx = portable();
+    std::fs::create_dir_all(fx.paths.temp_dir()).unwrap();
+    let item = fx.paths.temp_dir().join(format!("{TEMP_PREFIX}1.tmp"));
+    std::fs::write(&item, b"x").unwrap();
+    let want = [
+        CleanupAction::Delete(fx.paths.temp_dir().to_path_buf()),
+        CleanupAction::RemoveIfEmpty(fx.paths.owned_paths()[0].clone()),
+    ];
+    assert_eq!(plan_cleanup(&fx.paths).unwrap(), want);
+    let r = cleanup(&fx);
+    assert!(r.is_complete(), "{r:?}");
+    assert_eq!(r.done, want);
+    assert!(item.symlink_metadata().is_err());
+}
+
+/// A portable data folder that is a link to another drive is treated like any owned link:
+/// only the link goes, and the app's folders behind it are not reached through it.
+#[cfg(unix)]
+#[test]
+fn portable_cleanup_removes_a_linked_data_folder_but_not_what_it_points_to() {
+    let fx = portable();
+    let root = fx.paths.owned_paths()[0].clone();
+    let outside = fx.root().join("elsewhere");
+    std::fs::create_dir_all(outside.join("cache")).unwrap();
+    std::fs::write(outside.join("cache").join("keep.bin"), b"x").unwrap();
+    std::os::unix::fs::symlink(&outside, &root).unwrap();
+    assert!(fx.paths.cache_dir().join("keep.bin").exists());
+    assert_eq!(
+        plan_cleanup(&fx.paths).unwrap(),
+        [CleanupAction::Delete(root.clone())]
+    );
+    let r = cleanup(&fx);
+    assert!(r.is_complete(), "{r:?}");
+    assert!(root.symlink_metadata().is_err());
+    assert!(outside.join("cache").join("keep.bin").exists());
 }
 
 /// A ledger file in the portable data folder (say one copied from an installed setup) is not
@@ -301,17 +371,56 @@ fn portable_cleanup_never_reads_a_ledger_file_in_the_data_folder() {
     let cut_off: &[u8] = b"{";
     let fx = portable();
     let file = Ledger::file_path(&fx.paths);
+    let want = [
+        CleanupAction::Delete(fx.paths.data_dir().to_path_buf()),
+        CleanupAction::RemoveIfEmpty(fx.paths.owned_paths()[0].clone()),
+    ];
     for text in [copy.as_slice(), cut_off] {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, text).unwrap();
-        assert_eq!(
-            plan_cleanup(&fx.paths).unwrap(),
-            as_deletes(fx.paths.owned_paths())
-        );
+        assert_eq!(plan_cleanup(&fx.paths).unwrap(), want);
         let r = cleanup(&fx);
         assert!(r.is_complete(), "{r:?}");
-        assert_eq!(r.done, as_deletes(fx.paths.owned_paths()));
+        assert_eq!(r.done, want);
     }
+    assert_eq!(fx.fake.calls(), []);
+}
+
+/// The portable data folder is a plain `data` folder next to the executable, so it may hold
+/// someone else's files: only the folders the app makes there go, and the folder stays.
+#[test]
+fn portable_cleanup_keeps_foreign_files_in_the_data_folder() {
+    let fx = portable();
+    fx.paths.ensure_dirs().unwrap();
+    let layout = [
+        fx.paths.config_dir(),
+        fx.paths.data_dir(),
+        fx.paths.cache_dir(),
+        fx.paths.log_dir(),
+        fx.paths.temp_dir(),
+    ];
+    for dir in layout {
+        std::fs::write(dir.join("app.bin"), b"app").unwrap();
+    }
+    let root = fx.paths.owned_paths()[0].clone();
+    std::fs::write(root.join("notes.txt"), b"notes").unwrap();
+    std::fs::create_dir_all(root.join("photos")).unwrap();
+    std::fs::write(root.join("photos").join("a.jpg"), b"jpeg").unwrap();
+    let mut want: Vec<CleanupAction> = layout
+        .iter()
+        .map(|p| CleanupAction::Delete(p.to_path_buf()))
+        .collect();
+    want.push(CleanupAction::RemoveIfEmpty(root.clone()));
+    let r = cleanup(&fx);
+    assert!(r.is_complete(), "{r:?}");
+    assert_eq!(r.done, want);
+    assert!(layout.iter().all(|p| p.symlink_metadata().is_err()));
+    assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"notes");
+    assert_eq!(
+        std::fs::read(root.join("photos").join("a.jpg")).unwrap(),
+        b"jpeg"
+    );
+    assert!(root.is_dir());
     assert_eq!(fx.fake.calls(), []);
 }
 
