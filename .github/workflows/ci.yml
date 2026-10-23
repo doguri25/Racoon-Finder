@@ -28,21 +28,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rf-platform --test trash --test trash_diag --no-run --locked
       - name: fresh-bin parallel x15
+        shell: pwsh
         run: |
-          SID=$(whoami //user //fo csv //nh | sed 's/.*,"//; s/"//g' | tr -d '\r')
-          echo "SID=$SID"
-          for i in $(seq 1 15); do
-            cmd //c "rd /s /q C:\\\$Recycle.Bin\\$SID" >/dev/null 2>&1 || true
-            [ -e "C:/\$Recycle.Bin/$SID" ] && echo "bin still there" || echo "bin removed"
-            echo "=== fresh parallel run $i"
-            cargo test -q -p rf-platform --test trash --locked -- --nocapture 2>&1 | grep -E "diag|test |panicked|Err|result" || true
-          done
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          "SID=$sid"
+          $bin = 'C:\$Recycle.Bin\' + $sid
+          for ($i = 1; $i -le 15; $i++) {
+            if (Test-Path -LiteralPath $bin) { cmd /c "rd /s /q `"$bin`"" }
+            "bin present after reset: $(Test-Path -LiteralPath $bin)"
+            "=== fresh parallel run $i"
+            cargo test -q -p rf-platform --test trash --locked -- --nocapture 2>&1 | ForEach-Object { "$_" } | Select-String -Pattern 'diag|test |panicked|Err|result'
+          }
+          exit 0
       - name: fresh-bin serial x8
+        shell: pwsh
         run: |
-          SID=$(whoami //user //fo csv //nh | sed 's/.*,"//; s/"//g' | tr -d '\r')
-          for i in $(seq 1 8); do
-            cmd //c "rd /s /q C:\\\$Recycle.Bin\\$SID" >/dev/null 2>&1 || true
-            [ -e "C:/\$Recycle.Bin/$SID" ] && echo "bin still there" || echo "bin removed"
-            echo "=== fresh serial run $i"
-            cargo test -q -p rf-platform --test trash --locked -- --nocapture --test-threads=1 2>&1 | grep -E "diag|test |panicked|Err|result" || true
-          done
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $bin = 'C:\$Recycle.Bin\' + $sid
+          for ($i = 1; $i -le 8; $i++) {
+            if (Test-Path -LiteralPath $bin) { cmd /c "rd /s /q `"$bin`"" }
+            "bin present after reset: $(Test-Path -LiteralPath $bin)"
+            "=== fresh serial run $i"
+            cargo test -q -p rf-platform --test trash --locked -- --nocapture --test-threads=1 2>&1 | ForEach-Object { "$_" } | Select-String -Pattern 'diag|test |panicked|Err|result'
+          }
+          exit 0
