@@ -200,6 +200,10 @@ impl Provider for LocalProvider {
         ops::remove_dir(path)
     }
 
+    fn delete_leaf(&self, path: &VPath) -> Result<()> {
+        ops::delete_leaf(path)
+    }
+
     fn sync_dir(&self, path: &VPath) -> Result<()> {
         ops::sync_dir(path)
     }

@@ -267,11 +267,12 @@ pub enum Fault {
     /// Every rename fails with `io::ErrorKind::CrossesDevices`, as between two volumes, except
     /// the commit of a temporary file (a `from` whose name `temp_job` reads).
     CrossDevice,
-    /// Deleting an item called `name` fails with `PermissionDenied`.
+    /// Deleting an item called `name` (`delete` or `delete_leaf`) fails with `PermissionDenied`.
     FailDelete { name: OsString },
-    /// Just before the first permanent delete is passed on, a file `name` with the content
-    /// `late` appears next to the item, as if another app wrote it during a move. Once only.
-    /// If that file cannot be made, the delete fails with the reason and deletes nothing.
+    /// Just before the first permanent delete (`delete` with `DeleteMode::Permanent`, or
+    /// `delete_leaf`) is passed on, a file `name` with the content `late` appears next to the
+    /// item, as if another app wrote it during a move. Once only. If that file cannot be made,
+    /// the delete fails with the reason and deletes nothing.
     CreateOnDelete { name: OsString },
     /// Paths under `under` (it included) lack `Capabilities::WRITE`.
     ReadOnly { under: VPath },
@@ -455,6 +456,18 @@ impl FaultyProvider {
         entry
     }
 
+    /// Fails with `PermissionDenied` when a [`Fault::FailDelete`] names the item at `path`.
+    fn refuse_delete(&self, path: &VPath) -> Result<()> {
+        let refused = self.faults.iter().any(|fault| {
+            matches!(fault, Fault::FailDelete { name } if path.file_name() == Some(name.as_os_str()))
+        });
+        if refused {
+            let error = io::Error::from(io::ErrorKind::PermissionDenied);
+            return Err(Error::io("delete", path.clone(), error));
+        }
+        Ok(())
+    }
+
     /// Makes the [`Fault::CreateOnDelete`] file next to `path`, the first time only.
     fn make_late_file(&self, path: &VPath) -> Result<()> {
         let Some(name) = self.faults.iter().find_map(|fault| match fault {
@@ -557,17 +570,17 @@ impl Provider for FaultyProvider {
     }
 
     fn delete(&self, path: &VPath, mode: DeleteMode) -> Result<Deleted> {
-        let refused = self.faults.iter().any(|fault| {
-            matches!(fault, Fault::FailDelete { name } if path.file_name() == Some(name.as_os_str()))
-        });
-        if refused {
-            let error = io::Error::from(io::ErrorKind::PermissionDenied);
-            return Err(Error::io("delete", path.clone(), error));
-        }
+        self.refuse_delete(path)?;
         if mode == DeleteMode::Permanent {
             self.make_late_file(path)?;
         }
         self.inner.delete(path, mode)
+    }
+
+    fn delete_leaf(&self, path: &VPath) -> Result<()> {
+        self.refuse_delete(path)?;
+        self.make_late_file(path)?;
+        self.inner.delete_leaf(path)
     }
 
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>> {
@@ -903,6 +916,34 @@ mod tests {
         );
         assert_eq!(p.fs_name(&root).as_deref(), Some("exFAT"));
         assert_eq!(p.space(&root).unwrap().map(|s| s.available), Some(7));
+    }
+
+    #[test]
+    fn delete_leaf_meets_the_delete_faults() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["keep", "a"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+        let p = FaultyProvider::local(vec![
+            Fault::FailDelete {
+                name: "keep".into(),
+            },
+            Fault::CreateOnDelete {
+                name: "late".into(),
+            },
+        ]);
+        let at = |name: &str| local(&dir.path().join(name));
+        let refused = p.delete_leaf(&at("keep")).unwrap_err();
+        assert_eq!(refused.kind(), rf_core::ErrorKind::PermissionDenied);
+        assert!(!dir.path().join("late").exists());
+        p.delete_leaf(&at("a")).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("late")).unwrap(), b"late");
+        // The inner provider's answer: a folder is never removed.
+        let folder = p.delete_leaf(&at("folder")).unwrap_err();
+        assert_eq!(folder.kind(), rf_core::ErrorKind::IsADirectory);
+        assert!(dir.path().join("folder").is_dir());
+        assert_eq!(std::fs::read(dir.path().join("keep")).unwrap(), b"keep");
     }
 
     #[test]

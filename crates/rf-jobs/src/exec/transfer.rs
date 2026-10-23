@@ -13,8 +13,8 @@ use rf_vfs::{DeleteMode, MetadataPatch, Provider, RenameMode};
 use super::file::{Source, copy_file};
 use super::scan::{Planned, follow_link, follows_links, scan_transfer};
 use super::{
-    At, Attempt, Cause, Ctx, Failed, Identity, Level, MAX_DEPTH, fold_path, folder_identity,
-    link_loop,
+    At, Attempt, Cause, Ctx, Failed, Identity, Level, fold_path, folder_identity, link_loop,
+    replaced, too_deep,
 };
 use crate::conflict::{Conflict, ConflictAction, Decision, decide};
 use crate::naming::{MAX_NUMBERED, numbered_name};
@@ -219,7 +219,8 @@ fn flow<T>(attempt: &Attempt<T>) -> Flow {
 /// The checks an item meets before anything is done with it, `Some` with the flow when it
 /// ends there:
 ///
-/// - Deeper than [`MAX_DEPTH`]: fails as `Stage::Plan` and is not entered.
+/// - Deeper than [`MAX_DEPTH`](super::MAX_DEPTH): fails as `Stage::Plan` and is not entered
+///   (see [`too_deep`]).
 /// - A target the pre-flight review left out (found under its planned path, also below a
 ///   folder written under a numbered name): fails as `Stage::Preflight` with its issue,
 ///   without a question, since the user chose to skip it.
@@ -231,13 +232,8 @@ fn refused(
     level: Level<'_>,
 ) -> Option<Flow> {
     let target = to.path;
-    if level.depth() > MAX_DEPTH {
-        let too_deep = ctx.attempt(walk.errors, Some(source), Some(target), |_| {
-            let error =
-                Error::Unsupported(format!("folder nesting deeper than {MAX_DEPTH} levels"));
-            Err::<(), _>(Failed::new(Stage::Plan, error))
-        });
-        return Some(flow(&too_deep));
+    if let Some(failed) = too_deep(ctx, level, walk.errors, source, Some(target)) {
+        return Some(flow(&failed));
     }
     if let Some(issue) = walk.blocked.get(to.planned) {
         let failure =
@@ -641,10 +637,12 @@ fn move_file(
 /// First the folder of the copy is synced (`Provider::sync_dir`), so that the commit that gave
 /// the copy its name is durable before the source goes: after a power loss the delete could
 /// otherwise be on disk while the copy is still only a temporary file, which crash recovery
-/// removes. Then the source is `stat`ed, and left when it is no longer what was copied: of
-/// another kind (above all a folder, which `delete` would remove with everything in it) or,
-/// when both identities are known, another file, as when a program replaced it while it was
-/// copied. A link is deleted itself, never what it leads to.
+/// removes. Then the source is `stat`ed, and left when it is no longer what was copied (see
+/// [`replaced`]): of another kind or, when both identities are known, another file, as when a
+/// program replaced it while it was copied. It is deleted with `Provider::delete_leaf`, which
+/// removes a link itself, never what it leads to, and never removes a folder: an item that
+/// turned into one after that `stat`, or a path that leads into another folder by then, fails
+/// and stays with everything in it.
 fn delete_source(ctx: &Ctx<'_>, source: &VPath, entry: &Entry, copy: &VPath) -> Result<(), Failed> {
     if let Some(folder) = copy.parent() {
         let dst = ctx.provider(copy).at(Stage::DeleteSource)?;
@@ -652,17 +650,13 @@ fn delete_source(ctx: &Ctx<'_>, source: &VPath, entry: &Entry, copy: &VPath) -> 
     }
     let src = ctx.provider(source).at(Stage::DeleteSource)?;
     let now = src.stat(source).at(Stage::DeleteSource)?;
-    let replaced = now.kind != entry.kind
-        || matches!((now.identity(), entry.identity()), (Some(a), Some(b)) if a != b);
-    if replaced {
+    if replaced(entry, &now) {
         let error = Error::Unsupported(format!(
             "{source} changed while it was moved; left in place"
         ));
         return Err(Failed::new(Stage::DeleteSource, error));
     }
-    src.delete(source, DeleteMode::Permanent)
-        .map(drop)
-        .at(Stage::DeleteSource)
+    src.delete_leaf(source).at(Stage::DeleteSource)
 }
 
 /// How a move got a folder to its target in its first step.
@@ -1405,5 +1399,47 @@ mod tests {
         let issue = IssueKind::NameTooLong { len: 257, max: 255 };
         assert_eq!(error.to_string(), issue.to_string());
         assert!(free_name(&local, &target, false, Os::MacOs).is_ok());
+    }
+
+    /// A source whose path leads to a folder by the time a move deletes it (its folder was
+    /// swapped for a link after the source was checked) takes nothing with it: the source goes
+    /// with `delete_leaf`, which never removes a folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_whose_path_leads_to_a_folder_by_its_delete_removes_nothing() {
+        use crate::exec::swapping::{Swapping, When};
+        use crate::exec::{ExecEnv, execute};
+        use crate::id::JobId;
+        use crate::resolver::NonInteractive;
+        use crate::spec::{JobSpec, TransferOptions};
+        use crate::testkit::{Fault, FaultyProvider, tree, write_tree};
+
+        let t = tempfile::tempdir().unwrap();
+        write_tree(
+            t.path(),
+            &[("dir/c", "C"), ("outside/c/keep.txt", "K"), ("dst/", "")],
+        );
+        let (dir, dst, outside) = (
+            t.path().join("dir"),
+            t.path().join("dst"),
+            t.path().join("outside"),
+        );
+        let before = tree(&outside);
+        // Across volumes, the move copies `c` and then deletes it.
+        let faulty = FaultyProvider::local(vec![Fault::CrossDevice]);
+        let vfs = Swapping::new(faulty, &dir, &outside, When::DeletingALeaf).vfs();
+        let sources = [v(&dir.join("c"))];
+        let options = TransferOptions::default();
+        let spec = TransferSpec::into_dir(TransferMode::Move, &sources, &v(&dst), options).unwrap();
+        let env = ExecEnv::new(&vfs, &NonInteractive);
+        let report = execute(JobId(1), &JobSpec::Transfer(spec), &env);
+        assert!(dir.is_symlink(), "the swap did not happen");
+        assert_eq!(tree(&outside), before);
+        assert_eq!(std::fs::read_to_string(dst.join("c")).unwrap(), "C");
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(
+            (report.failures[0].stage, report.failures[0].kind),
+            (Stage::DeleteSource, ErrorKind::IsADirectory)
+        );
     }
 }

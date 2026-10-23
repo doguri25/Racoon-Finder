@@ -320,6 +320,60 @@ pub fn check_delete_permanent(p: &dyn Provider, root: &VPath) {
     );
 }
 
+/// `delete_leaf` removes a file and a link, never what a link leads to and never a folder: a
+/// real folder, empty or not, gives `IsADirectory` and stays as it is with everything in it.
+///
+/// The links are skipped, with a note on stderr, on Windows when the OS refuses the first one
+/// (no Developer Mode and no privilege to make links), which a provider may pass on.
+#[allow(
+    clippy::print_stderr,
+    reason = "a check that cannot run says so, as the skipped tests do"
+)]
+pub fn check_delete_leaf(p: &dyn Provider, root: &VPath) {
+    let d = fresh(p, root, "delete-leaf");
+    let f = d.join("f.txt").unwrap();
+    write_all(p, &f, WriteMode::CreateNew, b"f");
+    p.delete_leaf(&f).unwrap();
+    assert_eq!(kind_of(p.stat(&f)), ErrorKind::NotFound);
+    assert_eq!(kind_of(p.delete_leaf(&f)), ErrorKind::NotFound);
+
+    let (empty, full) = (fresh(p, &d, "empty"), fresh(p, &d, "full"));
+    let keep = full.join("keep.txt").unwrap();
+    write_all(p, &keep, WriteMode::CreateNew, b"keep");
+    assert_eq!(kind_of(p.delete_leaf(&empty)), ErrorKind::IsADirectory);
+    assert_eq!(kind_of(p.delete_leaf(&full)), ErrorKind::IsADirectory);
+    assert_eq!(p.stat(&empty).unwrap().kind, EntryKind::Dir);
+    assert_eq!(read_all(p, &keep), b"keep");
+
+    let (flink, dlink) = (d.join("flink").unwrap(), d.join("dlink").unwrap());
+    let to_file = LinkTarget {
+        target: Path::new("full").join("keep.txt"),
+        is_dir: false,
+    };
+    match p.create_symlink(&flink, &to_file) {
+        Ok(()) => {}
+        Err(e) if cfg!(windows) => {
+            eprintln!("skipped: the OS refuses links here (no Developer Mode): {e}");
+            return;
+        }
+        Err(e) => panic!("create_symlink failed: {e}"),
+    }
+    let to_folder = LinkTarget {
+        target: PathBuf::from("full"),
+        is_dir: true,
+    };
+    p.create_symlink(&dlink, &to_folder).unwrap();
+    // Each link really leads to `full`, so a delete that followed one would reach `keep.txt`.
+    assert_eq!(read_all(p, &dlink.join("keep.txt").unwrap()), b"keep");
+    p.delete_leaf(&flink).unwrap();
+    p.delete_leaf(&dlink).unwrap();
+    assert_eq!(
+        names(p, &d),
+        BTreeSet::from([OsString::from("empty"), OsString::from("full")])
+    );
+    assert_eq!(read_all(p, &keep), b"keep");
+}
+
 /// A permanent delete of a folder tree removes a link inside it, never what the link leads to.
 /// With `tree/inner/outside-link` a link to the folder `outside` next to `tree`, deleting
 /// `tree` removes the whole tree and leaves `outside` and everything in it as it was.

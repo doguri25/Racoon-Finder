@@ -127,6 +127,35 @@ fn delete_permanently(path: &VPath) -> Result<()> {
     }
 }
 
+/// Removes one file, link or other item, never a folder tree; see `Provider::delete_leaf`.
+///
+/// On Unix it is one `unlink` (`std::fs::remove_file`), which removes a link itself and refuses
+/// a folder (`EISDIR` on Linux, `EPERM` on macOS); a refusal of an item that is a folder is
+/// reported as `IsADirectory` on every system. On Windows the kind is read first, without
+/// following links: a folder link or junction is removed with `std::fs::remove_dir`, which
+/// removes the link itself (and, should a real folder have taken its place in between, only an
+/// empty one); a real folder is refused; anything else goes through `std::fs::remove_file`,
+/// which refuses a folder too.
+pub(super) fn delete_leaf(path: &VPath) -> Result<()> {
+    let local = native(path)?;
+    let fail = |e| Error::io("delete", path.clone(), e);
+    let a_folder = || fail(io::Error::from(io::ErrorKind::IsADirectory));
+    #[cfg(windows)]
+    {
+        let file_type = std::fs::symlink_metadata(&local).map_err(fail)?.file_type();
+        if std::os::windows::fs::FileTypeExt::is_symlink_dir(&file_type) {
+            return std::fs::remove_dir(&local).map_err(fail);
+        }
+        if file_type.is_dir() {
+            return Err(a_folder());
+        }
+    }
+    std::fs::remove_file(&local).map_err(|e| {
+        let folder = std::fs::symlink_metadata(&local).is_ok_and(|meta| meta.is_dir());
+        if folder { a_folder() } else { fail(e) }
+    })
+}
+
 /// Removes the empty folder `path`; see `Provider::remove_dir`. The OS itself refuses a folder
 /// with anything in it and a file, and does not follow a final link: Unix refuses a link, and
 /// Windows removes a folder link or junction itself.

@@ -4,6 +4,8 @@ mod delete;
 mod file;
 mod scan;
 mod simple;
+#[cfg(all(test, unix))]
+mod swapping;
 mod transfer;
 
 use std::any::Any;
@@ -375,6 +377,33 @@ pub(crate) fn link_loop(source: &VPath) -> Error {
     Error::Unsupported(format!(
         "folder link loop: {source} leads back to a folder above it"
     ))
+}
+
+/// Whether the item a fresh `stat` finds, `now`, is no longer the one `was` described: of
+/// another kind (a file turned into a folder, a folder into a link to one) or, when both
+/// identities are known, another item. A walk about to delete or enter an item it found
+/// earlier leaves it in place then.
+pub(crate) fn replaced(was: &Entry, now: &Entry) -> bool {
+    now.kind != was.kind || matches!((now.identity(), was.identity()), (Some(a), Some(b)) if a != b)
+}
+
+/// Fails the item `source`, which goes to `target` if anything is written, as deeper than
+/// [`MAX_DEPTH`] when `level` is that deep: a [`Stage::Plan`] failure under `policy`, and the
+/// item is neither entered, copied, moved nor deleted. `None` when it is not that deep.
+pub(crate) fn too_deep(
+    ctx: &mut Ctx<'_>,
+    level: Level<'_>,
+    policy: ErrorPolicy,
+    source: &VPath,
+    target: Option<&VPath>,
+) -> Option<Attempt<()>> {
+    if level.depth() <= MAX_DEPTH {
+        return None;
+    }
+    Some(ctx.attempt(policy, Some(source), target, |_| {
+        let error = Error::Unsupported(format!("folder nesting deeper than {MAX_DEPTH} levels"));
+        Err(Failed::new(Stage::Plan, error))
+    }))
 }
 
 /// How [`Ctx::attempt`] ended.

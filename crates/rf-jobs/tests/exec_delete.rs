@@ -147,7 +147,7 @@ mod walk {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use rf_jobs::MAX_DEPTH;
-    use rf_jobs::testkit::{Fault, FaultyProvider};
+    use rf_jobs::testkit::{Fault, FaultyProvider, Node, ScriptedResolver};
 
     use super::*;
 
@@ -513,5 +513,147 @@ mod walk {
         assert_eq!(rep.done, Totals::default());
         assert_eq!(rep.failures.len(), 2);
         assert_eq!(tree(&f.src), before);
+    }
+
+    /// A cancel in the middle of the walk stops it between two items: what is left stays, the
+    /// folders it is in too, and nothing is reported as failed.
+    #[test]
+    fn cancelling_in_the_middle_keeps_what_is_left() {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[
+                ("dir/a", "a"),
+                ("dir/b", "b"),
+                ("dir/c", "c"),
+                ("dir/sub/a", "a"),
+                ("dir/sub/b", "b"),
+                ("dir/sub/c", "c"),
+            ],
+        );
+        let control = Control::new();
+        let c2 = control.clone();
+        // The first progress event comes once the first file is deleted.
+        let on = move |e: ExecEvent| {
+            if matches!(e, ExecEvent::Progress(_)) {
+                c2.cancel();
+            }
+        };
+        let (vfs, res) = (Vfs::with_local(), NonInteractive);
+        let job = del(&[f.src.join("dir")], DeleteMethod::Permanent);
+        let env = ExecEnv::new(&vfs, &res).control(control).on_event(&on);
+        let rep = execute(JobId::generate(), &job, &env);
+        assert_eq!(rep.outcome, Outcome::Cancelled);
+        assert_eq!(rep.failures, Vec::new());
+        assert_eq!(
+            rep.done,
+            Totals {
+                files: 1,
+                dirs: 0,
+                bytes: 0
+            }
+        );
+        let left = tree(&f.src.join("dir"));
+        let files = left.values().filter(|n| matches!(n, Node::File(_))).count();
+        assert_eq!(files, 5, "{left:?}");
+    }
+
+    /// A job cancelled before it starts plans nothing and deletes nothing.
+    #[test]
+    fn cancelling_before_the_plan_deletes_nothing() {
+        let f = fx();
+        write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
+        let before = tree(&f.src);
+        let control = Control::new();
+        control.cancel();
+        let (vfs, res) = (Vfs::with_local(), NonInteractive);
+        let job = del(&[f.src.join("dir")], DeleteMethod::Permanent);
+        let env = ExecEnv::new(&vfs, &res).control(control);
+        let rep = execute(JobId::generate(), &job, &env);
+        assert_eq!(rep.outcome, Outcome::Cancelled);
+        assert_eq!(
+            (rep.planned, rep.done),
+            (Totals::default(), Totals::default())
+        );
+        assert_eq!(rep.failures, Vec::new());
+        assert_eq!(tree(&f.src), before);
+    }
+
+    /// An item below a selected path that is gone by the time the walk reaches it (another
+    /// program deleted it) counts as gone: no failure and no question, so a retry under `Ask`
+    /// cannot loop on it, and the folder it was in still goes once it is empty.
+    #[test]
+    fn items_gone_before_their_delete_count_as_gone() {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[
+                ("dir/a/x.txt", "X"),
+                ("dir/b/y.txt", "Y"),
+                ("dir/c.txt", "C"),
+            ],
+        );
+        let dir = f.src.join("dir");
+        let gone = AtomicBool::new(false);
+        // Once the job has deleted its first file, everything else in `dir` goes by itself.
+        let on = |e: ExecEvent| {
+            if matches!(e, ExecEvent::Progress(_)) && !gone.swap(true, Ordering::SeqCst) {
+                for name in ["a", "b"] {
+                    if dir.join(name).exists() {
+                        std::fs::remove_dir_all(dir.join(name)).unwrap();
+                    }
+                }
+                if dir.join("c.txt").exists() {
+                    std::fs::remove_file(dir.join("c.txt")).unwrap();
+                }
+            }
+        };
+        // It has no answer, so it would panic if it were asked.
+        let resolver = ScriptedResolver::new();
+        let vfs = Vfs::with_local();
+        let job = JobSpec::Delete(DeleteSpec {
+            paths: vec![v(&dir)],
+            method: DeleteMethod::Permanent,
+            errors: ErrorPolicy::Ask,
+        });
+        let env = ExecEnv::new(&vfs, &resolver).on_event(&on);
+        let rep = execute(JobId::generate(), &job, &env);
+        assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+        assert!(!dir.exists());
+        assert_eq!(resolver.calls(), Vec::new());
+        // The job deleted its first file and `dir`; the rest went by itself.
+        assert_eq!(
+            rep.done,
+            Totals {
+                files: 1,
+                dirs: 1,
+                bytes: 0
+            }
+        );
+    }
+
+    /// A path inside another path of the same job is not dropped beforehand: it goes with its
+    /// folder, and its own turn then finds it gone, a `NotFound` failure that touches nothing.
+    #[test]
+    fn a_path_inside_another_one_fails_once_its_folder_went() {
+        let f = fx();
+        write_tree(&f.src, &[("dir/a.txt", "A"), ("keep.txt", "K")]);
+        let inner = f.src.join("dir").join("a.txt");
+        let rep = run(&del(
+            &[f.src.join("dir"), inner.clone()],
+            DeleteMethod::Permanent,
+        ));
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        assert!(!f.src.join("dir").exists());
+        let failed: Vec<_> = rep
+            .failures
+            .iter()
+            .map(|x| (x.stage, x.kind, x.source.clone()))
+            .collect();
+        assert_eq!(
+            failed,
+            [(Stage::Delete, ErrorKind::NotFound, Some(v(&inner)))]
+        );
+        assert_eq!(tree(&f.src).into_keys().collect::<Vec<_>>(), ["keep.txt"]);
     }
 }

@@ -4,12 +4,12 @@
 use std::ffi::OsStr;
 use std::io;
 
-use rf_core::{EntryKind, Error, ErrorKind, VPath};
+use rf_core::{EntryKind, Error, ErrorKind, Os, VPath};
 use rf_vfs::RenameMode;
 
 use super::{At, Attempt, Ctx, Failed};
 use crate::naming::{MAX_NUMBERED, numbered_name};
-use crate::preflight::{FsKind, check_name, check_path_len};
+use crate::preflight::{FsKind, IssueKind, check_name, check_path_len};
 use crate::report::{Stage, Totals};
 use crate::spec::{CreateKind, ErrorPolicy};
 use crate::undo::UndoRecord;
@@ -17,6 +17,19 @@ use crate::undo::UndoRecord;
 /// The error policy of a job of one step: its failure is recorded and ends it, without a
 /// question.
 const ERRORS: ErrorPolicy = ErrorPolicy::Continue;
+
+/// The first thing wrong with `name` as the name of the new item `path` on the file system
+/// `fs` and under the path limit of `os` (see [`check_name`] and [`check_path_len`]), or
+/// `None`. Any issue refuses the name, a warning too: a rename or a create never gives an
+/// item a name its file system cannot hold or that Windows would not open (a reserved name,
+/// a trailing dot or space), which the `\\?\` paths of the local provider would write
+/// literally.
+fn name_issue(name: &OsStr, path: &VPath, fs: FsKind, os: Os) -> Option<IssueKind> {
+    check_name(name, fs)
+        .into_iter()
+        .next()
+        .or_else(|| check_path_len(path, os))
+}
 
 /// One folder (`is_dir`) or one file, as a plan of one step counts it.
 fn one(is_dir: bool) -> Totals {
@@ -31,7 +44,9 @@ fn one(is_dir: bool) -> Totals {
 ///
 /// The plan `stat`s `from` (`Stage::Plan`, a link itself) and counts it as one folder or one
 /// file by its kind; no file is read. Two paths of different schemes are served by different
-/// providers, which no rename joins: that fails as `Stage::Rename` with `Unsupported`. Otherwise
+/// providers, which no rename joins: that fails as `Stage::Rename` with `Unsupported`. The new
+/// name is checked against the file system of its folder first (see [`name_issue`]): any issue
+/// fails as `Stage::Rename` with it (`ErrorKind::InvalidPath`), and nothing is renamed. Then
 /// the provider renames with `RenameMode::NoReplace` (`Stage::Rename`), so a taken `to` fails
 /// with `AlreadyExists` and both items stay as they are. A change of only the letter case of a
 /// name works on a file system that ignores case (the provider sees to it); a change of only
@@ -64,6 +79,12 @@ pub(crate) fn run_rename(ctx: &mut Ctx<'_>, from: &VPath, to: &VPath) {
             return Err(Failed::new(Stage::Rename, error));
         }
         let provider = ctx.provider(from).at(Stage::Rename)?;
+        if let (Some(folder), Some(name)) = (to.parent(), to.file_name()) {
+            let fs = FsKind::from_fs_name(provider.fs_name(&folder).as_deref());
+            if let Some(issue) = name_issue(name, to, fs, ctx.env.naming_os) {
+                return Err(Failed::issue(Stage::Rename, issue));
+            }
+        }
         ctx.working_on(from);
         provider
             .rename(from, to, RenameMode::NoReplace)
@@ -127,11 +148,7 @@ fn make_new(
         let path = parent
             .join(&candidate)
             .map_err(|error| Failed::new(Stage::Create, error.into()))?;
-        let issue = check_name(&candidate, fs)
-            .into_iter()
-            .next()
-            .or_else(|| check_path_len(&path, os));
-        if let Some(issue) = issue {
+        if let Some(issue) = name_issue(&candidate, &path, fs, os) {
             return Err(Failed::issue(Stage::Create, issue).writing(&path));
         }
         match provider.stat(&path) {
@@ -239,7 +256,7 @@ mod tests {
             name: "a.txt".into(),
             kind: CreateKind::File,
         };
-        let env = ExecEnv::new(&vfs, &NonInteractive).naming_os(rf_core::Os::Windows);
+        let env = ExecEnv::new(&vfs, &NonInteractive).naming_os(Os::Windows);
         let report = execute(JobId(1), &job, &env);
         assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
         assert_eq!(report.outputs, [parent.join("a (3).txt").unwrap()]);

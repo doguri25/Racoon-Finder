@@ -257,4 +257,34 @@ mod rules {
         }
         assert_eq!(tree(&f.src), BTreeMap::new());
     }
+
+    /// A rename never gives an item a name its file system cannot hold or that Windows would
+    /// not open: the job fails with the issue and the item keeps its name.
+    #[test]
+    fn a_new_name_the_file_system_cannot_hold_is_refused() {
+        let f = fx();
+        std::fs::write(f.src.join("a.txt"), "A").unwrap();
+        let before = tree(&f.src);
+        let p = FaultyProvider::local(vec![Fault::FsName("NTFS".into())]);
+        let cases = [
+            ("CON", IssueKind::ReservedName),
+            ("a.", IssueKind::TrailingDotOrSpace),
+            ("a|b.txt", IssueKind::InvalidCharacter('|')),
+        ];
+        for (name, issue) in cases {
+            let job = JobSpec::Rename {
+                from: v(f.src.join("a.txt")),
+                to: v(f.src.join(name)),
+            };
+            let rep = run_on(&job, &p.vfs(), &NonInteractive);
+            let failure = &rep.failures[0];
+            assert_eq!(
+                (failure.stage, failure.kind, failure.message.clone()),
+                (Stage::Rename, ErrorKind::InvalidPath, issue.to_string()),
+                "{name}"
+            );
+            assert_eq!((rep.outputs.len(), rep.undo), (0, None), "{name}");
+        }
+        assert_eq!(tree(&f.src), before);
+    }
 }

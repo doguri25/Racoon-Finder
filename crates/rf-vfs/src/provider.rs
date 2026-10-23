@@ -5,7 +5,7 @@ use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use rf_core::{Attributes, Entry, Error, Result, Scheme, VPath};
+use rf_core::{Attributes, Entry, EntryKind, Error, Result, Scheme, VPath};
 pub use rf_platform::DiskSpace;
 
 use crate::cancel::CancelToken;
@@ -173,8 +173,8 @@ fn unsupported(op: &str, path: &VPath) -> Error {
 ///
 /// The methods after `watch` have default implementations, so that a provider without links,
 /// metadata or a trash to restore from needs none of them: they fail with
-/// `Error::Unsupported`, except `copy_extras` and `fs_name`, which have nothing to give, and
-/// `sync_dir`, which has nothing to do.
+/// `Error::Unsupported`, except `copy_extras` and `fs_name`, which have nothing to give,
+/// `sync_dir`, which has nothing to do, and `delete_leaf`, which uses `stat` and `delete`.
 pub trait Provider: Send + Sync + Debug {
     /// The scheme this provider serves; `Vfs` routes by it.
     fn scheme(&self) -> Scheme;
@@ -314,6 +314,27 @@ pub trait Provider: Send + Sync + Debug {
     /// while what it leads to stays.
     fn remove_dir(&self, path: &VPath) -> Result<()> {
         Err(unsupported("remove_dir", path))
+    }
+
+    /// Removes the file, link or other item (FIFO, socket, device) at `path` for good, and
+    /// never a folder tree. A walk that deletes item by item removes its leaves this way, so
+    /// that an item that turned into a folder since it was found is never removed with
+    /// everything in it.
+    ///
+    /// A real folder gives `ErrorKind::IsADirectory` and stays as it is, an empty one too. A
+    /// link is removed itself, never what it leads to; a folder link or a Windows junction too.
+    /// A missing item gives `ErrorKind::NotFound`.
+    ///
+    /// The default implementation `stat`s `path` and refuses a folder, else calls `delete` with
+    /// `DeleteMode::Permanent`. An item that turns into a folder between the two would still go
+    /// with everything in it, so a provider that can remove one item in one step that never
+    /// takes a folder along (as the local provider does) implements it itself.
+    fn delete_leaf(&self, path: &VPath) -> Result<()> {
+        if self.stat(path)?.kind == EntryKind::Dir {
+            let error = std::io::Error::from(std::io::ErrorKind::IsADirectory);
+            return Err(Error::io("delete", path.clone(), error));
+        }
+        self.delete(path, DeleteMode::Permanent).map(drop)
     }
 
     /// Makes the changes to the entries of the folder `path` durable: the items made in it and
