@@ -9,6 +9,8 @@ use std::time::Duration;
 use rf_core::{Entry, FileId, VolumeId};
 use rf_platform::DirEvent;
 
+use crate::names::fold_name;
+
 /// How long a provider collects raw notifications before it sends them as one
 /// `WatchEvent::Changes`.
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -231,8 +233,8 @@ impl Coalescer {
 /// - an 8.3 short name on Windows;
 /// - hard links.
 ///
-/// It is so when two names fold to one string (`to_lowercase` of the lossy name), whether or not
-/// both are present; or when two names that are present have the same file ID (compared only
+/// It is so when two names fold to one string (`fold_name`), whether or not both are present;
+/// or when two names that are present have the same file ID (compared only
 /// when both are known). The IDs cost a call each on Windows, so they are asked for only when
 /// two names are present and the spellings are all different.
 ///
@@ -247,10 +249,7 @@ fn names_one_file_twice(
         return false;
     }
     let mut spellings = HashSet::with_capacity(names.len());
-    if !names
-        .iter()
-        .all(|name| spellings.insert(name.to_string_lossy().to_lowercase()))
-    {
+    if !names.iter().all(|name| spellings.insert(fold_name(name))) {
         return true;
     }
     if now.iter().flatten().nth(1).is_none() {

@@ -3,6 +3,7 @@
 pub mod cancel;
 pub mod filter;
 pub mod local;
+mod names;
 pub mod provider;
 pub mod registry;
 pub mod sort;

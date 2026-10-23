@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use rf_core::{Error, ErrorKind, Result, VPath};
 
 use super::native;
+use crate::names::fold_name;
 use crate::provider::{DeleteMode, Deleted, ReadStream, RenameMode, WriteMode, WriteStream};
 
 /// Renames or moves `from` to `to`; see `Provider::rename`.
@@ -46,7 +47,7 @@ fn is_case_only_rename(from: &VPath, to: &VPath) -> bool {
     let same_folder = from.parent() == to.parent();
     let same_name_ignoring_case = matches!(
         (from.file_name(), to.file_name()),
-        (Some(a), Some(b)) if a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        (Some(a), Some(b)) if fold_name(a) == fold_name(b)
     );
     same_folder
         && same_name_ignoring_case
