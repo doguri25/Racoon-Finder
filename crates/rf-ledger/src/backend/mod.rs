@@ -1,6 +1,8 @@
 //! The only way the app touches operating system settings.
 
 pub mod fake;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
@@ -60,9 +62,16 @@ pub fn os_backend() -> Box<dyn SystemBackend> {
     Box::new(windows::RegistryBackend)
 }
 
+/// The backend for the operating system this build runs on: on macOS the preferences of the
+/// current user ([`macos::PreferencesBackend`]).
+#[cfg(target_os = "macos")]
+pub fn os_backend() -> Box<dyn SystemBackend> {
+    Box::new(macos::PreferencesBackend)
+}
+
 /// The backend for the operating system this build runs on: none here, so every change is
 /// refused ([`UnsupportedBackend`]).
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn os_backend() -> Box<dyn SystemBackend> {
     Box::new(UnsupportedBackend)
 }
