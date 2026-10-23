@@ -85,18 +85,50 @@ fn corrupt_ledger_is_never_overwritten() {
         Err(LedgerError::Corrupt { .. })
     ));
     assert_eq!(std::fs::read(&file).unwrap(), text);
+    assert_eq!(files_under(fx.paths.data_dir()), [file]);
     assert_eq!(fx.fake.calls(), []);
 }
 
+/// Edits the ledger file of `fx` as JSON and writes it back; returns the new content.
+fn rewrite(fx: &Fx, edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let file = Ledger::file_path(&fx.paths);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    edit(&mut json);
+    let text = serde_json::to_vec(&json).unwrap();
+    std::fs::write(&file, &text).unwrap();
+    text
+}
+
+/// Checks that `open` and `inspect` refuse the ledger file of `fx` with an error `expected`
+/// accepts; that the file still holds `text` and is alone in the data folder (no temporary file
+/// was left); and that the backend was called no more than the `calls` times before.
+fn assert_refused_untouched(
+    fx: &Fx,
+    text: &[u8],
+    calls: usize,
+    expected: impl Fn(&LedgerError) -> bool,
+) {
+    let file = Ledger::file_path(&fx.paths);
+    let err = Ledger::open(&fx.paths, Box::new(fx.fake.clone())).unwrap_err();
+    assert!(expected(&err), "{err:?}");
+    let err = Ledger::inspect(&fx.paths).unwrap_err();
+    assert!(expected(&err), "{err:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), text);
+    assert_eq!(files_under(fx.paths.data_dir()), [file]);
+    assert_eq!(fx.fake.calls().len(), calls);
+}
+
+/// The file records a `Pending` entry, so an open that accepted it would call the backend and
+/// save the file.
 #[test]
 fn newer_format_is_refused_untouched() {
     let fx = installed();
-    let file = Ledger::file_path(&fx.paths);
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let text = br#"{"format":2,"next_id":1,"entries":[]}"#;
-    std::fs::write(&file, text).unwrap();
-    let err = Ledger::open(&fx.paths, Box::new(fx.fake.clone())).unwrap_err();
-    assert!(
+    pending_not_applied(&fx);
+    let text = rewrite(&fx, |json| json["format"] = 2.into());
+    let calls = fx.fake.calls().len();
+    assert_eq!(Ledger::FORMAT, 1);
+    assert_refused_untouched(&fx, &text, calls, |err| {
         matches!(
             err,
             LedgerError::UnsupportedFormat {
@@ -104,16 +136,61 @@ fn newer_format_is_refused_untouched() {
                 supported: 1,
                 ..
             }
-        ),
-        "{err:?}"
+        )
+    });
+}
+
+/// No build ever wrote format 0, and a 1 that became a 0 is a one-bit disk error: the file is
+/// corrupt, not old.
+#[test]
+fn format_zero_is_refused_as_corrupt_untouched() {
+    let fx = installed();
+    pending_not_applied(&fx);
+    let text = rewrite(&fx, |json| json["format"] = 0.into());
+    let calls = fx.fake.calls().len();
+    assert_refused_untouched(
+        &fx,
+        &text,
+        calls,
+        |err| matches!(err, LedgerError::Corrupt { reason, .. } if reason.contains("format 0")),
     );
-    assert_eq!(Ledger::FORMAT, 1);
-    assert_eq!(std::fs::read(&file).unwrap(), text);
-    assert!(matches!(
-        Ledger::inspect(&fx.paths),
-        Err(LedgerError::UnsupportedFormat { .. })
-    ));
-    assert_eq!(fx.fake.calls(), []);
+}
+
+/// An entry the ledger could not have written (one `apply` or a backend would refuse) makes
+/// the whole file corrupt: nothing safe can be done with it, and an honest refusal beats an
+/// entry that fails forever.
+#[test]
+fn an_entry_the_ledger_could_not_have_written_is_refused_untouched() {
+    type Edit = fn(&mut serde_json::Value);
+    let edits: [(&str, Edit); 5] = [
+        ("an HKLM target", |e| {
+            e["change"]["target"]["key"] = r"HKLM\Software\X".into();
+        }),
+        ("an invalid group", |e| e["group"] = "Not A Group".into()),
+        ("a value the target cannot hold", |e| {
+            e["change"]["value"] = serde_json::json!({"type": "bool", "data": true});
+        }),
+        ("a before-state the target cannot hold", |e| {
+            e["before"]["value"] = serde_json::json!({"type": "bool", "data": true});
+        }),
+        ("a created key outside HKCU", |e| {
+            e["before"]["created_keys"] = serde_json::json!([r"HKLM\Software\X"]);
+        }),
+    ];
+    for (case, edit) in edits {
+        let fx = installed();
+        pending_not_applied(&fx);
+        let text = rewrite(&fx, |json| edit(&mut json["entries"][0]));
+        let calls = fx.fake.calls().len();
+        assert_refused_untouched(&fx, &text, calls, |err| {
+            let corrupt = matches!(
+                err,
+                LedgerError::Corrupt { reason, .. } if reason.starts_with("entry 1: ")
+            );
+            assert!(corrupt, "{case}: {err:?}");
+            corrupt
+        });
+    }
 }
 
 #[test]
@@ -194,6 +271,7 @@ fn entry_ids_out_of_order_or_at_the_end_are_refused_untouched() {
             "{ids:?}"
         );
         assert_eq!(std::fs::read(&file).unwrap(), text, "{ids:?}");
+        assert_eq!(files_under(fx.paths.data_dir()), [file], "{ids:?}");
         assert_eq!(fx.fake.calls().len(), calls, "{ids:?}");
     }
 }
@@ -396,6 +474,35 @@ fn someone_elses_value_drops_the_older_entries_of_its_setting_unasked() {
         fx.fake.calls()[calls..],
         [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::IsApplied]
     );
+}
+
+/// Only entries of the same setting hold one another back: a newer `Applied` entry of slot 1
+/// leaves a `Pending` entry of slot 2 to be settled like any other.
+#[test]
+fn an_entry_of_another_setting_does_not_hold_a_pending_entry_back() {
+    let fx = installed();
+    let mut l = fx.open();
+    // Entry 1: slot 2, left `Pending` with its change not live. Entry 2: slot 3, left
+    // `Pending` with its change live. Entry 3: slot 1, `Applied`, the newest.
+    leave_pending(&fx, &mut l, &slot(2), "x");
+    fx.fake.panic_after_next(FakeOp::Apply, &slot(3));
+    assert!(catch_unwind(AssertUnwindSafe(|| l.apply("g", set(&slot(3), "y")))).is_err());
+    l.apply("g", set(&slot(1), "z")).unwrap();
+    drop(l);
+    let (l, report) = reopen(&fx);
+    assert_eq!(
+        (report.confirmed, report.rolled_back),
+        (vec![EntryId(2)], vec![EntryId(1)])
+    );
+    assert!(report.skipped.is_empty() && report.failed.is_empty());
+    assert_eq!(
+        states(l.entries()),
+        [
+            (EntryId(2), EntryState::Applied),
+            (EntryId(3), EntryState::Applied)
+        ]
+    );
+    assert_eq!(fx.fake.get(&slot(2)), None);
 }
 
 /// An entry an open rolls back hands the keys it created over like a reverted one: here to the

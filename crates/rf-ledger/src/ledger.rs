@@ -125,7 +125,7 @@ pub struct Ledger {
 }
 
 /// Whether `group` is a non-empty name of lowercase letters, digits, `.` and `-`.
-fn is_valid_group(group: &str) -> bool {
+pub(crate) fn is_valid_group(group: &str) -> bool {
     !group.is_empty()
         && group
             .bytes()
@@ -231,6 +231,11 @@ impl Ledger {
     /// The ledger file's name inside the data folder.
     pub const FILE_NAME: &'static str = "ledger.json";
     /// The ledger file format this build writes.
+    ///
+    /// Any new field or enum variant anywhere in the file (the entries, changes, targets,
+    /// values, before-states) bumps it: an older build would otherwise drop what it does not
+    /// know on its next save, and with it a change a newer build recorded. Format 0 was never
+    /// written; a file that says so is corrupt.
     pub const FORMAT: u32 = 1;
 
     /// Where the ledger file of `paths` lives.
@@ -242,8 +247,10 @@ impl Ledger {
     /// `Pending` entries a crash left (see [`ReconcileReport`]) and saves the file once if that
     /// changed anything.
     ///
-    /// A ledger file that does not parse, or whose entry ids were tampered with, is refused
-    /// with [`LedgerError::Corrupt`]; one a newer build wrote, with
+    /// A ledger file that does not parse, says format 0, or whose entry ids were tampered with
+    /// or entries could not have been written by the ledger (an invalid group, change,
+    /// before-state or created key), is refused with [`LedgerError::Corrupt`]; one a newer
+    /// build wrote, with
     /// [`LedgerError::UnsupportedFormat`]. Neither is ever changed, and the backend is not
     /// called: the file is the only record of the system changes to revert. If the settled
     /// entries cannot be saved, that error is returned; the next open settles them again, with
