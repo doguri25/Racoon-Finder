@@ -12,4 +12,5 @@ pub use change::{Before, Change, ServiceKind, Target, Value};
 pub use error::LedgerError;
 pub use ledger::{
     ApplyOutcome, EntryFailure, EntryId, EntryState, Ledger, LedgerEntry, ReconcileReport,
+    RevertReport,
 };

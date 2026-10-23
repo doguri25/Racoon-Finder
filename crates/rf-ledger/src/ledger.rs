@@ -6,7 +6,7 @@ use rf_core::{AppPaths, InstallMode};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::SystemBackend;
-use crate::change::{Before, Change};
+use crate::change::{Before, Change, Target};
 use crate::error::LedgerError;
 use crate::store::{self, LedgerFile};
 
@@ -64,6 +64,27 @@ pub struct ReconcileReport {
     pub confirmed: Vec<EntryId>,
     pub rolled_back: Vec<EntryId>,
     pub failed: Vec<EntryFailure>,
+}
+
+/// What [`Ledger::revert_all`] or [`Ledger::revert_group`] settled, each list in processing
+/// order (newest entry first).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RevertReport {
+    /// Entries whose before-state was put back; they are no longer recorded.
+    pub reverted: Vec<EntryId>,
+    /// Entries whose value someone else changed since: the other value was left alone and the
+    /// entry is no longer recorded.
+    pub skipped: Vec<EntryId>,
+    /// Entries that are still recorded because they could not be settled.
+    pub failed: Vec<EntryFailure>,
+}
+
+impl RevertReport {
+    /// Whether every entry that was asked for is settled, that is, nothing `failed`.
+    pub fn is_clean(&self) -> bool {
+        self.failed.is_empty()
+    }
 }
 
 /// Records every change to the operating system, with the state it replaced, in a file under
@@ -202,6 +223,102 @@ impl Ledger {
         // A failed save leaves the entry `Pending` on disk; the next open confirms it.
         let _ = self.persist();
         Ok(ApplyOutcome::Recorded(id))
+    }
+
+    /// Puts the system back to what it was before the changes of `group`, newest first, and
+    /// drops them from the ledger. See [`Ledger::revert_all`] for the rules.
+    pub fn revert_group(&mut self, group: &str) -> RevertReport {
+        self.revert_where(|entry| entry.group == group)
+    }
+
+    /// Puts the system back to what it was before every recorded change, newest first, and
+    /// drops them from the ledger.
+    ///
+    /// A value is put back only if the system still holds the value the app wrote. If someone
+    /// else changed it since, it is theirs: the entry is dropped as `skipped` and the system
+    /// is left alone. An entry a crash left `Pending` is put back without that check, because
+    /// the system may hold a half-written value of ours.
+    ///
+    /// An entry that fails stays recorded, and so do the older entries for the same setting:
+    /// the system still holds the newer value, so they could not be told apart from a value
+    /// someone else wrote, and dropping them would lose the original before-state. Running
+    /// the revert again retries them. After every entry settled the file is saved, so a crash
+    /// part-way leaves a ledger that matches what is left to revert.
+    pub fn revert_all(&mut self) -> RevertReport {
+        self.revert_where(|_| true)
+    }
+
+    /// Reverts the entries `pick` accepts, newest first.
+    fn revert_where(&mut self, pick: impl Fn(&LedgerEntry) -> bool) -> RevertReport {
+        let mut report = RevertReport::default();
+        // Settings whose newest entry could not be settled.
+        let mut stuck: Vec<Target> = Vec::new();
+        // Entries only leave the list at the index being settled, so lower indexes stay valid.
+        for index in (0..self.entries.len()).rev() {
+            let entry = &self.entries[index];
+            if !pick(entry) {
+                continue;
+            }
+            let id = entry.id;
+            let label = entry.change.target.to_string();
+            let fail = |error: String| EntryFailure {
+                id,
+                change: label,
+                error,
+            };
+
+            if stuck
+                .iter()
+                .any(|slot| slot.same_slot(&entry.change.target))
+            {
+                report.failed.push(fail(
+                    "not reverted: a newer change to the same setting could not be reverted first"
+                        .into(),
+                ));
+                continue;
+            }
+            if entry.state == EntryState::Applied {
+                match self.backend.is_applied(&entry.change) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // The value is no longer the one the app wrote, so it is not the app's
+                        // to overwrite.
+                        match self.forget(index) {
+                            Ok(()) => report.skipped.push(id),
+                            Err(e) => report.failed.push(fail(format!(
+                                "left alone, but the ledger file could not be updated: {e}"
+                            ))),
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        stuck.push(entry.change.target.clone());
+                        report.failed.push(fail(e.to_string()));
+                        continue;
+                    }
+                }
+            }
+            if let Err(e) = self.backend.restore(&entry.change, &entry.before) {
+                stuck.push(entry.change.target.clone());
+                report.failed.push(fail(e.to_string()));
+                continue;
+            }
+            match self.forget(index) {
+                Ok(()) => report.reverted.push(id),
+                Err(e) => report.failed.push(fail(format!(
+                    "restored, but the ledger file could not be updated: {e}"
+                ))),
+            }
+        }
+        report
+    }
+
+    /// Drops the entry at `index` and saves the file. If the file cannot be saved, the entry is
+    /// put back so that memory and disk agree.
+    fn forget(&mut self, index: usize) -> Result<(), LedgerError> {
+        let entry = self.entries.remove(index);
+        self.persist()
+            .inspect_err(|_| self.entries.insert(index, entry))
     }
 
     /// Writes the current entries to the ledger file.
