@@ -56,9 +56,9 @@ pub type DirEventHandler = Box<dyn FnMut(DirEvent) + Send>;
 /// A running watch. Dropping it stops the watch.
 ///
 /// The drop blocks until the backend has stopped: on Windows it cancels the pending read and
-/// joins the watch thread, which takes at least 10 ms, and `FSEvents` joins its run loop. A
-/// caller that must not wait, such as a UI thread, drops the watch on another thread; the VFS
-/// layer does so.
+/// joins the watch thread, 10 ms or more while that thread still runs, and `FSEvents` joins its
+/// run loop. A caller that must not wait, such as a UI thread, drops the watch on another
+/// thread; the VFS layer does so.
 ///
 /// On Windows the handler is not called again once the drop has returned. The `notify` backend
 /// (inotify, `FSEvents`) can still call it once more right after the drop, so a caller that must

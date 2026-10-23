@@ -79,7 +79,8 @@ pub(super) fn start(dir: &Path, handler: DirEventHandler) -> io::Result<Watcher>
 }
 
 impl Drop for Watcher {
-    /// Blocks until the watch thread is gone, at least one 10 ms pause; see `DirWatch`.
+    /// Blocks until the watch thread is gone: one 10 ms pause or more while it still runs; see
+    /// `DirWatch`.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let Some(thread) = self.thread.take() else {

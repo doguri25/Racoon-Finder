@@ -75,12 +75,13 @@ impl<B: Send + 'static> Drop for LocalWatch<B> {
     /// Closes the slot, which waits for a sink call in progress and keeps every later one from
     /// happening, then hands the backend to a short-lived thread that stops it.
     ///
-    /// Stopping a backend can block (Windows cancels its pending read and joins its thread, at
-    /// least 10 ms; `FSEvents` joins its run loop), and the handle may be dropped on the UI
+    /// Stopping a backend can block (Windows cancels its pending read and joins its thread, 10
+    /// ms or more; `FSEvents` joins its run loop), and the handle may be dropped on the UI
     /// thread. The stop cannot hang: the backend's handler only sends into an unbounded
-    /// channel, which never blocks, and the sink is closed already. If no thread can be
-    /// started, the closure that owns the backend is dropped right here, so the backend is
-    /// stopped on this thread instead.
+    /// channel, which never blocks, and the sink is closed already. Until it is done the OS
+    /// watch still holds the folder open (on Windows with delete sharing, so the folder can be
+    /// deleted or renamed meanwhile). If no thread can be started, the closure that owns the
+    /// backend is dropped right here, so the backend is stopped on this thread instead.
     fn drop(&mut self) {
         self.slot.close();
         if let Some(backend) = self.backend.take() {

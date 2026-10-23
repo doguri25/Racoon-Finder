@@ -194,8 +194,8 @@ fn dropping_the_handle_stops_the_sink() {
 }
 
 /// Dropping a handle, maybe on the UI thread, must not wait for the OS watch to stop: on
-/// Windows that takes at least 10 ms. The fastest of five drops is judged, so that a busy
-/// machine does not fail the test.
+/// Windows stopping a running watch takes 10 ms or more. The fastest of five drops is judged,
+/// so that a busy machine does not fail the test.
 #[test]
 fn dropping_the_handle_does_not_wait_for_the_os_watch() {
     let t = tempfile::tempdir().unwrap();

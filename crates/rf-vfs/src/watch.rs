@@ -58,7 +58,8 @@ pub type WatchSink = Box<dyn FnMut(WatchEvent) + Send>;
 /// Dropping it waits for a sink call that is in progress, so never drop it from inside the sink,
 /// and never while holding a lock (or anything else) the sink may wait on: the two would wait
 /// for each other. Apart from that wait the drop is quick, so the UI thread may drop it: the
-/// local provider stops the OS watch on a thread of its own.
+/// local provider stops the OS watch on a thread of its own, which may keep the folder open
+/// for a few milliseconds after the drop has returned.
 pub struct WatchHandle {
     _guard: Box<dyn Any + Send>,
 }
