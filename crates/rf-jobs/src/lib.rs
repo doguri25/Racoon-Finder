@@ -2,10 +2,14 @@
 
 pub mod id;
 pub mod naming;
+pub mod preflight;
 pub mod spec;
 
 pub use id::JobId;
 pub use naming::{MAX_NUMBERED, TEMP_SUFFIX, numbered_name, temp_job, temp_name};
+pub use preflight::{
+    CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
+};
 pub use spec::{
     ConflictPolicy, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy, JobKind, JobSpec,
     SymlinkMode, TransferItem, TransferMode, TransferOptions, TransferSpec,
