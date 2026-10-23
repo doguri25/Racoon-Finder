@@ -8,12 +8,10 @@
 
 use std::ffi::{OsString, c_void};
 use std::io;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-use rf_core::winpath::strip_extended_length;
 use rf_core::{Error, Result, VPath};
-use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
@@ -27,6 +25,7 @@ use windows::Win32::UI::Shell::{
 use windows::core::{IUnknown, PCWSTR};
 
 use self::sink::RecycleGuard;
+use crate::fileid::file_identity;
 use crate::volume::volume_root;
 use crate::win_util::{to_io, wide};
 
@@ -68,8 +67,8 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
             "trash needs a local path: {path}"
         )));
     };
-    let local = local.to_path_buf();
-    let outcome = std::thread::spawn(move || recycle(&local))
+    let (requested, local) = (path.clone(), local.to_path_buf());
+    let outcome = std::thread::spawn(move || recycle(&requested, &local))
         .join()
         .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))));
     match outcome {
@@ -113,7 +112,7 @@ impl Drop for ComScope {
 }
 
 /// Runs on its own thread: COM in, work, COM out.
-fn recycle(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+fn recycle(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     // SAFETY: no reserved pointer; the thread is new, so no apartment is set yet.
     let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
     if init.is_err() {
@@ -123,10 +122,10 @@ fn recycle(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     }
     // `run` has dropped every COM object when it returns, before the scope ends.
     let _scope = ComScope;
-    run(local)
+    run(requested, local)
 }
 
-fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+fn run(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
     let fail = |e: windows::core::Error| Failure::Io(to_io(&e));
     let name = wide(local.as_os_str());
 
@@ -145,9 +144,9 @@ fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
         unsafe { SHCreateItemFromParsingName(PCWSTR(name.as_ptr()), None::<&IBindCtx>) }
             .map_err(fail)?;
     // The shell drops a trailing dot or space while parsing, so the item may be a sibling of the
-    // one asked for. Compare before anything is queued; a name that cannot be read counts as a
-    // mismatch.
-    if !file_system_path(&item).is_some_and(|resolved| same_path(local, &resolved)) {
+    // one asked for. Check that it is the very item before anything is queued; a name that
+    // cannot be read counts as a mismatch.
+    if !file_system_path(&item).is_some_and(|resolved| same_item(requested, &resolved)) {
         return Err(Failure::Redirected);
     }
 
@@ -184,14 +183,20 @@ fn file_system_path(item: &IShellItem) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Whether two paths are the same text, compared by UTF-16 unit and without regard to case
-/// (the way NTFS compares names), after dropping a `\\?\` prefix.
-fn same_path(requested: &Path, resolved: &Path) -> bool {
-    let units =
-        |path: &Path| strip_extended_length(&path.as_os_str().encode_wide().collect::<Vec<_>>());
-    let (requested, resolved) = (units(requested), units(resolved));
-    // SAFETY: both arguments are valid slices that the call only reads.
-    unsafe { CompareStringOrdinal(&requested, &resolved, true) == CSTR_EQUAL }
+/// Whether `resolved`, the path the shell gives for its parsed item, is the item `requested`.
+///
+/// This compares file identities (volume and file index, without following a final link), not
+/// text: the shell returns long names where the request may hold 8.3 short names, and it can
+/// differ in case, but it also turns `report.` into `report`, which is another file. If either
+/// identity cannot be read, the answer is no.
+fn same_item(requested: &VPath, resolved: &Path) -> bool {
+    let Ok(resolved) = VPath::local(resolved) else {
+        return false;
+    };
+    matches!(
+        (file_identity(requested), file_identity(&resolved)),
+        (Ok(wanted), Ok(found)) if wanted == found
+    )
 }
 
 /// The progress sink, in a module of its own because the `implement` macro writes code that
