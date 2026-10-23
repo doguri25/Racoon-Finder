@@ -11,8 +11,17 @@ const REQUIRED: &[&str] = &[
     "windows_registry::Key::remove_value",
     "windows_registry::Key::remove_tree",
     "windows::Win32::System::Registry::RegSetValueExW",
+    "windows::Win32::System::Registry::RegSetValueExA",
+    "windows::Win32::System::Registry::RegSetValueW",
     "windows::Win32::System::Registry::RegCreateKeyExW",
+    "windows::Win32::System::Registry::RegCreateKeyW",
     "windows::Win32::System::Registry::RegDeleteTreeW",
+    "windows::Win32::System::Registry::RegRestoreKeyW",
+    "windows::Win32::UI::Shell::SHSetValueW",
+    "windows::Win32::UI::Shell::SHDeleteKeyW",
+    "windows::Win32::UI::Shell::SHSetKnownFolderPath",
+    "windows_sys::Win32::System::Registry::RegSetValueExW",
+    "windows_sys::Win32::UI::Shell::SHSetValueW",
     "objc2_core_foundation::CFPreferencesSetValue",
     "objc2_core_foundation::CFPreferencesSetAppValue",
     "objc2_foundation::NSUserDefaults::setObject_forKey",
@@ -94,6 +103,14 @@ fn clippy_toml_disallows_os_write_apis() {
             .find(|&e| field(e, "path") == *required)
             .unwrap_or_else(|| panic!("{required} missing"));
         assert!(field(entry, "reason").contains("rf-ledger"), "{required}");
+    }
+    // The same functions are reachable through `windows-sys`.
+    let paths: Vec<String> = entries.iter().map(|e| field(e, "path")).collect();
+    for path in &paths {
+        if let Some(rest) = path.strip_prefix("windows::") {
+            let twin = format!("windows_sys::{rest}");
+            assert!(paths.contains(&twin), "{twin} missing");
+        }
     }
     assert!(
         table.contains_key("doc-valid-idents"),
