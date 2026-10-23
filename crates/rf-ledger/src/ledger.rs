@@ -101,13 +101,15 @@ impl RevertReport {
 /// the app's data folder, so that every change can be reverted.
 ///
 /// A change is written to the file, and flushed to disk, before the system is touched.
+///
+/// In portable mode (`InstallMode::Portable`) the ledger never touches the system or its own
+/// file: it stays empty, [`Ledger::apply`] is refused with [`LedgerError::PortableMode`] and
+/// the revert methods have nothing to do. A ledger file in the data folder, say one copied
+/// from an installed setup, is neither read nor changed, and the backend is never called.
 #[derive(Debug)]
 pub struct Ledger {
     path: PathBuf,
-    #[expect(
-        dead_code,
-        reason = "read by the portable-mode guard that a later change adds"
-    )]
+    /// Whether the app runs portable: this ledger is empty and inert.
     portable: bool,
     backend: Box<dyn SystemBackend>,
     next_id: u64,
@@ -183,11 +185,24 @@ impl Ledger {
     /// called: the file is the only record of the system changes to revert. If the settled
     /// entries cannot be saved, that error is returned; the next open settles them again, with
     /// the same result.
+    ///
+    /// In portable mode none of this happens: the file is not read, so even one that would be
+    /// refused is no obstacle, and the result is an empty ledger and an empty report.
     pub fn open(
         paths: &AppPaths,
         backend: Box<dyn SystemBackend>,
     ) -> Result<(Self, ReconcileReport), LedgerError> {
         let path = Self::file_path(paths);
+        if paths.mode() == InstallMode::Portable {
+            let ledger = Self {
+                path,
+                portable: true,
+                backend,
+                next_id: 1,
+                entries: Vec::new(),
+            };
+            return Ok((ledger, ReconcileReport::default()));
+        }
         let (entries, next_id) = match store::load(&path)? {
             Some(file) => {
                 // `load` checked that the ids ascend and that the last one is below `u64::MAX`.
@@ -198,7 +213,7 @@ impl Ledger {
         };
         let mut ledger = Self {
             path,
-            portable: paths.mode() == InstallMode::Portable,
+            portable: false,
             backend,
             next_id,
             entries,
@@ -278,7 +293,11 @@ impl Ledger {
     }
 
     /// Reads the recorded entries without a backend; refuses the same files as [`Ledger::open`].
+    /// In portable mode the file is not read and the list is empty.
     pub fn inspect(paths: &AppPaths) -> Result<Vec<LedgerEntry>, LedgerError> {
+        if paths.mode() == InstallMode::Portable {
+            return Ok(Vec::new());
+        }
         Ok(store::load(&Self::file_path(paths))?.map_or_else(Vec::new, |file| file.entries))
     }
 
@@ -297,7 +316,13 @@ impl Ledger {
     ///
     /// Only one group may own a slot of system state at a time. If the system already holds
     /// the wanted value, nothing is changed or recorded.
+    ///
+    /// In portable mode this is refused first of all, with [`LedgerError::PortableMode`]: the
+    /// system is never changed.
     pub fn apply(&mut self, group: &str, change: Change) -> Result<ApplyOutcome, LedgerError> {
+        if self.portable {
+            return Err(LedgerError::PortableMode);
+        }
         if !is_valid_group(group) {
             return Err(LedgerError::InvalidGroup(group.to_owned()));
         }
@@ -378,13 +403,19 @@ impl Ledger {
     /// someone else wrote, and dropping them would lose the original before-state. Running
     /// the revert again retries them. After every entry settled the file is saved, so a crash
     /// part-way leaves a ledger that matches what is left to revert.
+    ///
+    /// In portable mode the report is empty and neither the system nor the file is touched.
     pub fn revert_all(&mut self) -> RevertReport {
         self.revert_where(|_| true)
     }
 
-    /// Reverts the entries `pick` accepts, newest first, under the rule of [`SlotChain`].
+    /// Reverts the entries `pick` accepts, newest first, under the rule of [`SlotChain`]. In
+    /// portable mode there is nothing to revert and the system is not asked.
     fn revert_where(&mut self, pick: impl Fn(&LedgerEntry) -> bool) -> RevertReport {
         let mut report = RevertReport::default();
+        if self.portable {
+            return report;
+        }
         let mut chain = SlotChain::default();
         // Entries only leave the list at the index being settled, so lower indexes stay valid.
         for index in (0..self.entries.len()).rev() {
