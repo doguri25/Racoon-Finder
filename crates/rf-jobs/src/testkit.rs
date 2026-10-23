@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use rf_core::{Entry, Error, Result, Scheme, VPath, VolumeId};
 use rf_vfs::{
-    CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LinkTarget, LocalProvider,
-    MetadataPatch, Provider, ReadStream, RenameMode, Vfs, WatchHandle, WatchSink, WriteMode,
-    WriteStream,
+    CancelToken, Capabilities, DataRanges, DeleteMode, Deleted, DiskSpace, LinkTarget,
+    LocalProvider, MetadataPatch, Provider, ReadStream, RenameMode, Vfs, WatchHandle, WatchSink,
+    WriteMode, WriteStream,
 };
 
 use crate::conflict::{Conflict, ConflictAnswer};
@@ -346,6 +346,10 @@ pub enum Fault {
     /// Every `write_hole` gives `Ok(false)` and passes nothing on, as on a file system that
     /// cannot make holes (FAT and exFAT on Windows).
     NoHoles,
+    /// Every `seek` of a stream that reads an item called `name` fails with
+    /// `injected seek failure`, as on a stream that cannot seek (a pipe-like FUSE file, a
+    /// remote stream). Its `ReadStream::data_ranges` still answers.
+    FailSeek { name: OsString },
 }
 
 impl Fault {
@@ -637,13 +641,21 @@ impl Provider for FaultyProvider {
 
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>> {
         let inner = self.inner.open_read(path)?;
+        let named = |name: &OsString| path.file_name() == Some(name.as_os_str());
         let ranges = self.faults.iter().find_map(|fault| match fault {
-            Fault::DataRanges { name, ranges } if path.file_name() == Some(name.as_os_str()) => {
-                Some(ranges.clone())
-            }
+            Fault::DataRanges { name, ranges } if named(name) => Some(ranges.clone()),
             _ => None,
         });
-        Ok(Box::new(FaultyReader { inner, ranges }))
+        let fail_seek = self
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::FailSeek { name } if named(name)));
+        Ok(Box::new(FaultyReader {
+            inner,
+            path: path.clone(),
+            ranges,
+            fail_seek,
+        }))
     }
 
     fn open_write(&self, path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteStream>> {
@@ -741,12 +753,15 @@ impl Provider for FaultyProvider {
     }
 }
 
-/// A file a [`FaultyProvider`] reads: the inner stream, and the ranges of the
-/// [`Fault::DataRanges`] for its item, if there is one.
+/// A file a [`FaultyProvider`] reads: the inner stream, the ranges of the
+/// [`Fault::DataRanges`] for its item, if there is one, and whether a [`Fault::FailSeek`]
+/// names it.
 #[derive(Debug)]
 struct FaultyReader {
     inner: Box<dyn ReadStream>,
+    path: VPath,
     ranges: Option<Vec<Range<u64>>>,
+    fail_seek: bool,
 }
 
 impl Read for FaultyReader {
@@ -757,16 +772,28 @@ impl Read for FaultyReader {
 
 impl Seek for FaultyReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        if self.fail_seek {
+            return Err(io::Error::other("injected seek failure"));
+        }
         self.inner.seek(pos)
     }
 }
 
 impl ReadStream for FaultyReader {
-    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
-        match &self.ranges {
-            Some(ranges) => Ok(Some(ranges.clone())),
-            None => self.inner.data_ranges(),
-        }
+    /// The injected ranges come with the length the file has now, which the inner stream
+    /// tells; it is put back where it was. Without a [`Fault::DataRanges`] the call is passed on.
+    fn data_ranges(&mut self) -> Result<Option<DataRanges>> {
+        let Some(ranges) = &self.ranges else {
+            return self.inner.data_ranges();
+        };
+        let fail = |e| Error::io("data_ranges", self.path.clone(), e);
+        let at = self.inner.stream_position().map_err(fail)?;
+        let len = self.inner.seek(SeekFrom::End(0)).map_err(fail)?;
+        self.inner.seek(SeekFrom::Start(at)).map_err(fail)?;
+        Ok(Some(DataRanges {
+            len,
+            ranges: ranges.clone(),
+        }))
     }
 }
 
@@ -1015,14 +1042,22 @@ mod tests {
         sparse.write_all(b"x").unwrap();
         assert!(sparse.write_hole(1 << 20).unwrap());
         sparse.finish().unwrap();
-        let p = FaultyProvider::local(vec![Fault::DataRanges {
-            name: "a".into(),
-            ranges: vec![1..2, 4..5],
-        }]);
+        let p = FaultyProvider::local(vec![
+            Fault::DataRanges {
+                name: "a".into(),
+                ranges: vec![1..2, 4..5],
+            },
+            Fault::FailSeek { name: "b".into() },
+        ]);
         let local = LocalProvider::new();
         let streamed = |p: &dyn Provider, path| p.open_read(path).unwrap().data_ranges().unwrap();
-        // The fault is for the streams of `a`; everything else is passed on.
-        assert_eq!(streamed(&*p, &a), Some(vec![1..2, 4..5]));
+        // The fault is for the streams of `a`, with the length `a` has; everything else is
+        // passed on.
+        let injected = DataRanges {
+            len: 5,
+            ranges: vec![1..2, 4..5],
+        };
+        assert_eq!(streamed(&*p, &a), Some(injected));
         assert_eq!(streamed(&*p, &b), streamed(&local, &b));
         for path in [&a, &b] {
             assert_eq!(
@@ -1030,6 +1065,17 @@ mod tests {
                 local.data_ranges(path).unwrap()
             );
         }
+        // The stream of `b` reads but does not seek, and the injected answer did not move `a`'s.
+        let mut stream = p.open_read(&b).unwrap();
+        let error = stream.seek(SeekFrom::Start(0)).unwrap_err();
+        assert_eq!(error.to_string(), "injected seek failure");
+        let mut first = [0; 1];
+        stream.read_exact(&mut first).unwrap();
+        assert_eq!(first, *b"x");
+        let mut stream = p.open_read(&a).unwrap();
+        stream.data_ranges().unwrap();
+        stream.read_exact(&mut first).unwrap();
+        assert_eq!(first, *b"d");
     }
 
     #[test]

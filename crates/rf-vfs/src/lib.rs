@@ -18,6 +18,6 @@ pub use provider::{
     ReadStream, RenameMode, WriteMode, WriteStream,
 };
 pub use registry::Vfs;
-pub use rf_platform::DiskSpace;
+pub use rf_platform::{DataRanges, DiskSpace};
 pub use sort::{SortBy, SortKey, SortOrder, SortSpec, compare_entries, sort_entries};
 pub use watch::{Change, MAX_PENDING_CHANGES, WATCH_DEBOUNCE, WatchEvent, WatchHandle, WatchSink};

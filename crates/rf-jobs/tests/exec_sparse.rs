@@ -66,3 +66,17 @@ fn a_trailing_hole_keeps_the_file_size() {
     assert_eq!(std::fs::metadata(&b).unwrap().len(), 16 * MIB);
     assert_eq!(std::fs::read(&b).unwrap(), std::fs::read(&a).unwrap());
 }
+
+/// A pseudo-file is copied whole, as it reads: `/proc/version` reports no length and refuses
+/// `lseek(SEEK_END)` (`EINVAL`), so a copy that seeks before it knows of any holes would fail it.
+#[cfg(target_os = "linux")]
+#[test]
+fn pseudo_files_are_copied_whole() {
+    let f = fx();
+    let source = std::path::PathBuf::from("/proc/version");
+    let r = run(&copy(std::slice::from_ref(&source), &f.dst));
+    assert_eq!(r.outcome, Outcome::Completed, "{:?}", r.failures);
+    let copied = std::fs::read(f.dst.join("version")).unwrap();
+    assert_eq!(copied, std::fs::read(&source).unwrap());
+    assert_ne!(copied, Vec::<u8>::new());
+}

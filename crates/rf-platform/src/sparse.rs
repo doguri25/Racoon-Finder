@@ -23,22 +23,38 @@ pub fn data_ranges(path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
     };
     let fail = |e| Error::io("data_ranges", path.clone(), e);
     let file = File::open(local).map_err(fail)?;
-    file_data_ranges(&file).map_err(fail)
+    let found = file_data_ranges(&file).map_err(fail)?;
+    Ok(found.map(|found| found.ranges))
 }
 
-/// The ranges of the open file `file` that hold data, in ascending order and not overlapping.
-/// The gaps between them, and before the first and after the last up to the file's length,
-/// are holes: they read as zeros and take no space on the disk. The length and the ranges are
-/// both taken from `file`, so they describe the file that was opened, even when its path names
-/// another file by now (an app that saves by replacing the file).
+/// Where an open file holds data, as [`file_data_ranges`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataRanges {
+    /// The length of the file, taken with the ranges from the same file; no range reaches past
+    /// it.
+    pub len: u64,
+    /// The ranges that hold data, in ascending order and not overlapping.
+    pub ranges: Vec<Range<u64>>,
+}
+
+/// The length of the open file `file` and its ranges that hold data, in ascending order and not
+/// overlapping. The gaps between them, and before the first and after the last up to the
+/// length, are holes: they read as zeros and take no space on the disk. Both are taken from
+/// `file` (`fstat`, `GetFileInformationByHandle`), so they describe the file that was opened,
+/// even when its path names another file by now (an app that saves by replacing the file).
+/// The offset of `file` is never moved, so a reader of it can go on where it was.
 ///
 /// `Ok(None)` means there are no holes to keep, or that the answer cannot be trusted:
 /// - Linux and other Unix systems: a file whose allocated blocks (`st_blocks` × 512) cover its
-///   length has none. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks the file. A file
-///   system that does not know them (`EINVAL`, `ENOTSUP`) gives `None`, and so does an `ENXIO`
-///   ("no data from here on") for an offset that `SEEK_HOLE` does not confirm as the start of a
-///   hole: some file systems answer `ENXIO` for data they keep elsewhere (QEMU issue 3124). The
-///   walk moves the file's offset, so seek before reading from `file`.
+///   length has none, and nothing more is asked; pseudo-files such as those of `/proc` report
+///   no length and stop there too. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks a
+///   second open file description of the same file (`/proc/self/fd`), which leaves the offset
+///   of `file` alone; one that cannot be opened gives `None`. A file system that does not know
+///   these seeks (`EINVAL`, `ENOTSUP`, `ESPIPE`) gives `None`, and so do answers that do not
+///   agree with each other: an `ENXIO` ("no data from here on") for an offset that `SEEK_HOLE`
+///   does not confirm as the start of a hole (some file systems answer `ENXIO` for data they
+///   keep elsewhere, QEMU issue 3124), and data that starts after offset 0 when `SEEK_HOLE`
+///   does not find a hole at 0.
 /// - macOS: always. A file compressed by the file system (decmpfs, `UF_COMPRESSED`) has fewer
 ///   blocks than its length and answers `ENXIO` to `SEEK_DATA` inside it, and APFS answers to
 ///   `SEEK_HOLE` have lost data before (GNU coreutils bugs 51857 and 61386), so its files are
@@ -58,7 +74,7 @@ pub fn data_ranges(path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
 /// The ranges describe the file as it was when it was looked at: no range reaches past the
 /// length it had then. A file that changes afterwards can end before a range does, so a
 /// caller that reads the ranges must check that it gets every byte of them.
-pub fn file_data_ranges(file: &File) -> io::Result<Option<Vec<Range<u64>>>> {
+pub fn file_data_ranges(file: &File) -> io::Result<Option<DataRanges>> {
     #[cfg(target_os = "macos")]
     {
         let _ = file;
@@ -66,7 +82,8 @@ pub fn file_data_ranges(file: &File) -> io::Result<Option<Vec<Range<u64>>>> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(imp::data_ranges(file)?.and_then(|(len, ranges)| tidy(len, ranges)))
+        Ok(imp::data_ranges(file)?
+            .and_then(|(len, ranges)| tidy(len, ranges).map(|ranges| DataRanges { len, ranges })))
     }
 }
 
@@ -137,7 +154,7 @@ enum Found {
     At(u64),
     /// Nothing of the kind from the offset on (`ENXIO`).
     Nothing,
-    /// The file system cannot seek to data and holes (`EINVAL`, `ENOTSUP`).
+    /// The file cannot seek to data and holes (`EINVAL`, `ENOTSUP`, `ESPIPE`).
     Unknown,
 }
 
@@ -146,7 +163,9 @@ enum Found {
 ///
 /// "No data from here on" (`Found::Nothing` for `To::Data`) is believed only if the same offset
 /// is the start of a hole (`To::Hole` finds it itself): a file system that keeps data elsewhere
-/// can say there is none in a file full of it (QEMU issue 3124).
+/// can say there is none in a file full of it (QEMU issue 3124). Data that starts after offset
+/// 0 is believed the same way: only if a hole starts at 0. Every later offset the walk asks
+/// from is the start of a hole that `To::Hole` found itself.
 #[cfg_attr(
     any(windows, target_os = "macos"),
     allow(dead_code, reason = "used on Linux; tested on every OS")
@@ -166,6 +185,9 @@ fn walk(
             }
             Found::Unknown => return Ok(None),
         };
+        if at == 0 && start > 0 && seek(To::Hole(0))? != Found::At(0) {
+            return Ok(None);
+        }
         // `Nothing` here means the file got shorter since its data was found.
         let Found::At(end) = seek(To::Hole(start))? else {
             return Ok(None);
@@ -203,6 +225,7 @@ mod imp {
     use std::fs::File;
     use std::io;
     use std::ops::Range;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
 
     use rustix::fs::SeekFrom;
@@ -211,7 +234,7 @@ mod imp {
     use super::{Found, To, walk};
 
     /// The length of `file` and its data ranges as `lseek` finds them, or `None` when it has
-    /// no holes or the answers cannot be trusted.
+    /// no holes or the answers cannot be trusted. The offset of `file` is never moved.
     pub fn data_ranges(file: &File) -> io::Result<Option<(u64, Vec<Range<u64>>)>> {
         let meta = file.metadata()?;
         let len = meta.len();
@@ -219,15 +242,23 @@ mod imp {
         if meta.blocks().saturating_mul(512) >= len {
             return Ok(None);
         }
+        // Seeking moves the offset of the open file description, which `file` shares with
+        // every duplicate of it. A new description of the same file has an offset of its own.
+        let Ok(walked) = File::open(format!("/proc/self/fd/{}", file.as_raw_fd())) else {
+            return Ok(None);
+        };
         let ranges = walk(len, |to| {
             let target = match to {
                 To::Data(offset) => SeekFrom::Data(offset),
                 To::Hole(offset) => SeekFrom::Hole(offset),
             };
-            match rustix::fs::seek(file, target) {
+            match rustix::fs::seek(&walked, target) {
                 Ok(offset) => Ok(Found::At(offset)),
                 Err(Errno::NXIO) => Ok(Found::Nothing),
-                Err(e) if e == Errno::INVAL || e == Errno::NOTSUP || e == Errno::OPNOTSUPP => {
+                Err(e)
+                    if [Errno::INVAL, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::SPIPE]
+                        .contains(&e) =>
+                {
                     Ok(Found::Unknown)
                 }
                 Err(e) => Err(e.into()),
@@ -416,6 +447,21 @@ mod tests {
             To::Hole(0) => Ok(Found::At(10)),
             To::Data(_) => Ok(Found::Nothing),
             To::Hole(at) => Ok(Found::At(at + 1)),
+        };
+        assert_eq!(walk(100, &mut lying).unwrap(), None);
+    }
+
+    #[test]
+    fn data_after_offset_0_is_believed_only_after_a_hole_at_0() {
+        let data: Vec<Range<u64>> = std::iter::once(20..30).collect();
+        assert_eq!(walk(100, honest(&data, 100)).unwrap(), Some(data.clone()));
+        // `SEEK_DATA` skips to 20, but `SEEK_HOLE` finds data at 0 that ends at 5.
+        let mut lying = {
+            let mut truth = honest(&data, 100);
+            move |to| match to {
+                To::Hole(0) => Ok(Found::At(5)),
+                other => truth(other),
+            }
         };
         assert_eq!(walk(100, &mut lying).unwrap(), None);
     }

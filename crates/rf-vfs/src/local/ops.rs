@@ -2,14 +2,14 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::ops::Range;
 
 use rf_core::{Error, ErrorKind, Result, VPath};
 
 use super::native;
 use crate::names::fold_name;
 use crate::provider::{
-    DeleteMode, Deleted, LinkTarget, MetadataPatch, ReadStream, RenameMode, WriteMode, WriteStream,
+    DataRanges, DeleteMode, Deleted, LinkTarget, MetadataPatch, ReadStream, RenameMode, WriteMode,
+    WriteStream,
 };
 
 /// Renames or moves `from` to `to`; see `Provider::rename`.
@@ -273,9 +273,9 @@ impl Seek for LocalReader {
 }
 
 impl ReadStream for LocalReader {
-    /// `rf_platform::file_data_ranges` of the open file, so the ranges are those of the bytes
-    /// this stream reads. On Linux the walk moves the file's position.
-    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+    /// `rf_platform::file_data_ranges` of the open file, so the length and the ranges are those
+    /// of the bytes this stream reads. It never moves the stream's position.
+    fn data_ranges(&mut self) -> Result<Option<DataRanges>> {
         rf_platform::file_data_ranges(&self.file)
             .map_err(|e| Error::io("data_ranges", self.path.clone(), e))
     }

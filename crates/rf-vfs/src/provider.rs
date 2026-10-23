@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use rf_core::{Attributes, Entry, EntryKind, Error, Result, Scheme, VPath};
-pub use rf_platform::DiskSpace;
+pub use rf_platform::{DataRanges, DiskSpace};
 
 use crate::cancel::CancelToken;
 use crate::watch::{WatchHandle, WatchSink};
@@ -78,20 +78,23 @@ pub enum WriteMode {
 /// A file opened for reading. `std::fs::File` and `std::io::Cursor` are streams as they are,
 /// without data ranges.
 pub trait ReadStream: Read + Seek + Send + Debug {
-    /// The ranges of the open file that hold data, in ascending order and not overlapping, so
-    /// that a copy can leave the gaps between them as holes (`WriteStream::write_hole`,
-    /// XFER-11). They are taken from the open file itself, so they describe the bytes this
-    /// stream reads even when its path names another file by now (an app that saves by
-    /// replacing the file). For the local provider it is what `rf_platform::file_data_ranges`
-    /// gives.
+    /// The length of the open file and its ranges that hold data, in ascending order and not
+    /// overlapping, so that a copy can leave the gaps between them as holes
+    /// (`WriteStream::write_hole`, XFER-11). They are taken from the open file itself, so they
+    /// describe the bytes this stream reads even when its path names another file by now (an
+    /// app that saves by replacing the file). For the local provider it is what
+    /// `rf_platform::file_data_ranges` gives.
     ///
     /// `None` means that the file has no holes to keep, or that the stream cannot tell or
     /// cannot be trusted to; the file is then copied whole, which gives the same content. The
     /// ranges describe the file as it was when it was looked at, so a reader must check them
-    /// against the length it reads and that it gets every byte of them. The position of the
-    /// stream afterwards is unspecified: seek before reading. The default implementation gives
-    /// `Ok(None)`.
-    fn data_ranges(&mut self) -> Result<Option<Vec<Range<u64>>>> {
+    /// against the length and that it gets every byte of them.
+    ///
+    /// With `Ok(None)` or an error the stream is where it was, so a reader that goes on from
+    /// there loses nothing, and a stream that cannot seek can still be read through. After
+    /// `Ok(Some(_))` its position is unspecified: seek before reading. The default
+    /// implementation gives `Ok(None)`.
+    fn data_ranges(&mut self) -> Result<Option<DataRanges>> {
         Ok(None)
     }
 }
@@ -108,8 +111,8 @@ pub trait WriteStream: Write + Send + Debug {
 
     /// Leaves the next `len` bytes of the file as a hole, which reads as zeros and takes no
     /// space, and moves on past it, as a copy of a sparse file does with the gaps between its
-    /// `Provider::data_ranges` (XFER-11). A hole at the end still counts: the finished file is
-    /// as long as its last write or hole reaches.
+    /// `ReadStream::data_ranges` (XFER-11). A hole at the end still counts: the finished file
+    /// is as long as its last write or hole reaches.
     ///
     /// `Ok(false)` means that this stream cannot make holes and has written nothing: the
     /// caller writes the zeros itself, so the content is the same either way. The default

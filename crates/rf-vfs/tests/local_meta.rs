@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::time::{Duration, SystemTime};
 
 use rf_core::{Attributes, Entry, EntryKind, ErrorKind, Scheme, VPath};
@@ -198,9 +198,15 @@ fn read_streams_report_the_ranges_of_their_own_file() {
     std::fs::write(&dense, vec![7u8; 256 * 1024]).unwrap();
     std::fs::rename(&dense, dir.path().join("s.bin")).unwrap();
     assert_eq!(p.data_ranges(&file).unwrap(), None);
-    assert_eq!(reader.data_ranges().unwrap(), sparse);
+    let found = reader.data_ranges().unwrap();
+    assert!(
+        found
+            .as_ref()
+            .is_none_or(|found| found.len == 2 + (4 << 20))
+    );
+    assert_eq!(found.map(|found| found.ranges), sparse);
+    // The stream is still at its start.
     let mut first = [0; 1];
-    reader.seek(SeekFrom::Start(0)).unwrap();
     reader.read_exact(&mut first).unwrap();
     assert_eq!(first, *b"a");
 }

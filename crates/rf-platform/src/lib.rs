@@ -20,7 +20,7 @@ pub use fsops::rename_no_replace;
 pub use known::{KnownFolder, known_folder};
 pub use meta::{copy_extras, set_attributes, set_times};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};
-pub use sparse::{data_ranges, file_data_ranges, mark_sparse};
+pub use sparse::{DataRanges, data_ranges, file_data_ranges, mark_sparse};
 pub use trash::{move_to_trash, restore_from_trash, trash_supported};
 pub use volume::{DiskSpace, VolumeInfo, disk_space, volume_info};
 pub use watch::{DirEvent, DirEventHandler, DirWatch, watch_dir};

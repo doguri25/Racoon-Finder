@@ -6,7 +6,7 @@ use std::io::{self, SeekFrom};
 use std::ops::Range;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
-use rf_vfs::{MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
+use rf_vfs::{DataRanges, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
 use super::{At, COPY_CHUNK, Ctx, Failed};
 use crate::preflight::check_path_len;
@@ -212,35 +212,29 @@ fn write_content(
     writer.finish().at(Stage::Write)
 }
 
-/// Where a sparse source holds data. Only [`data_layout`] makes one, and only from ranges that
-/// passed [`usable`]: each range ends after it starts, within `len`, before the next one.
-struct Layout {
-    /// The length of the source.
-    len: u64,
-    /// The ranges with data, as `ReadStream::data_ranges` gives them.
-    ranges: Vec<Range<u64>>,
-}
-
 /// Where the source that `reader` reads holds data, for a copy that keeps its holes; `None`
 /// for a copy from start to end, with `reader` at its start. Keeping holes is best effort: a
 /// source without holes, or whose stream cannot tell, fails to, or gives ranges that are not
-/// [`usable`], is copied whole, which gives the same content.
+/// [`usable`], is copied whole, which gives the same content. Only a `DataRanges` that passed
+/// [`usable`] comes back.
 ///
-/// Both the length and the ranges come from the open stream, never from the path, which an app
-/// can have given to another file by now. The length is taken first, so that data the source
-/// gains in between lies past it, where a range fails [`usable`]; what it gains after the
-/// ranges lies past the length too, where [`Content::sparse`] copies it as [`Content::rest`]
-/// would.
-fn data_layout(reader: &mut dyn ReadStream, source: &VPath) -> Result<Option<Layout>, Failed> {
-    let read_error = |e| Failed::new(Stage::Read, Error::io("read", source.clone(), e));
-    let len = reader.seek(SeekFrom::End(0)).map_err(read_error)?;
-    if let Ok(Some(ranges)) = reader.data_ranges() {
-        if usable(&ranges, len) {
-            return Ok(Some(Layout { len, ranges }));
-        }
-    }
-    reader.rewind().map_err(read_error)?;
-    Ok(None)
+/// The stream is asked before anything else. A stream without ranges, or one that fails to give
+/// them, has not moved (`ReadStream::data_ranges`) and is read through as it is, without a
+/// single seek, so one that cannot seek (a `/proc` file, a pipe-like FUSE file) is copied as
+/// it always was. A stream that gave ranges is put back at its start, whether they are used or
+/// not; one that cannot get there cannot be copied correctly, and fails.
+///
+/// The length comes with the ranges, from the open stream, never from the path, which an app
+/// can have given to another file by now. What the source gains after it lies past the length,
+/// where [`Content::sparse`] copies it as [`Content::rest`] would.
+fn data_layout(reader: &mut dyn ReadStream, source: &VPath) -> Result<Option<DataRanges>, Failed> {
+    let Ok(Some(found)) = reader.data_ranges() else {
+        return Ok(None);
+    };
+    reader
+        .rewind()
+        .map_err(|e| Failed::new(Stage::Read, Error::io("read", source.clone(), e)))?;
+    Ok(usable(&found.ranges, found.len).then_some(found))
 }
 
 /// Whether `ranges` keep the promises of `ReadStream::data_ranges` for a source of `len` bytes:
@@ -284,15 +278,16 @@ impl Content<'_, '_> {
         }
     }
 
-    /// Copies a source laid out as `layout` says: each gap before, between and after its
-    /// ranges becomes a hole, and each range is read from its start.
+    /// Copies a source laid out as `layout` says, ranges that passed [`usable`]: each gap before,
+    /// between and after its ranges becomes a hole, and each range is read from its start.
     ///
     /// The ranges can be out of date by the time they are read. A source that ends before the
     /// end of a range, or before its length once the ranges are copied, fails with
     /// `UnexpectedEof` as `Stage::Read`, so that a copy longer than its source, or one cut
     /// short, is never committed. What the source has gained past its length is copied after
-    /// it, as `rest` copies.
-    fn sparse(&mut self, layout: &Layout) -> Result<(), Failed> {
+    /// it, as `rest` copies. The stream got back to its start before this, so a seek that fails
+    /// here is an error of the stream, and fails the item too.
+    fn sparse(&mut self, layout: &DataRanges) -> Result<(), Failed> {
         let mut at = 0;
         for range in &layout.ranges {
             self.hole(range.start - at)?;
@@ -623,6 +618,46 @@ mod tests {
             let copy = d.dst.join(source.file_name().unwrap());
             assert_eq!(std::fs::read(&copy).unwrap(), content, "{}", copy.display());
         }
+    }
+
+    /// A stream that cannot seek (a `/proc` file, a pipe-like FUSE file) and has no ranges is
+    /// read through without a single seek, as a copy always read it.
+    #[test]
+    fn a_stream_that_cannot_seek_is_copied_whole() {
+        let d = dirs();
+        let a = d.src.join("a.bin");
+        let content: Vec<u8> = (0..=255).cycle().take(3 << 20).collect();
+        std::fs::write(&a, &content).unwrap();
+        let p = FaultyProvider::local(vec![Fault::FailSeek {
+            name: "a.bin".into(),
+        }]);
+        let report = copy(JobId::generate(), &a, &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
+        assert_eq!(std::fs::read(d.dst.join("a.bin")).unwrap(), content);
+    }
+
+    /// A stream that gave ranges but cannot get back to its start fails the read: neither a
+    /// sparse nor a whole copy could be made of it correctly, and nothing is committed.
+    #[test]
+    fn a_stream_with_ranges_that_cannot_seek_back_fails_the_read() {
+        let d = dirs();
+        let a = d.src.join("a.bin");
+        std::fs::write(&a, vec![1; 100]).unwrap();
+        let p = FaultyProvider::local(vec![
+            Fault::DataRanges {
+                name: "a.bin".into(),
+                ranges: vec![0..10, 50..100],
+            },
+            Fault::FailSeek {
+                name: "a.bin".into(),
+            },
+        ]);
+        let report = copy(JobId::generate(), &a, &d.dst, &p.vfs());
+        assert_eq!(first_failure(&report), (Stage::Read, ErrorKind::Other));
+        let message = &report.failures[0].message;
+        assert!(message.ends_with("injected seek failure"), "{message}");
+        assert_eq!(report.done.bytes, 0);
+        assert_eq!(tree(&d.dst), BTreeMap::new());
     }
 
     /// A source cut short inside a range after its ranges were taken fails the read: no copy is

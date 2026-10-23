@@ -1,4 +1,4 @@
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use rf_core::{ErrorKind, Scheme, VPath};
@@ -68,12 +68,31 @@ fn an_open_file_answers_for_itself() {
     let local = path.as_local().unwrap().to_path_buf();
     let opened = std::fs::File::open(&local).unwrap();
     let before = file_data_ranges(&opened).unwrap();
-    assert_eq!(before, data_ranges(&path).unwrap());
+    assert_eq!(
+        before.as_ref().map(|found| &found.ranges),
+        data_ranges(&path).unwrap().as_ref()
+    );
+    assert!(before.as_ref().is_none_or(|found| found.len == 8 * MIB));
     let dense = t.path().join("dense.bin");
     std::fs::write(&dense, vec![7u8; 256 * 1024]).unwrap();
     std::fs::rename(&dense, &local).unwrap();
     assert_eq!(data_ranges(&path).unwrap(), None);
     assert_eq!(file_data_ranges(&opened).unwrap(), before);
+}
+
+/// Asking an open file for its ranges leaves its offset where it was, so a reader of it loses
+/// nothing.
+#[test]
+fn an_open_file_keeps_its_offset() {
+    let t = tempfile::tempdir().unwrap();
+    let path = holey(t.path());
+    let mut opened = std::fs::File::open(path.as_local().unwrap()).unwrap();
+    let mut first = [0; 2];
+    opened.read_exact(&mut first).unwrap();
+    file_data_ranges(&opened).unwrap();
+    let mut next = [0; 2];
+    opened.read_exact(&mut next).unwrap();
+    assert_eq!((first, next), (*b"he", *b"ad"));
 }
 
 #[test]
