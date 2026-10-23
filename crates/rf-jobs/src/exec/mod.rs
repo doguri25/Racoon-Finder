@@ -9,6 +9,7 @@ mod swapping;
 mod transfer;
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
@@ -21,6 +22,7 @@ use rf_vfs::{Provider, Vfs};
 use crate::conflict::{Conflict, ConflictAction};
 use crate::control::Control;
 use crate::id::JobId;
+use crate::journal::{JournalHandle, Record};
 use crate::naming::temp_name;
 use crate::preflight::{FsKind, IssueKind, fold_name};
 use crate::progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
@@ -52,13 +54,15 @@ pub enum ExecEvent {
 }
 
 /// What a job runs with: where it finds the providers, who answers its questions, which
-/// naming rule it follows, its remote control and who hears about its progress.
+/// naming rule it follows, its remote control, who hears about its progress and the journal
+/// it notes its temporary folders in.
 pub struct ExecEnv<'a> {
     vfs: &'a Vfs,
     resolver: &'a dyn Resolver,
     naming_os: Os,
     control: Control,
     on_event: Option<&'a dyn Fn(ExecEvent)>,
+    journal: Option<&'a JournalHandle>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -71,6 +75,7 @@ impl<'a> ExecEnv<'a> {
             naming_os: Os::CURRENT,
             control: Control::new(),
             on_event: None,
+            journal: None,
         }
     }
 
@@ -95,6 +100,21 @@ impl<'a> ExecEnv<'a> {
         self.on_event = Some(f);
         self
     }
+
+    /// Notes in `journal`, durably, each folder the job makes temporary files in, before the
+    /// first one there, so that crash recovery finds what the job left if it never ends.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "unused until the engine is implemented, which must remove this"
+        )
+    )]
+    pub(crate) fn journal(mut self, journal: &'a JournalHandle) -> Self {
+        self.journal = Some(journal);
+        self
+    }
 }
 
 impl fmt::Debug for ExecEnv<'_> {
@@ -104,6 +124,7 @@ impl fmt::Debug for ExecEnv<'_> {
             .field("naming_os", &self.naming_os)
             .field("control", &self.control)
             .field("on_event", &self.on_event.is_some())
+            .field("journal", &self.journal)
             .finish_non_exhaustive()
     }
 }
@@ -453,6 +474,8 @@ pub(crate) struct Ctx<'e> {
     step_bytes: u64,
     /// The number the next temporary file gets.
     temp_seq: u64,
+    /// The folders of temporary files noted in the journal so far.
+    temp_dirs: HashSet<VPath>,
 }
 
 impl<'e> Ctx<'e> {
@@ -470,6 +493,7 @@ impl<'e> Ctx<'e> {
             stopped: Stopped::No,
             step_bytes: 0,
             temp_seq: 0,
+            temp_dirs: HashSet::new(),
         }
     }
 
@@ -619,10 +643,27 @@ impl<'e> Ctx<'e> {
 
     /// A new temporary name in the folder `folder`, numbered on from the job's other ones (see
     /// [`temp_for`](Self::temp_for)).
+    ///
+    /// With a journal, the job's first name in a folder first notes the folder in the journal
+    /// and waits until the note is on the disk, so that crash recovery knows where to look for
+    /// what the job leaves.
+    /// A note that cannot be written does not stop the job: the journal reports it itself, and
+    /// a leftover temporary file is never mistaken for a user's file.
     pub(crate) fn temp_in(&mut self, folder: &VPath) -> rf_core::Result<VPath> {
         let seq = self.temp_seq;
         self.temp_seq += 1;
-        Ok(folder.join(temp_name(self.id, seq))?)
+        let temp = folder.join(temp_name(self.id, seq))?;
+        if let Some(journal) = self.env.journal {
+            if self.temp_dirs.insert(folder.clone()) {
+                let note = Record::TempDir {
+                    job: self.id,
+                    dir: folder.clone(),
+                };
+                // The journal's own error handler has the failure.
+                let _ = journal.append_durable(note);
+            }
+        }
+        Ok(temp)
     }
 
     /// Records what the plan expects to process and announces it.

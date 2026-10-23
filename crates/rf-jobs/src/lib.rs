@@ -4,6 +4,7 @@ pub mod conflict;
 pub mod control;
 pub mod exec;
 pub mod id;
+pub mod journal;
 pub mod naming;
 pub mod preflight;
 pub mod progress;
@@ -17,6 +18,7 @@ pub use conflict::{Conflict, ConflictAction, ConflictAnswer, Decision, MTIME_TOL
 pub use control::Control;
 pub use exec::{ExecEnv, ExecEvent, MAX_DEPTH, execute};
 pub use id::JobId;
+pub use journal::{IncompleteJob, JOURNAL_FILE};
 pub use naming::{MAX_NUMBERED, TEMP_SUFFIX, numbered_name, temp_job, temp_name};
 pub use preflight::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
