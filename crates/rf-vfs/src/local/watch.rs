@@ -142,6 +142,14 @@ impl Folder {
             Err(e) => matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory),
         }
     }
+
+    /// The volume and file ID of the entry called `name` in the folder, if there is one and the
+    /// OS tells. A hard link, an 8.3 short name or another spelling of the name on a
+    /// case-insensitive volume has the ID of the file it names.
+    fn identity_of(&self, name: &OsStr) -> Option<(VolumeId, FileId)> {
+        let path = self.path.join(name).ok()?;
+        rf_platform::file_identity(&path).ok()
+    }
 }
 
 /// The thread that turns notifications into `WatchEvent`s.
@@ -180,7 +188,9 @@ impl Pump {
             if self.slot.is_closed() {
                 return;
             }
-            let events = window.flush(&mut |name| self.stat(name));
+            let events = window.flush(&mut |name| self.stat(name), &mut |name| {
+                self.folder.identity_of(name)
+            });
             if !self.slot.deliver(events) {
                 return;
             }
@@ -217,6 +227,7 @@ mod tests {
     use std::thread::JoinHandle;
 
     use super::*;
+    use crate::watch::Change;
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -304,6 +315,53 @@ mod tests {
         assert!(folder.is_gone());
         std::fs::remove_dir(&watched).unwrap();
         assert!(folder.is_gone());
+    }
+
+    #[test]
+    fn a_name_in_the_folder_has_the_identity_of_its_file() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("x"), b"1").unwrap();
+        std::fs::hard_link(root.path().join("x"), root.path().join("y")).unwrap();
+        std::fs::write(root.path().join("z"), b"2").unwrap();
+        let path = VPath::local(root.path()).unwrap();
+        let folder = Folder {
+            identity: None,
+            path,
+        };
+        let x = folder.identity_of(OsStr::new("x"));
+        assert!(x.is_some());
+        assert_eq!(folder.identity_of(OsStr::new("y")), x);
+        let z = folder.identity_of(OsStr::new("z"));
+        assert!(z.is_some());
+        assert_ne!(z, x);
+        assert_eq!(folder.identity_of(OsStr::new("missing")), None);
+    }
+
+    /// The whole path: real files, the real `stat` and ID lookup, a pump fed by hand. Two names
+    /// of one file in one window reach the sink as a rescan, not as two entries.
+    #[test]
+    fn two_names_of_one_file_in_a_window_reach_the_sink_as_a_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("x"), b"1").unwrap();
+        std::fs::hard_link(root.path().join("x"), root.path().join("y")).unwrap();
+        std::fs::write(root.path().join("z"), b"2").unwrap();
+        let (sink, events) = channel_sink();
+        let rig = rig(root.path(), sink);
+        rig.tx.send(DirEvent::Changed("x".into())).unwrap();
+        rig.tx.send(DirEvent::Changed("y".into())).unwrap();
+        assert_eq!(events.recv_timeout(WAIT), Ok(WatchEvent::Rescan));
+        // Another file in the next window is reported as itself.
+        rig.tx.send(DirEvent::Changed("z".into())).unwrap();
+        let Ok(WatchEvent::Changes(changes)) = events.recv_timeout(WAIT) else {
+            panic!("expected the change of z");
+        };
+        assert!(
+            matches!(&changes[..], [Change::Upsert(e)] if e.name == "z"),
+            "{changes:?}"
+        );
+        rig.slot.close();
+        drop(rig.tx);
+        join_within(rig.pump, WAIT);
     }
 
     #[test]

@@ -118,6 +118,8 @@ pub trait Provider: Send + Sync + Debug {
     /// Space on the volume holding `path`; `None` when the provider cannot tell.
     fn space(&self, path: &VPath) -> Result<Option<DiskSpace>>;
     /// Starts watching `dir` (not its subfolders). `sink` runs on a background thread and
-    /// is never called after the returned handle is dropped.
+    /// is never called after the returned handle is dropped. Dropping the handle waits for a
+    /// sink call in progress, so never drop it while holding a lock (or anything else) the sink
+    /// may wait on.
     fn watch(&self, dir: &VPath, sink: WatchSink) -> Result<WatchHandle>;
 }

@@ -1,12 +1,12 @@
 //! The types a provider uses to report live changes of one folder.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::time::Duration;
 
-use rf_core::Entry;
+use rf_core::{Entry, FileId, VolumeId};
 use rf_platform::DirEvent;
 
 /// How long a provider collects raw notifications before it sends them as one
@@ -34,7 +34,8 @@ pub enum WatchEvent {
     /// The net changes of one debounce window: each name appears at most once, with its state
     /// after the window. Order is unspecified.
     Changes(Vec<Change>),
-    /// Changes may have been lost; the receiver lists the folder again.
+    /// Changes may have been lost, or cannot be told apart (one file seen under two names, such
+    /// as the two spellings of a case-only rename); the receiver lists the folder again.
     Rescan,
     /// The watch cannot go on and no event follows. The receiver drops the `WatchHandle`.
     Ended,
@@ -46,7 +47,9 @@ pub type WatchSink = Box<dyn FnMut(WatchEvent) + Send>;
 
 /// A running watch. Dropping it stops the watch, and the sink is not called after the drop.
 ///
-/// Never drop it from inside the sink: stopping can wait for the thread that runs the sink.
+/// Dropping it waits for a sink call that is in progress, so never drop it from inside the sink,
+/// and never while holding a lock (or anything else) the sink may wait on: the two would wait
+/// for each other.
 pub struct WatchHandle {
     _guard: Box<dyn Any + Send>,
 }
@@ -147,11 +150,17 @@ impl Coalescer {
     /// ended, else `[Rescan]` if a rescan is due, else `[Changes(..)]` if anything changed,
     /// else nothing.
     ///
+    /// A rescan is also due when the window may name one file twice, because the receiver
+    /// would then keep an entry under a name that no longer exists (see `names_one_file_twice`).
+    ///
     /// `stat` gives the entry now at a name, or `None` if there is none. It is called once per
-    /// name, and not at all for `Ended` and `Rescan`.
+    /// name, and not at all for `Ended` and `Rescan`. `identify` gives the volume and file ID
+    /// of the file at a name, for entries that carry none (Windows); it is called only when two
+    /// or more names are present and their spellings are all different.
     pub(crate) fn flush(
         &mut self,
         stat: &mut dyn FnMut(&OsStr) -> Option<Entry>,
+        identify: &mut dyn FnMut(&OsStr) -> Option<(VolumeId, FileId)>,
     ) -> Vec<WatchEvent> {
         let window = std::mem::take(self);
         if window.ended {
@@ -160,22 +169,30 @@ impl Coalescer {
         if window.rescan {
             return vec![WatchEvent::Rescan];
         }
-        let changes = window.changes(stat);
-        if changes.is_empty() {
-            Vec::new()
-        } else {
-            vec![WatchEvent::Changes(changes)]
+        match window.changes(stat, identify) {
+            None => vec![WatchEvent::Rescan],
+            Some(changes) if changes.is_empty() => Vec::new(),
+            Some(changes) => vec![WatchEvent::Changes(changes)],
         }
     }
 
-    /// The net changes: a pair becomes `Renamed` when its source is gone and its target is
-    /// there; every other name is an `Upsert` or `Removed` by what `stat` finds.
+    /// The net changes, or `None` if the receiver has to list the folder again.
+    ///
+    /// A pair becomes `Renamed` when its source is gone and its target is there; every other
+    /// name is an `Upsert` or `Removed` by what `stat` finds.
     ///
     /// A name takes part in one change only. A rename that shares a name with an earlier
     /// `Renamed` is left to the per-name changes, which give the same end state.
-    fn changes(self, stat: &mut dyn FnMut(&OsStr) -> Option<Entry>) -> Vec<Change> {
+    fn changes(
+        self,
+        stat: &mut dyn FnMut(&OsStr) -> Option<Entry>,
+        identify: &mut dyn FnMut(&OsStr) -> Option<(VolumeId, FileId)>,
+    ) -> Option<Vec<Change>> {
         let Coalescer { names, renames, .. } = self;
         let mut now: Vec<Option<Entry>> = names.iter().map(|name| stat(name)).collect();
+        if names_one_file_twice(&names, &now, identify) {
+            return None;
+        }
         let mut taken = vec![false; names.len()];
         let mut changes = Vec::new();
         for (from, to) in renames {
@@ -199,8 +216,57 @@ impl Coalescer {
                 });
             }
         }
-        changes
+        Some(changes)
     }
+}
+
+/// Whether the names of one window may be one file under two names, which the receiver cannot
+/// tell from two files. `stat` finds the same file under every name that is another spelling
+/// of its name or another name for it, so after a rename the receiver would get an `Upsert`
+/// for the old name as well, an entry that no longer exists. Cases:
+///
+/// - a case-only rename (`b.txt` to `B.TXT`) on NTFS or default APFS, and macOS reporting a
+///   rename as two changes;
+/// - the Unicode normalization forms of a name on APFS (NFC and NFD);
+/// - an 8.3 short name on Windows;
+/// - hard links.
+///
+/// It is so when two names fold to one string (`to_lowercase` of the lossy name), whether or not
+/// both are present; or when two names that are present have the same file ID (compared only
+/// when both are known). The IDs cost a call each on Windows, so they are asked for only when
+/// two names are present and the spellings are all different.
+///
+/// This over-reports (two hard links, or `a` and `A` on a case-sensitive volume, are two files
+/// that are reported as a rescan too), which only costs a listing.
+fn names_one_file_twice(
+    names: &[OsString],
+    now: &[Option<Entry>],
+    identify: &mut dyn FnMut(&OsStr) -> Option<(VolumeId, FileId)>,
+) -> bool {
+    if names.len() < 2 {
+        return false;
+    }
+    let mut spellings = HashSet::with_capacity(names.len());
+    if !names
+        .iter()
+        .all(|name| spellings.insert(name.to_string_lossy().to_lowercase()))
+    {
+        return true;
+    }
+    if now.iter().flatten().nth(1).is_none() {
+        return false;
+    }
+    let mut ids = HashSet::new();
+    for (name, entry) in names.iter().zip(now) {
+        let Some(entry) = entry else { continue };
+        let Some(id) = entry.identity().or_else(|| identify(name)) else {
+            continue;
+        };
+        if !ids.insert(id) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -229,8 +295,26 @@ mod tests {
         }
     }
 
+    /// An entry with the volume and file ID the OS gives it (Unix always does).
+    fn entry_with_id(s: &str, id: u128) -> Entry {
+        let mut e = entry(s);
+        e.volume_id = Some(VolumeId(1));
+        e.file_id = Some(FileId(id));
+        e
+    }
+
     fn no_events() -> Vec<WatchEvent> {
         Vec::new()
+    }
+
+    /// The IDs of a platform where the entries carry none and nothing else can say (`None`).
+    fn no_identity() -> impl FnMut(&OsStr) -> Option<(VolumeId, FileId)> {
+        |_: &OsStr| None
+    }
+
+    /// For tests where the flush must not ask for an ID.
+    fn no_id_lookup() -> impl FnMut(&OsStr) -> Option<(VolumeId, FileId)> {
+        |name: &OsStr| panic!("the ID of {name:?} must not be looked up")
     }
 
     fn renamed(from: &str, to: &str) -> DirEvent {
@@ -247,7 +331,7 @@ mod tests {
             c.push(DirEvent::Changed(o(n)));
         }
         let want = WatchEvent::Changes(vec![Change::Upsert(entry("a")), Change::Removed(o("b"))]);
-        assert_eq!(c.flush(&mut stat_from(&["a"])), [want]);
+        assert_eq!(c.flush(&mut stat_from(&["a"]), &mut no_identity()), [want]);
     }
 
     #[test]
@@ -260,7 +344,7 @@ mod tests {
             from: o("x"),
             to: entry("y"),
         }]);
-        assert_eq!(c.flush(&mut stat_from(&["y"])), [want]);
+        assert_eq!(c.flush(&mut stat_from(&["y"]), &mut no_identity()), [want]);
     }
 
     #[test]
@@ -274,7 +358,7 @@ mod tests {
             from: o("x"),
             to: entry("y"),
         }]);
-        assert_eq!(c.flush(&mut stat_from(&["y"])), [want]);
+        assert_eq!(c.flush(&mut stat_from(&["y"]), &mut no_identity()), [want]);
     }
 
     #[test]
@@ -283,7 +367,10 @@ mod tests {
         c.push(renamed("x", "y"));
         let want =
             WatchEvent::Changes(vec![Change::Upsert(entry("x")), Change::Upsert(entry("y"))]);
-        assert_eq!(c.flush(&mut stat_from(&["x", "y"])), [want]);
+        assert_eq!(
+            c.flush(&mut stat_from(&["x", "y"]), &mut no_identity()),
+            [want]
+        );
     }
 
     #[test]
@@ -291,7 +378,7 @@ mod tests {
         let mut c = Coalescer::new();
         c.push(renamed("x", "y"));
         let want = WatchEvent::Changes(vec![Change::Removed(o("x")), Change::Removed(o("y"))]);
-        assert_eq!(c.flush(&mut stat_from(&[])), [want]);
+        assert_eq!(c.flush(&mut stat_from(&[]), &mut no_identity()), [want]);
     }
 
     #[test]
@@ -307,7 +394,10 @@ mod tests {
             },
             Change::Upsert(entry("c")),
         ]);
-        assert_eq!(c.flush(&mut stat_from(&["b", "c"])), [want]);
+        assert_eq!(
+            c.flush(&mut stat_from(&["b", "c"]), &mut no_identity()),
+            [want]
+        );
     }
 
     #[test]
@@ -323,7 +413,7 @@ mod tests {
             },
             Change::Removed(o("a")),
         ]);
-        assert_eq!(c.flush(&mut stat_from(&["c"])), [want]);
+        assert_eq!(c.flush(&mut stat_from(&["c"]), &mut no_identity()), [want]);
     }
 
     /// Every sequence of up to three `Changed`/`Renamed` events over three names, against every
@@ -371,8 +461,10 @@ mod tests {
                     }
                     c.push(event.clone());
                 }
-                let flushed =
-                    c.flush(&mut |n: &OsStr| present(n).then(|| Entry::new(n, EntryKind::File)));
+                let flushed = c.flush(
+                    &mut |n: &OsStr| present(n).then(|| Entry::new(n, EntryKind::File)),
+                    &mut no_identity(),
+                );
                 // (name, present) for every name the changes mention.
                 let mut mentioned = Vec::new();
                 for event in flushed {
@@ -404,13 +496,170 @@ mod tests {
         }
     }
 
+    /// One file seen under two spellings in one window: a case-insensitive volume finds it under
+    /// both names, so the receiver would get one entry per spelling, one of them a ghost.
+    #[test]
+    fn two_spellings_of_one_name_become_a_rescan() {
+        for (a, b) in [("b.txt", "B.TXT"), ("\u{c9}.txt", "\u{e9}.txt")] {
+            let mut c = Coalescer::new();
+            c.push(DirEvent::Changed(o(a)));
+            c.push(DirEvent::Changed(o(b)));
+            // Both spellings find the same file, as on NTFS or default APFS. The names alone
+            // are enough, so no ID is looked up.
+            let mut stat = |n: &OsStr| Some(entry_with_id(&n.to_string_lossy(), 7));
+            assert_eq!(
+                c.flush(&mut stat, &mut no_id_lookup()),
+                [WatchEvent::Rescan],
+                "{a} / {b}"
+            );
+            assert_eq!(c.flush(&mut stat, &mut no_id_lookup()), no_events());
+        }
+    }
+
+    #[test]
+    fn a_case_only_rename_becomes_a_rescan() {
+        let mut c = Coalescer::new();
+        c.push(renamed("b.txt", "B.TXT"));
+        // The old spelling still finds the file (case-insensitive volume).
+        let mut stat = |n: &OsStr| Some(entry_with_id(&n.to_string_lossy(), 7));
+        assert_eq!(
+            c.flush(&mut stat, &mut no_id_lookup()),
+            [WatchEvent::Rescan]
+        );
+    }
+
+    /// Case-sensitive volumes (Linux) report the same pair with the old spelling gone. The
+    /// names fold to one string either way, so it is a rescan too.
+    #[test]
+    fn a_case_only_rename_is_a_rescan_when_the_old_spelling_is_gone() {
+        let mut c = Coalescer::new();
+        c.push(renamed("b.txt", "B.TXT"));
+        assert_eq!(
+            c.flush(&mut stat_from(&["B.TXT"]), &mut no_id_lookup()),
+            [WatchEvent::Rescan]
+        );
+    }
+
+    #[test]
+    fn distinct_files_are_reported_as_changes() {
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("a")));
+        c.push(DirEvent::Changed(o("b")));
+        let mut stat = |n: &OsStr| {
+            let id = if n == "a" { 1 } else { 2 };
+            Some(entry_with_id(&n.to_string_lossy(), id))
+        };
+        let want = WatchEvent::Changes(vec![
+            Change::Upsert(entry_with_id("a", 1)),
+            Change::Upsert(entry_with_id("b", 2)),
+        ]);
+        // The entries carry their IDs, so nothing is looked up.
+        assert_eq!(c.flush(&mut stat, &mut no_id_lookup()), [want]);
+    }
+
+    #[test]
+    fn entries_without_an_id_are_looked_up_and_distinct_ones_stay_changes() {
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("a")));
+        c.push(DirEvent::Changed(o("b")));
+        let mut asked = Vec::new();
+        let mut identify = |n: &OsStr| {
+            asked.push(n.to_owned());
+            Some((VolumeId(1), FileId(if n == "a" { 1 } else { 2 })))
+        };
+        let want =
+            WatchEvent::Changes(vec![Change::Upsert(entry("a")), Change::Upsert(entry("b"))]);
+        assert_eq!(c.flush(&mut stat_from(&["a", "b"]), &mut identify), [want]);
+        assert_eq!(asked, [o("a"), o("b")]);
+    }
+
+    /// Windows: `entry_from_metadata` has no ID there, and an 8.3 short name is another name
+    /// for the same file.
+    #[test]
+    fn two_names_with_one_looked_up_id_become_a_rescan() {
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("LONGNA~1.TXT")));
+        c.push(DirEvent::Changed(o("longname.txt")));
+        let mut identify = |_: &OsStr| Some((VolumeId(1), FileId(9)));
+        assert_eq!(
+            c.flush(
+                &mut stat_from(&["LONGNA~1.TXT", "longname.txt"]),
+                &mut identify
+            ),
+            [WatchEvent::Rescan]
+        );
+    }
+
+    #[test]
+    fn names_whose_id_is_unknown_are_not_taken_for_one_file() {
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("a")));
+        c.push(DirEvent::Changed(o("b")));
+        let want =
+            WatchEvent::Changes(vec![Change::Upsert(entry("a")), Change::Upsert(entry("b"))]);
+        assert_eq!(
+            c.flush(&mut stat_from(&["a", "b"]), &mut no_identity()),
+            [want]
+        );
+    }
+
+    #[test]
+    fn ids_are_looked_up_only_for_two_or_more_present_names() {
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("a")));
+        c.push(DirEvent::Changed(o("b")));
+        c.push(DirEvent::Changed(o("c")));
+        let want = WatchEvent::Changes(vec![
+            Change::Upsert(entry("a")),
+            Change::Removed(o("b")),
+            Change::Removed(o("c")),
+        ]);
+        assert_eq!(c.flush(&mut stat_from(&["a"]), &mut no_id_lookup()), [want]);
+    }
+
+    /// Two names of one file (a hard link) in one window cannot be told apart from one file
+    /// seen twice, so the window is a rescan. Real files: the IDs come from `stat`.
+    #[cfg(unix)]
+    #[test]
+    fn hard_linked_names_changed_together_become_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("x"), b"1").unwrap();
+        std::fs::hard_link(dir.path().join("x"), dir.path().join("y")).unwrap();
+        std::fs::write(dir.path().join("z"), b"2").unwrap();
+        let mut stat = |n: &OsStr| {
+            let meta = std::fs::symlink_metadata(dir.path().join(n)).ok()?;
+            Some(crate::local::entry_from_metadata(n.to_owned(), &meta))
+        };
+        let mut c = Coalescer::new();
+        c.push(DirEvent::Changed(o("x")));
+        c.push(DirEvent::Changed(o("y")));
+        assert_eq!(
+            c.flush(&mut stat, &mut no_id_lookup()),
+            [WatchEvent::Rescan]
+        );
+        // A different file next to them is not a collision.
+        c.push(DirEvent::Changed(o("x")));
+        c.push(DirEvent::Changed(o("z")));
+        let flushed = c.flush(&mut stat, &mut no_id_lookup());
+        assert!(
+            matches!(&flushed[..], [WatchEvent::Changes(changes)] if changes.len() == 2),
+            "{flushed:?}"
+        );
+    }
+
     #[test]
     fn overflow_becomes_rescan_and_resets() {
         let mut c = Coalescer::new();
         c.push(DirEvent::Changed(o("a")));
         c.push(DirEvent::Overflow);
-        assert_eq!(c.flush(&mut stat_from(&[])), [WatchEvent::Rescan]);
-        assert_eq!(c.flush(&mut stat_from(&[])), no_events());
+        assert_eq!(
+            c.flush(&mut stat_from(&[]), &mut no_identity()),
+            [WatchEvent::Rescan]
+        );
+        assert_eq!(
+            c.flush(&mut stat_from(&[]), &mut no_identity()),
+            no_events()
+        );
     }
 
     #[test]
@@ -420,7 +669,10 @@ mod tests {
             c.push(DirEvent::Changed(OsString::from(i.to_string())));
         }
         assert_eq!(
-            c.flush(&mut |_: &OsStr| panic!("stat must not run")),
+            c.flush(
+                &mut |_: &OsStr| panic!("stat must not run"),
+                &mut no_identity()
+            ),
             [WatchEvent::Rescan]
         );
     }
@@ -433,7 +685,7 @@ mod tests {
         }
         // A name seen before does not count twice.
         c.push(DirEvent::Changed(o("0")));
-        let flushed = c.flush(&mut |_: &OsStr| None);
+        let flushed = c.flush(&mut |_: &OsStr| None, &mut no_identity());
         assert!(
             matches!(&flushed[..], [WatchEvent::Changes(changes)] if changes.len() == MAX_PENDING_CHANGES),
             "{} events",
@@ -448,7 +700,10 @@ mod tests {
             c.push(renamed("a", "b"));
         }
         assert_eq!(
-            c.flush(&mut |_: &OsStr| panic!("stat must not run")),
+            c.flush(
+                &mut |_: &OsStr| panic!("stat must not run"),
+                &mut no_identity()
+            ),
             [WatchEvent::Rescan]
         );
     }
@@ -458,8 +713,14 @@ mod tests {
         let mut c = Coalescer::new();
         c.push(DirEvent::Changed(o("a")));
         c.push(DirEvent::Ended);
-        assert_eq!(c.flush(&mut stat_from(&[])), [WatchEvent::Ended]);
-        assert_eq!(c.flush(&mut stat_from(&[])), no_events());
+        assert_eq!(
+            c.flush(&mut stat_from(&[]), &mut no_identity()),
+            [WatchEvent::Ended]
+        );
+        assert_eq!(
+            c.flush(&mut stat_from(&[]), &mut no_identity()),
+            no_events()
+        );
     }
 
     #[test]
@@ -467,11 +728,17 @@ mod tests {
         let mut c = Coalescer::new();
         c.push(DirEvent::Overflow);
         c.push(DirEvent::Ended);
-        assert_eq!(c.flush(&mut stat_from(&[])), [WatchEvent::Ended]);
+        assert_eq!(
+            c.flush(&mut stat_from(&[]), &mut no_identity()),
+            [WatchEvent::Ended]
+        );
     }
 
     #[test]
     fn empty_flush_is_empty() {
-        assert_eq!(Coalescer::new().flush(&mut stat_from(&[])), no_events());
+        assert_eq!(
+            Coalescer::new().flush(&mut stat_from(&[]), &mut no_identity()),
+            no_events()
+        );
     }
 }

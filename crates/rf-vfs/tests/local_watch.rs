@@ -111,6 +111,30 @@ fn watch_tracks_create_rename_and_remove() {
     wait_for(&rx, &mut model, p, &dir, &["d"]);
 }
 
+/// A case-only rename leaves one entry under the new spelling, whether the volume tells the
+/// two spellings apart (Linux) or not (NTFS, default APFS): a receiver that applies the events
+/// must not keep the old spelling as a ghost.
+#[test]
+fn a_case_only_rename_leaves_one_entry() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = VPath::local(t.path()).unwrap();
+    let p = LocalProvider::new();
+    let (_h, rx) = start(p, &dir);
+    let mut model = BTreeSet::new();
+    std::fs::write(t.path().join("b.txt"), b"1").unwrap();
+    wait_for(&rx, &mut model, p, &dir, &["b.txt"]);
+    std::fs::rename(t.path().join("b.txt"), t.path().join("B.TXT")).unwrap();
+    wait_for(&rx, &mut model, p, &dir, &["B.TXT"]);
+    // Whatever else is still on its way (a second window) must not bring the old name back.
+    let deadline = Instant::now() + Duration::from_millis(600);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        if let Ok(ev) = rx.recv_timeout(left) {
+            apply(&mut model, ev, p, &dir);
+        }
+    }
+    assert_eq!(model, BTreeSet::from([OsString::from("B.TXT")]));
+}
+
 #[test]
 fn watch_ignores_nested_changes() {
     let t = tempfile::tempdir().unwrap();
