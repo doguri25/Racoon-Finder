@@ -10,7 +10,7 @@ use std::sync::Arc;
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_vfs::Provider;
 
-use super::{At, Attempt, Ctx, Failed, MAX_DEPTH, Stopped, fold_path};
+use super::{At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Stopped, fold_path, folder_identity};
 use crate::preflight::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
 };
@@ -63,9 +63,10 @@ pub(crate) fn follows_links(spec: &TransferSpec) -> bool {
 /// subfolders (on a target that ignores case, spelled in any case). Then the tree under it is
 /// walked, `MAX_DEPTH` levels deep at most. A file counts with its size; a link copied as a
 /// link counts as a file of no bytes; a folder counts as a folder. In Follow mode a link counts
-/// as what it leads to, and a folder it leads to is walked. A FIFO, socket or device is not
-/// counted, checked or opened: the run reports it. Nothing found below a source fails the
-/// plan; the run meets it again and reports it then.
+/// as what it leads to, and a folder it leads to is walked, unless it is one of the folders
+/// above it (a loop of links, known by identity; without identities the depth limit ends it).
+/// A FIFO, socket or device is not counted, checked or opened: the run reports it. Nothing
+/// found below a source fails the plan; the run meets it again and reports it then.
 ///
 /// Every target name, path and file size is checked against the file system of its top-level
 /// target folder, names that only differ in case within one folder are looked for, and each
@@ -84,7 +85,15 @@ pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Pl
             scan_item(ctx, &mut survey, item)
         }) {
             Attempt::Done((src, entry, folder)) => {
-                let walked = survey.walk(ctx, &*src, source, entry.clone(), target, folder, 0);
+                let walked = survey.walk(
+                    ctx,
+                    &*src,
+                    source,
+                    entry.clone(),
+                    target,
+                    folder,
+                    Level::TOP,
+                );
                 if walked.is_err() {
                     ctx.stop(Stopped::Cancelled);
                     return None;
@@ -246,12 +255,14 @@ impl Survey {
     }
 
     /// Counts and checks `source` of `src`, which `entry` describes and which goes to `target`
-    /// in the top-level folder number `folder`, and everything under it; `depth` is how far
-    /// below a source of the job it is. An item that cannot be followed or listed is left
-    /// uncounted. Fails only when the job is cancelled.
+    /// in the top-level folder number `folder`, and everything under it; `level` says how far
+    /// below a source of the job it is and which folders are above it. An item deeper than
+    /// [`MAX_DEPTH`], a followed folder that is one of the folders above it (a loop of links),
+    /// and an item that cannot be followed or listed are left uncounted. Fails only when the
+    /// job is cancelled.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one walk step: the item, where it goes and how deep"
+        reason = "one walk step: the item, where it goes and where it is in the walk"
     )]
     fn walk(
         &mut self,
@@ -261,13 +272,18 @@ impl Survey {
         entry: Entry,
         target: &VPath,
         folder: usize,
-        depth: usize,
+        level: Level<'_>,
     ) -> rf_core::Result<()> {
-        if depth > MAX_DEPTH {
+        if level.depth() > MAX_DEPTH {
             return Ok(());
         }
         let (source, entry) = if entry.kind == EntryKind::Symlink && self.follow {
             match follow_link(src, source) {
+                Ok((_, found))
+                    if found.kind == EntryKind::Dir && level.leads_back(found.identity()) =>
+                {
+                    return Ok(());
+                }
                 Ok(followed) => followed,
                 Err(_) => return Ok(()),
             }
@@ -300,6 +316,7 @@ impl Survey {
                     Err(error) if error.kind() == ErrorKind::Cancelled => return Err(error),
                     Err(_) => return Ok(()),
                 };
+                let here = level.enter(folder_identity(self.follow, src, &source, &entry));
                 for child in children {
                     let (Ok(child_source), Ok(child_target)) =
                         (source.join(&child.name), target.join(&child.name))
@@ -313,7 +330,7 @@ impl Survey {
                         child,
                         &child_target,
                         folder,
-                        depth + 1,
+                        here.below(),
                     )?;
                 }
             }

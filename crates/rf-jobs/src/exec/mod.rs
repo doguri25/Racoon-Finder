@@ -11,7 +11,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rf_core::{Entry, Error, ErrorKind, Os, PathError, VPath};
+use rf_core::{Entry, Error, ErrorKind, FileId, Os, PathError, VPath, VolumeId};
 use rf_vfs::{Provider, Vfs};
 
 use crate::conflict::{Conflict, ConflictAction};
@@ -288,6 +288,90 @@ pub(crate) fn fold_path(path: &VPath, fs: FsKind) -> Vec<String> {
         ),
     }
     keys
+}
+
+/// The volume and file ID of an item.
+pub(crate) type Identity = (VolumeId, FileId);
+
+/// One folder a transfer's walk has entered, and through `up` the folders above it.
+#[derive(Debug)]
+pub(crate) struct Above<'a> {
+    /// How deep the folder is: an item of the job is at 0.
+    depth: usize,
+    /// The identity of the folder, when the walk follows links and the provider knows it.
+    identity: Option<Identity>,
+    up: Option<&'a Above<'a>>,
+}
+
+impl Above<'_> {
+    /// The level of the items in this folder.
+    pub(crate) fn below(&self) -> Level<'_> {
+        Level(Some(self))
+    }
+}
+
+/// Where an item is in a transfer's walk: how deep, and which folders are above it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Level<'a>(Option<&'a Above<'a>>);
+
+impl<'a> Level<'a> {
+    /// The level of an item of the job itself.
+    pub(crate) const TOP: Level<'static> = Level(None);
+
+    /// How far below an item of the job this is: 0 for the item itself.
+    pub(crate) fn depth(self) -> usize {
+        self.0.map_or(0, |above| above.depth + 1)
+    }
+
+    /// Whether a folder with `identity` is one of the folders above, so that entering it
+    /// would lead back up (a loop of links). An unknown identity never matches.
+    pub(crate) fn leads_back(self, identity: Option<Identity>) -> bool {
+        let Some(identity) = identity else {
+            return false;
+        };
+        let mut above = self.0;
+        while let Some(folder) = above {
+            if folder.identity == Some(identity) {
+                return true;
+            }
+            above = folder.up;
+        }
+        false
+    }
+
+    /// The folder at this level, with `identity`, as the walk enters it.
+    pub(crate) fn enter(self, identity: Option<Identity>) -> Above<'a> {
+        Above {
+            depth: self.depth(),
+            identity,
+            up: self.0,
+        }
+    }
+}
+
+/// The identity the folder `path` of `provider`, which `entry` describes, is entered with:
+/// none unless links are followed (only a followed link can lead back to a folder above),
+/// else the entry's, or the one `stat` gives for a listed folder that has none (a Windows
+/// listing).
+pub(crate) fn folder_identity(
+    follow: bool,
+    provider: &dyn Provider,
+    path: &VPath,
+    entry: &Entry,
+) -> Option<Identity> {
+    if !follow {
+        return None;
+    }
+    entry
+        .identity()
+        .or_else(|| provider.stat(path).ok()?.identity())
+}
+
+/// The error of a followed folder that is one of the folders above it.
+pub(crate) fn link_loop(source: &VPath) -> Error {
+    Error::Unsupported(format!(
+        "folder link loop: {source} leads back to a folder above it"
+    ))
 }
 
 /// How [`Ctx::attempt`] ended.

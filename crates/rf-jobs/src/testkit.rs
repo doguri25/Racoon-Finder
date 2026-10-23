@@ -261,6 +261,9 @@ pub enum Fault {
     Crash { file: usize, after: u64 },
     /// Rename number `call` fails with `injected rename failure`.
     FailRename { call: usize },
+    /// `create_dir` number `call` (counted from 0 like `rename`'s) fails with
+    /// `injected create_dir failure` and makes nothing.
+    FailCreateDir { call: usize },
     /// Every rename fails with `io::ErrorKind::CrossesDevices`, as between two volumes, except
     /// the commit of a temporary file (a `from` whose name `temp_job` reads).
     CrossDevice,
@@ -314,6 +317,7 @@ impl Fault {
 struct Counters {
     opened_writes: usize,
     renames: usize,
+    created_dirs: usize,
     late_file_made: bool,
 }
 
@@ -497,6 +501,15 @@ impl Provider for FaultyProvider {
     }
 
     fn create_dir(&self, path: &VPath) -> Result<()> {
+        let call = {
+            let mut counters = self.counters();
+            counters.created_dirs += 1;
+            counters.created_dirs - 1
+        };
+        if self.faults.contains(&Fault::FailCreateDir { call }) {
+            let error = io::Error::other("injected create_dir failure");
+            return Err(Error::io("create_dir", path.clone(), error));
+        }
         self.inner.create_dir(path)
     }
 
@@ -855,6 +868,18 @@ mod tests {
         );
         assert_eq!(p.fs_name(&root).as_deref(), Some("exFAT"));
         assert_eq!(p.space(&root).unwrap().map(|s| s.available), Some(7));
+    }
+
+    #[test]
+    fn a_create_dir_fault_strikes_its_own_call_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = FaultyProvider::local(vec![Fault::FailCreateDir { call: 1 }]);
+        let at = |name: &str| local(&dir.path().join(name));
+        p.create_dir(&at("a")).unwrap();
+        let error = p.create_dir(&at("b")).unwrap_err();
+        assert!(error.to_string().contains("injected create_dir failure"));
+        assert!(!dir.path().join("b").exists());
+        p.create_dir(&at("b")).unwrap();
     }
 
     #[test]

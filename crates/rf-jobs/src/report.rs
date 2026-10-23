@@ -45,6 +45,9 @@ pub enum Stage {
 /// An item a job could not process, or processed only in part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemFailure {
+    /// The item that was read. Below a link that a copy in Follow mode followed, it is the real
+    /// path of the item with every link resolved (`…/outside/sub/x`), not the path through the
+    /// link (`…/dir/dlink/x`).
     pub source: Option<VPath>,
     pub target: Option<VPath>,
     pub stage: Stage,

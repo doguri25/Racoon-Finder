@@ -172,13 +172,123 @@ mod unix {
             follow(),
         ));
         assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        // Controller ruling (Task 10 fix round 1): a followed folder that is a folder above it
+        // stops as a loop of links; the depth limit is the fallback without identities.
         assert!(
-            rep.failures
-                .iter()
-                .any(|x| x.message.contains("nesting deeper than")),
+            rep.failures.iter().any(|x| x.message.contains("link loop")),
             "{:?}",
             rep.failures
         );
+    }
+
+    /// Without identities a loop cannot be recognised, and the depth limit ends it.
+    #[test]
+    fn follow_mode_ends_link_loops_at_the_depth_limit_without_identities() {
+        let f = fx();
+        write_tree(&f.src, &[("dir/a.txt", "A")]);
+        symlink(".", f.src.join("dir").join("loop")).unwrap();
+        let p = FaultyProvider::local(vec![Fault::NoIdentity]);
+        let job = spec(TransferMode::Copy, &[f.src.join("dir")], &f.dst, follow());
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        assert!(
+            rep.failures
+                .iter()
+                .all(|x| x.message.contains("nesting deeper than")),
+            "{:?}",
+            rep.failures
+        );
+        // `a.txt` and `loop` one level below the limit.
+        assert_eq!(rep.failures.len(), 2);
+        assert_eq!(rep.planned, rep.done);
+    }
+
+    /// Two links back into one folder would double the walk at each level; each is stopped
+    /// where it first leads back, so the job ends at once. So does a pair of folders that
+    /// lead into each other.
+    #[test]
+    fn follow_mode_stops_every_link_back_into_a_folder_above() {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[("dir/a.txt", "A"), ("dir/x/", ""), ("dir/y/", "")],
+        );
+        let dir = f.src.join("dir");
+        symlink(".", dir.join("l1")).unwrap();
+        symlink(".", dir.join("l2")).unwrap();
+        symlink("../y", dir.join("x").join("lx")).unwrap();
+        symlink("../x", dir.join("y").join("ly")).unwrap();
+        let started = std::time::Instant::now();
+        let rep = run(&spec(
+            TransferMode::Copy,
+            std::slice::from_ref(&dir),
+            &f.dst,
+            follow(),
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        let looped: Vec<_> = rep
+            .failures
+            .iter()
+            .map(|x| (x.stage, x.kind, x.message.contains("link loop")))
+            .collect();
+        assert_eq!(
+            looped,
+            [(Stage::Plan, ErrorKind::Unsupported, true); 4],
+            "{:?}",
+            rep.failures
+        );
+        // Below a followed link the sources are resolved paths (`/private/var` on macOS), so
+        // only the names of the links are compared.
+        let mut links: Vec<_> = rep
+            .failures
+            .iter()
+            .filter_map(|x| x.source.as_ref()?.file_name().map(ToOwned::to_owned))
+            .collect();
+        links.sort();
+        assert_eq!(links, ["l1", "l2", "lx", "ly"]);
+        assert_eq!(
+            tree(&f.dst.join("dir")).into_keys().collect::<Vec<_>>(),
+            ["a.txt", "x", "x/lx", "y", "y/ly"]
+        );
+        assert_eq!(rep.planned, rep.done);
+    }
+
+    /// The targets the review left out stay out under a folder written under a numbered name.
+    #[test]
+    fn skipped_targets_stay_skipped_under_a_renamed_folder() {
+        let f = fx();
+        write_tree(&f.src, &[("dir/a?b.txt", "x"), ("dir/ok.txt", "y")]);
+        write_tree(&f.dst, &[("dir", "a file")]);
+        let p = FaultyProvider::local(vec![Fault::FsName("exFAT".into())]);
+        let r = ScriptedResolver::new().on_preflight(PreflightAnswer::SkipBlocked);
+        let job = spec(
+            TransferMode::Copy,
+            &[f.src.join("dir")],
+            &f.dst,
+            with(ConflictPolicy::AutoRename),
+        );
+        let rep = execute(
+            JobId::generate(),
+            &job,
+            &ExecEnv::new(&p.vfs(), &r).naming_os(Os::Windows),
+        );
+        let renamed = f.dst.join("dir (2)");
+        let failed: Vec<_> = rep
+            .failures
+            .iter()
+            .map(|x| (x.stage, x.target.clone()))
+            .collect();
+        assert_eq!(
+            failed,
+            [(Stage::Preflight, Some(v(renamed.join("a?b.txt"))))]
+        );
+        assert_eq!(tree(&renamed).into_keys().collect::<Vec<_>>(), ["ok.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(f.dst.join("dir")).unwrap(),
+            "a file"
+        );
+        assert_eq!(r.calls(), [ResolverCall::Preflight { issues: 1 }]);
     }
 
     #[test]
@@ -655,4 +765,56 @@ fn copying_a_folder_into_itself_ignores_case_on_case_insensitive_targets() {
         &NonInteractive,
     );
     assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+}
+
+/// The outputs are the top-level items the job made: a folder it merged into was there
+/// before.
+#[test]
+fn a_merged_folder_is_not_an_output() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("new/b.txt", "B")]);
+    write_tree(&f.dst, &[("dir/other.txt", "O")]);
+    let rep = run(&copy(&[f.src.join("dir"), f.src.join("new")], &f.dst));
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert_eq!(rep.outputs, [v(f.dst.join("new"))]);
+}
+
+/// A folder's own step that fails and is tried again leaves its children counted once.
+#[test]
+fn retrying_a_folder_counts_its_children_once() {
+    use rf_jobs::testkit::ResolverCall;
+    use rf_jobs::{ErrorAction, ErrorAnswer, ErrorPolicy, Totals};
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
+    // The first try of `dir` fails, and so does the first try of `sub`.
+    let p = FaultyProvider::local(vec![
+        Fault::FailCreateDir { call: 0 },
+        Fault::FailCreateDir { call: 2 },
+    ]);
+    let retry = ErrorAnswer {
+        action: ErrorAction::Retry,
+        apply_to_all: false,
+    };
+    let r = ScriptedResolver::new().on_error(retry).on_error(retry);
+    let options = TransferOptions {
+        errors: ErrorPolicy::Ask,
+        ..TransferOptions::default()
+    };
+    let rep = run_on(
+        &spec(TransferMode::Copy, &[f.src.join("dir")], &f.dst, options),
+        &p.vfs(),
+        &r,
+    );
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    let write_failed = ResolverCall::Error {
+        stage: Stage::Write,
+    };
+    assert_eq!(r.calls(), [write_failed.clone(), write_failed]);
+    let all = Totals {
+        files: 2,
+        dirs: 2,
+        bytes: 2,
+    };
+    assert_eq!((rep.planned, rep.done), (all, all));
+    assert_eq!(tree(&f.dst.join("dir")), tree(&f.src.join("dir")));
 }

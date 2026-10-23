@@ -10,7 +10,10 @@ use rf_vfs::{MetadataPatch, Provider, RenameMode};
 
 use super::file::{Source, copy_file};
 use super::scan::{follow_link, follows_links, scan_transfer};
-use super::{At, Attempt, Cause, Ctx, Failed, MAX_DEPTH, fold_path};
+use super::{
+    At, Attempt, Cause, Ctx, Failed, Identity, Level, MAX_DEPTH, fold_path, folder_identity,
+    link_loop,
+};
 use crate::conflict::{Conflict, ConflictAction, Decision, decide};
 use crate::naming::{MAX_NUMBERED, numbered_name};
 use crate::preflight::{FsKind, IssueKind, check_name, check_path_len};
@@ -44,7 +47,12 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
             fs: planned.fs,
         };
         let (source, target) = (&planned.item.source, &planned.item.target);
-        if transfer_entry(ctx, &walk, source, planned.entry.clone(), target, 0).is_break() {
+        let entry = planned.entry.clone();
+        let to = To {
+            path: target,
+            planned: target,
+        };
+        if transfer_entry(ctx, &walk, source, entry, to, Level::TOP).is_break() {
             return;
         }
     }
@@ -63,6 +71,17 @@ struct Walk<'p> {
     fs: FsKind,
 }
 
+/// Where one item goes.
+#[derive(Clone, Copy, Debug)]
+struct To<'a> {
+    /// The path it is written to: under the folder its parent was really written to, which
+    /// can be a numbered one.
+    path: &'a VPath,
+    /// The path the plan gave it, under the names of the sources: what its pre-flight issues
+    /// are found under.
+    planned: &'a VPath,
+}
+
 /// Whether the job goes on after an item: `Break` once it is cancelled or aborted.
 type Flow = ControlFlow<()>;
 
@@ -74,26 +93,31 @@ fn flow<T>(attempt: &Attempt<T>) -> Flow {
     }
 }
 
-/// Transfers `source`, which `entry` describes, to `target`; `depth` is how far below an item
-/// of the job it is (the items themselves are at 0).
+/// Transfers `source`, which `entry` describes, to `to`; `level` says how far below an item of
+/// the job it is (the items themselves are at 0) and which folders are above it.
 ///
 /// - Deeper than [`MAX_DEPTH`]: fails as `Stage::Plan` and is not entered.
-/// - A target the pre-flight review left out: fails as `Stage::Preflight` with its issue,
+/// - A target the pre-flight review left out (found under its planned path, also below a
+///   folder written under a numbered name): fails as `Stage::Preflight` with its issue,
 ///   without a question, since the user chose to skip it.
 /// - A link in Follow mode: what it leads to is transferred in its place, under the link's
 ///   name. It is read, listed and given extras at its own path with every link resolved (see
-///   `follow_link`), which also names it in its later failures, so a loop of links only adds
-///   depth, never a longer source path. A link that cannot be followed fails as `Stage::Read`.
+///   `follow_link`), which also names it in its later failures, so a loop of links never makes
+///   a source path longer. A link that cannot be followed fails as `Stage::Read`. A followed
+///   folder that is one of the folders above it (by identity, when both are known) is a loop
+///   of links: it fails as `Stage::Plan` and is not entered. Without identities, the depth
+///   limit ends such a loop.
 /// - A folder: see [`transfer_dir`]. A file, a link and anything else: see [`transfer_file`].
 fn transfer_entry(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
     source: &VPath,
     entry: Entry,
-    target: &VPath,
-    depth: usize,
+    to: To<'_>,
+    level: Level<'_>,
 ) -> Flow {
-    if depth > MAX_DEPTH {
+    let target = to.path;
+    if level.depth() > MAX_DEPTH {
         let too_deep = ctx.attempt(walk.errors, Some(source), Some(target), |_| {
             let error =
                 Error::Unsupported(format!("folder nesting deeper than {MAX_DEPTH} levels"));
@@ -101,30 +125,35 @@ fn transfer_entry(
         });
         return flow(&too_deep);
     }
-    if let Some(issue) = walk.blocked.get(target) {
+    if let Some(issue) = walk.blocked.get(to.planned) {
         let failure =
             Failed::issue(Stage::Preflight, issue.clone()).record(Some(source), Some(target));
         ctx.report.failures.push(failure);
         return ControlFlow::Continue(());
     }
-    let (source, entry) = if entry.kind == EntryKind::Symlink && walk.follow {
+    let (link, (source, entry)) = if entry.kind == EntryKind::Symlink && walk.follow {
         let followed = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
             ctx.check().at(Stage::Read)?;
             let src = ctx.provider(source).at(Stage::Read)?;
             follow_link(&*src, source).at(Stage::Read)
         });
         match followed {
-            Attempt::Done(followed) => followed,
+            Attempt::Done(followed) => (Some(source), followed),
             other => return flow(&other),
         }
     } else {
-        (source.clone(), entry)
+        (None, (source.clone(), entry))
     };
-    if entry.kind == EntryKind::Dir {
-        transfer_dir(ctx, walk, &source, &entry, target, depth)
-    } else {
-        transfer_file(ctx, walk, &source, &entry, target, depth == 0)
+    if entry.kind != EntryKind::Dir {
+        return transfer_file(ctx, walk, &source, &entry, target, level.depth() == 0);
     }
+    if let Some(link) = link.filter(|_| level.leads_back(entry.identity())) {
+        let looped = ctx.attempt(walk.errors, Some(link), Some(target), |_| {
+            Err::<(), _>(Failed::new(Stage::Plan, link_loop(link)))
+        });
+        return flow(&looped);
+    }
+    transfer_dir(ctx, walk, &source, &entry, to, level)
 }
 
 /// Copies the file or link `source`, which `entry` describes, to `target`, or settles its
@@ -178,7 +207,7 @@ fn transfer_file(
     ControlFlow::Continue(())
 }
 
-/// Copies the folder `source`, which `entry` describes, to `target` with everything in it.
+/// Copies the folder `source`, which `entry` describes, to `to` with everything in it.
 ///
 /// One step lists all the children first, then settles where the folder goes (see
 /// [`place`]): a new folder is made there, an existing folder is merged into without a
@@ -187,19 +216,20 @@ fn transfer_file(
 /// child is then its own step, so a child that has been written stays counted once whatever
 /// happens after it. A folder this job made gets the extras, times and attributes of the
 /// source last, after its children are in it: its modification time stays, and a read-only
-/// folder still takes its children. A metadata failure is a warning.
+/// folder still takes its children. A metadata failure is a warning. Only a top-level folder
+/// this job made goes to the outputs; one merged into was there before.
 fn transfer_dir(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
     source: &VPath,
     entry: &Entry,
-    target: &VPath,
-    depth: usize,
+    to: To<'_>,
+    level: Level<'_>,
 ) -> Flow {
-    let opened = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
-        open_dir(ctx, walk, source, entry, target)
+    let opened = ctx.attempt(walk.errors, Some(source), Some(to.path), |ctx| {
+        open_dir(ctx, walk, source, entry, to.path)
     });
-    let (to, children, made) = match opened {
+    let opened = match opened {
         Attempt::Done(Some(opened)) => opened,
         Attempt::Done(None) => {
             ctx.report.skipped += 1;
@@ -207,57 +237,97 @@ fn transfer_dir(
         }
         other => return flow(&other),
     };
-    if depth == 0 {
-        ctx.report.outputs.push(to.clone());
+    if opened.made && level.depth() == 0 {
+        ctx.report.outputs.push(opened.path.clone());
     }
-    for child in children {
-        match (source.join(&child.name), to.join(&child.name)) {
-            (Ok(child_source), Ok(child_target)) => {
-                transfer_entry(ctx, walk, &child_source, child, &child_target, depth + 1)?;
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                let named = ctx.attempt(walk.errors, Some(source), Some(&to), |_| {
+    let here = level.enter(opened.identity);
+    for child in opened.children {
+        let name = &child.name;
+        let child_source = match source.join(name) {
+            Ok(path) => path,
+            Err(error) => {
+                // No path names the child on the source side; the error names it.
+                let named = opened.path.join(name).ok();
+                let target = named.as_ref().unwrap_or(&opened.path);
+                let failed = ctx.attempt(walk.errors, Some(source), Some(target), |_| {
                     Err::<(), _>(Failed::new(Stage::Read, error.clone().into()))
                 });
-                flow(&named)?;
+                flow(&failed)?;
+                continue;
             }
-        }
+        };
+        let (child_target, child_planned) = match (opened.path.join(name), to.planned.join(name)) {
+            (Ok(target), Ok(planned)) => (target, planned),
+            (Err(error), _) | (_, Err(error)) => {
+                let failed =
+                    ctx.attempt(walk.errors, Some(&child_source), Some(&opened.path), |_| {
+                        Err::<(), _>(Failed::new(Stage::Write, error.clone().into()))
+                    });
+                flow(&failed)?;
+                continue;
+            }
+        };
+        let child_to = To {
+            path: &child_target,
+            planned: &child_planned,
+        };
+        transfer_entry(ctx, walk, &child_source, child, child_to, here.below())?;
     }
-    if made {
-        finish_dir(ctx, source, entry, &to);
+    if opened.made {
+        finish_dir(ctx, source, entry, &opened.path);
     }
     ctx.item_done(false, true);
     ControlFlow::Continue(())
 }
 
-/// The children of the folder `source` and the folder they go to, and whether this job made
-/// that folder; `None` when the folder is skipped.
+/// A folder the job has entered.
+#[derive(Debug)]
+struct Opened {
+    /// Where its children go.
+    path: VPath,
+    /// Its children, as they were when it was listed.
+    children: Vec<Entry>,
+    /// Whether this job made the folder at `path`, rather than merge into one that was there.
+    made: bool,
+    /// The identity of the source folder (see `folder_identity`).
+    identity: Option<Identity>,
+}
+
+/// Lists the folder `source` and settles where its children go; `None` when the folder is
+/// skipped.
 fn open_dir(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
     source: &VPath,
     entry: &Entry,
     target: &VPath,
-) -> Result<Option<(VPath, Vec<Entry>, bool)>, Failed> {
+) -> Result<Option<Opened>, Failed> {
     ctx.check().at(Stage::Write)?;
     let src = ctx.provider(source).at(Stage::Read)?;
     let dst = ctx.provider(target).at(Stage::Write)?;
     ctx.working_on(source);
     let children = ctx.list(&*src, source).at(Stage::Read)?;
+    let identity = folder_identity(walk.follow, &*src, source, entry);
     let from = Source {
         provider: &*src,
         path: source,
         entry,
     };
-    match place(ctx, walk.conflict, from, &*dst, target, walk.fs)? {
-        Place::Skip => Ok(None),
-        Place::Merge => Ok(Some((target.clone(), children, false))),
+    let (path, made) = match place(ctx, walk.conflict, from, &*dst, target, walk.fs)? {
+        Place::Skip => return Ok(None),
+        Place::Merge => (target.clone(), false),
         Place::At { path, .. } => {
             dst.create_dir(&path)
                 .map_err(|error| Failed::new(Stage::Write, error).writing(&path))?;
-            Ok(Some((path, children, true)))
+            (path, true)
         }
-    }
+    };
+    Ok(Some(Opened {
+        path,
+        children,
+        made,
+        identity,
+    }))
 }
 
 /// Gives the folder `to`, which this job made, what the source folder `source` has besides its
