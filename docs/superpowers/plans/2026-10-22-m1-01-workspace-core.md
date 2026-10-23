@@ -68,7 +68,7 @@ crates/rf-core/
 
 ## 후속 계획이 쓰는 공개 API (요약)
 
-모든 타입은 `rf_core` 루트에서도 재수출된다(`rf_core::VPath` 등). 세부 규칙은 각 태스크의 Interfaces에 있다.
+모든 타입은 `rf_core` 루트에서도 재수출된다(`rf_core::VPath` 등). 세부 규칙은 각 태스크의 Interfaces에 있다. 최종 검토 수정으로 늘어난 `ErrorKind`·`EntryKind` 변형과 `VPath::to_uri` 문자열 문법(`vpath/mod.rs` 모듈 문서)은 이 요약과 rf-core 코드가 기준이다(Task 7·8 본문은 처음 구현할 때 그대로다).
 
 ```rust
 // rf_core::identity
@@ -111,13 +111,15 @@ impl VPath {
 // rf_core::error
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum PathError { Empty, Nul, NotAbsolute(String), UnknownScheme(String), InvalidEscape(String), InvalidName(String), Unsupported(String) } // non_exhaustive
-pub enum ErrorKind { NotFound, PermissionDenied, AlreadyExists, InvalidPath, Unsupported, Cancelled, Other } // non_exhaustive
+pub enum ErrorKind { NotFound, PermissionDenied, AlreadyExists, InvalidPath, NotADirectory, IsADirectory, DirectoryNotEmpty, StorageFull, ReadOnly, CrossesDevices, Busy, TimedOut, Interrupted, FileTooLarge, Unsupported, Cancelled, Other } // non_exhaustive
+// kind(): Io maps io::ErrorKind by name (StorageFull and QuotaExceeded → StorageFull, ReadOnlyFilesystem → ReadOnly, ResourceBusy → Busy);
+//         Windows OS codes 32, 33 → Busy and 123, 161, 206 → InvalidPath; any other io kind → Other. Path (every PathError) → InvalidPath, MissingEnv → Other
 pub enum Error { Io { op: &'static str, path: VPath, source: std::io::Error }, Path(PathError), MissingEnv(&'static str), Unsupported(String), Cancelled } // non_exhaustive
 impl Error { pub fn io(op: &'static str, path: VPath, source: std::io::Error) -> Error; pub fn kind(&self) -> ErrorKind }
 
 // rf_core::entry
 pub struct Attributes: u32; // bitflags: READONLY HIDDEN SYSTEM ARCHIVE COMPRESSED ENCRYPTED SPARSE OFFLINE REPARSE_POINT
-pub enum EntryKind { File, Dir, Symlink }
+pub enum EntryKind { File, Dir, Symlink, Other } // Other: FIFO, socket, block/char device or other non-regular file; never opened for data
 pub struct VolumeId(pub u64);
 pub struct FileId(pub u128);
 pub struct Entry { pub name: OsString, pub kind: EntryKind, pub size: u64, pub modified: Option<SystemTime>, pub created: Option<SystemTime>, pub accessed: Option<SystemTime>, pub attributes: Attributes, pub volume_id: Option<VolumeId>, pub file_id: Option<FileId> } // non_exhaustive
