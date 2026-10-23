@@ -2,7 +2,7 @@
 //!
 //! Names compare with the OS natural order (`rf_platform::NaturalKey`). The OS rules are not
 //! guaranteed to be total orders, and since Rust 1.81 `slice::sort_by` may panic on one, so
-//! every sort here goes through [`stable_order_by`], a merge sort that never panics.
+//! every sort here goes through `stable_order_by`, a merge sort that never panics.
 
 use std::cmp::Ordering;
 

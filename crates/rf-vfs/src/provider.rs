@@ -21,6 +21,11 @@ bitflags::bitflags! {
         /// volume does not have it.
         const WRITE = 1 << 0;
         /// Items can be moved to the trash from here (`DeleteMode::Trash`).
+        ///
+        /// It is a guess for the whole volume (a fixed drive on Windows, a volume with a trash
+        /// folder on macOS), not a promise for each item: the trash can still refuse one item,
+        /// for example a Windows path longer than the recycle bin takes, and `delete` then
+        /// fails with `ErrorKind::Unsupported` and leaves the item alone.
         const TRASH = 1 << 1;
         /// The folder can be watched for changes (`Provider::watch`).
         const WATCH = 1 << 2;
@@ -93,6 +98,9 @@ pub trait Provider: Send + Sync + Debug {
     /// Streams the direct children of `dir` in batches of at most `LIST_BATCH_SIZE`
     /// (never empty); checks `cancel` at least between batches and then returns
     /// `Err(Error::Cancelled)`. Order is unspecified. An empty folder calls `sink` zero times.
+    ///
+    /// `Entry::identity()` may be `None`, as for `stat`. The local provider leaves it empty on
+    /// Windows for every listed entry, because the IDs need an open handle per file.
     fn list(
         &self,
         dir: &VPath,
@@ -100,16 +108,37 @@ pub trait Provider: Send + Sync + Debug {
         sink: &mut dyn FnMut(Vec<Entry>),
     ) -> Result<()>;
     /// Metadata of `path` itself, without following a final symlink.
+    ///
+    /// `Entry::identity()` (the volume and file ID) may be `None`: a file system without file
+    /// IDs, one that reports an ID of 0, or a remote provider that cannot tell. A caller that
+    /// needs the identity handles `None`, and never takes two entries without one for the
+    /// same item.
     fn stat(&self, path: &VPath) -> Result<Entry>;
     /// Creates one folder; `AlreadyExists` if anything is there, `NotFound` without a parent.
     fn create_dir(&self, path: &VPath) -> Result<()>;
     /// Creates one empty file with the same error rules as `create_dir`.
     fn create_file(&self, path: &VPath) -> Result<()>;
     /// Renames or moves inside one provider. `NoReplace` never overwrites; `Replace`
-    /// atomically replaces an existing file. Moving a folder into itself is refused.
+    /// atomically replaces an existing file. Moving a folder into itself is refused with
+    /// `ErrorKind::Unsupported`.
+    ///
+    /// A target on another volume gives `ErrorKind::CrossesDevices`; the caller copies and
+    /// deletes instead. A rename that only changes the letter case of a name works on a volume
+    /// that ignores case, but one that only changes its Unicode normalization (NFC to NFD or
+    /// back, I18N-04) can fail with `AlreadyExists` on APFS, which takes both spellings for
+    /// one name.
     fn rename(&self, from: &VPath, to: &VPath, mode: RenameMode) -> Result<()>;
-    /// `Trash` never turns into a permanent delete; it fails instead. `Permanent` removes a
-    /// folder tree, and for a symlink removes only the link.
+    /// Moves `path` to the trash or removes it for good.
+    ///
+    /// `Trash` never turns into a permanent delete; it fails instead, and every error leaves
+    /// the item untouched (principle 1). `ErrorKind::Unsupported` means that the trash cannot
+    /// take this item (no trash here, or the trash refuses it): the caller may offer a
+    /// permanent delete, after asking the user. Other kinds come from the trash itself (the
+    /// Windows shell may fail to read a very long path, for example).
+    ///
+    /// `Permanent` removes a folder tree, and for a symlink removes only the link, never what
+    /// it leads to. An error names `path`, not the item inside the tree that failed, and a tree
+    /// may then be partly removed.
     fn delete(&self, path: &VPath, mode: DeleteMode) -> Result<Deleted>;
     /// Opens the file at `path` for reading and seeking.
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>>;
@@ -121,5 +150,8 @@ pub trait Provider: Send + Sync + Debug {
     /// is never called after the returned handle is dropped. Dropping the handle waits for a
     /// sink call in progress, so never drop it while holding a lock (or anything else) the sink
     /// may wait on.
+    ///
+    /// Start the watch before listing the folder, so that no change between the two is lost;
+    /// a change that the listing already shows may then also arrive as an event.
     fn watch(&self, dir: &VPath, sink: WatchSink) -> Result<WatchHandle>;
 }
