@@ -2,6 +2,7 @@
 
 use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -85,6 +86,19 @@ pub trait WriteStream: Write + Send + Debug {
     /// Flushes and closes the stream. Only after this returns `Ok` is the data durable;
     /// dropping the stream without it promises nothing.
     fn finish(self: Box<Self>) -> Result<()>;
+
+    /// Leaves the next `len` bytes of the file as a hole, which reads as zeros and takes no
+    /// space, and moves on past it, as a copy of a sparse file does with the gaps between its
+    /// `Provider::data_ranges` (XFER-11). A hole at the end still counts: the finished file is
+    /// as long as its last write or hole reaches.
+    ///
+    /// `Ok(false)` means that this stream cannot make holes and has written nothing: the
+    /// caller writes the zeros itself, so the content is the same either way. The default
+    /// implementation always says so.
+    fn write_hole(&mut self, len: u64) -> Result<bool> {
+        let _ = len;
+        Ok(false)
+    }
 }
 
 /// What a symbolic link leads to, as `Provider::read_link` reads it and
@@ -173,8 +187,9 @@ fn unsupported(op: &str, path: &VPath) -> Error {
 ///
 /// The methods after `watch` have default implementations, so that a provider without links,
 /// metadata or a trash to restore from needs none of them: they fail with
-/// `Error::Unsupported`, except `copy_extras` and `fs_name`, which have nothing to give,
-/// `sync_dir`, which has nothing to do, and `delete_leaf`, which uses `stat` and `delete`.
+/// `Error::Unsupported`, except `copy_extras`, `fs_name` and `data_ranges`, which have nothing
+/// to give, `sync_dir`, which has nothing to do, and `delete_leaf`, which uses `stat` and
+/// `delete`.
 pub trait Provider: Send + Sync + Debug {
     /// The scheme this provider serves; `Vfs` routes by it.
     fn scheme(&self) -> Scheme;
@@ -356,6 +371,19 @@ pub trait Provider: Send + Sync + Debug {
     fn fs_name(&self, path: &VPath) -> Option<String> {
         let _ = path;
         None
+    }
+
+    /// The ranges of the file at `path` that hold data, in ascending order and not overlapping,
+    /// so that a copy can leave the gaps between them as holes (`WriteStream::write_hole`,
+    /// XFER-11). For the local provider it is what `rf_platform::data_ranges` gives.
+    ///
+    /// `None` means that the file has no holes to keep, or that the provider cannot tell; the
+    /// file is then copied whole, which gives the same content. The ranges describe the file
+    /// as it was when it was looked at, so a reader must check that it gets every byte of
+    /// them. The default implementation gives `Ok(None)`.
+    fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
+        let _ = path;
+        Ok(None)
     }
 
     /// Puts an item back from the trash: moves it from `location`, where `Deleted::Trashed`

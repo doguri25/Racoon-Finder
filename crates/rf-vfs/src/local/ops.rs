@@ -1,7 +1,7 @@
 //! Renaming, deleting, links, metadata, and the read and write streams.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 
 use rf_core::{Error, ErrorKind, Result, VPath};
 
@@ -263,14 +263,41 @@ pub(super) fn open_write(path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteS
     Ok(Box::new(LocalWriter {
         file,
         path: path.clone(),
+        mode,
+        holes: Holes::Untried,
     }))
 }
 
-/// A file being written. `path` is for error messages only.
+/// A file being written. `path` is for error messages only; `mode` is how it was opened.
 #[derive(Debug)]
 struct LocalWriter {
     file: File,
     path: VPath,
+    mode: WriteMode,
+    holes: Holes,
+}
+
+/// What a [`LocalWriter`] knows about leaving holes in its file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holes {
+    /// `write_hole` has not been called.
+    Untried,
+    /// The file can have holes, and has had at least one passed over.
+    Made,
+    /// The file system refused to mark the file sparse (FAT and exFAT on Windows).
+    Refused,
+}
+
+impl LocalWriter {
+    /// Makes the file as long as the position it is written at, which a hole at its end leaves
+    /// past its last byte.
+    fn extend_to_position(&mut self) -> io::Result<()> {
+        let position = self.file.stream_position()?;
+        if self.file.metadata()?.len() < position {
+            self.file.set_len(position)?;
+        }
+        Ok(())
+    }
 }
 
 impl Write for LocalWriter {
@@ -284,10 +311,37 @@ impl Write for LocalWriter {
 }
 
 impl WriteStream for LocalWriter {
+    /// A file with a hole at its end is first made as long as that hole reaches (`set_len`).
+    /// Only a hole moves the position past the end of the file, so a file without one is
+    /// never measured.
     fn finish(mut self: Box<Self>) -> Result<()> {
-        self.file
-            .flush()
+        let extended = if self.holes == Holes::Made {
+            self.extend_to_position()
+        } else {
+            Ok(())
+        };
+        extended
+            .and_then(|()| self.file.flush())
             .and_then(|()| self.file.sync_all())
             .map_err(|e| Error::io("finish", self.path.clone(), e))
+    }
+
+    /// The first call marks the file sparse (`rf_platform::mark_sparse`); after that, a hole
+    /// is a seek past it. A file system that refuses the mark gets `Ok(false)` for this hole and
+    /// every later one, and so does a file opened with `WriteMode::Append`, which writes at its
+    /// end wherever it was moved to.
+    fn write_hole(&mut self, len: u64) -> Result<bool> {
+        if self.mode == WriteMode::Append || self.holes == Holes::Refused {
+            return Ok(false);
+        }
+        if self.holes == Holes::Untried && rf_platform::mark_sparse(&self.file).is_err() {
+            self.holes = Holes::Refused;
+            return Ok(false);
+        }
+        let fail = |e| Error::io("write_hole", self.path.clone(), e);
+        let offset = i64::try_from(len).map_err(|_| fail(io::ErrorKind::InvalidInput.into()))?;
+        self.file.seek(SeekFrom::Current(offset)).map_err(fail)?;
+        self.holes = Holes::Made;
+        Ok(true)
     }
 }

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs::ReadDir;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -275,7 +276,9 @@ pub fn wait_finished(rx: &Receiver<JobEvent>, id: JobId, timeout: Duration) -> A
 /// that would take the file past `after` bytes in all: that write passes its first bytes up
 /// to `after` on and then fails (or crashes). Writes that stay at or below `after` are not
 /// touched, so a file of exactly `after` bytes, or a smaller one, is never hit. With
-/// `after: 0` the first write of any data strikes and passes nothing on.
+/// `after: 0` the first write of any data strikes and passes nothing on. A hole
+/// (`WriteStream::write_hole`) is passed on and does not count toward `after`, but once one of
+/// these faults has struck, `write_hole` fails with the same error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Fault {
@@ -287,10 +290,10 @@ pub enum Fault {
     /// `finish` of file `file` fails with `injected fsync failure` and does not finish the inner
     /// stream (it is closed unsynced).
     FailFinish { file: usize },
-    /// The first write to file `file` panics with `injected panic`.
+    /// The first `write` or `write_hole` of file `file` panics with `injected panic`.
     Panic { file: usize },
-    /// The first write to file `file` waits until [`FaultyProvider::release`]. It wakes
-    /// [`FaultyProvider::wait_held`] before it waits.
+    /// The first `write` or `write_hole` of file `file` waits until
+    /// [`FaultyProvider::release`]. It wakes [`FaultyProvider::wait_held`] before it waits.
     Hold { file: usize },
     /// Like a killed process: the write that would take file `file` past `after` bytes passes
     /// them on up to `after`, then the inner stream is flushed and closed,
@@ -332,6 +335,16 @@ pub enum Fault {
     /// as the same items show through a second mount of their file system (bindfs, an NFS or
     /// SMB loopback, one share mounted twice). Their file IDs stay as they are.
     OtherVolume { under: VPath },
+    /// `data_ranges` of an item called `name` gives `ranges`, as for a sparse file, whatever the
+    /// file holds: ranges that are out of date by the time they are read, or that call a
+    /// stretch of zeros a hole.
+    DataRanges {
+        name: OsString,
+        ranges: Vec<Range<u64>>,
+    },
+    /// Every `write_hole` gives `Ok(false)` and passes nothing on, as on a file system that
+    /// cannot make holes (FAT and exFAT on Windows).
+    NoHoles,
 }
 
 impl Fault {
@@ -642,8 +655,10 @@ impl Provider for FaultyProvider {
             inner: Some(inner),
             path: path.clone(),
             faults,
+            no_holes: self.faults.contains(&Fault::NoHoles),
             written: 0,
             started: false,
+            struck: None,
             shared: Arc::clone(&self.shared),
         }))
     }
@@ -712,6 +727,19 @@ impl Provider for FaultyProvider {
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         self.inner.restore_trashed(location, original)
     }
+
+    fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
+        let injected = self.faults.iter().find_map(|fault| match fault {
+            Fault::DataRanges { name, ranges } if path.file_name() == Some(name.as_os_str()) => {
+                Some(ranges.clone())
+            }
+            _ => None,
+        });
+        match injected {
+            Some(ranges) => Ok(Some(ranges)),
+            None => self.inner.data_ranges(path),
+        }
+    }
 }
 
 /// A file a [`FaultyProvider`] writes, with the faults of its `open_write` number.
@@ -721,16 +749,49 @@ struct FaultyWriter {
     inner: Option<Box<dyn WriteStream>>,
     path: VPath,
     faults: Vec<Fault>,
-    /// The bytes passed to the inner stream so far.
+    /// Whether the provider has [`Fault::NoHoles`].
+    no_holes: bool,
+    /// The bytes passed to the inner stream so far; holes do not count.
     written: u64,
-    /// Whether `write` was called before.
+    /// Whether `write` or `write_hole` was called before.
     started: bool,
+    /// The fault with a byte count that has struck, if one has.
+    struck: Option<Fault>,
     shared: Arc<Shared>,
 }
 
 impl FaultyWriter {
     fn has(&self, wanted: impl Fn(&Fault) -> bool) -> bool {
         self.faults.iter().any(wanted)
+    }
+
+    /// Applies the faults of the first `write` or `write_hole`: a panic, or a wait for
+    /// [`FaultyProvider::release`].
+    fn start(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        // No lock is held here, so the panic poisons nothing.
+        assert!(
+            !self.has(|fault| matches!(fault, Fault::Panic { .. })),
+            "injected panic"
+        );
+        if self.has(|fault| matches!(fault, Fault::Hold { .. })) {
+            self.shared.set(|signals| signals.held = true);
+            self.shared.wait_until(|signals| signals.released);
+        }
+    }
+
+    /// The error that `fault`, one with a byte count other than a crash, fails a write with.
+    fn injected(fault: &Fault) -> io::Error {
+        match fault {
+            Fault::DiskFull { .. } => {
+                io::Error::new(io::ErrorKind::StorageFull, "injected disk full")
+            }
+            // `FailWrite`, the other fault with a byte count.
+            _ => io::Error::other("injected write failure"),
+        }
     }
 
     fn stream(&mut self) -> io::Result<&mut Box<dyn WriteStream>> {
@@ -753,18 +814,7 @@ impl FaultyWriter {
 
 impl Write for FaultyWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !self.started {
-            self.started = true;
-            // No lock is held here, so the panic poisons nothing.
-            assert!(
-                !self.has(|fault| matches!(fault, Fault::Panic { .. })),
-                "injected panic"
-            );
-            if self.has(|fault| matches!(fault, Fault::Hold { .. })) {
-                self.shared.set(|signals| signals.held = true);
-                self.shared.wait_until(|signals| signals.released);
-            }
-        }
+        self.start();
         let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
         let strike = self
             .faults
@@ -778,15 +828,12 @@ impl Write for FaultyWriter {
             let part = &buf[..room.min(buf.len())];
             self.stream()?.write_all(part)?;
             self.written += u64::try_from(part.len()).unwrap_or(u64::MAX);
-            return match fault {
-                Fault::DiskFull { .. } => Err(io::Error::new(
-                    io::ErrorKind::StorageFull,
-                    "injected disk full",
-                )),
-                Fault::Crash { .. } => self.crash(),
-                // `FailWrite`, the other fault with a byte count.
-                _ => Err(io::Error::other("injected write failure")),
-            };
+            if matches!(fault, Fault::Crash { .. }) {
+                self.crash();
+            }
+            let error = Self::injected(&fault);
+            self.struck = Some(fault);
+            return Err(error);
         }
         let n = self.stream()?.write(buf)?;
         self.written += u64::try_from(n).unwrap_or(u64::MAX);
@@ -812,6 +859,21 @@ impl WriteStream for FaultyWriter {
             return Err(Error::io("finish", self.path.clone(), error));
         };
         stream.finish()
+    }
+
+    /// Passed on, without counting toward the byte count of a fault, unless a fault with a byte
+    /// count has struck (the same error again) or the provider has [`Fault::NoHoles`].
+    fn write_hole(&mut self, len: u64) -> Result<bool> {
+        self.start();
+        let error = match &self.struck {
+            Some(fault) => Self::injected(fault),
+            None if self.no_holes => return Ok(false),
+            None => match self.stream() {
+                Ok(stream) => return stream.write_hole(len),
+                Err(error) => error,
+            },
+        };
+        Err(Error::io("write_hole", self.path.clone(), error))
     }
 }
 
@@ -863,6 +925,77 @@ mod tests {
         // Exactly `after` bytes never pass `after`.
         write_file(&p, dir.path(), "3", 8).unwrap();
         assert_eq!(p.opened_writes(), 4);
+    }
+
+    #[test]
+    fn holes_are_passed_on_uncounted_until_a_fault_strikes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = FaultyProvider::local(vec![
+            Fault::FailWrite { file: 0, after: 4 },
+            Fault::Panic { file: 1 },
+        ]);
+        let open = |name: &str| {
+            p.open_write(&local(&dir.path().join(name)), WriteMode::CreateNew)
+                .unwrap()
+        };
+        let mut stream = open("0");
+        stream.write_all(b"ab").unwrap();
+        assert!(stream.write_hole(1 << 20).unwrap());
+        // Had the hole counted, these two bytes would be past `after`.
+        stream.write_all(b"cd").unwrap();
+        let error = stream.write_all(b"e").unwrap_err();
+        assert_eq!(error.to_string(), "injected write failure");
+        let error = stream.write_hole(1).unwrap_err();
+        assert!(
+            error.to_string().contains("injected write failure"),
+            "{error}"
+        );
+        drop(stream);
+        let mut panicking = open("1");
+        let panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| panicking.write_hole(1)));
+        assert!(panicked.is_err());
+        drop(panicking);
+
+        let mut stream = open("2");
+        stream.write_all(b"a").unwrap();
+        assert!(stream.write_hole(3).unwrap());
+        stream.write_all(b"b").unwrap();
+        assert!(stream.write_hole(2).unwrap());
+        stream.finish().unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("2")).unwrap(),
+            b"a\0\0\0b\0\0"
+        );
+
+        let p = FaultyProvider::local(vec![Fault::NoHoles]);
+        let mut stream = p
+            .open_write(&local(&dir.path().join("3")), WriteMode::CreateNew)
+            .unwrap();
+        assert!(!stream.write_hole(1).unwrap());
+    }
+
+    #[test]
+    fn data_ranges_are_passed_on_unless_injected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (local(&dir.path().join("a")), local(&dir.path().join("b")));
+        std::fs::write(dir.path().join("a"), b"dense").unwrap();
+        // Sparse where the file system keeps holes, so the inner answer is not the default.
+        let mut sparse = LocalProvider::new()
+            .open_write(&b, WriteMode::CreateNew)
+            .unwrap();
+        sparse.write_all(b"x").unwrap();
+        assert!(sparse.write_hole(1 << 20).unwrap());
+        sparse.finish().unwrap();
+        let p = FaultyProvider::local(vec![Fault::DataRanges {
+            name: "a".into(),
+            ranges: vec![1..2, 4..5],
+        }]);
+        assert_eq!(p.data_ranges(&a).unwrap(), Some(vec![1..2, 4..5]));
+        assert_eq!(
+            p.data_ranges(&b).unwrap(),
+            LocalProvider::new().data_ranges(&b).unwrap()
+        );
     }
 
     #[test]

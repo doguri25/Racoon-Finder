@@ -6,6 +6,7 @@ mod watch;
 
 use std::ffi::OsString;
 use std::fs::{FileType, Metadata, OpenOptions};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use rf_core::{Entry, EntryKind, Error, Result, Scheme, VPath};
@@ -212,6 +213,10 @@ impl Provider for LocalProvider {
         rf_platform::volume_info(path)
             .ok()
             .and_then(|info| info.fs_name)
+    }
+
+    fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
+        rf_platform::data_ranges(path)
     }
 
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {

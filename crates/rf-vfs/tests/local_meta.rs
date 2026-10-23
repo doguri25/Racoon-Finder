@@ -1,7 +1,8 @@
+use std::io::Write;
 use std::time::{Duration, SystemTime};
 
 use rf_core::{Attributes, Entry, EntryKind, ErrorKind, Scheme, VPath};
-use rf_vfs::{LinkTarget, LocalProvider, MetadataPatch, Provider, testkit};
+use rf_vfs::{LinkTarget, LocalProvider, MetadataPatch, Provider, WriteMode, testkit};
 
 fn run(check: fn(&dyn Provider, &VPath)) {
     let t = tempfile::tempdir().unwrap();
@@ -144,4 +145,32 @@ fn sync_dir_syncs_an_existing_folder() {
     assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
     #[cfg(windows)]
     missing.unwrap();
+}
+
+#[test]
+fn write_streams_can_leave_holes() {
+    let d = tempfile::tempdir().unwrap();
+    let p = LocalProvider::new();
+    let f = VPath::local(d.path().join("h.bin")).unwrap();
+    let mut w = p.open_write(&f, WriteMode::CreateNew).unwrap();
+    w.write_all(b"a").unwrap();
+    assert!(w.write_hole(1 << 20).unwrap());
+    w.write_all(b"b").unwrap();
+    assert!(w.write_hole(1 << 20).unwrap());
+    w.finish().unwrap();
+    let bytes = std::fs::read(d.path().join("h.bin")).unwrap();
+    assert_eq!(bytes.len(), 2 + (2 << 20));
+    assert_eq!((bytes[0], bytes[1 + (1 << 20)]), (b'a', b'b'));
+    assert!(
+        bytes[1..=(1 << 20)]
+            .iter()
+            .chain(&bytes[2 + (1 << 20)..])
+            .all(|&b| b == 0)
+    );
+    assert!(
+        !p.open_write(&f, WriteMode::Append)
+            .unwrap()
+            .write_hole(1)
+            .unwrap()
+    );
 }

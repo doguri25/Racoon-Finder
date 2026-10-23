@@ -2,7 +2,8 @@
 //! durable, commit it under the final name with one rename, then copy the metadata. No partly
 //! written file ever carries the final name.
 
-use std::io::{self, Write};
+use std::io::{self, SeekFrom};
+use std::ops::Range;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
 use rf_vfs::{MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
@@ -29,11 +30,13 @@ pub(crate) struct Source<'a> {
 ///
 /// The content goes to a new temporary file in the target's folder, which is flushed and
 /// synced, given the source's extras (when both sides are of one provider) and times, and
-/// renamed to `target` with `commit`. On an error, a cancel or a panic the temporary file is
-/// removed; a file that was at the temporary path before is not ours and is never touched.
-/// The attributes (read-only among them) are put on `target` only after the commit, because
-/// Windows cannot remove a read-only temporary file. A metadata failure is a warning; the
-/// copy itself has worked.
+/// renamed to `target` with `commit`. The holes of a sparse source stay holes where the target
+/// can make them and are written as zeros where it cannot (XFER-11); either way they count as
+/// copied bytes, and the content is the same. On an error, a cancel or a panic the temporary
+/// file is removed; a file that was at the temporary path before is not ours and is never
+/// touched. The attributes (read-only among them) are put on `target` only after the commit,
+/// because Windows cannot remove a read-only temporary file. A metadata failure is a warning;
+/// the copy itself has worked.
 ///
 /// A link is copied as a link: a new link at the temporary path stores what the source link
 /// stores, and is committed like a file. It gets no metadata, because on Unix changing its
@@ -108,7 +111,7 @@ pub(crate) fn copy_file(
     };
     // `write_content` owns the writer, so the handle is closed before the guard removes the
     // file (Windows does not remove an open file).
-    write_content(ctx, &mut *reader, writer, source, &tmp, entry.size)?;
+    write_content(ctx, from, &mut *reader, writer, &tmp)?;
     drop(reader);
 
     if src.scheme() == dst.scheme() {
@@ -174,44 +177,202 @@ fn refuse_own_folder(
 /// The smallest buffer a file is copied through.
 const MIN_BUFFER: usize = 64 << 10;
 
-/// Copies `reader` into `writer` one chunk at a time, stopping at a pause or a cancel between
-/// chunks, then finishes (flushes and syncs) the writer. `size` is the planned size of the
-/// source: it decides whether the first chunk gets its own progress event, and the buffer is
-/// no larger than it needs (at least [`MIN_BUFFER`], at most [`COPY_CHUNK`]). A source that
-/// grew after the plan only takes more chunks.
+/// Copies the content of `from` from `reader` into `writer` one chunk at a time, stopping at a
+/// pause or a cancel between chunks, then finishes (flushes and syncs) the writer. A sparse
+/// source (`Provider::data_ranges`) is copied range by range with holes between the ranges
+/// ([`Content::sparse`]); any other one from start to end ([`Content::rest`]).
+///
+/// The planned size of the source decides whether the first chunk gets its own progress event,
+/// and the buffer is no larger than it needs (at least [`MIN_BUFFER`], at most [`COPY_CHUNK`]).
+/// A source that grew after the plan only takes more chunks.
 fn write_content(
     ctx: &mut Ctx<'_>,
+    from: Source<'_>,
     reader: &mut dyn ReadStream,
     mut writer: Box<dyn WriteStream>,
-    source: &VPath,
     tmp: &VPath,
-    size: u64,
 ) -> Result<(), Failed> {
-    let large = size > bytes(COPY_CHUNK);
+    let layout = data_layout(from, reader)?;
+    let size = from.entry.size;
     let buffer =
         usize::try_from(size).map_or(COPY_CHUNK, |size| size.clamp(MIN_BUFFER, COPY_CHUNK));
-    let mut buf = vec![0; buffer];
-    let mut first = true;
-    loop {
-        ctx.check().at(Stage::Write)?;
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                return Err(Failed::new(
-                    Stage::Read,
-                    Error::io("read", source.clone(), e),
-                ));
-            }
-        };
-        writer
-            .write_all(&buf[..n])
-            .map_err(|e| Failed::new(Stage::Write, Error::io("write", tmp.clone(), e)))?;
-        ctx.add_bytes(bytes(n), source, first && large);
-        first = false;
+    let mut content = Content {
+        ctx,
+        reader,
+        writer: &mut *writer,
+        source: from.path,
+        tmp,
+        buf: vec![0; buffer],
+        first_of_large: size > bytes(COPY_CHUNK),
+    };
+    match layout {
+        Some(layout) => content.sparse(&layout)?,
+        None => content.rest()?,
     }
     writer.finish().at(Stage::Write)
+}
+
+/// Where a sparse source holds data.
+struct Layout {
+    /// The length of the source.
+    len: u64,
+    /// The ranges with data, as `Provider::data_ranges` gives them.
+    ranges: Vec<Range<u64>>,
+}
+
+/// Where `from` holds data, for a copy that keeps its holes; `None` for a copy from start to
+/// end, with `reader` at its start. Keeping holes is best effort: a source without holes, or
+/// whose provider cannot tell or fails to, is copied whole, which gives the same content.
+///
+/// The length is taken before the ranges, so that data the source gains in between lies in a
+/// range and is never taken for a hole; what it gains after the ranges lies past the length,
+/// where [`Content::sparse`] copies it as [`Content::rest`] would. The first question keeps a
+/// file without holes, the common case, from the seek and the second question.
+fn data_layout(from: Source<'_>, reader: &mut dyn ReadStream) -> Result<Option<Layout>, Failed> {
+    if !matches!(from.provider.data_ranges(from.path), Ok(Some(_))) {
+        return Ok(None);
+    }
+    let read_error = |e| Failed::new(Stage::Read, Error::io("read", from.path.clone(), e));
+    let len = reader.seek(SeekFrom::End(0)).map_err(read_error)?;
+    if let Ok(Some(ranges)) = from.provider.data_ranges(from.path) {
+        return Ok(Some(Layout { len, ranges }));
+    }
+    reader.rewind().map_err(read_error)?;
+    Ok(None)
+}
+
+/// The content of one file on its way from the reader to the writer, through one buffer.
+/// Everything it writes, holes too, is counted with `Ctx::add_bytes`, so a step that fails
+/// takes all of it back; a pause or a cancel stops it between two chunks.
+struct Content<'a, 'e> {
+    ctx: &'a mut Ctx<'e>,
+    reader: &'a mut dyn ReadStream,
+    writer: &'a mut dyn WriteStream,
+    source: &'a VPath,
+    tmp: &'a VPath,
+    buf: Vec<u8>,
+    /// Whether the next count is the first of a file larger than one chunk, which gets a
+    /// progress event of its own.
+    first_of_large: bool,
+}
+
+impl Content<'_, '_> {
+    /// Copies the rest of the reader, from where it is to its end.
+    fn rest(&mut self) -> Result<(), Failed> {
+        loop {
+            self.ctx.check().at(Stage::Write)?;
+            let n = match self.reader.read(&mut self.buf) {
+                Ok(0) => return Ok(()),
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(self.read_error(e)),
+            };
+            self.write(n)?;
+        }
+    }
+
+    /// Copies a source laid out as `layout` says: each gap before, between and after its
+    /// ranges becomes a hole, and each range is read from its start.
+    ///
+    /// The ranges can be out of date by the time they are read. A source that ends before the
+    /// end of a range, or before its length once the ranges are copied, fails with
+    /// `UnexpectedEof` as `Stage::Read`, so that a copy longer than its source, or one cut
+    /// short, is never committed. What the source has gained past its length is copied after
+    /// it, as `rest` copies.
+    fn sparse(&mut self, layout: &Layout) -> Result<(), Failed> {
+        let mut at = 0;
+        for range in &layout.ranges {
+            // The ranges come in order and apart; should one not, the copy still never goes
+            // back.
+            let start = range.start.max(at);
+            let end = range.end.max(start);
+            self.hole(start - at)?;
+            self.seek(start)?;
+            self.exactly(end - start)?;
+            at = end;
+        }
+        let end = at.max(layout.len);
+        self.hole(end - at)?;
+        let now = self
+            .reader
+            .seek(SeekFrom::End(0))
+            .map_err(|e| self.read_error(e))?;
+        if now < end {
+            return Err(self.read_error(io::ErrorKind::UnexpectedEof.into()));
+        }
+        self.seek(end)?;
+        self.rest()
+    }
+
+    /// Copies the next `n` bytes of the reader; a reader that ends before them fails with
+    /// `UnexpectedEof`.
+    fn exactly(&mut self, mut n: u64) -> Result<(), Failed> {
+        while n > 0 {
+            self.ctx.check().at(Stage::Write)?;
+            let want = usize::try_from(n).map_or(self.buf.len(), |n| n.min(self.buf.len()));
+            let got = match self.reader.read(&mut self.buf[..want]) {
+                Ok(0) => return Err(self.read_error(io::ErrorKind::UnexpectedEof.into())),
+                Ok(got) => got,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(self.read_error(e)),
+            };
+            self.write(got)?;
+            n -= bytes(got);
+        }
+        Ok(())
+    }
+
+    /// Leaves the next `n` bytes of the copy as a hole (`WriteStream::write_hole`), or writes
+    /// them as zeros where the target cannot make holes (FAT and exFAT on Windows).
+    fn hole(&mut self, n: u64) -> Result<(), Failed> {
+        if n == 0 {
+            return Ok(());
+        }
+        self.ctx.check().at(Stage::Write)?;
+        if self.writer.write_hole(n).at(Stage::Write)? {
+            self.count(n);
+            return Ok(());
+        }
+        self.buf.fill(0);
+        let mut left = n;
+        loop {
+            let chunk = usize::try_from(left).map_or(self.buf.len(), |n| n.min(self.buf.len()));
+            self.write(chunk)?;
+            left -= bytes(chunk);
+            if left == 0 {
+                return Ok(());
+            }
+            self.ctx.check().at(Stage::Write)?;
+        }
+    }
+
+    /// Moves the reader to `offset`.
+    fn seek(&mut self, offset: u64) -> Result<(), Failed> {
+        self.reader
+            .seek(SeekFrom::Start(offset))
+            .map(drop)
+            .map_err(|e| self.read_error(e))
+    }
+
+    /// Writes the first `n` bytes of the buffer and counts them.
+    fn write(&mut self, n: usize) -> Result<(), Failed> {
+        self.writer
+            .write_all(&self.buf[..n])
+            .map_err(|e| Failed::new(Stage::Write, Error::io("write", self.tmp.clone(), e)))?;
+        self.count(bytes(n));
+        Ok(())
+    }
+
+    /// Counts `n` more bytes of the source as copied.
+    fn count(&mut self, n: u64) {
+        let first = std::mem::take(&mut self.first_of_large);
+        self.ctx.add_bytes(n, self.source, first);
+    }
+
+    /// The failure of reading the source.
+    fn read_error(&self, e: io::Error) -> Failed {
+        Failed::new(Stage::Read, Error::io("read", self.source.clone(), e))
+    }
 }
 
 /// A byte count as a `u64`; no `usize` this code sees is larger.
@@ -314,6 +475,81 @@ mod tests {
         assert_eq!((report.done.files, report.done.bytes), (1, 5_000));
         assert_eq!(report.planned.bytes, (3 << 20) + 5_000);
         assert_eq!(tree(&d.dst).into_keys().collect::<Vec<_>>(), ["b.bin"]);
+    }
+
+    /// The holes a sparse copy counted go back with the rest when it fails.
+    #[test]
+    fn a_failed_sparse_file_takes_back_its_holes() {
+        let d = dirs();
+        let (a, b) = (d.src.join("a.bin"), d.src.join("b.bin"));
+        let mut content = vec![0; 3 << 20];
+        content[..1 << 20].fill(1);
+        content[2 << 20..].fill(2);
+        std::fs::write(&a, &content).unwrap();
+        std::fs::write(&b, vec![3; 5_000]).unwrap();
+        // The first range and the hole after it are counted before the second range fails.
+        let p = FaultyProvider::local(vec![
+            Fault::DataRanges {
+                name: "a.bin".into(),
+                ranges: vec![0..1 << 20, 2 << 20..3 << 20],
+            },
+            Fault::FailWrite {
+                file: 0,
+                after: 3 << 19,
+            },
+        ]);
+        let report = copy_all(JobId::generate(), &[&a, &b], &d.dst, &p.vfs());
+        assert_eq!(first_failure(&report), (Stage::Write, ErrorKind::Other));
+        assert_eq!((report.done.files, report.done.bytes), (1, 5_000));
+        assert_eq!(tree(&d.dst).into_keys().collect::<Vec<_>>(), ["b.bin"]);
+    }
+
+    /// Where the target cannot make holes they are written as zeros: before the first range,
+    /// between ranges and at the end. The copy is the same and every byte is counted.
+    #[test]
+    fn holes_the_target_cannot_make_are_written_as_zeros() {
+        let d = dirs();
+        let a = d.src.join("a.bin");
+        let mut content = vec![0; 5 << 20];
+        content[1 << 20..2 << 20].fill(7);
+        content[3 << 20..(3 << 20) + 10].fill(9);
+        std::fs::write(&a, &content).unwrap();
+        let p = FaultyProvider::local(vec![
+            Fault::DataRanges {
+                name: "a.bin".into(),
+                ranges: vec![1 << 20..2 << 20, 3 << 20..(3 << 20) + 10],
+            },
+            Fault::NoHoles,
+        ]);
+        let report = copy(JobId::generate(), &a, &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
+        assert_eq!(
+            (report.planned.bytes, report.done.bytes),
+            (5 << 20, 5 << 20)
+        );
+        assert_eq!(std::fs::read(d.dst.join("a.bin")).unwrap(), content);
+    }
+
+    /// Ranges that reach past the end of the source, as those of a file cut short after they
+    /// were taken, fail the read: no copy is committed, and no byte is counted.
+    #[test]
+    fn ranges_past_the_end_fail_the_read_and_commit_nothing() {
+        let d = dirs();
+        let a = d.src.join("a.bin");
+        std::fs::write(&a, vec![1; 100]).unwrap();
+        let p = FaultyProvider::local(vec![Fault::DataRanges {
+            name: "a.bin".into(),
+            ranges: vec![0..10, 50..200],
+        }]);
+        let report = copy(JobId::generate(), &a, &d.dst, &p.vfs());
+        assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+        assert_eq!(first_failure(&report), (Stage::Read, ErrorKind::Other));
+        let message = &report.failures[0].message;
+        let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof).to_string();
+        assert!(message.starts_with("read failed for "), "{message}");
+        assert!(message.ends_with(&eof), "{message}");
+        assert_eq!(report.done.bytes, 0);
+        assert_eq!(tree(&d.dst), BTreeMap::new());
     }
 
     #[test]
