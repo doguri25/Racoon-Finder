@@ -5,7 +5,7 @@
 use std::io::{self, Write};
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
-use rf_vfs::{DeleteMode, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
+use rf_vfs::{MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
 use super::{At, COPY_CHUNK, Ctx, Failed};
 use crate::preflight::check_path_len;
@@ -220,8 +220,9 @@ fn bytes(n: usize) -> u64 {
 }
 
 /// Removes the temporary file at `path` when it goes out of scope still armed: after an
-/// error, a cancel, or while a panic unwinds. The removal is best effort; a file it cannot
-/// remove keeps its temporary name, which crash recovery looks for.
+/// error, a cancel, or while a panic unwinds. It goes with `Provider::delete_leaf`, so a folder
+/// that took its name meanwhile is never removed with it. The removal is best effort; a file
+/// it cannot remove keeps its temporary name, which crash recovery looks for.
 struct TempGuard<'a> {
     provider: &'a dyn Provider,
     path: &'a VPath,
@@ -231,7 +232,7 @@ struct TempGuard<'a> {
 impl Drop for TempGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.provider.delete(self.path, DeleteMode::Permanent);
+            let _ = self.provider.delete_leaf(self.path);
         }
     }
 }

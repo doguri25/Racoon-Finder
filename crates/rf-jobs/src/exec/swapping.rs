@@ -14,24 +14,33 @@ use rf_vfs::{
 };
 
 /// When a [`Swapping`] provider turns its folder into a link.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum When {
     /// As listing number `n` (from 0) of the folder starts.
     Listing(usize),
     /// Right before the first permanent delete of one item (`delete_leaf`, or `delete` with
     /// `DeleteMode::Permanent`) is passed on.
     DeletingALeaf,
+    /// Right before `stat` number `nth` (from 0) of the item `of`, counting only those made
+    /// once the provider is armed (see [`Swapping::arm`]).
+    Stat { of: PathBuf, nth: usize },
 }
 
-/// An inner provider for every call, but the folder `dir` is removed with everything in it
-/// and replaced by a link to `outside` once, at `when`.
+/// An inner provider for every call, but the folder `dir` is moved away to `dir.moved` with
+/// everything in it, and a link to `outside` put in its place, once, at `when`.
 #[derive(Debug)]
 pub(super) struct Swapping {
     inner: Arc<dyn Provider>,
     dir: PathBuf,
     outside: PathBuf,
     when: When,
+    /// Whether listed entries come without their volume and file IDs, as the local provider
+    /// lists them on Windows.
+    no_listed_ids: bool,
     listings: AtomicUsize,
+    /// Whether `stat`s of [`When::Stat`] are counted yet.
+    armed: AtomicBool,
+    stats: AtomicUsize,
     swapped: AtomicBool,
 }
 
@@ -42,21 +51,43 @@ impl Swapping {
             dir: dir.to_path_buf(),
             outside: outside.to_path_buf(),
             when,
+            no_listed_ids: false,
             listings: AtomicUsize::new(0),
+            armed: AtomicBool::new(false),
+            stats: AtomicUsize::new(0),
             swapped: AtomicBool::new(false),
         }
     }
 
+    /// Lists every entry without its volume and file IDs, as the local provider does on
+    /// Windows; `stat` still gives them.
+    #[must_use]
+    pub(super) fn without_listed_ids(mut self) -> Self {
+        self.no_listed_ids = true;
+        self
+    }
+
     /// A registry whose only provider is this one.
-    pub(super) fn vfs(self) -> Vfs {
+    pub(super) fn vfs(self: &Arc<Self>) -> Vfs {
         let mut vfs = Vfs::new();
-        vfs.register(Arc::new(self));
+        vfs.register(Arc::clone(self) as Arc<dyn Provider>);
         vfs
+    }
+
+    /// Starts counting the `stat`s of [`When::Stat`], as a test does when the job's plan is
+    /// made, so that only the run's are counted.
+    pub(super) fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Where the folder went when it was swapped.
+    pub(super) fn moved(dir: &Path) -> PathBuf {
+        dir.with_extension("moved")
     }
 
     fn swap(&self) {
         if !self.swapped.swap(true, Ordering::SeqCst) {
-            std::fs::remove_dir_all(&self.dir).unwrap();
+            std::fs::rename(&self.dir, Self::moved(&self.dir)).unwrap();
             symlink(&self.outside, &self.dir).unwrap();
         }
     }
@@ -81,9 +112,24 @@ impl Provider for Swapping {
                 self.swap();
             }
         }
-        self.inner.list(dir, cancel, sink)
+        let no_ids = self.no_listed_ids;
+        self.inner.list(dir, cancel, &mut |mut batch: Vec<Entry>| {
+            if no_ids {
+                for entry in &mut batch {
+                    (entry.volume_id, entry.file_id) = (None, None);
+                }
+            }
+            sink(batch);
+        })
     }
     fn stat(&self, path: &VPath) -> Result<Entry> {
+        if let When::Stat { of, nth } = &self.when {
+            let counted =
+                path.as_local() == Some(of.as_path()) && self.armed.load(Ordering::SeqCst);
+            if counted && self.stats.fetch_add(1, Ordering::SeqCst) == *nth {
+                self.swap();
+            }
+        }
         self.inner.stat(path)
     }
     fn create_dir(&self, path: &VPath) -> Result<()> {

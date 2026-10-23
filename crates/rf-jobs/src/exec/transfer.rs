@@ -8,7 +8,7 @@ use std::io;
 use std::ops::ControlFlow;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
-use rf_vfs::{DeleteMode, MetadataPatch, Provider, RenameMode};
+use rf_vfs::{MetadataPatch, Provider, RenameMode};
 
 use super::file::{Source, copy_file};
 use super::scan::{Planned, follow_link, follows_links, scan_transfer};
@@ -833,9 +833,10 @@ fn check_own_folder(
 
 /// Whether the folder `target` of `dst` shows through as the folder `source` of `src`: an empty
 /// marker under a temporary name of the job (which crash recovery removes too) is made in
-/// `target` without replacing anything, looked for in `source`, and removed again. A marker
-/// that cannot be removed is a `Stage::Write` warning. An error that leaves it unknown, from
-/// the making or from the look (any but `NotFound`), is returned.
+/// `target` without replacing anything, looked for in `source`, and removed again with
+/// `Provider::delete_leaf`, which never removes a folder. A marker that cannot be removed is a
+/// `Stage::Write` warning. An error that leaves it unknown, from the making or from the look
+/// (any but `NotFound`), is returned.
 fn shows_through(
     ctx: &mut Ctx<'_>,
     src: &dyn Provider,
@@ -854,7 +855,7 @@ fn shows_through(
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     };
-    if let Err(error) = dst.delete(&marker, DeleteMode::Permanent) {
+    if let Err(error) = dst.delete_leaf(&marker) {
         ctx.warn(
             Failed::new(Stage::Write, error),
             Some(source),
@@ -1427,7 +1428,8 @@ mod tests {
         let before = tree(&outside);
         // Across volumes, the move copies `c` and then deletes it.
         let faulty = FaultyProvider::local(vec![Fault::CrossDevice]);
-        let vfs = Swapping::new(faulty, &dir, &outside, When::DeletingALeaf).vfs();
+        let vfs =
+            std::sync::Arc::new(Swapping::new(faulty, &dir, &outside, When::DeletingALeaf)).vfs();
         let sources = [v(&dir.join("c"))];
         let options = TransferOptions::default();
         let spec = TransferSpec::into_dir(TransferMode::Move, &sources, &v(&dst), options).unwrap();
