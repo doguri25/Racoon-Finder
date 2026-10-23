@@ -114,18 +114,50 @@ fn cleanup_finishes_after_a_crash_mid_revert() {
     let calls = fx.fake.calls().len();
     let r = cleanup(&fx);
     assert!(r.is_complete(), "{r:?}");
-    // Slot 2 was put back before the crash, so only slot 1 is restored now.
-    assert_eq!(r.reverted.reverted, [EntryId(1)]);
-    assert_eq!(r.reverted.skipped, [EntryId(2)]);
+    // Slot 2 was put back before the crash: it holds entry 2's before-state, so entry 2 is
+    // restored again (which changes nothing) and reported as reverted; then slot 1 is restored.
+    assert_eq!(r.reverted.reverted, [EntryId(2), EntryId(1)]);
+    assert_eq!(r.reverted.skipped, []);
     assert_eq!(
         fx.fake.calls()[calls..],
-        [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::Restore]
+        [
+            FakeOp::IsApplied,
+            FakeOp::IsApplied,
+            FakeOp::Restore,
+            FakeOp::IsApplied,
+            FakeOp::Restore
+        ]
     );
     assert_eq!(
         (fx.fake.get(&slot(1)), fx.fake.get(&slot(2))),
         (s("orig"), None)
     );
     assert!(deletes.iter().all(|p| p.symlink_metadata().is_err()));
+}
+
+/// Two entries on one setting: `orig` → `a` → `b`. The clean uninstall dies right after the
+/// restore of `b` put `a` back. The next run still ends with `orig`, an empty ledger and a
+/// complete uninstall.
+#[test]
+fn cleanup_restores_the_original_value_after_a_crash_mid_revert_of_one_setting() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    l.apply("g", set(&t, "a")).unwrap();
+    l.apply("g", set(&t, "b")).unwrap();
+    drop(l);
+    fx.fake.panic_after_next(FakeOp::Restore, &t);
+    assert!(catch_unwind(AssertUnwindSafe(|| cleanup(&fx))).is_err());
+    assert_eq!(fx.fake.get(&t), s("a"));
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 2);
+    let r = cleanup(&fx);
+    assert!(r.is_complete(), "{r:?}");
+    assert_eq!(r.reverted.reverted, [EntryId(2), EntryId(1)]);
+    assert_eq!(r.reverted.skipped, []);
+    assert_eq!(fx.fake.get(&t), s("orig"));
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+    assert!(!Ledger::file_path(&fx.paths).exists());
 }
 
 #[test]

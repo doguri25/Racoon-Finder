@@ -81,10 +81,13 @@ pub struct ReconcileReport {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RevertReport {
-    /// Entries whose before-state was put back; they are no longer recorded.
+    /// Entries whose before-state was put back; they are no longer recorded. An entry whose
+    /// setting already held its before-state (its restore had happened, but the ledger file did
+    /// not say so yet) is put back again and listed here too.
     pub reverted: Vec<EntryId>,
-    /// Entries whose value someone else changed since: the other value was left alone and the
-    /// entry is no longer recorded.
+    /// Entries whose setting holds neither the app's value nor the entry's before-state, because
+    /// someone else changed it since, and the older entries of that setting: the other value was
+    /// left alone and the entries are no longer recorded.
     pub skipped: Vec<EntryId>,
     /// Entries that are still recorded because they could not be settled.
     pub failed: Vec<EntryFailure>,
@@ -131,8 +134,9 @@ enum SlotMark {
     /// It could not be settled and stays recorded. The older entries wait for it without a
     /// backend call and stay recorded; those that were to be settled are reported as failed.
     Stuck,
-    /// It found someone else's value. The older entries are dropped without a backend call:
-    /// whatever they recorded, the value is not the app's to overwrite.
+    /// It found someone else's value: neither its own value nor its before-state. The older
+    /// entries are dropped without a backend call: whatever they recorded, the value is not the
+    /// app's to overwrite.
     Foreign,
     /// It stays recorded with its value in place. The older entries stay as they are.
     Live,
@@ -162,6 +166,34 @@ impl SlotChain {
     fn mark(&mut self, target: &Target, mark: SlotMark) {
         self.0.push((target.clone(), mark));
     }
+}
+
+/// What the setting of an entry holds now, as [`holds`] finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holds {
+    /// The entry's value: the app's.
+    Ours,
+    /// The entry's before-state. Its restore already happened (a crash came before the ledger
+    /// file said so, or a power loss dropped the app's write), or its apply never did.
+    Before,
+    /// Anything else: someone else changed the setting since, and the value is theirs.
+    Other,
+}
+
+/// Asks the system what the setting of `entry` holds: whether it is the entry's value, and if
+/// not, whether it is the entry's before-state.
+fn holds(backend: &mut dyn SystemBackend, entry: &LedgerEntry) -> Result<Holds, LedgerError> {
+    if backend.is_applied(&entry.change)? {
+        return Ok(Holds::Ours);
+    }
+    let before = Change {
+        target: entry.change.target.clone(),
+        value: entry.before.value.clone(),
+    };
+    if backend.is_applied(&before)? {
+        return Ok(Holds::Before);
+    }
+    Ok(Holds::Other)
 }
 
 impl Ledger {
@@ -398,12 +430,15 @@ impl Ledger {
     /// Puts the system back to what it was before every recorded change, newest first, and
     /// drops them from the ledger.
     ///
-    /// A value is put back only if the system still holds the value the app wrote. If someone
-    /// else changed it since, it is theirs: the entry is dropped as `skipped` and the system
-    /// is left alone. An entry a crash left `Pending` is put back without that check, because
-    /// the system may hold a half-written value of ours; but not when a newer entry for the
-    /// same setting was skipped, since the value there is then someone else's: every older
-    /// entry for that setting is dropped as `skipped` without touching the system.
+    /// A value is put back only if the system still holds the value the app wrote, or the
+    /// entry's own before-state: then the entry's restore already happened (a crash came before
+    /// the ledger file said so, or a power loss dropped the app's write) and it is done again,
+    /// which changes nothing but removes keys a crash left, and the entry is `reverted`. A
+    /// setting is someone else's only when it holds neither: the entry is dropped as `skipped`
+    /// and the system is left alone, and so is every older entry for that setting, which is
+    /// dropped as `skipped` without asking the system. An entry a crash left `Pending` is put
+    /// back without the check, because the system may hold a half-written value of ours; but
+    /// not beneath a skipped entry of its setting.
     ///
     /// An entry that fails stays recorded, and so do the older entries for the same setting:
     /// the system still holds the newer value, so they could not be told apart from a value
@@ -438,7 +473,7 @@ impl Ledger {
                 error,
             };
 
-            let ours = match chain.get(&entry.change.target) {
+            let put_back = match chain.get(&entry.change.target) {
                 // A newer entry of the setting stays recorded (in a revert only because it
                 // failed): this one waits for it.
                 Some(SlotMark::Stuck | SlotMark::Live) => {
@@ -454,8 +489,10 @@ impl Ledger {
                 Some(SlotMark::Foreign) => false,
                 // A crash may have left a half-written value of ours: put it back unasked.
                 None if entry.state == EntryState::Pending => true,
-                None => match self.backend.is_applied(&entry.change) {
-                    Ok(applied) => applied,
+                // The app's value, or the entry's before-state: then its restore already
+                // happened and is done again. Only anything else is someone else's.
+                None => match holds(self.backend.as_mut(), entry) {
+                    Ok(found) => found != Holds::Other,
                     Err(e) => {
                         chain.mark(&entry.change.target, SlotMark::Stuck);
                         report.failed.push(fail(e.to_string()));
@@ -463,7 +500,7 @@ impl Ledger {
                     }
                 },
             };
-            if !ours {
+            if !put_back {
                 chain.mark(&entry.change.target, SlotMark::Foreign);
                 match self.forget(index) {
                     Ok(()) => report.skipped.push(id),

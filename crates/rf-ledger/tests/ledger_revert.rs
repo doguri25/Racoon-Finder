@@ -153,8 +153,12 @@ fn a_pending_entry_beneath_a_skipped_one_leaves_the_other_apps_value_alone() {
     assert_eq!(r.skipped, [EntryId(2), EntryId(1)]);
     assert!(r.reverted.is_empty() && r.is_clean());
     assert_eq!(fx.fake.get(&t), s("other-app"));
-    // Entry 2 was checked; entry 1 was dropped without asking the system anything.
-    assert_eq!(fx.fake.calls()[calls..], [FakeOp::IsApplied]);
+    // Entry 2 holds neither its value ("b") nor its before-state ("orig"): two questions.
+    // Entry 1 was dropped without asking the system anything.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::IsApplied]
+    );
     assert_eq!(l.entries(), []);
     assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
 }
@@ -204,10 +208,11 @@ fn every_settled_entry_is_saved_before_the_next_one_is_touched() {
         .collect();
     assert_eq!(on_disk, [EntryId(1), EntryId(2)]);
 
+    // Slot 2 holds entry 2's before-state: its restore already happened and is done again.
     let r = fx.open().revert_all();
     assert_eq!(
         (r.reverted, r.skipped),
-        (vec![EntryId(1)], vec![EntryId(2)])
+        (vec![EntryId(2), EntryId(1)], vec![])
     );
     assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
     assert_eq!(
@@ -269,4 +274,103 @@ fn an_unsaved_skip_keeps_the_entry_and_says_so() {
     assert!(!r.is_clean());
     assert_eq!(l.entries().len(), 1);
     assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 1);
+}
+
+/// Two entries on one setting: `orig` → `a` (entry 1) → `b` (entry 2). The process dies right
+/// after entry 2's restore put `a` back, before the ledger file said so. On the next run the
+/// setting holds entry 2's before-state, not someone else's value: entry 2's restore already
+/// happened and is done again, and entry 1 then puts `orig` back.
+#[test]
+fn a_crash_right_after_a_restore_still_reverts_the_setting_to_its_original_value() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    l.apply("g", set(&t, "a")).unwrap();
+    l.apply("g", set(&t, "b")).unwrap();
+    fx.fake.panic_after_next(FakeOp::Restore, &t);
+    assert!(catch_unwind(AssertUnwindSafe(|| l.revert_all())).is_err());
+    assert_eq!(fx.fake.get(&t), s("a"));
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 2);
+
+    let calls = fx.fake.calls().len();
+    let r = fx.open().revert_all();
+    assert_eq!(
+        (r.reverted, r.skipped, r.failed),
+        (vec![EntryId(2), EntryId(1)], vec![], vec![])
+    );
+    assert_eq!(fx.fake.get(&t), s("orig"));
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+    // Entry 2: not its value but its before-state, so restored again. Entry 1: its value.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [
+            FakeOp::IsApplied,
+            FakeOp::IsApplied,
+            FakeOp::Restore,
+            FakeOp::IsApplied,
+            FakeOp::Restore
+        ]
+    );
+}
+
+/// The same two entries, but a power loss dropped entry 2's write while the ledger file already
+/// says it is applied: the setting holds entry 2's before-state, and the revert still ends with
+/// `orig`.
+#[test]
+fn a_lost_write_of_the_newest_entry_still_reverts_the_setting_to_its_original_value() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    l.apply("g", set(&t, "a")).unwrap();
+    l.apply("g", set(&t, "b")).unwrap();
+    fx.fake.set(&t, s("a"));
+    let r = l.revert_all();
+    assert_eq!(
+        (r.reverted, r.skipped, r.failed),
+        (vec![EntryId(2), EntryId(1)], vec![], vec![])
+    );
+    assert_eq!(fx.fake.get(&t), s("orig"));
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+}
+
+/// An unsaved skip still marks the setting as someone else's: the older entry beneath it gets
+/// no backend call, so it can never put its before-state over the other value.
+#[test]
+fn an_unsaved_skip_still_marks_the_setting_foreign() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    // Entry 1 stays `Pending`: its apply failed and so did the rollback.
+    fx.fake.fail_next(FakeOp::Apply, &t);
+    fx.fake.fail_next(FakeOp::Restore, &t);
+    assert!(l.apply("g", set(&t, "a")).is_err());
+    l.apply("g", set(&t, "b")).unwrap();
+    // A third value: neither the app's ("b") nor entry 2's before-state ("orig").
+    fx.fake.set(&t, s("other-app"));
+    // A folder where the temporary file must go, so the ledger file cannot be saved.
+    std::fs::create_dir(fx.paths.data_dir().join("ledger.json.tmp")).unwrap();
+    let calls = fx.fake.calls().len();
+    let r = l.revert_all();
+    let failed: Vec<EntryId> = r.failed.iter().map(|f| f.id).collect();
+    assert_eq!(failed, [EntryId(2), EntryId(1)]);
+    for f in &r.failed {
+        assert!(
+            f.error
+                .starts_with("left alone, but the ledger file could not be updated: "),
+            "{}",
+            f.error
+        );
+    }
+    assert!(r.reverted.is_empty() && r.skipped.is_empty());
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+    // Entry 2 was asked about its value and its before-state; entry 1 was not asked at all.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::IsApplied]
+    );
+    assert_eq!(l.entries().len(), 2);
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 2);
 }
