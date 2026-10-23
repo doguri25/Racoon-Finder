@@ -1,21 +1,24 @@
-//! Running a copy or a move: plan it, then transfer the planned items one by one.
+//! Running a copy or a move: plan it, then transfer the planned items one by one, each folder
+//! with everything in it.
 
+use std::collections::HashMap;
 use std::io;
+use std::ops::ControlFlow;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
-use rf_vfs::{Provider, RenameMode};
+use rf_vfs::{MetadataPatch, Provider, RenameMode};
 
-use super::file::copy_file;
-use super::scan::scan_transfer;
-use super::{At, Attempt, Ctx, Failed, issue_error};
+use super::file::{Source, copy_file};
+use super::scan::{follow_link, follows_links, scan_transfer};
+use super::{At, Attempt, Cause, Ctx, Failed, MAX_DEPTH, fold_path};
 use crate::conflict::{Conflict, ConflictAction, Decision, decide};
 use crate::naming::{MAX_NUMBERED, numbered_name};
 use crate::preflight::{FsKind, IssueKind, check_name, check_path_len};
 use crate::report::Stage;
-use crate::spec::{ConflictPolicy, TransferMode, TransferSpec};
+use crate::spec::{ConflictPolicy, ErrorPolicy, TransferMode, TransferSpec};
 
 /// Plans `spec` and copies each planned item to its target under the job's conflict and error
-/// policies.
+/// policies; a folder goes with everything in it (see [`transfer_entry`]).
 ///
 /// A target name that is free gets the file with a commit that never replaces. A taken one
 /// is settled by [`place`] first: the item is skipped, written under a numbered name, or
@@ -33,68 +36,283 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
         return;
     };
     for planned in &plan.items {
+        let walk = Walk {
+            conflict: spec.options.conflict,
+            errors: spec.options.errors,
+            follow: follows_links(spec),
+            blocked: &plan.blocked,
+            fs: planned.fs,
+        };
         let (source, target) = (&planned.item.source, &planned.item.target);
-        let copied = ctx.attempt(spec.options.errors, Some(source), Some(target), |ctx| {
-            // A cancel between items creates nothing more.
-            ctx.check().at(Stage::Write)?;
-            let src = ctx.provider(source).at(Stage::Read)?;
-            let dst = ctx.provider(target).at(Stage::Write)?;
-            // Only a regular file can be copied (and so can clash): `copy_file` refuses any
-            // other source before it touches anything, and nobody is asked about those.
-            let (to, commit) = if planned.entry.kind == EntryKind::File {
-                let policy = spec.options.conflict;
-                match place(ctx, policy, source, &planned.entry, &*dst, target)? {
-                    Place::Skip => return Ok(None),
-                    Place::At { path, commit } => (path, commit),
-                }
-            } else {
-                (target.clone(), RenameMode::NoReplace)
-            };
-            copy_file(ctx, &src, source, &planned.entry, &dst, &to, commit)?;
-            Ok(Some(to))
-        });
-        match copied {
-            Attempt::Done(Some(to)) => {
-                // Before `item_done`, which may call the listener: a committed file is in
-                // the outputs whatever the listener does.
-                ctx.report.outputs.push(to);
-                ctx.item_done(true, false);
-            }
-            Attempt::Done(None) => ctx.report.skipped += 1,
-            Attempt::Skipped => {}
-            Attempt::Stop => return,
+        if transfer_entry(ctx, &walk, source, planned.entry.clone(), target, 0).is_break() {
+            return;
         }
     }
 }
 
-/// Where a file goes.
+/// What every item under one planned item is transferred with.
 #[derive(Debug)]
-enum Place {
-    /// Nowhere: the existing item stays and the file is left out.
-    Skip,
-    /// To `path`, committed with `commit`.
-    At { path: VPath, commit: RenameMode },
+struct Walk<'p> {
+    conflict: ConflictPolicy,
+    errors: ErrorPolicy,
+    /// Whether links are followed (a copy in Follow mode).
+    follow: bool,
+    /// The targets the pre-flight review left out, with the issue of each.
+    blocked: &'p HashMap<VPath, IssueKind>,
+    /// The kind of file system the targets are on.
+    fs: FsKind,
 }
 
-/// Decides where the file `source`, which `incoming` describes, is written: what happens
-/// when `target` is taken by something already.
+/// Whether the job goes on after an item: `Break` once it is cancelled or aborted.
+type Flow = ControlFlow<()>;
+
+/// The flow after an attempt that ends no differently whether it worked or not.
+fn flow<T>(attempt: &Attempt<T>) -> Flow {
+    match attempt {
+        Attempt::Stop => ControlFlow::Break(()),
+        Attempt::Done(_) | Attempt::Skipped => ControlFlow::Continue(()),
+    }
+}
+
+/// Transfers `source`, which `entry` describes, to `target`; `depth` is how far below an item
+/// of the job it is (the items themselves are at 0).
+///
+/// - Deeper than [`MAX_DEPTH`]: fails as `Stage::Plan` and is not entered.
+/// - A target the pre-flight review left out: fails as `Stage::Preflight` with its issue,
+///   without a question, since the user chose to skip it.
+/// - A link in Follow mode: what it leads to is transferred in its place, under the link's
+///   name. It is read, listed and given extras at its own path with every link resolved (see
+///   `follow_link`), which also names it in its later failures, so a loop of links only adds
+///   depth, never a longer source path. A link that cannot be followed fails as `Stage::Read`.
+/// - A folder: see [`transfer_dir`]. A file, a link and anything else: see [`transfer_file`].
+fn transfer_entry(
+    ctx: &mut Ctx<'_>,
+    walk: &Walk<'_>,
+    source: &VPath,
+    entry: Entry,
+    target: &VPath,
+    depth: usize,
+) -> Flow {
+    if depth > MAX_DEPTH {
+        let too_deep = ctx.attempt(walk.errors, Some(source), Some(target), |_| {
+            let error =
+                Error::Unsupported(format!("folder nesting deeper than {MAX_DEPTH} levels"));
+            Err::<(), _>(Failed::new(Stage::Plan, error))
+        });
+        return flow(&too_deep);
+    }
+    if let Some(issue) = walk.blocked.get(target) {
+        let failure =
+            Failed::issue(Stage::Preflight, issue.clone()).record(Some(source), Some(target));
+        ctx.report.failures.push(failure);
+        return ControlFlow::Continue(());
+    }
+    let (source, entry) = if entry.kind == EntryKind::Symlink && walk.follow {
+        let followed = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
+            ctx.check().at(Stage::Read)?;
+            let src = ctx.provider(source).at(Stage::Read)?;
+            follow_link(&*src, source).at(Stage::Read)
+        });
+        match followed {
+            Attempt::Done(followed) => followed,
+            other => return flow(&other),
+        }
+    } else {
+        (source.clone(), entry)
+    };
+    if entry.kind == EntryKind::Dir {
+        transfer_dir(ctx, walk, &source, &entry, target, depth)
+    } else {
+        transfer_file(ctx, walk, &source, &entry, target, depth == 0)
+    }
+}
+
+/// Copies the file or link `source`, which `entry` describes, to `target`, or settles its
+/// conflict first (see [`place`]); a `top` item that is written goes to the outputs. A FIFO,
+/// socket or device goes to `copy_file` too, which refuses it before it opens or creates
+/// anything; nobody is asked about it.
+fn transfer_file(
+    ctx: &mut Ctx<'_>,
+    walk: &Walk<'_>,
+    source: &VPath,
+    entry: &Entry,
+    target: &VPath,
+    top: bool,
+) -> Flow {
+    let copied = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
+        // A cancel between items creates nothing more.
+        ctx.check().at(Stage::Write)?;
+        let src = ctx.provider(source).at(Stage::Read)?;
+        let dst = ctx.provider(target).at(Stage::Write)?;
+        let from = Source {
+            provider: &*src,
+            path: source,
+            entry,
+        };
+        let (to, commit) = if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
+            match place(ctx, walk.conflict, from, &*dst, target, walk.fs)? {
+                Place::Skip => return Ok(None),
+                Place::At { path, commit } => (path, commit),
+                // Only two folders merge; a file is never written into one.
+                Place::Merge => return Err(Failed::new(Stage::Conflict, taken(target))),
+            }
+        } else {
+            (target.clone(), RenameMode::NoReplace)
+        };
+        copy_file(ctx, from, &*dst, &to, commit).map_err(|failed| failed.writing(&to))?;
+        Ok(Some(to))
+    });
+    match copied {
+        Attempt::Done(Some(to)) => {
+            // Before `item_done`, which may call the listener: a committed file is in the
+            // outputs whatever the listener does.
+            if top {
+                ctx.report.outputs.push(to);
+            }
+            ctx.item_done(true, false);
+        }
+        Attempt::Done(None) => ctx.report.skipped += 1,
+        Attempt::Skipped => {}
+        Attempt::Stop => return ControlFlow::Break(()),
+    }
+    ControlFlow::Continue(())
+}
+
+/// Copies the folder `source`, which `entry` describes, to `target` with everything in it.
+///
+/// One step lists all the children first, then settles where the folder goes (see
+/// [`place`]): a new folder is made there, an existing folder is merged into without a
+/// question and keeps its own metadata, or the policy skips it, renames it or refuses it. A
+/// folder copied onto itself is made under a numbered name, never merged into itself. Each
+/// child is then its own step, so a child that has been written stays counted once whatever
+/// happens after it. A folder this job made gets the extras, times and attributes of the
+/// source last, after its children are in it: its modification time stays, and a read-only
+/// folder still takes its children. A metadata failure is a warning.
+fn transfer_dir(
+    ctx: &mut Ctx<'_>,
+    walk: &Walk<'_>,
+    source: &VPath,
+    entry: &Entry,
+    target: &VPath,
+    depth: usize,
+) -> Flow {
+    let opened = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
+        open_dir(ctx, walk, source, entry, target)
+    });
+    let (to, children, made) = match opened {
+        Attempt::Done(Some(opened)) => opened,
+        Attempt::Done(None) => {
+            ctx.report.skipped += 1;
+            return ControlFlow::Continue(());
+        }
+        other => return flow(&other),
+    };
+    if depth == 0 {
+        ctx.report.outputs.push(to.clone());
+    }
+    for child in children {
+        match (source.join(&child.name), to.join(&child.name)) {
+            (Ok(child_source), Ok(child_target)) => {
+                transfer_entry(ctx, walk, &child_source, child, &child_target, depth + 1)?;
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                let named = ctx.attempt(walk.errors, Some(source), Some(&to), |_| {
+                    Err::<(), _>(Failed::new(Stage::Read, error.clone().into()))
+                });
+                flow(&named)?;
+            }
+        }
+    }
+    if made {
+        finish_dir(ctx, source, entry, &to);
+    }
+    ctx.item_done(false, true);
+    ControlFlow::Continue(())
+}
+
+/// The children of the folder `source` and the folder they go to, and whether this job made
+/// that folder; `None` when the folder is skipped.
+fn open_dir(
+    ctx: &mut Ctx<'_>,
+    walk: &Walk<'_>,
+    source: &VPath,
+    entry: &Entry,
+    target: &VPath,
+) -> Result<Option<(VPath, Vec<Entry>, bool)>, Failed> {
+    ctx.check().at(Stage::Write)?;
+    let src = ctx.provider(source).at(Stage::Read)?;
+    let dst = ctx.provider(target).at(Stage::Write)?;
+    ctx.working_on(source);
+    let children = ctx.list(&*src, source).at(Stage::Read)?;
+    let from = Source {
+        provider: &*src,
+        path: source,
+        entry,
+    };
+    match place(ctx, walk.conflict, from, &*dst, target, walk.fs)? {
+        Place::Skip => Ok(None),
+        Place::Merge => Ok(Some((target.clone(), children, false))),
+        Place::At { path, .. } => {
+            dst.create_dir(&path)
+                .map_err(|error| Failed::new(Stage::Write, error).writing(&path))?;
+            Ok(Some((path, children, true)))
+        }
+    }
+}
+
+/// Gives the folder `to`, which this job made, what the source folder `source` has besides its
+/// children: its extras when both are of one provider, then its times and attributes.
+fn finish_dir(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, to: &VPath) {
+    let (src, dst) = match (ctx.provider(source), ctx.provider(to)) {
+        (Ok(src), Ok(dst)) => (src, dst),
+        (Err(error), _) | (_, Err(error)) => {
+            ctx.warn(Failed::new(Stage::Metadata, error), Some(source), Some(to));
+            return;
+        }
+    };
+    if src.scheme() == dst.scheme() {
+        if let Err(error) = dst.copy_extras(source, to) {
+            ctx.warn(Failed::new(Stage::Metadata, error), Some(source), Some(to));
+        }
+    }
+    let mut patch = MetadataPatch::times_of(entry);
+    patch.attributes = MetadataPatch::attributes_of(entry).attributes;
+    if let Err(error) = dst.set_metadata(to, &patch) {
+        ctx.warn(Failed::new(Stage::Metadata, error), Some(source), Some(to));
+    }
+}
+
+/// Where an item goes.
+#[derive(Debug)]
+enum Place {
+    /// Nowhere: the existing item stays and the new one is left out.
+    Skip,
+    /// To `path`, committed with `commit` (a folder is made there).
+    At { path: VPath, commit: RenameMode },
+    /// Into the existing folder at the target, which a folder joins.
+    Merge,
+}
+
+/// Decides where the item `from` is written: what happens when `target` is taken by something
+/// already. `fs` is the kind of file system of the target.
 ///
 /// 1. `stat` says `NotFound`: the name is free. Any other `stat` error fails the item, since a
 ///    target that cannot be examined may well exist.
-/// 2. The existing item is the source itself (the same path, or two identities that are both
-///    known and equal): the file gets a numbered name whatever the policy says, so that a
-///    copy onto itself never replaces or empties its own source.
-/// 3. Otherwise the policy decides. [`Decision::Ask`] goes to the resolver, and its
+/// 2. The existing item is the source itself (see [`is_same_item`]): the item gets a numbered
+///    name whatever the policy says, so that a copy onto itself never replaces or empties its
+///    own source, and a folder is never merged into itself.
+/// 3. A folder meets a folder (not a link to one): they merge, without a question.
+/// 4. Otherwise the policy decides. [`Decision::Ask`] goes to the resolver, and its
 ///    `Overwrite` answer is refused when either side is a folder, as it would be for the
 ///    overwrite policies: a file and a folder never replace each other. A refused conflict
 ///    fails the item as `Stage::Conflict` with `AlreadyExists` and touches neither side.
 fn place(
     ctx: &mut Ctx<'_>,
     policy: ConflictPolicy,
-    source: &VPath,
-    incoming: &Entry,
+    from: Source<'_>,
     dst: &dyn Provider,
     target: &VPath,
+    fs: FsKind,
 ) -> Result<Place, Failed> {
     let existing = match dst.stat(target) {
         Ok(existing) => existing,
@@ -107,13 +325,18 @@ fn place(
         Err(error) => return Err(Failed::new(Stage::Conflict, error)),
     };
     let os = ctx.env.naming_os;
-    if is_same_item(source, incoming, target, &existing) {
-        return numbered(dst, target, os);
+    let incoming = from.entry;
+    let is_dir = incoming.kind == EntryKind::Dir;
+    if is_same_item(from, target, &existing, fs) {
+        return numbered(dst, target, is_dir, os);
+    }
+    if is_dir && existing.kind == EntryKind::Dir {
+        return Ok(Place::Merge);
     }
     let decision = match decide(policy, incoming, &existing) {
         Decision::Ask => {
             let conflict = Conflict {
-                source: source.clone(),
+                source: from.path.clone(),
                 target: target.clone(),
                 incoming: incoming.clone(),
                 existing: existing.clone(),
@@ -137,26 +360,37 @@ fn place(
             commit: RenameMode::Replace,
         }),
         Decision::Skip => Ok(Place::Skip),
-        Decision::Rename => numbered(dst, target, os),
+        Decision::Rename => numbered(dst, target, is_dir, os),
         // An `Ask` is answered by now; one that is not fails closed like a refusal.
         Decision::Refuse | Decision::Ask => Err(Failed::new(Stage::Conflict, taken(target))),
     }
 }
 
-/// Whether the item `existing` at `target` is the source `source` that `incoming` describes.
-/// Two identities count only when both are known: a file system without file IDs gives none,
-/// and two unknowns are not proof of the same file.
-fn is_same_item(source: &VPath, incoming: &Entry, target: &VPath, existing: &Entry) -> bool {
-    source == target
-        || matches!(
-            (incoming.identity(), existing.identity()),
-            (Some(a), Some(b)) if a == b
-        )
+/// Whether the item `existing` at `target` is the source `from` itself.
+///
+/// The same path is the same item. Otherwise two identities decide, but only when both are
+/// known: a file system without file IDs gives none, and two unknowns are not proof of the
+/// same file. A source listed without an identity (a Windows listing) is `stat`ed for it.
+/// Without both identities, a target file system `fs` that ignores case takes two paths that
+/// differ only in case for one item, as it would open them.
+fn is_same_item(from: Source<'_>, target: &VPath, existing: &Entry, fs: FsKind) -> bool {
+    if from.path == target {
+        return true;
+    }
+    let incoming = from.entry.identity().or_else(|| {
+        let entry = from.provider.stat(from.path).ok()?;
+        entry.identity()
+    });
+    match (incoming, existing.identity()) {
+        (Some(a), Some(b)) => a == b,
+        _ => fs.case_insensitive() && fold_path(from.path, fs) == fold_path(target, fs),
+    }
 }
 
-/// A free numbered name next to `target`, to commit a file to without replacing anything.
-fn numbered(dst: &dyn Provider, target: &VPath, os: Os) -> Result<Place, Failed> {
-    let path = free_name(dst, target, false, os).at(Stage::Conflict)?;
+/// A free numbered name next to `target`, to commit a file to or make a folder at without
+/// replacing anything.
+fn numbered(dst: &dyn Provider, target: &VPath, is_dir: bool, os: Os) -> Result<Place, Failed> {
+    let path = free_name(dst, target, is_dir, os).at(Stage::Conflict)?;
     Ok(Place::At {
         path,
         commit: RenameMode::NoReplace,
@@ -178,17 +412,17 @@ fn taken(target: &VPath) -> Error {
 ///
 /// Only `NotFound` from `stat` makes a name free; any other error is returned. A name that
 /// would be too long for the file system or the OS (a number adds up to seven units) fails
-/// with [`ErrorKind::InvalidPath`] before the file system is asked, since every later number
-/// is at least as long. When all the names are taken, fails with `AlreadyExists` for
-/// `target`.
+/// with that issue ([`ErrorKind::InvalidPath`]) before the file system is asked, since every
+/// later number is at least as long. When all the names are taken, fails with `AlreadyExists`
+/// for `target`.
 pub(crate) fn free_name(
     provider: &dyn Provider,
     target: &VPath,
     is_dir: bool,
     os: Os,
-) -> rf_core::Result<VPath> {
+) -> Result<VPath, Cause> {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
-        return Err(Error::Unsupported(format!("no name to number: {target}")));
+        return Err(Error::Unsupported(format!("no name to number: {target}")).into());
     };
     let fs = FsKind::from_fs_name(provider.fs_name(&parent).as_deref());
     for n in 2..=MAX_NUMBERED {
@@ -199,15 +433,15 @@ pub(crate) fn free_name(
             .find(|issue| matches!(issue, IssueKind::NameTooLong { .. }))
             .or_else(|| check_path_len(&candidate, os));
         if let Some(issue) = too_long {
-            return Err(issue_error(&issue));
+            return Err(Cause::Issue(issue));
         }
         match provider.stat(&candidate) {
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(candidate),
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         }
     }
-    Err(taken(target))
+    Err(taken(target).into())
 }
 
 #[cfg(test)]
@@ -239,8 +473,15 @@ mod tests {
     fn two_identities_make_one_item_only_when_both_are_known() {
         let base = std::env::temp_dir();
         let (source, target) = (v(&base.join("s")), v(&base.join("t")));
-        let same =
-            |incoming: &Entry, existing: &Entry| is_same_item(&source, incoming, &target, existing);
+        let local = LocalProvider::new();
+        let same = |incoming: &Entry, existing: &Entry| {
+            let from = Source {
+                provider: &local,
+                path: &source,
+                entry: incoming,
+            };
+            is_same_item(from, &target, existing, FsKind::Other)
+        };
         let known = entry(Some(1), Some(7));
         assert!(same(&known, &entry(Some(1), Some(7))));
         assert!(!same(&known, &entry(Some(1), Some(8))));
@@ -250,12 +491,48 @@ mod tests {
         assert!(!same(&known, &entry(Some(1), None)));
         assert!(!same(&entry(None, Some(7)), &entry(None, Some(7))));
         // The same path is the same item whatever the IDs say.
+        let from = Source {
+            provider: &local,
+            path: &source,
+            entry: &entry(None, None),
+        };
         assert!(is_same_item(
+            from,
             &source,
             &entry(None, None),
-            &source,
-            &entry(None, None)
+            FsKind::Other
         ));
+    }
+
+    #[test]
+    fn without_identities_a_target_that_ignores_case_compares_folded_paths() {
+        let base = std::env::temp_dir();
+        let (source, upper) = (v(&base.join("a.txt")), v(&base.join("A.TXT")));
+        let local = LocalProvider::new();
+        let unknown = entry(None, None);
+        let same = |incoming: &Entry, existing: &Entry, fs| {
+            let from = Source {
+                provider: &local,
+                path: &source,
+                entry: incoming,
+            };
+            is_same_item(from, &upper, existing, fs)
+        };
+        assert!(same(&unknown, &unknown, FsKind::Ntfs));
+        assert!(!same(&unknown, &unknown, FsKind::Other));
+        // Two known identities that differ are two items, in a folder that tells case apart.
+        assert!(!same(
+            &entry(Some(1), Some(7)),
+            &entry(Some(1), Some(8)),
+            FsKind::Ntfs
+        ));
+        let other = v(&base.join("b.txt"));
+        let from = Source {
+            provider: &local,
+            path: &source,
+            entry: &unknown,
+        };
+        assert!(!is_same_item(from, &other, &unknown, FsKind::Ntfs));
     }
 
     #[test]
@@ -297,6 +574,9 @@ mod tests {
         // ` (2)` takes the name to 257 units and ` 2` to 255.
         let error = free_name(&local, &target, false, Os::Windows).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidPath);
+        // The issue's own text, with no prefix.
+        let issue = IssueKind::NameTooLong { len: 257, max: 255 };
+        assert_eq!(error.to_string(), issue.to_string());
         assert!(free_name(&local, &target, false, Os::MacOs).is_ok());
     }
 }

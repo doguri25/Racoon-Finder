@@ -276,6 +276,12 @@ pub enum Fault {
     FsName(String),
     /// `space` gives this space.
     Space(DiskSpace),
+    /// `stat` of an item called `name` fails with `PermissionDenied`: an item that exists or
+    /// not, which cannot be examined.
+    FailStat { name: OsString },
+    /// `stat`, `stat_target` and `list` give entries without a volume or file ID, as a file
+    /// system that has none (FAT) or reports zeros.
+    NoIdentity,
 }
 
 impl Fault {
@@ -419,6 +425,15 @@ impl FaultyProvider {
         self.counters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// `entry` without its identity under [`Fault::NoIdentity`], else as it is.
+    fn identity_of(&self, mut entry: Entry) -> Entry {
+        if self.faults.contains(&Fault::NoIdentity) {
+            entry.volume_id = None;
+            entry.file_id = None;
+        }
+        entry
+    }
+
     /// Makes the [`Fault::CreateOnDelete`] file next to `path`, the first time only.
     fn make_late_file(&self, path: &VPath) -> Result<()> {
         let Some(name) = self.faults.iter().find_map(|fault| match fault {
@@ -465,11 +480,20 @@ impl Provider for FaultyProvider {
         cancel: &CancelToken,
         sink: &mut dyn FnMut(Vec<Entry>),
     ) -> Result<()> {
-        self.inner.list(dir, cancel, sink)
+        self.inner.list(dir, cancel, &mut |batch: Vec<Entry>| {
+            sink(batch.into_iter().map(|e| self.identity_of(e)).collect());
+        })
     }
 
     fn stat(&self, path: &VPath) -> Result<Entry> {
-        self.inner.stat(path)
+        let refused = self.faults.iter().any(|fault| {
+            matches!(fault, Fault::FailStat { name } if path.file_name() == Some(name.as_os_str()))
+        });
+        if refused {
+            let error = io::Error::from(io::ErrorKind::PermissionDenied);
+            return Err(Error::io("stat", path.clone(), error));
+        }
+        self.inner.stat(path).map(|e| self.identity_of(e))
     }
 
     fn create_dir(&self, path: &VPath) -> Result<()> {
@@ -555,7 +579,7 @@ impl Provider for FaultyProvider {
     }
 
     fn stat_target(&self, path: &VPath) -> Result<Entry> {
-        self.inner.stat_target(path)
+        self.inner.stat_target(path).map(|e| self.identity_of(e))
     }
 
     fn read_link(&self, path: &VPath) -> Result<LinkTarget> {
@@ -831,5 +855,30 @@ mod tests {
         );
         assert_eq!(p.fs_name(&root).as_deref(), Some("exFAT"));
         assert_eq!(p.space(&root).unwrap().map(|s| s.available), Some(7));
+    }
+
+    #[test]
+    fn stat_faults_refuse_one_name_and_hide_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let (a, b) = (local(&dir.path().join("a")), local(&dir.path().join("b")));
+        let p = FaultyProvider::local(vec![Fault::FailStat { name: "b".into() }]);
+        assert_eq!(
+            p.stat(&b).unwrap_err().kind(),
+            rf_core::ErrorKind::PermissionDenied
+        );
+        assert!(p.stat(&a).unwrap().identity().is_some());
+
+        let p = FaultyProvider::local(vec![Fault::NoIdentity]);
+        assert_eq!(p.stat(&a).unwrap().identity(), None);
+        assert_eq!(p.stat_target(&a).unwrap().identity(), None);
+        let mut listed = Vec::new();
+        p.list(&local(dir.path()), &CancelToken::new(), &mut |batch| {
+            listed.extend(batch.into_iter().map(|e| e.identity()));
+        })
+        .unwrap();
+        assert_eq!(listed, [None, None]);
     }
 }

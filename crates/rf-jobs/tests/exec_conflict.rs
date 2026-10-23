@@ -479,27 +479,28 @@ fn a_temp_path_over_the_limit_fails_before_anything_is_written() {
     assert_eq!(tree(&deep), BTreeMap::new());
 }
 
-/// A name no Unix file system accepts: `stat` fails with something other than `NotFound`,
-/// which must never be read as "the name is free".
-#[cfg(unix)]
+/// `stat` of the target fails with something other than `NotFound`, which must never be read
+/// as "the name is free".
 #[test]
 fn a_target_that_cannot_be_examined_is_not_taken_for_missing() {
     use std::collections::BTreeMap;
 
-    use rf_jobs::testkit::FaultyProvider;
+    use rf_jobs::testkit::{Fault, FaultyProvider};
     use rf_jobs::{TransferItem, TransferSpec};
     let f = fx();
     std::fs::write(f.src.join("a.txt"), "a").unwrap();
     let item = TransferItem {
         source: v(f.src.join("a.txt")),
-        target: v(&f.dst).join("n".repeat(300)).unwrap(),
+        target: v(f.dst.join("b.txt")),
     };
     let job = JobSpec::Transfer(TransferSpec {
         mode: TransferMode::Copy,
         items: vec![item],
         options: with(ConflictPolicy::Overwrite),
     });
-    let p = FaultyProvider::local(vec![]);
+    let p = FaultyProvider::local(vec![Fault::FailStat {
+        name: "b.txt".into(),
+    }]);
     let rep = run_on(&job, &p.vfs(), &NonInteractive);
     assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
     assert_eq!(rep.failures[0].stage, Stage::Conflict);
@@ -524,4 +525,33 @@ fn a_hard_link_to_the_source_counts_as_the_source() {
     assert_eq!(rep.outputs, [v(f.dst.join("a (2).txt"))]);
     assert_eq!(read(&f.dst.join("a.txt")), "me");
     assert_eq!(read(&f.dst.join("a (2).txt")), "me");
+}
+
+/// A failure names the path that was being written: the numbered name, not the taken one.
+#[test]
+fn a_failure_names_the_numbered_path_it_was_writing() {
+    use rf_jobs::testkit::{Fault, FaultyProvider};
+    let f = fx();
+    both(&f, "a.txt", "new", "old");
+    let p = FaultyProvider::local(vec![Fault::FailWrite { file: 0, after: 0 }]);
+    let job = spec(
+        TransferMode::Copy,
+        &[f.src.join("a.txt")],
+        &f.dst,
+        with(ConflictPolicy::AutoRename),
+    );
+    let res = NonInteractive;
+    let rep = execute(
+        JobId::generate(),
+        &job,
+        &ExecEnv::new(&p.vfs(), &res).naming_os(Os::Windows),
+    );
+    assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(
+        (rep.failures[0].stage, rep.failures[0].target.clone()),
+        (Stage::Write, Some(v(f.dst.join("a (2).txt"))))
+    );
+    assert_eq!(rep.failures[0].source, Some(v(f.src.join("a.txt"))));
+    assert_eq!(read(&f.dst.join("a.txt")), "old");
+    assert_eq!(temp_files(&f.dst), Vec::<String>::new());
 }

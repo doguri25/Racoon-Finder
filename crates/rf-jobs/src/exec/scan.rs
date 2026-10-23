@@ -1,14 +1,22 @@
-//! The plan of a transfer: what each source is, whether its target folder exists, and how
-//! much the job will copy.
+//! The plan of a transfer: what each source is, whether its target folder exists, how much the
+//! job will copy, and what the target file systems cannot hold (XFER-12).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
+use std::path::{Component, PathBuf};
+use std::sync::Arc;
 
-use rf_core::{Entry, EntryKind, Error, VPath};
+use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
+use rf_vfs::Provider;
 
-use super::{At, Attempt, Ctx, Failed};
+use super::{At, Attempt, Ctx, Failed, MAX_DEPTH, Stopped, fold_path};
+use crate::preflight::{
+    CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
+};
 use crate::report::{Stage, Totals};
-use crate::spec::{TransferItem, TransferSpec};
+use crate::resolver::PreflightAnswer;
+use crate::spec::{SymlinkMode, TransferItem, TransferMode, TransferSpec};
 
 /// One item the plan keeps, with what the source was when it was planned.
 #[derive(Debug)]
@@ -16,6 +24,9 @@ pub(crate) struct Planned {
     pub item: TransferItem,
     /// The source as `stat` saw it (a link is described itself, not what it leads to).
     pub entry: Entry,
+    /// The kind of file system the target folder is on; every item under this one is written
+    /// to the same.
+    pub fs: FsKind,
     /// A move expected to end with one rename, so its tree is not walked.
     #[expect(
         dead_code,
@@ -24,17 +35,13 @@ pub(crate) struct Planned {
     pub rename: bool,
 }
 
-/// What a transfer will do.
+/// What a transfer will do. What it expects to process is in the report (`planned`).
 #[derive(Debug)]
 pub(crate) struct Plan {
     pub items: Vec<Planned>,
-    pub totals: Totals,
-    /// Targets the pre-flight review left out; each fails as `Stage::Preflight`.
-    #[expect(
-        dead_code,
-        reason = "unread until the pre-flight review is implemented, which must remove this"
-    )]
-    pub blocked: HashSet<VPath>,
+    /// Targets the pre-flight review left out, each with the first of its blocking issues; each
+    /// fails as `Stage::Preflight` and is not written.
+    pub blocked: HashMap<VPath, IssueKind>,
     /// A move that copies, because a source location cannot be written to.
     #[expect(
         dead_code,
@@ -43,37 +50,49 @@ pub(crate) struct Plan {
     pub moved_as_copy: bool,
 }
 
-/// Plans `spec`: `stat`s each source (a link itself, not what it leads to) and checks that its
-/// target folder exists, under the job's error policy. A file or a link counts as one file, a
-/// file with its size and a link with none. A FIFO, socket or device stays in the plan
-/// uncounted and is never opened: the run reports it as failed. A folder source fails as not
-/// implemented yet. Announces the totals at the end; `None` when the job was cancelled or
-/// aborted.
+/// Whether the links of `spec` are followed: in a copy that asks for it. A move always moves
+/// links as links, so that it never deletes anything through one.
+pub(crate) fn follows_links(spec: &TransferSpec) -> bool {
+    spec.mode == TransferMode::Copy && spec.options.symlinks == SymlinkMode::Follow
+}
+
+/// Plans `spec` and puts its pre-flight review to the resolver.
+///
+/// Each source is `stat`ed (a link itself, not what it leads to) under the job's error policy;
+/// its target folder must exist, and a folder may not be copied into itself or one of its
+/// subfolders (on a target that ignores case, spelled in any case). Then the tree under it is
+/// walked, `MAX_DEPTH` levels deep at most. A file counts with its size; a link copied as a
+/// link counts as a file of no bytes; a folder counts as a folder. In Follow mode a link counts
+/// as what it leads to, and a folder it leads to is walked. A FIFO, socket or device is not
+/// counted, checked or opened: the run reports it. Nothing found below a source fails the
+/// plan; the run meets it again and reports it then.
+///
+/// Every target name, path and file size is checked against the file system of its top-level
+/// target folder, names that only differ in case within one folder are looked for, and each
+/// such folder must have room for the bytes copied into it. The issues go to the report, and
+/// the totals are announced. If there are issues and the job may ask, the resolver decides:
+/// go on as planned, leave out the targets with a blocking issue (a lack of space only warns
+/// here), or cancel the job.
+///
+/// `None` when the job was cancelled or aborted.
 pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Plan> {
-    let mut plan = Plan {
-        items: Vec::with_capacity(spec.items.len()),
-        totals: Totals::default(),
-        blocked: HashSet::new(),
-        moved_as_copy: false,
-    };
+    let mut survey = Survey::new(ctx.env.naming_os, follows_links(spec));
+    let mut items = Vec::with_capacity(spec.items.len());
     for item in &spec.items {
-        let source = &item.source;
-        let target = &item.target;
+        let (source, target) = (&item.source, &item.target);
         match ctx.attempt(spec.options.errors, Some(source), Some(target), |ctx| {
-            scan_item(ctx, item)
+            scan_item(ctx, &mut survey, item)
         }) {
-            Attempt::Done(entry) => {
-                match entry.kind {
-                    EntryKind::File => {
-                        plan.totals.files += 1;
-                        plan.totals.bytes += entry.size;
-                    }
-                    EntryKind::Symlink => plan.totals.files += 1,
-                    EntryKind::Dir | EntryKind::Other => {}
+            Attempt::Done((src, entry, folder)) => {
+                let walked = survey.walk(ctx, &*src, source, entry.clone(), target, folder, 0);
+                if walked.is_err() {
+                    ctx.stop(Stopped::Cancelled);
+                    return None;
                 }
-                plan.items.push(Planned {
+                items.push(Planned {
                     item: item.clone(),
                     entry,
+                    fs: survey.folders[folder].fs,
                     rename: false,
                 });
             }
@@ -81,28 +100,41 @@ pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Pl
             Attempt::Stop => return None,
         }
     }
-    ctx.planned(plan.totals);
-    Some(plan)
+    survey.check_space(ctx);
+    ctx.report.issues = survey.issues;
+    ctx.planned(survey.totals);
+    let blocked = review(ctx)?;
+    Some(Plan {
+        items,
+        blocked,
+        moved_as_copy: false,
+    })
 }
 
-/// The source entry of `item`, once its target folder is known to exist.
-fn scan_item(ctx: &mut Ctx<'_>, item: &TransferItem) -> Result<Entry, Failed> {
+/// The source of `item` with its provider and entry, and the number of its target folder in
+/// `survey`, once that folder is known to exist and to lie outside the source.
+fn scan_item(
+    ctx: &mut Ctx<'_>,
+    survey: &mut Survey,
+    item: &TransferItem,
+) -> Result<(Arc<dyn Provider>, Entry, usize), Failed> {
+    let (source, target) = (&item.source, &item.target);
     ctx.check().at(Stage::Plan)?;
-    let entry = ctx
-        .provider(&item.source)
-        .and_then(|src| src.stat(&item.source))
-        .at(Stage::Plan)?;
-    if entry.kind == EntryKind::Dir {
-        let error = Error::Unsupported("folders are not implemented yet".to_owned());
+    let src = ctx.provider(source).at(Stage::Plan)?;
+    let entry = src.stat(source).at(Stage::Plan)?;
+    let parent = check_target_folder(ctx, target).at(Stage::Plan)?;
+    let dst = ctx.provider(&parent).at(Stage::Plan)?;
+    let folder = survey.folder(&*dst, &parent);
+    if lands_inside(source, target, survey.folders[folder].fs) {
+        let error = Error::Unsupported(format!("cannot copy or move {source} into itself"));
         return Err(Failed::new(Stage::Plan, error));
     }
-    check_target_folder(ctx, &item.target).at(Stage::Plan)?;
-    Ok(entry)
+    Ok((src, entry, folder))
 }
 
-/// Fails with `NotFound` unless the folder `target` goes into exists. A link to a folder
+/// The folder `target` goes into. Fails with `NotFound` unless it exists; a link to a folder
 /// counts as a folder (macOS `/tmp`, a Windows junction).
-fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<()> {
+fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<VPath> {
     let parent = target
         .parent()
         .ok_or_else(|| Error::Unsupported(format!("no folder to copy into: {target}")))?;
@@ -112,9 +144,392 @@ fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<()> {
         folder = dst.stat_target(&parent)?;
     }
     if folder.kind == EntryKind::Dir {
-        Ok(())
+        Ok(parent)
     } else {
         let error = io::Error::new(io::ErrorKind::NotFound, "not a folder");
         Err(Error::io("stat", parent, error))
+    }
+}
+
+/// Whether `target` lies inside `source`, a copy into itself (DND-09). The paths are compared
+/// name by name, and on a file system `fs` that ignores case by their folded keys too, so
+/// `C:\Work\A` and `C:\work\a\sub` count. A target that only spells `source` in another case
+/// is not inside it.
+fn lands_inside(source: &VPath, target: &VPath, fs: FsKind) -> bool {
+    if target != source && target.starts_with(source) {
+        return true;
+    }
+    if !fs.case_insensitive() {
+        return false;
+    }
+    let (source, target) = (fold_path(source, fs), fold_path(target, fs));
+    target.len() > source.len() && target.starts_with(&source)
+}
+
+/// Asks the resolver about the issues in the report, if there are any and the job may ask
+/// (a job that may not goes on as planned). The answer gives the targets to leave out: none to
+/// go on, those with a blocking issue other than a lack of space to skip them. `None` when the
+/// answer cancels the job, which cancels its control.
+fn review(ctx: &mut Ctx<'_>) -> Option<HashMap<VPath, IssueKind>> {
+    let mut blocked = HashMap::new();
+    if ctx.report.issues.is_empty() || !ctx.interactive {
+        return Some(blocked);
+    }
+    let answer = ctx.waiting(|| ctx.env.resolver.preflight(ctx.id, &ctx.report.issues));
+    match answer {
+        PreflightAnswer::Proceed => {}
+        PreflightAnswer::SkipBlocked => {
+            let skipped = ctx.report.issues.iter().filter(|issue| {
+                issue.kind.severity() == Severity::Blocking
+                    && !matches!(issue.kind, IssueKind::NotEnoughSpace { .. })
+            });
+            for issue in skipped {
+                blocked
+                    .entry(issue.target.clone())
+                    .or_insert_with(|| issue.kind.clone());
+            }
+        }
+        PreflightAnswer::Cancel => {
+            ctx.env.control.cancel();
+            return None;
+        }
+    }
+    Some(blocked)
+}
+
+/// A top-level target folder: the file system it is on and the bytes the job copies into it.
+#[derive(Debug)]
+struct Folder {
+    path: VPath,
+    fs: FsKind,
+    needed: u64,
+}
+
+/// What the walk of the sources has found so far.
+#[derive(Debug)]
+struct Survey {
+    /// The naming rule of the job, whose OS limits the length of a path.
+    os: Os,
+    /// Whether links are followed (see [`follows_links`]).
+    follow: bool,
+    folders: Vec<Folder>,
+    /// The names going into each target folder, for each kind of file system.
+    cases: HashMap<FsKind, CaseIndex>,
+    issues: Vec<Issue>,
+    totals: Totals,
+}
+
+impl Survey {
+    fn new(os: Os, follow: bool) -> Survey {
+        Survey {
+            os,
+            follow,
+            folders: Vec::new(),
+            cases: HashMap::new(),
+            issues: Vec::new(),
+            totals: Totals::default(),
+        }
+    }
+
+    /// The number of the top-level target folder `path` of `dst`. The file system of a folder
+    /// is asked once, the first time it is seen.
+    fn folder(&mut self, dst: &dyn Provider, path: &VPath) -> usize {
+        if let Some(known) = self.folders.iter().position(|f| f.path == *path) {
+            return known;
+        }
+        self.folders.push(Folder {
+            path: path.clone(),
+            fs: FsKind::from_fs_name(dst.fs_name(path).as_deref()),
+            needed: 0,
+        });
+        self.folders.len() - 1
+    }
+
+    /// Counts and checks `source` of `src`, which `entry` describes and which goes to `target`
+    /// in the top-level folder number `folder`, and everything under it; `depth` is how far
+    /// below a source of the job it is. An item that cannot be followed or listed is left
+    /// uncounted. Fails only when the job is cancelled.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one walk step: the item, where it goes and how deep"
+    )]
+    fn walk(
+        &mut self,
+        ctx: &Ctx<'_>,
+        src: &dyn Provider,
+        source: &VPath,
+        entry: Entry,
+        target: &VPath,
+        folder: usize,
+        depth: usize,
+    ) -> rf_core::Result<()> {
+        if depth > MAX_DEPTH {
+            return Ok(());
+        }
+        let (source, entry) = if entry.kind == EntryKind::Symlink && self.follow {
+            match follow_link(src, source) {
+                Ok(followed) => followed,
+                Err(_) => return Ok(()),
+            }
+        } else {
+            (source.clone(), entry)
+        };
+        let fs = self.folders[folder].fs;
+        match entry.kind {
+            EntryKind::Other => {}
+            EntryKind::File | EntryKind::Symlink => {
+                let size = if entry.kind == EntryKind::File {
+                    entry.size
+                } else {
+                    0
+                };
+                self.totals.files += 1;
+                self.totals.bytes += size;
+                self.folders[folder].needed += size;
+                self.check(target, fs);
+                if let Some(kind) = check_size(size, fs) {
+                    self.issue(target, kind);
+                }
+            }
+            EntryKind::Dir => {
+                self.totals.dirs += 1;
+                self.check(target, fs);
+                ctx.check()?;
+                let children = match ctx.list(src, &source) {
+                    Ok(children) => children,
+                    Err(error) if error.kind() == ErrorKind::Cancelled => return Err(error),
+                    Err(_) => return Ok(()),
+                };
+                for child in children {
+                    let (Ok(child_source), Ok(child_target)) =
+                        (source.join(&child.name), target.join(&child.name))
+                    else {
+                        continue;
+                    };
+                    self.walk(
+                        ctx,
+                        src,
+                        &child_source,
+                        child,
+                        &child_target,
+                        folder,
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks the name and the whole path of `target` on `fs`, and its name against the other
+    /// names that go into the same folder.
+    fn check(&mut self, target: &VPath, fs: FsKind) {
+        let Some(name) = target.file_name() else {
+            return;
+        };
+        let mut found = check_name(name, fs);
+        found.extend(check_path_len(target, self.os));
+        if let Some(parent) = target.parent() {
+            let index = self.cases.entry(fs).or_insert_with(|| CaseIndex::new(fs));
+            if let Some(other) = index.insert(&parent, name) {
+                found.push(IssueKind::CaseCollision { other });
+            }
+        }
+        for kind in found {
+            self.issue(target, kind);
+        }
+    }
+
+    fn issue(&mut self, target: &VPath, kind: IssueKind) {
+        self.issues.push(Issue {
+            target: target.clone(),
+            kind,
+        });
+    }
+
+    /// Adds [`IssueKind::NotEnoughSpace`] for each top-level target folder that has less space
+    /// available than the job copies into it. A folder whose space cannot be told is not
+    /// checked.
+    fn check_space(&mut self, ctx: &Ctx<'_>) {
+        for folder in &self.folders {
+            if folder.needed == 0 {
+                continue;
+            }
+            let space = ctx
+                .provider(&folder.path)
+                .and_then(|dst| dst.space(&folder.path));
+            if let Ok(Some(space)) = space {
+                if folder.needed > space.available {
+                    self.issues.push(Issue {
+                        target: folder.path.clone(),
+                        kind: IssueKind::NotEnoughSpace {
+                            needed: folder.needed,
+                            available: space.available,
+                        },
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// What the link at `path` of `provider` leads to: the path of that item, with every link on
+/// the way resolved (see [`resolve_links`]), and the entry `Provider::stat_target` gives for it,
+/// under the name of the link. The entry is never of kind `Symlink`; one of kind `Other` is
+/// never opened. A provider that cannot follow links fails with `Unsupported`.
+pub(crate) fn follow_link(
+    provider: &dyn Provider,
+    path: &VPath,
+) -> rf_core::Result<(VPath, Entry)> {
+    let entry = provider.stat_target(path)?;
+    let (resolved, found) = resolve_links(provider, path)?;
+    // Both describe one item, unless a link changed between the two.
+    let changed = matches!(
+        (entry.identity(), found.identity()),
+        (Some(a), Some(b)) if a != b
+    );
+    if changed {
+        let error = io::Error::other("the link changed while it was followed");
+        return Err(Error::io("stat", path.clone(), error));
+    }
+    Ok((resolved, entry))
+}
+
+/// The most links [`resolve_links`] follows for one path, as Linux does (`MAXSYMLINKS`).
+const MAX_LINKS: usize = 40;
+
+/// One name, or one step up, still to be taken by [`resolve_links`].
+#[derive(Debug)]
+enum Step {
+    Name(OsString),
+    Up,
+}
+
+/// The path that `path` of `provider` leads to with every link on the way resolved, the last
+/// name too, and the entry of the item there, which is no link: the item `stat_target`
+/// describes, under a path of its own.
+///
+/// The names are taken from the root one at a time. A name that is a link is replaced by what
+/// the link stores: an absolute target starts again at its root, a relative one goes on from
+/// the folder resolved so far. That folder is reached through no link, so a `..` in a target
+/// goes up from the folder the link is really in, as Unix resolves it. More than
+/// [`MAX_LINKS`] links fail like a loop of links.
+fn resolve_links(provider: &dyn Provider, path: &VPath) -> rf_core::Result<(VPath, Entry)> {
+    let mut steps = Vec::new();
+    let mut at = path.clone();
+    while let (Some(parent), Some(name)) = (at.parent(), at.file_name()) {
+        steps.push(Step::Name(name.to_owned()));
+        at = parent;
+    }
+    // `at` is the root; the next step to take is the last one in `steps`.
+    let mut links = 0;
+    while let Some(step) = steps.pop() {
+        let name = match step {
+            Step::Up => {
+                at = at.parent().unwrap_or(at);
+                continue;
+            }
+            Step::Name(name) => name,
+        };
+        let next = at.join(&name)?;
+        if provider.stat(&next)?.kind != EntryKind::Symlink {
+            at = next;
+            continue;
+        }
+        links += 1;
+        if links > MAX_LINKS {
+            let error = io::Error::other("too many levels of links");
+            return Err(Error::io("stat", path.clone(), error));
+        }
+        let target = provider.read_link(&next)?.target;
+        let root: PathBuf = target
+            .components()
+            .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .collect();
+        if !root.as_os_str().is_empty() {
+            // An absolute target is a host path; another provider would have to say what one
+            // means.
+            if at.as_local().is_none() {
+                let what = format!("following an absolute link: {next}");
+                return Err(Error::Unsupported(what));
+            }
+            at = VPath::local(&root)?;
+        }
+        for component in target.components().rev() {
+            match component {
+                Component::Normal(name) => steps.push(Step::Name(name.to_owned())),
+                Component::ParentDir => steps.push(Step::Up),
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+    }
+    let entry = provider.stat(&at)?;
+    Ok((at, entry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(path: impl AsRef<std::path::Path>) -> VPath {
+        VPath::local(path).unwrap()
+    }
+
+    #[test]
+    fn into_itself_is_name_by_name_and_folds_case_only_where_the_target_does() {
+        let base = std::env::temp_dir();
+        let (a, sub) = (
+            v(base.join("Work").join("A")),
+            v(base.join("work").join("a").join("sub")),
+        );
+        assert!(lands_inside(&a, &a.join("sub").unwrap(), FsKind::Other));
+        assert!(!lands_inside(&a, &a, FsKind::Ntfs));
+        assert!(!lands_inside(
+            &a,
+            &v(base.join("Work").join("AB")),
+            FsKind::Ntfs
+        ));
+        assert!(!lands_inside(&a, &sub, FsKind::Other));
+        assert!(lands_inside(&a, &sub, FsKind::Ntfs));
+        // Only the case differs: the same folder, not one inside it.
+        assert!(!lands_inside(
+            &a,
+            &v(base.join("work").join("a")),
+            FsKind::Ntfs
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_resolve_from_the_folder_they_are_really_in() {
+        use std::os::unix::fs::symlink;
+
+        use rf_vfs::LocalProvider;
+        let dir = tempfile::tempdir().unwrap();
+        // Through the link `top/in`, the `..` of `x` goes up to `real`; as text it would be
+        // `top`.
+        let root = dir.path().canonicalize().unwrap();
+        for d in ["top", "real/deep"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("real").join("y.txt"), "y").unwrap();
+        symlink("../real/deep", root.join("top").join("in")).unwrap();
+        symlink("../y.txt", root.join("real").join("deep").join("x")).unwrap();
+        symlink(root.join("top"), root.join("abs")).unwrap();
+        symlink("loop", root.join("loop")).unwrap();
+        let local = LocalProvider::new();
+        let resolve = |p: PathBuf| resolve_links(&local, &v(p)).map(|(path, _)| path);
+        let x = root.join("abs").join("in").join("x");
+        assert_eq!(
+            resolve(x.clone()).unwrap(),
+            v(root.join("real").join("y.txt"))
+        );
+        let (path, entry) = follow_link(&local, &v(&x)).unwrap();
+        assert_eq!(
+            (path, entry.name, entry.size),
+            (v(root.join("real").join("y.txt")), "x".into(), 1)
+        );
+        assert_eq!(resolve(root.join("top")).unwrap(), v(root.join("top")));
+        assert!(resolve(root.join("loop")).is_err());
     }
 }

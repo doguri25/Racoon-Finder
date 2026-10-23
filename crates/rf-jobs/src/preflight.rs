@@ -331,7 +331,10 @@ pub fn check_size(size: u64, fs: FsKind) -> Option<IssueKind> {
 /// composed to NFC first on `Apfs` and `HfsPlus` (which ignore the Unicode form of a name),
 /// then lower-cased. It is a simple lower-casing, not a full case folding: `ß` and `SS` stay
 /// different names.
-fn fold_name(name: &OsStr, fs: FsKind) -> String {
+///
+/// [`CaseIndex`] and the transfer's path comparisons share it. It means something only on a
+/// file system with [`FsKind::case_insensitive`]; callers check that first.
+pub(crate) fn fold_name(name: &OsStr, fs: FsKind) -> String {
     let text = name.to_string_lossy();
     match fs {
         FsKind::Apfs | FsKind::HfsPlus => text.nfc().collect::<String>().to_lowercase(),

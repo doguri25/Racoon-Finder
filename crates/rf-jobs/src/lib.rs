@@ -15,7 +15,7 @@ pub mod undo;
 
 pub use conflict::{Conflict, ConflictAction, ConflictAnswer, Decision, MTIME_TOLERANCE, decide};
 pub use control::Control;
-pub use exec::{ExecEnv, ExecEvent, execute};
+pub use exec::{ExecEnv, ExecEvent, MAX_DEPTH, execute};
 pub use id::JobId;
 pub use naming::{MAX_NUMBERED, TEMP_SUFFIX, numbered_name, temp_job, temp_name};
 pub use preflight::{

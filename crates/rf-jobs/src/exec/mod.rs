@@ -5,19 +5,20 @@ mod scan;
 mod transfer;
 
 use std::any::Any;
+use std::ffi::OsStr;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rf_core::{Error, ErrorKind, Os, PathError, VPath};
+use rf_core::{Entry, Error, ErrorKind, Os, PathError, VPath};
 use rf_vfs::{Provider, Vfs};
 
 use crate::conflict::{Conflict, ConflictAction};
 use crate::control::Control;
 use crate::id::JobId;
 use crate::naming::temp_name;
-use crate::preflight::IssueKind;
+use crate::preflight::{FsKind, IssueKind, fold_name};
 use crate::progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
 use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
 use crate::resolver::{ErrorAction, Resolver};
@@ -25,6 +26,12 @@ use crate::spec::{ErrorPolicy, JobKind, JobSpec};
 
 /// The size of the buffer a file is copied through, and so of one progress step.
 pub(crate) const COPY_CHUNK: usize = 1 << 20;
+
+/// How deep a transfer goes into folders: the items it was given are at depth 0, their
+/// children at 1. An item deeper than this is not counted in the plan and fails as
+/// [`Stage::Plan`] when the job reaches it; a folder there is not entered. It ends a loop of
+/// links that Follow mode would walk forever, well inside the 1,023-byte path limit of macOS.
+pub const MAX_DEPTH: usize = 128;
 
 /// What a running job tells the one who started it, on the job's own thread.
 #[derive(Clone, Debug)]
@@ -148,23 +155,97 @@ fn panic_text(payload: &(dyn Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// An error and the step of the job it happened in.
+/// Why a step failed.
+#[derive(Debug)]
+pub(crate) enum Cause {
+    /// An error of a provider, of a path or of the job.
+    Error(Error),
+    /// Something the target file system cannot hold.
+    Issue(IssueKind),
+}
+
+impl Cause {
+    /// The kind a failure of this cause has: the error's, or for an issue
+    /// [`ErrorKind::FileTooLarge`] when the file is too large and [`ErrorKind::InvalidPath`]
+    /// for anything else.
+    pub(crate) fn kind(&self) -> ErrorKind {
+        match self {
+            Cause::Error(error) => error.kind(),
+            Cause::Issue(IssueKind::FileTooLarge { .. }) => ErrorKind::FileTooLarge,
+            Cause::Issue(_) => ErrorKind::InvalidPath,
+        }
+    }
+}
+
+/// The log text: the error's, or the issue's own text with nothing in front.
+impl fmt::Display for Cause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Cause::Error(error) => error.fmt(f),
+            Cause::Issue(issue) => issue.fmt(f),
+        }
+    }
+}
+
+impl From<Error> for Cause {
+    fn from(error: Error) -> Cause {
+        Cause::Error(error)
+    }
+}
+
+impl From<PathError> for Cause {
+    fn from(error: PathError) -> Cause {
+        Cause::Error(error.into())
+    }
+}
+
+/// Why a step failed, and the step of the job it happened in.
 #[derive(Debug)]
 pub(crate) struct Failed {
     pub stage: Stage,
-    pub error: Error,
+    pub cause: Cause,
+    /// The path that was being written, when it is not the target the step was run for (a
+    /// numbered name). The failure names it as its target. Boxed, so that every `Result` that
+    /// fails with a `Failed` stays small.
+    pub target: Option<Box<VPath>>,
 }
 
 impl Failed {
     pub(crate) fn new(stage: Stage, error: Error) -> Failed {
-        Failed { stage, error }
+        Failed {
+            stage,
+            cause: Cause::Error(error),
+            target: None,
+        }
     }
-}
 
-/// The error of an item the target cannot hold: kind [`ErrorKind::InvalidPath`], with the log
-/// text of `issue` as its message.
-pub(crate) fn issue_error(issue: &IssueKind) -> Error {
-    Error::Path(PathError::Unsupported(issue.to_string()))
+    /// The failure of an item the target cannot hold because of `issue`.
+    pub(crate) fn issue(stage: Stage, issue: IssueKind) -> Failed {
+        Failed {
+            stage,
+            cause: Cause::Issue(issue),
+            target: None,
+        }
+    }
+
+    /// Names `path` as the path that was being written, unless a path is named already.
+    #[must_use]
+    pub(crate) fn writing(mut self, path: &VPath) -> Failed {
+        self.target.get_or_insert_with(|| Box::new(path.clone()));
+        self
+    }
+
+    /// The record of this failure for a step on `source` and `target`; the path that was being
+    /// written, if one is named, is the target instead.
+    pub(crate) fn record(self, source: Option<&VPath>, target: Option<&VPath>) -> ItemFailure {
+        ItemFailure {
+            source: source.cloned(),
+            target: self.target.map(|path| *path).or_else(|| target.cloned()),
+            stage: self.stage,
+            kind: self.cause.kind(),
+            message: self.cause.to_string(),
+        }
+    }
 }
 
 /// Tags the error of a result with the step it happened in.
@@ -176,6 +257,37 @@ impl<T> At<T> for rf_core::Result<T> {
     fn at(self, stage: Stage) -> Result<T, Failed> {
         self.map_err(|error| Failed::new(stage, error))
     }
+}
+
+impl<T> At<T> for Result<T, Cause> {
+    fn at(self, stage: Stage) -> Result<T, Failed> {
+        self.map_err(|cause| Failed {
+            stage,
+            cause,
+            target: None,
+        })
+    }
+}
+
+/// The names of `path` from its root, each as its [`fold_name`] key on `fs`, after its scheme
+/// and authority as they are. Two paths of one provider that `fs` takes for one path have the
+/// same keys, and the keys of a path inside another start with the other's. Only meaningful on
+/// a file system with [`FsKind::case_insensitive`].
+pub(crate) fn fold_path(path: &VPath, fs: FsKind) -> Vec<String> {
+    let mut keys = vec![
+        path.scheme().name().to_owned(),
+        path.authority().unwrap_or_default().to_owned(),
+    ];
+    match path.as_local() {
+        Some(local) => keys.extend(local.components().map(|c| fold_name(c.as_os_str(), fs))),
+        None => keys.extend(
+            path.segments()
+                .unwrap_or_default()
+                .iter()
+                .map(|segment| fold_name(OsStr::new(segment), fs)),
+        ),
+    }
+    keys
 }
 
 /// How [`Ctx::attempt`] ended.
@@ -298,11 +410,11 @@ impl<'e> Ctx<'e> {
                 Err(failed) => failed,
             };
             self.report.done.bytes = self.report.done.bytes.saturating_sub(counted);
-            if failed.error.kind() == ErrorKind::Cancelled {
+            if failed.cause.kind() == ErrorKind::Cancelled {
                 self.stop(Stopped::Cancelled);
                 return Attempt::Stop;
             }
-            let failure = ItemFailure::new(failed.stage, source, target, &failed.error);
+            let failure = failed.record(source, target);
             let action = match policy {
                 _ if self.skip_failures => ErrorAction::Skip,
                 ErrorPolicy::Continue => ErrorAction::Skip,
@@ -366,9 +478,18 @@ impl<'e> Ctx<'e> {
 
     /// Records that a step went wrong without failing its item, such as copying metadata.
     pub(crate) fn warn(&mut self, failed: Failed, source: Option<&VPath>, target: Option<&VPath>) {
-        let Failed { stage, error } = failed;
-        let warning = ItemFailure::new(stage, source, target, &error);
+        let warning = failed.record(source, target);
         self.report.warnings.push(warning);
+    }
+
+    /// Every child of the folder `dir` of `provider`. All the batches are gathered before the
+    /// caller uses any of them, so that a change to the folder while the job works through it
+    /// cannot shake the list. A cancel of the job stops the listing with `Error::Cancelled`.
+    pub(crate) fn list(&self, provider: &dyn Provider, dir: &VPath) -> rf_core::Result<Vec<Entry>> {
+        let mut children = Vec::new();
+        let cancel = self.env.control.cancel_token();
+        provider.list(dir, &cancel, &mut |batch| children.extend(batch))?;
+        Ok(children)
     }
 
     /// A new temporary file next to `target`: `.rf-{job}-{seq}.rfpart` in its folder, with
@@ -527,6 +648,32 @@ mod tests {
 
     fn unsupported(what: &str) -> Failed {
         Failed::new(Stage::Write, Error::Unsupported(what.to_owned()))
+    }
+
+    #[test]
+    fn a_failure_on_an_issue_has_the_issue_text_and_its_own_kind() {
+        let dir = VPath::local(std::env::temp_dir()).unwrap();
+        let (taken, numbered) = (dir.join("a.txt").unwrap(), dir.join("a (2).txt").unwrap());
+        let too_large = IssueKind::FileTooLarge { size: 5, max: 4 };
+        let failure = Failed::issue(Stage::Preflight, too_large.clone()).record(None, Some(&taken));
+        assert_eq!(
+            (failure.kind, failure.message, failure.target),
+            (
+                ErrorKind::FileTooLarge,
+                too_large.to_string(),
+                Some(taken.clone())
+            )
+        );
+        let bad = IssueKind::InvalidCharacter('?');
+        let failure = Failed::issue(Stage::Preflight, bad.clone())
+            .writing(&numbered)
+            .writing(&taken)
+            .record(None, Some(&taken));
+        // The first path named is the one that was being written.
+        assert_eq!(
+            (failure.kind, failure.message, failure.target),
+            (ErrorKind::InvalidPath, bad.to_string(), Some(numbered))
+        );
     }
 
     #[test]

@@ -1,18 +1,31 @@
-//! Copying one file: write a temporary file next to the target, make it durable, commit it
-//! under the final name with one rename, then copy the metadata. No partly written file ever
-//! carries the final name.
+//! Copying one file or link: write a temporary file (or link) next to the target, make it
+//! durable, commit it under the final name with one rename, then copy the metadata. No partly
+//! written file ever carries the final name.
 
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use rf_core::{Entry, EntryKind, Error, VPath};
 use rf_vfs::{DeleteMode, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
-use super::{At, COPY_CHUNK, Ctx, Failed, issue_error};
+use super::{At, COPY_CHUNK, Ctx, Failed};
 use crate::preflight::check_path_len;
 use crate::report::Stage;
 
-/// Copies the file `source` of `src`, which `entry` describes, to `target` of `dst`.
+/// One item a transfer reads: where it is and what it is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Source<'a> {
+    /// The provider of `path`.
+    pub provider: &'a dyn Provider,
+    /// The item itself, never a link that is followed: in Follow mode the path the link leads
+    /// to, with every link on the way resolved. Its content and its extras
+    /// (`Provider::copy_extras`) are what the copy gets.
+    pub path: &'a VPath,
+    /// What the item at `path` is: its kind, size, times and attributes, and its identity when
+    /// the provider knows it.
+    pub entry: &'a Entry,
+}
+
+/// Copies the file or link `from` to `target` of `dst`.
 ///
 /// The content goes to a new temporary file in the target's folder, which is flushed and
 /// synced, given the source's extras (when both sides are of one provider) and times, and
@@ -22,25 +35,30 @@ use crate::report::Stage;
 /// Windows cannot remove a read-only temporary file. A metadata failure is a warning; the
 /// copy itself has worked.
 ///
-/// A source that is no regular file is refused before anything is opened or created: a FIFO
-/// blocks a reader until a writer comes, and a device can be read without end. A temporary
-/// path longer than the OS allows is refused the same way, as `Stage::Preflight`: its name is
-/// longer than a short final name, so the final path alone may fit where it does not.
+/// A link is copied as a link: a new link at the temporary path stores what the source link
+/// stores, and is committed like a file. It gets no metadata, because on Unix changing its
+/// mode would change the item it leads to; the link is never opened, and the temporary link
+/// that a failure leaves is removed itself, never what it leads to.
+///
+/// A source that is neither a regular file nor a link is refused before anything is opened
+/// or created: a FIFO blocks a reader until a writer comes, and a device can be read without
+/// end. A temporary path longer than the OS allows is refused the same way, as
+/// `Stage::Preflight`: its name is longer than a short final name, so the final path alone may
+/// fit where it does not.
 pub(crate) fn copy_file(
     ctx: &mut Ctx<'_>,
-    src: &Arc<dyn Provider>,
-    source: &VPath,
-    entry: &Entry,
-    dst: &Arc<dyn Provider>,
+    from: Source<'_>,
+    dst: &dyn Provider,
     target: &VPath,
     commit: RenameMode,
 ) -> Result<(), Failed> {
+    let Source {
+        provider: src,
+        path: source,
+        entry,
+    } = from;
     match entry.kind {
-        EntryKind::File => {}
-        EntryKind::Symlink => {
-            let error = Error::Unsupported("links are not implemented yet".to_owned());
-            return Err(Failed::new(Stage::Plan, error));
-        }
+        EntryKind::File | EntryKind::Symlink => {}
         EntryKind::Dir | EntryKind::Other => {
             let error = Error::Unsupported(format!("not a regular file: {source}"));
             return Err(Failed::new(Stage::Plan, error));
@@ -51,7 +69,20 @@ pub(crate) fn copy_file(
     // The temporary name is at least 29 units, longer than a short final name, so the final
     // path can fit where this one does not.
     if let Some(issue) = check_path_len(&tmp, ctx.env.naming_os) {
-        return Err(Failed::new(Stage::Preflight, issue_error(&issue)));
+        return Err(Failed::issue(Stage::Preflight, issue));
+    }
+    if entry.kind == EntryKind::Symlink {
+        let link = src.read_link(source).at(Stage::Read)?;
+        dst.create_symlink(&tmp, &link).at(Stage::Write)?;
+        // As for a file: only a link this call made is removed, and only the link.
+        let mut guard = TempGuard {
+            provider: dst,
+            path: &tmp,
+            armed: true,
+        };
+        dst.rename(&tmp, target, commit).at(Stage::Commit)?;
+        guard.armed = false;
+        return Ok(());
     }
     let mut reader = src.open_read(source).at(Stage::Read)?;
     let writer = dst
@@ -60,7 +91,7 @@ pub(crate) fn copy_file(
     // Only now is there a file of ours at `tmp`. If `CreateNew` failed, whatever is at that
     // path is not ours and stays.
     let mut guard = TempGuard {
-        provider: &**dst,
+        provider: dst,
         path: &tmp,
         armed: true,
     };
@@ -173,6 +204,8 @@ mod tests {
     use rf_core::{ErrorKind, VPath};
     use rf_vfs::Vfs;
 
+    #[cfg(unix)]
+    use crate::testkit::Node;
     use crate::testkit::{Fault, FaultyProvider, temp_files, tree};
     use crate::{
         ExecEnv, JobId, JobReport, JobSpec, NonInteractive, Outcome, Stage, TransferMode,
@@ -316,34 +349,46 @@ mod tests {
         assert_eq!(tree(&d.dst), BTreeMap::new());
     }
 
+    /// A link is counted as a file of no bytes and copied as a link: nothing is opened for
+    /// writing, and what it leads to is not read.
     #[cfg(unix)]
     #[test]
-    fn a_link_source_is_counted_but_not_yet_copied() {
+    fn a_link_source_is_copied_as_a_link_without_opening_anything() {
         let d = dirs();
         std::fs::write(d.src.join("a.txt"), "a").unwrap();
         std::os::unix::fs::symlink("a.txt", d.src.join("link")).unwrap();
         let p = FaultyProvider::local(vec![]);
         let report = copy(JobId::generate(), &d.src.join("link"), &d.dst, &p.vfs());
-        assert_eq!(
-            first_failure(&report),
-            (Stage::Plan, ErrorKind::Unsupported)
-        );
-        assert!(
-            report.failures[0]
-                .message
-                .contains("links are not implemented yet")
-        );
+        assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
         let one_link = crate::Totals {
             files: 1,
             dirs: 0,
             bytes: 0,
         };
-        assert_eq!(
-            (report.planned, report.done),
-            (one_link, crate::Totals::default())
-        );
+        assert_eq!((report.planned, report.done), (one_link, one_link));
         assert_eq!(p.opened_writes(), 0);
-        assert_eq!(tree(&d.dst), BTreeMap::new());
+        assert_eq!(
+            tree(&d.dst),
+            BTreeMap::from([("link".to_string(), Node::Link("a.txt".into()))])
+        );
+        assert_eq!(report.outputs, [v(&d.dst.join("link"))]);
+    }
+
+    /// A link that cannot be committed is removed, and only the link: the file it leads to is
+    /// still there.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_that_fails_its_commit_is_removed_itself() {
+        let d = dirs();
+        std::fs::write(d.dst.join("keep.txt"), "keep").unwrap();
+        std::os::unix::fs::symlink(d.dst.join("keep.txt"), d.src.join("link")).unwrap();
+        let p = FaultyProvider::local(vec![Fault::FailRename { call: 0 }]);
+        let report = copy(JobId::generate(), &d.src.join("link"), &d.dst, &p.vfs());
+        assert_eq!(first_failure(&report), (Stage::Commit, ErrorKind::Other));
+        assert_eq!(
+            tree(&d.dst),
+            BTreeMap::from([("keep.txt".to_string(), Node::File(b"keep".to_vec()))])
+        );
     }
 
     #[cfg(unix)]
