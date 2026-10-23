@@ -177,7 +177,8 @@ impl Log {
     /// The record that undoes a move (`moving`) or a copy that did what this log holds, or
     /// `None` when it changed nothing. A move that only made and removed folders changed
     /// something: an empty folder moved across volumes. A copy's record notes the time it is
-    /// made, after the job wrote its last item, so that an undo can tell what changed since.
+    /// made, after the job wrote its last item, so that an undo can tell what changed since; a
+    /// clock before 1970, which the journal cannot store, is left out as for an item's time.
     fn into_record(self, moving: bool) -> Option<UndoRecord> {
         let Log {
             created,
@@ -198,7 +199,7 @@ impl Log {
             changed.then(|| UndoRecord::Copied {
                 created,
                 overwritten,
-                at: Some(SystemTime::now()),
+                at: Some(SystemTime::now()).filter(|now| *now >= SystemTime::UNIX_EPOCH),
             })
         }
     }

@@ -64,8 +64,14 @@ pub enum UndoRecord {
         /// cannot bring it back.
         overwritten: u64,
         /// When the job finished, after it wrote its last item: a copied folder is unchanged
-        /// only while nothing in it is newer. `None` in a record written before this was kept,
-        /// and an undo then leaves every copied folder where it is.
+        /// only while nothing in it is newer. `None` in a record written before this was kept
+        /// (or for a clock before 1970), and an undo then leaves every copied folder where it
+        /// is.
+        ///
+        /// It is one time for the whole job, so it leaves a window: an item changed in a
+        /// copied folder after that folder was done but before the job ended has a time before
+        /// `at`, and the change goes unseen. The folder then goes to the trash with it, where
+        /// it can still be got back.
         #[serde(default)]
         at: Option<SystemTime>,
     },
@@ -119,6 +125,8 @@ pub struct UndoHistory {
     limit: usize,
     undo: VecDeque<UndoRecord>,
     redo: VecDeque<UndoRecord>,
+    /// How many records of jobs the user ran were noted ([`push`](Self::push)).
+    generation: u64,
 }
 
 impl UndoHistory {
@@ -128,14 +136,48 @@ impl UndoHistory {
             limit,
             undo: VecDeque::new(),
             redo: VecDeque::new(),
+            generation: 0,
         }
     }
 
     /// Notes `record`, the record of a job the user ran: it can be undone next. A new action
-    /// makes what was undone before it impossible to redo, so the redo list is emptied.
+    /// makes what was undone before it impossible to redo, so the redo list is emptied. It
+    /// starts a new [`generation`](Self::generation).
     pub fn push(&mut self, record: UndoRecord) {
         self.redo.clear();
+        self.generation += 1;
         Self::bounded_push(&mut self.undo, record, self.limit);
+    }
+
+    /// How many records of jobs the user ran were noted so far. A record taken off a list is
+    /// put back only in the generation it was taken in (see
+    /// [`put_back_undo`](Self::put_back_undo)).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Puts `record`, which [`pop_undo`](Self::pop_undo) took in the generation `popped_at`,
+    /// back at the end of the undo list, for an undo that never ran; the redo list stays as it
+    /// is. Only while no record of a job the user ran was noted since: that newer record must
+    /// be undone first, so the old one is dropped then. Says whether it was put back.
+    pub fn put_back_undo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
+        let current = popped_at == self.generation;
+        if current {
+            Self::bounded_push(&mut self.undo, record, self.limit);
+        }
+        current
+    }
+
+    /// Puts `record`, which [`pop_redo`](Self::pop_redo) took in the generation `popped_at`,
+    /// back at the end of the redo list, for a redo that never ran. Only while no record of a
+    /// job the user ran was noted since, after which nothing can be redone: the record is
+    /// dropped then. Says whether it was put back.
+    pub fn put_back_redo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
+        let current = popped_at == self.generation;
+        if current {
+            Self::bounded_push(&mut self.redo, record, self.limit);
+        }
+        current
     }
 
     /// Takes the record of the job to undo next, the last one noted.

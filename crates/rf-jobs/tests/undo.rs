@@ -771,4 +771,307 @@ mod beyond {
         assert_eq!((e.undo_history().len(), e.redo_history().len()), (0, 1));
         assert!(e.shutdown(WAIT));
     }
+
+    // Fix round 1: fail-safe cases.
+
+    /// The record of a copy of `sources` into `dst`, made through `b`.
+    fn copied(b: &Arc<Bin>, sources: &[PathBuf], dst: &Path) -> Vec<rf_jobs::CreatedItem> {
+        let rep = run_on(&copy(sources, dst), &b.vfs(), &NonInteractive);
+        let Some(UndoRecord::Copied { created, .. }) = rep.undo else {
+            panic!("{:?}", rep.undo)
+        };
+        created
+    }
+
+    #[test]
+    fn an_item_that_cannot_be_confirmed_unchanged_is_left_in_place() {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[
+                ("dir/x.txt", "X"),
+                ("a.txt", "A"),
+                ("b.txt", "B"),
+                ("c.txt", "C"),
+            ],
+        );
+        let b = Bin::new(&f);
+        let names = ["dir", "a.txt", "b.txt", "c.txt"];
+        let sources: Vec<PathBuf> = names.iter().map(|name| f.src.join(name)).collect();
+        let mut created = copied(&b, &sources, &f.dst);
+        assert_eq!(created.len(), 4);
+        // `a.txt` has no recorded time, as for a time before 1970.
+        created[1].modified = None;
+        // `b.txt` is replaced by another file of the same size and time.
+        let (b_txt, b_new) = (f.dst.join("b.txt"), f.dst.join("b.new"));
+        std::fs::write(&b_new, "B").unwrap();
+        rf_platform::set_times(&v(&b_new), created[2].modified, None, None).unwrap();
+        std::fs::rename(&b_new, &b_txt).unwrap();
+        let before = tree(&f.dst);
+        // The folder is in a record without the job's time.
+        let record = UndoRecord::Copied {
+            created,
+            overwritten: 0,
+            at: None,
+        };
+        let rep = run_on(&JobSpec::Undo(record), &b.vfs(), &NonInteractive);
+        let left: Vec<VPath> = names[..3].iter().map(|name| v(f.dst.join(name))).collect();
+        assert_eq!(left_as_changed(&rep), left);
+        assert_eq!(rep.failures.len(), 3, "{:?}", rep.failures);
+        // Only the file that is still as the copy left it goes.
+        let mut kept = before;
+        kept.remove("c.txt");
+        assert_eq!(tree(&f.dst), kept);
+        assert_eq!(originals(&rep), [v(f.dst.join("c.txt"))]);
+    }
+
+    /// A link in a copied folder counts by its own time and is never entered: what it leads to
+    /// can change without making the folder count as changed, and the link goes to the trash
+    /// with the folder while what it leads to stays as it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_a_copied_folder_is_not_followed() {
+        let f = fx();
+        write_tree(&f.root, &[("outside/o.txt", "O"), ("src/dir/a.txt", "A")]);
+        let outside = f.root.join("outside");
+        std::os::unix::fs::symlink(&outside, f.src.join("dir").join("link")).unwrap();
+        let b = Bin::new(&f);
+        let (e, rx) = engine_on(b.vfs());
+        done(&e, &rx, copy(&[f.src.join("dir")], &f.dst));
+        assert!(f.dst.join("dir").join("link").is_symlink());
+        later();
+        std::fs::write(outside.join("o.txt"), "edited after the copy").unwrap();
+        let rep = undo(&e, &rx);
+        assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+        assert_eq!(tree(&f.dst), BTreeMap::new());
+        let mut target = BTreeMap::new();
+        target.insert(
+            "o.txt".to_owned(),
+            Node::File(b"edited after the copy".to_vec()),
+        );
+        assert_eq!(tree(&outside), target);
+        assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_restore_whose_trash_entry_is_gone_names_the_trash_location() {
+        let f = fx();
+        write_tree(&f.src, &[("t.txt", "T")]);
+        let b = Bin::new(&f);
+        let (e, rx) = engine_on(b.vfs());
+        let rep = done(&e, &rx, trash(&[f.src.join("t.txt")]));
+        let Some(UndoRecord::Trashed { items }) = &rep.undo else {
+            panic!("{:?}", rep.undo)
+        };
+        let location = items[0].location.clone().unwrap();
+        // The trash was emptied.
+        std::fs::remove_file(location.as_local().unwrap()).unwrap();
+        let rep = undo(&e, &rx);
+        assert_eq!(rep.failures.len(), 1, "{:?}", rep.failures);
+        let failure = &rep.failures[0];
+        assert_eq!(
+            (failure.stage, failure.kind),
+            (Stage::Undo, ErrorKind::NotFound)
+        );
+        assert_eq!(
+            (failure.source.clone(), failure.target.clone()),
+            (Some(location), Some(v(f.src.join("t.txt"))))
+        );
+        assert!(e.shutdown(WAIT));
+    }
+
+    /// An undo puts no question: the move back meets a pre-flight issue (a name FAT32 cannot
+    /// hold) and an old place that is taken, and settles both without its resolver, which has
+    /// no answer and would panic if asked.
+    #[cfg(unix)]
+    #[test]
+    fn an_undo_asks_nothing() {
+        let f = fx();
+        write_tree(&f.src, &[("a?b.txt", "Q"), ("c.txt", "C")]);
+        let sources = [f.src.join("a?b.txt"), f.src.join("c.txt")];
+        let rep = run(&spec(
+            TransferMode::Move,
+            &sources,
+            &f.dst,
+            TransferOptions::default(),
+        ));
+        let record = rep.undo.expect("a move record");
+        std::fs::write(f.src.join("c.txt"), "new").unwrap();
+        let resolver = rf_jobs::testkit::ScriptedResolver::new();
+        let fat = FaultyProvider::local(vec![Fault::FsName("FAT32".into())]);
+        let rep = run_on(&JobSpec::Undo(record), &fat.vfs(), &resolver);
+        assert_eq!(resolver.calls(), Vec::new());
+        assert_ne!(rep.issues, Vec::new());
+        assert_eq!((rep.outcome, rep.skipped), (Outcome::Completed, 1));
+        assert_eq!(std::fs::read_to_string(f.src.join("a?b.txt")).unwrap(), "Q");
+        assert_eq!(std::fs::read_to_string(f.src.join("c.txt")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(f.dst.join("c.txt")).unwrap(), "C");
+    }
+}
+
+// Fix round 1: one undo or redo at a time, and the record of one that never runs goes back.
+
+mod one_at_a_time {
+    use rf_jobs::JobId;
+
+    use super::*;
+
+    /// An engine whose provider holds the first file it writes until it is released, with
+    /// `a.txt`, `x` and `big.bin` in `src` and an empty folder `held`.
+    fn engine(f: &Fx) -> (Arc<FaultyProvider>, JobEngine, Receiver<JobEvent>) {
+        write_tree(
+            &f.root,
+            &[
+                ("src/a.txt", "A"),
+                ("src/x", "X"),
+                ("src/big.bin", "B"),
+                ("held/", ""),
+            ],
+        );
+        let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
+        let (e, rx) = engine_on(p.vfs());
+        (p, e, rx)
+    }
+
+    /// Moves `a.txt` from `src` to `dst`; its undo runs on the main lane.
+    fn move_a(f: &Fx, e: &JobEngine, rx: &Receiver<JobEvent>) {
+        let moved = spec(
+            TransferMode::Move,
+            &[f.src.join("a.txt")],
+            &f.dst,
+            TransferOptions::default(),
+        );
+        assert_eq!(done(e, rx, moved).outcome, Outcome::Completed);
+    }
+
+    /// Submits a copy whose first write waits, so that it holds the main lane, and gives its ID.
+    fn hold_the_main_lane(f: &Fx, p: &FaultyProvider, e: &JobEngine) -> JobId {
+        let id = e.submit(copy(&[f.src.join("big.bin")], &f.root.join("held")));
+        assert!(p.wait_held(WAIT));
+        id
+    }
+
+    /// Cancels the queued job `id` and waits for its end.
+    fn cancel(e: &JobEngine, rx: &Receiver<JobEvent>, id: JobId) {
+        assert!(e.cancel(id));
+        assert_eq!(wait_finished(rx, id, WAIT).outcome, Outcome::Cancelled);
+    }
+
+    /// Lets the held copy `held` finish, and the engine end.
+    fn finish(p: &FaultyProvider, e: &JobEngine, rx: &Receiver<JobEvent>, held: JobId) {
+        p.release();
+        assert_eq!(wait_finished(rx, held, WAIT).outcome, Outcome::Completed);
+        assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_record_goes_back_only_in_the_generation_it_was_taken_in() {
+        let r = |n: &str| UndoRecord::Renamed {
+            from: v(std::env::temp_dir().join(n)),
+            to: v(std::env::temp_dir().join(format!("{n}2"))),
+        };
+        let mut h = UndoHistory::new(10);
+        h.push(r("a"));
+        h.push(r("b"));
+        h.push_undone(r("x"));
+        let at = h.generation();
+        let b = h.pop_undo().unwrap();
+        assert!(h.put_back_undo(b, at));
+        // Back on top, and the redo list as it was.
+        assert_eq!(
+            (h.undo_list(), h.redo_list()),
+            (vec![r("a"), r("b")], vec![r("x")])
+        );
+        let x = h.pop_redo().unwrap();
+        assert!(h.put_back_redo(x, at));
+        assert_eq!(h.redo_list(), [r("x")]);
+        let (b, x) = (h.pop_undo().unwrap(), h.pop_redo().unwrap());
+        h.push(r("c"));
+        assert!(!h.put_back_undo(b, at) && !h.put_back_redo(x, at));
+        assert_eq!(
+            (h.undo_list(), h.redo_list()),
+            (vec![r("a"), r("c")], Vec::new())
+        );
+    }
+
+    #[test]
+    fn one_undo_at_a_time_and_a_cancelled_one_keeps_its_record() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        let history = e.undo_history();
+        let held = hold_the_main_lane(&f, &p, &e);
+        let first = e.undo().expect("something to undo");
+        assert_eq!((e.undo(), e.redo()), (None, None));
+        cancel(&e, &rx, first);
+        assert_eq!(e.undo_history(), history);
+        // The next undo may start again, and is put back again.
+        let again = e.undo().expect("the record is back");
+        assert_eq!(e.undo(), None);
+        cancel(&e, &rx, again);
+        assert_eq!(e.undo_history(), history);
+        assert!(f.dst.join("a.txt").exists());
+        finish(&p, &e, &rx, held);
+    }
+
+    #[test]
+    fn one_redo_at_a_time_and_a_cancelled_one_keeps_its_record() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        done(&e, &rx, rename(&f, "x", "y"));
+        move_a(&f, &e, &rx);
+        undo(&e, &rx);
+        let (undos, redos) = (e.undo_history(), e.redo_history());
+        assert_eq!((undos.len(), redos.len()), (1, 1));
+        let held = hold_the_main_lane(&f, &p, &e);
+        let first = e.redo().expect("something to redo");
+        // The rename could be undone, but not while the redo waits.
+        assert_eq!((e.redo(), e.undo()), (None, None));
+        cancel(&e, &rx, first);
+        assert_eq!(
+            (e.undo_history(), e.redo_history()),
+            (undos.clone(), redos.clone())
+        );
+        let again = e.redo().expect("the record is back");
+        assert_eq!(e.redo(), None);
+        cancel(&e, &rx, again);
+        assert_eq!((e.undo_history(), e.redo_history()), (undos, redos));
+        assert!(f.src.join("a.txt").exists());
+        finish(&p, &e, &rx, held);
+    }
+
+    #[test]
+    fn a_new_action_drops_the_record_of_a_cancelled_undo() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        let held = hold_the_main_lane(&f, &p, &e);
+        let first = e.undo().expect("something to undo");
+        // A job the user runs meanwhile, on the quick lane, notes its record.
+        done(&e, &rx, rename(&f, "x", "y"));
+        let newer = e.undo_history();
+        assert_eq!(newer.len(), 1);
+        cancel(&e, &rx, first);
+        // The move's record would now be undone before the newer rename: it is dropped.
+        assert_eq!(e.undo_history(), newer);
+        assert_eq!(e.redo_history(), Vec::new());
+        finish(&p, &e, &rx, held);
+    }
+
+    #[test]
+    fn a_new_action_drops_the_record_of_a_cancelled_redo() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        undo(&e, &rx);
+        assert_eq!(e.redo_history().len(), 1);
+        let held = hold_the_main_lane(&f, &p, &e);
+        let first = e.redo().expect("something to redo");
+        done(&e, &rx, rename(&f, "x", "y"));
+        let newer = e.undo_history();
+        cancel(&e, &rx, first);
+        // After a new action there is nothing to redo.
+        assert_eq!((e.undo_history(), e.redo_history()), (newer, Vec::new()));
+        finish(&p, &e, &rx, held);
+    }
 }

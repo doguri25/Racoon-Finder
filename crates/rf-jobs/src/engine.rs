@@ -42,7 +42,8 @@
 //! the record a redo left can be undone next. A job without a record (a permanent delete, a job
 //! that changed nothing) leaves both lists as they are. [`JobEngine::undo`] and
 //! [`JobEngine::redo`] take the next record off its list and submit it as a
-//! [`JobSpec::Undo`] job, which runs like any other.
+//! [`JobSpec::Undo`] job, which runs like any other, one at a time: while one is queued or
+//! running, neither starts another. One that never runs puts its record back.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -279,24 +280,34 @@ impl JobEngine {
         self.submit_as(spec, Origin::User)
     }
 
-    /// Takes the record of the job to undo next off the undo list and submits it as a
-    /// [`JobSpec::Undo`] job, whose ID it gives (see [`submit`](Self::submit)); the record its
-    /// report gives can be redone next. `None` when there is nothing to undo.
+    /// Undoes the last job that can be undone: takes its record off the undo list and submits
+    /// it as a [`JobSpec::Undo`] job, whose ID it gives (see [`submit`](Self::submit)). The
+    /// record the job's report gives can be redone next. `None` when there is nothing to undo,
+    /// or when an undo or a redo is queued or running: one runs at a time, so that each starts
+    /// from what the one before it left.
     ///
-    /// The record leaves the list now: an undo that ends with no record of its own (one that
-    /// could do nothing, or was cancelled before it ran) takes it off for good. The same holds
-    /// for [`redo`](Self::redo).
+    /// An undo that never runs (cancelled while it is queued, submitted after
+    /// [`shutdown`](Self::shutdown), or left without a worker) puts its record back on top of
+    /// the undo list, and the redo list stays as it is; unless a job the user ran has noted its
+    /// record since, which must be undone first: then the record is dropped. An undo that runs
+    /// notes only the reverse of what it did: one that stops partway, or fails for some or all
+    /// of its items, leaves the rest of its record off both lists (it is not rebuilt).
     pub fn undo(&self) -> Option<JobId> {
-        let record = self.shared.lock().history.pop_undo()?;
-        Some(self.submit_as(JobSpec::Undo(record), Origin::Undo))
+        let (record, origin) = self.shared.lock().take_record(false)?;
+        Some(self.submit_as(JobSpec::Undo(record), origin))
     }
 
-    /// Takes the record of the undo to redo next off the redo list and submits it as a
-    /// [`JobSpec::Undo`] job, whose ID it gives; the record its report gives can be undone
-    /// next. `None` when there is nothing to redo.
+    /// Redoes the last undo that can be redone: takes its record off the redo list and submits
+    /// it as a [`JobSpec::Undo`] job, whose ID it gives. The record the job's report gives can
+    /// be undone next. `None` when there is nothing to redo, or when an undo or a redo is
+    /// queued or running.
+    ///
+    /// A redo that never runs puts its record back on top of the redo list, unless a job the
+    /// user ran has noted its record since, after which nothing can be redone: then the record
+    /// is dropped. A redo that runs notes only the reverse of what it did, as an undo does.
     pub fn redo(&self) -> Option<JobId> {
-        let record = self.shared.lock().history.pop_redo()?;
-        Some(self.submit_as(JobSpec::Undo(record), Origin::Redo))
+        let (record, origin) = self.shared.lock().take_record(true)?;
+        Some(self.submit_as(JobSpec::Undo(record), origin))
     }
 
     /// What [`undo`](Self::undo) can undo, the oldest first: the last one is undone next.
@@ -309,18 +320,21 @@ impl JobEngine {
         self.shared.lock().history.redo_list()
     }
 
-    /// [`submit`](Self::submit), for a job that `origin` asked for.
+    /// [`submit`](Self::submit), for a job that `origin` asked for. An undo or redo that ends
+    /// here without being queued gives its record back (see [`State::unrun`]).
     fn submit_as(&self, spec: JobSpec, origin: Origin) -> JobId {
         let id = JobId::generate();
         // Outside the lock: the policy is the caller's code.
         let lane = self.shared.lanes.lane(&spec);
         let mut state = self.shared.lock();
         if state.shut_down {
+            state.unrun(origin, &spec);
             let report = cancelled_report(id, &spec);
             state.broadcast(&JobEvent::Finished { id, report });
             return id;
         }
         if let Err(error) = self.shared.start_worker(&mut state, lane) {
+            state.unrun(origin, &spec);
             let mut report = JobReport::new(id, &spec);
             report.outcome = Outcome::Aborted;
             report.failures.push(ItemFailure {
@@ -651,14 +665,7 @@ impl Shared {
         }
         let mut state = self.lock();
         state.running.retain(|job| job.id != id);
-        if let Some(record) = &report.undo {
-            let record = record.clone();
-            match origin {
-                Origin::User => state.history.push(record),
-                Origin::Undo => state.history.push_undone(record),
-                Origin::Redo => state.history.push_redone(record),
-            }
-        }
+        state.note_record(origin, report.undo.as_ref());
         let report = Arc::new(report);
         state.broadcast(&JobEvent::Finished { id, report });
     }
@@ -757,10 +764,12 @@ struct Taken {
 enum Origin {
     /// The user, with [`JobEngine::submit`].
     User,
-    /// [`JobEngine::undo`].
-    Undo,
-    /// [`JobEngine::redo`].
-    Redo,
+    /// [`JobEngine::undo`], which took the job's record off the undo list in the history's
+    /// generation `popped_at`.
+    Undo { popped_at: u64 },
+    /// [`JobEngine::redo`], which took the job's record off the redo list in the history's
+    /// generation `popped_at`.
+    Redo { popped_at: u64 },
 }
 
 /// The engine's jobs, subscribers and threads, behind its one lock.
@@ -775,6 +784,9 @@ struct State {
     recovered: Vec<IncompleteJob>,
     /// What can be undone and redone.
     history: UndoHistory,
+    /// Whether a job of [`JobEngine::undo`] or [`JobEngine::redo`] is queued or running; until
+    /// it ends, neither starts another.
+    undoing: bool,
     /// A disabled handle without a journal.
     journal: JournalHandle,
     /// The worker of each lane that has had a job.
@@ -792,6 +804,7 @@ impl State {
             subscribers: vec![subscriber],
             recovered: Vec::new(),
             history: UndoHistory::new(UNDO_LIMIT),
+            undoing: false,
             journal: JournalHandle::disabled(),
             workers: BTreeMap::new(),
             journal_threads: Vec::new(),
@@ -858,8 +871,63 @@ impl State {
         }
     }
 
-    /// Ends `job`, taken out of the queue before it ran, as cancelled.
+    /// Takes the record for a new undo (`redo` false) or redo off its list, with the origin of
+    /// the job that runs it, and notes that an undo or redo is under way. `None` when the list
+    /// is empty, or when an undo or redo is queued or running already.
+    fn take_record(&mut self, redo: bool) -> Option<(UndoRecord, Origin)> {
+        if self.undoing {
+            return None;
+        }
+        let popped_at = self.history.generation();
+        let taken = if redo {
+            (self.history.pop_redo()?, Origin::Redo { popped_at })
+        } else {
+            (self.history.pop_undo()?, Origin::Undo { popped_at })
+        };
+        self.undoing = true;
+        Some(taken)
+    }
+
+    /// Notes `record`, what the job of `origin` that ran left, in the history (see the module
+    /// doc), and ends the undo or redo under way if the job was one.
+    fn note_record(&mut self, origin: Origin, record: Option<&UndoRecord>) {
+        if origin != Origin::User {
+            self.undoing = false;
+        }
+        let Some(record) = record.cloned() else {
+            return;
+        };
+        match origin {
+            Origin::User => self.history.push(record),
+            Origin::Undo { .. } => self.history.push_undone(record),
+            Origin::Redo { .. } => self.history.push_redone(record),
+        }
+    }
+
+    /// Ends the job `spec` of `origin` that never ran (cancelled while queued, submitted after
+    /// the shutdown, or without a worker). An undo or redo puts its record back on its list,
+    /// unless a job the user ran has noted a record since it was taken off (see
+    /// `UndoHistory::put_back_undo`), and the next undo or redo may start.
+    fn unrun(&mut self, origin: Origin, spec: &JobSpec) {
+        let (Origin::Undo { popped_at } | Origin::Redo { popped_at }) = origin else {
+            return;
+        };
+        self.undoing = false;
+        let JobSpec::Undo(record) = spec else {
+            return;
+        };
+        let record = record.clone();
+        if matches!(origin, Origin::Undo { .. }) {
+            self.history.put_back_undo(record, popped_at);
+        } else {
+            self.history.put_back_redo(record, popped_at);
+        }
+    }
+
+    /// Ends `job`, taken out of the queue before it ran, as cancelled; an undo or redo gives its
+    /// record back (see [`unrun`](Self::unrun)).
     fn end_unrun(&mut self, job: &QueuedJob) {
+        self.unrun(job.origin, &job.spec);
         if job.spec.journaled() {
             self.journal.append(Record::Finished {
                 job: job.id,
