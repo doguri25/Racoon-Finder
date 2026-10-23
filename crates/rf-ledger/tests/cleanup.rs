@@ -336,6 +336,21 @@ fn portable_temp_entries_go_with_the_temp_folder() {
     assert!(item.symlink_metadata().is_err());
 }
 
+/// A plain file where the portable data folder would be is someone else's: nothing is
+/// planned for it, and it stays byte for byte.
+#[test]
+fn portable_cleanup_leaves_a_file_named_like_the_data_folder() {
+    let fx = portable();
+    let root = fx.paths.owned_paths()[0].clone();
+    std::fs::write(&root, b"user file").unwrap();
+    assert_eq!(plan_cleanup(&fx.paths).unwrap(), []);
+    let r = cleanup(&fx);
+    assert!(r.is_complete(), "{r:?}");
+    assert_eq!(r.done, []);
+    assert_eq!(std::fs::read(&root).unwrap(), b"user file");
+    assert_eq!(fx.fake.calls(), []);
+}
+
 /// A portable data folder that is a link to another drive is treated like any owned link:
 /// only the link goes, and the app's folders behind it are not reached through it.
 #[cfg(unix)]

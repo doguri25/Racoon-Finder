@@ -68,8 +68,9 @@ impl CleanupReport {
 ///    portable mode the one owned path is a plain `data` folder next to the executable, which
 ///    may hold someone else's files, so it is not deleted whole: instead `Delete` for each of
 ///    the config, data, cache, log and temp folders the app makes in it that is there, then
-///    `RemoveIfEmpty` for the folder itself. If that folder is a link, it is deleted like any
-///    owned link, which removes only the link.
+///    `RemoveIfEmpty` for the folder itself. If a link is there instead, it is deleted like any
+///    owned link, which removes only the link; anything else there (a file of the user's)
+///    gets no step.
 /// 4. `Delete` for every entry of the shared temp folder whose name starts with
 ///    `identity::TEMP_PREFIX`, by name; none if the folder is missing. A temp folder inside an
 ///    owned path (portable mode) is not listed: it is one of the app's folders above and goes
@@ -184,13 +185,18 @@ fn is_there(path: &Path) -> bool {
 }
 
 /// The portable steps for `root`, the one owned path in portable mode: `Delete` for each folder
-/// of the layout that is there, then `RemoveIfEmpty` for `root`. A `root` that is not a real
-/// folder (a link to another drive) is deleted as any owned link is, which removes only the
-/// link: the app's folders behind it are not reached through it.
+/// of the layout that is there, then `RemoveIfEmpty` for `root`. A `root` that is a link (to
+/// another drive, say; on Windows a junction too) is deleted as any owned link is, which
+/// removes only the link: the app's folders behind it are not reached through it. A `root`
+/// that is neither a folder nor a link, such as a file of the user's, gets no step at all.
 fn portable_steps(paths: &AppPaths, root: &Path) -> Vec<CleanupAction> {
     match fs::symlink_metadata(root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Ok(meta) if !meta.file_type().is_dir() => vec![CleanupAction::Delete(root.to_path_buf())],
+        Ok(meta) if meta.file_type().is_symlink() => {
+            vec![CleanupAction::Delete(root.to_path_buf())]
+        }
+        // Not the app's, and the app's folders cannot be under it.
+        Ok(meta) if !meta.file_type().is_dir() => Vec::new(),
         // A real folder, or one that cannot be looked at: the steps report why they fail.
         _ => {
             let layout = [
