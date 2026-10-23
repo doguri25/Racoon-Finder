@@ -1,0 +1,194 @@
+{
+  "format": 1,
+  "next_id": 12,
+  "entries": [
+    {
+      "id": 1,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "registry",
+          "key": "HKCU\\Software\\G",
+          "name": ""
+        },
+        "value": {
+          "type": "str",
+          "data": "a"
+        }
+      },
+      "before": {
+        "value": null,
+        "created_keys": [
+          "HKCU\\Software\\G"
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "group": "winx.golden",
+      "state": "pending",
+      "change": {
+        "target": {
+          "kind": "registry",
+          "key": "HKCU\\Software\\G",
+          "name": "e"
+        },
+        "value": {
+          "type": "expand_str",
+          "data": "%A%"
+        }
+      },
+      "before": {
+        "value": {
+          "type": "raw",
+          "data": {
+            "ty": 1,
+            "data": [
+              97,
+              0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "registry",
+          "key": "HKCU\\Software\\G",
+          "name": "m"
+        },
+        "value": {
+          "type": "multi_str",
+          "data": [
+            "a",
+            "b"
+          ]
+        }
+      },
+      "before": {
+        "value": {
+          "type": "u32",
+          "data": 1
+        }
+      }
+    },
+    {
+      "id": 5,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "registry",
+          "key": "HKCU\\Software\\G",
+          "name": "q"
+        },
+        "value": {
+          "type": "u64",
+          "data": 2
+        }
+      },
+      "before": {
+        "value": {
+          "type": "bytes",
+          "data": [
+            3
+          ]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "preference",
+          "domain": "com.example.golden",
+          "key": "flag"
+        },
+        "value": {
+          "type": "bool",
+          "data": true
+        }
+      },
+      "before": {
+        "value": {
+          "type": "plist",
+          "data": [
+            4
+          ]
+        }
+      }
+    },
+    {
+      "id": 8,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "preference",
+          "domain": "com.example.golden",
+          "key": "count"
+        },
+        "value": null
+      },
+      "before": {
+        "value": {
+          "type": "i64",
+          "data": -1
+        }
+      }
+    },
+    {
+      "id": 10,
+      "group": "winx.golden",
+      "state": "pending",
+      "change": {
+        "target": {
+          "kind": "service",
+          "service": "windows_service",
+          "name": "indexd"
+        },
+        "value": {
+          "type": "program",
+          "data": {
+            "path": "C:\\x\\indexd.exe",
+            "args": [
+              "--service"
+            ]
+          }
+        }
+      },
+      "before": {
+        "value": null
+      }
+    },
+    {
+      "id": 11,
+      "group": "winx.golden",
+      "state": "applied",
+      "change": {
+        "target": {
+          "kind": "service",
+          "service": "launch_agent",
+          "name": "indexd"
+        },
+        "value": null
+      },
+      "before": {
+        "value": {
+          "type": "program",
+          "data": {
+            "path": "/x/indexd",
+            "args": []
+          }
+        }
+      }
+    }
+  ]
+}

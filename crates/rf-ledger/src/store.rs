@@ -147,3 +147,147 @@ pub(crate) fn save(path: &Path, file: &LedgerFile) -> Result<(), LedgerError> {
         .map_err(|e| io_error("sync_all", path, e))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Format 1 of the ledger file, pinned byte for byte by a golden file that holds every kind
+    //! of target, value, service and entry state, a before-state with and without created keys,
+    //! and missing values (`null`). A field or variant renamed by accident fails here; one
+    //! renamed on purpose needs a new format (see `Ledger::FORMAT`), not a new golden file.
+
+    use super::*;
+    use crate::change::{Before, Change, ServiceKind, Target, Value};
+    use crate::ledger::{EntryId, EntryState};
+
+    const GOLDEN: &[u8] = include_bytes!("../tests/golden/ledger-format-1.json");
+
+    fn registry(name: &str) -> Target {
+        Target::Registry {
+            key: r"HKCU\Software\G".into(),
+            name: name.into(),
+        }
+    }
+
+    fn preference(domain: &str, key: &str) -> Target {
+        Target::Preference {
+            domain: domain.into(),
+            key: key.into(),
+        }
+    }
+
+    fn service(service: ServiceKind) -> Target {
+        Target::Service {
+            service,
+            name: "indexd".into(),
+        }
+    }
+
+    fn was(value: Option<Value>) -> Before {
+        Before {
+            value,
+            created_keys: Vec::new(),
+        }
+    }
+
+    /// What the golden file holds. The ids have gaps and `next_id` is past the last one, as
+    /// after some reverts.
+    fn golden() -> LedgerFile {
+        use EntryState::{Applied, Pending};
+        let program = |path: &str, args: &[&str]| Value::Program {
+            path: path.into(),
+            args: args.iter().map(|&arg| arg.to_owned()).collect(),
+        };
+        let entries = [
+            (
+                Applied,
+                registry(""),
+                Some(Value::Str("a".into())),
+                Before {
+                    value: None,
+                    created_keys: vec![r"HKCU\Software\G".into()],
+                },
+            ),
+            (
+                Pending,
+                registry("e"),
+                Some(Value::ExpandStr("%A%".into())),
+                was(Some(Value::Raw {
+                    ty: 1,
+                    data: vec![97, 0],
+                })),
+            ),
+            (
+                Applied,
+                registry("m"),
+                Some(Value::MultiStr(vec!["a".into(), "b".into()])),
+                was(Some(Value::U32(1))),
+            ),
+            (
+                Applied,
+                registry("q"),
+                Some(Value::U64(2)),
+                was(Some(Value::Bytes(vec![3]))),
+            ),
+            (
+                Applied,
+                preference("com.example.golden", "flag"),
+                Some(Value::Bool(true)),
+                was(Some(Value::Plist(vec![4]))),
+            ),
+            (
+                Applied,
+                preference("com.example.golden", "count"),
+                None,
+                was(Some(Value::I64(-1))),
+            ),
+            (
+                Pending,
+                service(ServiceKind::WindowsService),
+                Some(program(r"C:\x\indexd.exe", &["--service"])),
+                was(None),
+            ),
+            (
+                Applied,
+                service(ServiceKind::LaunchAgent),
+                None,
+                was(Some(program("/x/indexd", &[]))),
+            ),
+        ];
+        let ids = [1, 2, 4, 5, 7, 8, 10, 11];
+        LedgerFile {
+            format: 1,
+            next_id: 12,
+            entries: ids
+                .into_iter()
+                .zip(entries)
+                .map(|(id, (state, target, value, before))| LedgerEntry {
+                    id: EntryId(id),
+                    group: "winx.golden".into(),
+                    state,
+                    change: Change { target, value },
+                    before,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn format_1_reads_the_golden_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(Ledger::FILE_NAME);
+        fs::write(&path, GOLDEN).unwrap();
+        let file = load(&path).unwrap().unwrap();
+        let want = golden();
+        assert_eq!((file.format, file.next_id), (want.format, want.next_id));
+        assert_eq!(file.entries, want.entries);
+    }
+
+    #[test]
+    fn format_1_writes_the_golden_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(Ledger::FILE_NAME);
+        save(&path, &golden()).unwrap();
+        let written = fs::read(&path).unwrap();
+        assert!(written == GOLDEN, "{}", String::from_utf8_lossy(&written));
+    }
+}
