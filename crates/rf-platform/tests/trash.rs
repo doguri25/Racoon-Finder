@@ -15,13 +15,20 @@ fn unique(dir: &Path, suffix: &str) -> PathBuf {
     ))
 }
 
+/// The path to give file APIs: the `\\?\` form on Windows, which reaches beyond `MAX_PATH`.
+#[cfg(any(windows, target_os = "macos"))]
+fn extended(path: &Path) -> PathBuf {
+    VPath::local(path).unwrap().to_extended_length().unwrap()
+}
+
 /// Removes a trashed test item from the real trash (and its `$I` record on Windows).
 #[cfg(any(windows, target_os = "macos"))]
 fn purge(location: &Path) {
-    if location.is_dir() {
-        std::fs::remove_dir_all(location).unwrap();
+    let item = extended(location);
+    if item.is_dir() {
+        std::fs::remove_dir_all(&item).unwrap();
     } else {
-        std::fs::remove_file(location).unwrap();
+        std::fs::remove_file(&item).unwrap();
     }
     #[cfg(windows)]
     {
@@ -96,7 +103,64 @@ fn long_path_is_never_deleted_permanently() {
             purge(&location);
         }
         Ok(None) => panic!("trashed without a recycle bin entry"),
-        Err(_) => assert!(f.exists(), "file vanished although trashing failed"),
+        // Usually `Unsupported` (the recycle bin refused the item), but the kind is not
+        // asserted: if the shell cannot even parse a path this long, the error is the I/O
+        // error of `SHCreateItemFromParsingName`. Either way nothing may be gone.
+        Err(e) => assert!(f.exists(), "file vanished although trashing failed: {e}"),
+    }
+}
+
+/// A folder whose own path is short but which holds a file beyond `MAX_PATH`: the recycle bin
+/// may take the whole tree or refuse it, but no part of it may be deleted for good.
+#[cfg(windows)]
+#[test]
+fn long_descendant_folder_is_never_deleted_permanently() {
+    let t = tempfile::tempdir().unwrap();
+    let top = unique(t.path(), "");
+    let mut deep = top.clone();
+    for i in 0..4 {
+        deep.push(format!("{i}-{}", "x".repeat(80)));
+    }
+    let deep_file = deep.strip_prefix(&top).unwrap().join("deep.txt");
+    // Plain paths stop at `MAX_PATH`; the deep part is made through the `\\?\` form.
+    std::fs::create_dir_all(extended(&deep)).unwrap();
+    std::fs::write(extended(&top.join(&deep_file)), b"deep").unwrap();
+    std::fs::write(top.join("shallow.txt"), b"shallow").unwrap();
+    assert!(top.as_os_str().len() < 200, "{}", top.display());
+    assert!(top.join(&deep_file).as_os_str().len() > 300);
+    // Whether `root` holds both files with their bytes.
+    let tree_intact = |root: &Path| {
+        std::fs::read(extended(&root.join("shallow.txt"))).is_ok_and(|b| b == b"shallow")
+            && std::fs::read(extended(&root.join(&deep_file))).is_ok_and(|b| b == b"deep")
+    };
+
+    let outcome = move_to_trash(&VPath::local(&top).unwrap());
+
+    match outcome {
+        Ok(Some(location)) => {
+            let top_gone = std::fs::symlink_metadata(extended(&top))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            let whole_tree_in_bin = tree_intact(&location);
+            let in_bin = in_trash(&location);
+            // Clean the trash before asserting, so a failed assertion leaves nothing behind.
+            purge(&location);
+            assert!(whole_tree_in_bin, "the bin entry lacks part of the tree");
+            assert!(in_bin, "{} is not inside the trash", location.display());
+            assert!(
+                top_gone,
+                "the bin took a copy, but the folder is still there"
+            );
+        }
+        Ok(None) => panic!("trashed without a recycle bin entry"),
+        Err(e) => {
+            let intact = tree_intact(&top);
+            let _ = std::fs::remove_dir_all(extended(&top));
+            assert!(
+                intact,
+                "part of the tree vanished although trashing failed: {e}"
+            );
+            assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
+        }
     }
 }
 
@@ -156,8 +220,11 @@ fn trashes_a_symlink_not_its_target() {
         return;
     }
     let outcome = move_to_trash(&VPath::local(&link).unwrap());
-    let link_gone =
-        std::fs::symlink_metadata(&link).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    let link_now = std::fs::symlink_metadata(&link);
+    let link_gone = link_now
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    let link_present = link_now.is_ok();
     let target_intact = std::fs::read(target.join("keep.txt")).is_ok_and(|bytes| bytes == b"keep");
     let location = outcome.as_ref().ok().cloned().flatten();
     let in_bin = location.as_deref().is_none_or(in_trash);
@@ -165,10 +232,22 @@ fn trashes_a_symlink_not_its_target() {
     if let Some(location) = &location {
         purge(location);
     }
+    // Data first, so that a failure shows whether anything was lost; the outcome comes last.
+    assert!(
+        target_intact,
+        "the link target lost its content: {outcome:?}"
+    );
+    match &outcome {
+        Ok(_) => {
+            assert!(link_gone, "trashing succeeded, but the link is still there");
+            assert!(in_bin, "{location:?} is not inside the trash");
+        }
+        Err(e) => assert!(
+            link_present,
+            "the link vanished although trashing failed: {e}"
+        ),
+    }
     assert!(outcome.is_ok(), "{outcome:?}");
-    assert!(link_gone, "the link is still there");
-    assert!(target_intact, "the link target lost its content");
-    assert!(in_bin, "{location:?} is not inside the trash");
 }
 
 #[cfg(windows)]
