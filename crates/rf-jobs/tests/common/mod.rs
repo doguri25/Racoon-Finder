@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use rf_core::VPath;
+use rf_core::identity::TEMP_PREFIX;
 use rf_jobs::{
     ExecEnv, JobId, JobReport, JobSpec, NonInteractive, Resolver, TransferMode, TransferOptions,
     TransferSpec, execute,
@@ -76,4 +77,32 @@ pub fn set_mtime(p: &Path, secs: u64) {
 
 pub fn mtime(p: &Path) -> SystemTime {
     std::fs::metadata(p).unwrap().modified().unwrap()
+}
+
+/// A name no other test run uses, for an item a test puts in the real trash: it starts with
+/// `TEMP_PREFIX`, so a leftover is easy to tell from the user's own items.
+pub fn unique_name(suffix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{TEMP_PREFIX}{}-{nanos}-{suffix}", std::process::id())
+}
+
+/// Removes a trashed test item from the real trash (and its `$I` record on Windows).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn purge(location: &Path) {
+    let item = v(location).to_extended_length().unwrap();
+    if item.is_dir() {
+        std::fs::remove_dir_all(&item).unwrap();
+    } else {
+        std::fs::remove_file(&item).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let name = location.file_name().unwrap().to_string_lossy().into_owned();
+        if let Some(rest) = name.strip_prefix("$R") {
+            let _ = std::fs::remove_file(location.with_file_name(format!("$I{rest}")));
+        }
+    }
 }

@@ -1,7 +1,9 @@
 //! Running one job to its end on the calling thread: plan, run, report.
 
+mod delete;
 mod file;
 mod scan;
+mod simple;
 mod transfer;
 
 use std::any::Any;
@@ -27,10 +29,11 @@ use crate::spec::{ErrorPolicy, JobKind, JobSpec};
 /// The size of the buffer a file is copied through, and so of one progress step.
 pub(crate) const COPY_CHUNK: usize = 1 << 20;
 
-/// How deep a transfer goes into folders: the items it was given are at depth 0, their
-/// children at 1. An item deeper than this is not counted in the plan and fails as
-/// [`Stage::Plan`] when the job reaches it; a folder there is not entered. It ends a loop of
-/// links that Follow mode would walk forever, well inside the 1,023-byte path limit of macOS.
+/// How deep a transfer or a permanent delete goes into folders: the items it was given are at
+/// depth 0, their children at 1. An item deeper than this is not counted in the plan and fails
+/// as [`Stage::Plan`] when the job reaches it; a folder there is not entered, and a delete
+/// removes neither it nor the folders above it. It ends a loop of links that Follow mode would
+/// walk forever, well inside the 1,023-byte path limit of macOS.
 pub const MAX_DEPTH: usize = 128;
 
 /// What a running job tells the one who started it, on the job's own thread.
@@ -140,9 +143,9 @@ pub fn execute(id: JobId, spec: &JobSpec, env: &ExecEnv<'_>) -> JobReport {
 fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
     match spec {
         JobSpec::Transfer(transfer) => transfer::run_transfer(ctx, transfer),
-        JobSpec::Delete(_) => ctx.not_yet("delete jobs are not implemented yet"),
-        JobSpec::Rename { .. } => ctx.not_yet("rename jobs are not implemented yet"),
-        JobSpec::Create { .. } => ctx.not_yet("create jobs are not implemented yet"),
+        JobSpec::Delete(delete) => delete::run_delete(ctx, delete),
+        JobSpec::Rename { from, to } => simple::run_rename(ctx, from, to),
+        JobSpec::Create { parent, name, kind } => simple::run_create(ctx, parent, name, *kind),
     }
 }
 
@@ -639,13 +642,6 @@ impl<'e> Ctx<'e> {
         if self.current.as_ref() != Some(source) {
             self.current = Some(source.clone());
         }
-    }
-
-    /// Records a part of the job this version cannot do yet as a failure of its plan.
-    fn not_yet(&mut self, what: &str) {
-        let error = Error::Unsupported(what.to_owned());
-        let failure = ItemFailure::new(Stage::Plan, None, None, &error);
-        self.report.failures.push(failure);
     }
 
     /// Whether [`PROGRESS_INTERVAL`] has passed since the last progress event.
