@@ -2,6 +2,7 @@
 
 mod list;
 mod ops;
+mod watch;
 
 use std::ffi::OsString;
 use std::fs::{FileType, Metadata, OpenOptions};
@@ -73,12 +74,6 @@ pub(crate) fn entry_from_metadata(name: OsString, meta: &Metadata) -> Entry {
         entry.file_id = Some(rf_core::FileId(u128::from(meta.ino())));
     }
     entry
-}
-
-fn not_implemented<T>(method: &str) -> Result<T> {
-    Err(Error::Unsupported(format!(
-        "LocalProvider::{method} is not implemented yet"
-    )))
 }
 
 impl Provider for LocalProvider {
@@ -162,7 +157,7 @@ impl Provider for LocalProvider {
         rf_platform::disk_space(path).map(Some)
     }
 
-    fn watch(&self, _dir: &VPath, _sink: WatchSink) -> Result<WatchHandle> {
-        not_implemented("watch")
+    fn watch(&self, dir: &VPath, sink: WatchSink) -> Result<WatchHandle> {
+        watch::start(dir, sink)
     }
 }
