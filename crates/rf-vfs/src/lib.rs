@@ -1,13 +1,16 @@
 //! Virtual file system layer: providers, the local provider, sorting and filtering.
 
 pub mod cancel;
+pub mod filter;
 pub mod local;
 pub mod provider;
 pub mod registry;
+pub mod sort;
 pub mod testkit;
 pub mod watch;
 
 pub use cancel::CancelToken;
+pub use filter::VisibilityFilter;
 pub use local::LocalProvider;
 pub use provider::{
     Capabilities, DeleteMode, Deleted, LIST_BATCH_SIZE, Provider, ReadStream, RenameMode,
@@ -15,4 +18,5 @@ pub use provider::{
 };
 pub use registry::Vfs;
 pub use rf_platform::DiskSpace;
+pub use sort::{SortBy, SortKey, SortOrder, SortSpec, compare_entries, sort_entries};
 pub use watch::{Change, MAX_PENDING_CHANGES, WATCH_DEBOUNCE, WatchEvent, WatchHandle, WatchSink};
