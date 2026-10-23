@@ -29,10 +29,15 @@ impl JobId {
         Self(hasher.finish())
     }
 
-    /// Reads the 16 hex digits [`Display`](fmt::Display) writes. Anything else is `None`:
-    /// a shorter or longer string, a sign, whitespace or a non-ASCII digit.
+    /// Reads the 16 lowercase hex digits [`Display`](fmt::Display) writes, and nothing else:
+    /// a shorter or longer string, an upper-case digit, a sign, whitespace or a non-ASCII digit
+    /// is `None`. One id has one spelling, so a name made from it is matched exactly.
     pub fn from_hex(s: &str) -> Option<Self> {
-        if s.len() != 16 || !s.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if s.len() != 16
+            || !s
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
             return None;
         }
         u64::from_str_radix(s, 16).ok().map(Self)

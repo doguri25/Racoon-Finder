@@ -32,6 +32,22 @@ fn job_ids_are_unique_and_hex() {
 }
 
 #[test]
+fn from_hex_accepts_only_what_display_writes() {
+    for id in [0, 0xab, 0xdead_beef_cafe_f00d, u64::MAX] {
+        assert_eq!(JobId::from_hex(&JobId(id).to_string()), Some(JobId(id)));
+    }
+    // Display writes lower-case digits, so an upper-case or mixed spelling is another name.
+    assert_eq!(JobId::from_hex("00000000000000AB"), None);
+    assert_eq!(JobId::from_hex("00000000000000aB"), None);
+    assert_eq!(JobId::from_hex("DEADBEEFCAFEF00D"), None);
+    assert_eq!(JobId::from_hex(""), None);
+    assert_eq!(JobId::from_hex("00000000000000abc"), None);
+    // Sixteen bytes long, but two of them are one Arabic-Indic digit.
+    assert_eq!("0000000000000٣b".len(), 16);
+    assert_eq!(JobId::from_hex("0000000000000٣b"), None);
+}
+
+#[test]
 fn defaults_follow_the_prd() {
     let o = TransferOptions::default();
     assert_eq!(
