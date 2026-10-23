@@ -698,6 +698,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rf-ledger"
+version = "0.1.0"
+dependencies = [
+ "rf-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rf-platform"
 version = "0.1.0"
 dependencies = [
