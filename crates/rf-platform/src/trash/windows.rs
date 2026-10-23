@@ -74,10 +74,30 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
             "trash needs a local path: {path}"
         )));
     };
-    let (requested, local) = (path.clone(), local.to_path_buf());
-    let outcome = std::thread::spawn(move || recycle(&requested, &local))
-        .join()
-        .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))));
+    let attempt = || {
+        let (requested, local) = (path.clone(), local.to_path_buf());
+        std::thread::spawn(move || recycle(&requested, &local))
+            .join()
+            .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))))
+    };
+    let mut outcome = attempt();
+    if matches!(outcome, Err(Failure::Refused)) {
+        sink::diag(&format!(
+            "REFUSED first attempt for {path}; retrying after 300 ms"
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        outcome = attempt();
+        sink::diag(&format!(
+            "RETRY for {path}: {}",
+            match &outcome {
+                Ok(Some(_)) => "recycled",
+                Ok(None) => "ok-none",
+                Err(Failure::Refused) => "REFUSED AGAIN",
+                Err(Failure::Redirected) => "redirected",
+                Err(Failure::Io(_)) => "io error",
+            }
+        ));
+    }
     match outcome {
         // The shell must also have removed the item that was asked for, not another one.
         Ok(Some(location)) if gone(&extended) => Ok(Some(location)),
@@ -237,7 +257,16 @@ mod sink {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        eprintln!("[diag {t} {:?}] {msg}", std::thread::current().id());
+        let line = format!("[diag {t} {:?}] {msg}\n", std::thread::current().id());
+        eprint!("{line}");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("rf-diag.log"))
+        {
+            use std::io::Write as _;
+            let _ = f.write_all(line.as_bytes());
+        }
     }
 
     /// A progress sink that lets a delete go ahead only if the shell will recycle the item, and

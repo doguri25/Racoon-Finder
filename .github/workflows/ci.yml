@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-11-arm]
-        rep: [1, 2, 3, 4]
+        rep: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -35,3 +35,10 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: diag log
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:TEMP 'rf-diag.log'
+          if (Test-Path $log) { Select-String -Path $log -Pattern 'REFUSED|RETRY|flags=0x2[0-7]' | ForEach-Object { $_.Line } } else { 'no diag log' }
+          exit 0
