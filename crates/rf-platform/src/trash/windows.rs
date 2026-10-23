@@ -1,0 +1,351 @@
+#![allow(unsafe_code, reason = "IFileOperation COM")]
+
+//! The Windows recycle bin through the shell's `IFileOperation`.
+//!
+//! `IFileOperation` recycles only when it can and deletes permanently when it cannot (a path
+//! over `MAX_PATH`, an item larger than the bin allows). A progress sink looks at every delete
+//! before it happens and aborts the one that would be permanent.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use rf_core::{Error, Result, VPath};
+use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+    CoUninitialize, IBindCtx,
+};
+use windows::Win32::UI::Shell::{
+    FOF_ALLOWUNDO, FOF_NO_UI, FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FileOperation,
+    IFileOperation, IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
+};
+use windows::core::{IUnknown, PCWSTR};
+
+use self::sink::RecycleGuard;
+use crate::volume::volume_root;
+use crate::win_util::{to_io, wide};
+
+/// `DRIVE_FIXED` from `GetDriveTypeW`; kept here so the feature module that defines it
+/// (`Win32_System_WindowsProgramming`) stays out of the build.
+const DRIVE_FIXED: u32 = 3;
+
+/// Whether the volume of `local` is a fixed local drive. Network, removable and optical drives
+/// and UNC paths have no recycle bin that the shell fills for us.
+pub fn supported(local: &Path) -> bool {
+    let Ok(root) = volume_root(local) else {
+        return false;
+    };
+    // SAFETY: `root` is NUL-terminated and outlives the call.
+    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_FIXED }
+}
+
+/// Why a recycle attempt did not finish.
+enum Failure {
+    /// The progress sink stopped a delete that would have been permanent.
+    Refused,
+    Io(io::Error),
+}
+
+/// Recycles the item at `path`. The shell does the work on a thread of its own, because
+/// `CoInitializeEx` ties COM to the calling thread, whose apartment is not ours to change.
+pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
+    let (Some(local), Some(extended)) = (path.as_local(), path.to_extended_length()) else {
+        return Err(Error::Unsupported(format!(
+            "trash needs a local path: {path}"
+        )));
+    };
+    let local = local.to_path_buf();
+    let outcome = std::thread::spawn(move || recycle(&local))
+        .join()
+        .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))));
+    match outcome {
+        Ok(Some(location)) => Ok(Some(location)),
+        // The shell reported success without naming a bin entry. `Ok(None)` is not an option
+        // here: either the item was deleted for good, or nothing happened.
+        Ok(None) => {
+            let message = if std::fs::symlink_metadata(&extended)
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+            {
+                "deleted permanently instead of recycled"
+            } else {
+                "the recycle bin took nothing"
+            };
+            Err(Error::io("trash", path.clone(), io::Error::other(message)))
+        }
+        Err(Failure::Refused) => Err(Error::Unsupported(format!(
+            "the recycle bin cannot take {path}; delete permanently instead"
+        ))),
+        Err(Failure::Io(e)) => Err(Error::io("trash", path.clone(), e)),
+    }
+}
+
+/// Ends the COM use of the thread that created it.
+struct ComScope;
+
+impl Drop for ComScope {
+    fn drop(&mut self) {
+        // SAFETY: only built after `CoInitializeEx` succeeded on this thread, so this balances
+        // that one call.
+        unsafe { CoUninitialize() };
+    }
+}
+
+/// Runs on its own thread: COM in, work, COM out.
+fn recycle(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+    // SAFETY: no reserved pointer; the thread is new, so no apartment is set yet.
+    let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    if init.is_err() {
+        return Err(Failure::Io(to_io(&windows::core::Error::from_hresult(
+            init,
+        ))));
+    }
+    // `run` has dropped every COM object when it returns, before the scope ends.
+    let _scope = ComScope;
+    run(local)
+}
+
+fn run(local: &Path) -> std::result::Result<Option<PathBuf>, Failure> {
+    let fail = |e: windows::core::Error| Failure::Io(to_io(&e));
+    let name = wide(local.as_os_str());
+
+    // SAFETY: `FileOperation` is the class ID of the shell's file operation object, and the
+    // interface type is chosen to match it; COM is initialized on this thread.
+    let operation: IFileOperation =
+        unsafe { CoCreateInstance(&FileOperation, None::<&IUnknown>, CLSCTX_ALL) }.map_err(fail)?;
+    // SAFETY: `operation` is a live interface pointer.
+    unsafe {
+        operation
+            .SetOperationFlags(FOF_NO_UI | FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE)
+    }
+    .map_err(fail)?;
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    let item: IShellItem =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(name.as_ptr()), None::<&IBindCtx>) }
+            .map_err(fail)?;
+
+    let guard = RecycleGuard::new();
+    let sink: IFileOperationProgressSink = guard.to_interface();
+    // SAFETY: `operation`, `item` and `sink` are live interface pointers.
+    let queued = unsafe { operation.DeleteItem(&item, &sink) };
+    // SAFETY: as above.
+    let performed = queued.and_then(|()| unsafe { operation.PerformOperations() });
+    if guard.get().was_refused() {
+        return Err(Failure::Refused);
+    }
+    performed.map_err(fail)?;
+    // SAFETY: as above.
+    if unsafe { operation.GetAnyOperationsAborted() }
+        .map_err(fail)?
+        .as_bool()
+    {
+        return Err(Failure::Io(io::Error::other(
+            "the recycle operation was aborted",
+        )));
+    }
+    Ok(guard.get().take_location())
+}
+
+/// The progress sink, in a module of its own because the `implement` macro writes code that
+/// trips two pedantic lints.
+#[allow(
+    clippy::ref_as_ptr,
+    clippy::inline_always,
+    reason = "code generated by the `implement` macro"
+)]
+mod sink {
+    use std::cell::{Cell, RefCell};
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    use windows::Win32::Foundation::E_ABORT;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{
+        IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SIGDN_FILESYSPATH,
+        TSF_DELETE_RECYCLE_IF_POSSIBLE,
+    };
+    use windows::core::{ComObject, HRESULT, PCWSTR, Ref, implement};
+
+    /// A progress sink that lets a delete go ahead only if the shell will recycle the item, and
+    /// records where the item lands.
+    #[implement(IFileOperationProgressSink)]
+    pub(super) struct RecycleGuard {
+        /// Set when a delete that would be permanent was stopped.
+        refused: Cell<bool>,
+        /// The file-system path of the item inside the recycle bin.
+        location: RefCell<Option<PathBuf>>,
+    }
+
+    impl RecycleGuard {
+        pub(super) fn new() -> ComObject<Self> {
+            ComObject::new(Self {
+                refused: Cell::new(false),
+                location: RefCell::new(None),
+            })
+        }
+
+        /// Whether a delete that would have been permanent was stopped.
+        pub(super) fn was_refused(&self) -> bool {
+            self.refused.get()
+        }
+
+        /// Where the recycled item went, once.
+        pub(super) fn take_location(&self) -> Option<PathBuf> {
+            self.location.take()
+        }
+    }
+
+    /// The file-system path of `item`, if it has one.
+    fn file_system_path(item: &IShellItem) -> Option<PathBuf> {
+        // SAFETY: `item` is a live interface pointer.
+        let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
+        // SAFETY: on success `name` is a NUL-terminated string that the shell allocated.
+        let path = PathBuf::from(OsString::from_wide(unsafe { name.as_wide() }));
+        // SAFETY: the shell allocated `name` with `CoTaskMemAlloc`, and it is freed only here.
+        unsafe { CoTaskMemFree(Some(name.0.cast::<c_void>().cast_const())) };
+        Some(path)
+    }
+
+    impl IFileOperationProgressSink_Impl for RecycleGuard_Impl {
+        fn StartOperations(&self) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn FinishOperations(&self, _hrresult: HRESULT) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PreRenameItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PostRenameItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+            _hrrename: HRESULT,
+            _psinewlycreated: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PreMoveItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PostMoveItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+            _hrmove: HRESULT,
+            _psinewlycreated: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PreCopyItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PostCopyItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+            _hrcopy: HRESULT,
+            _psinewlycreated: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PreDeleteItem(
+            &self,
+            dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            // Without the recycle bit the shell is about to delete the item for good.
+            let recycles = u32::try_from(TSF_DELETE_RECYCLE_IF_POSSIBLE.0)
+                .is_ok_and(|recycle| dwflags & recycle != 0);
+            if recycles {
+                Ok(())
+            } else {
+                self.refused.set(true);
+                Err(E_ABORT.into())
+            }
+        }
+
+        fn PostDeleteItem(
+            &self,
+            _dwflags: u32,
+            _psiitem: Ref<'_, IShellItem>,
+            hrdelete: HRESULT,
+            psinewlycreated: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            if hrdelete.is_ok() {
+                if let Some(location) = psinewlycreated.as_ref().and_then(file_system_path) {
+                    *self.location.borrow_mut() = Some(location);
+                }
+            }
+            Ok(())
+        }
+
+        fn PreNewItem(
+            &self,
+            _dwflags: u32,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PostNewItem(
+            &self,
+            _dwflags: u32,
+            _psidestinationfolder: Ref<'_, IShellItem>,
+            _psznewname: &PCWSTR,
+            _psztemplatename: &PCWSTR,
+            _dwfileattributes: u32,
+            _hrnew: HRESULT,
+            _psinewitem: Ref<'_, IShellItem>,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn UpdateProgress(&self, _iworktotal: u32, _iworksofar: u32) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn ResetTimer(&self) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn PauseTimer(&self) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn ResumeTimer(&self) -> windows::core::Result<()> {
+            Ok(())
+        }
+    }
+}

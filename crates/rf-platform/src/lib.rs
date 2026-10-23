@@ -5,6 +5,7 @@ pub mod fileid;
 pub mod fsops;
 pub mod known;
 pub mod natural;
+pub mod trash;
 pub mod volume;
 mod win_util;
 
@@ -15,4 +16,5 @@ pub use fileid::file_identity;
 pub use fsops::rename_no_replace;
 pub use known::{KnownFolder, known_folder};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};
+pub use trash::{move_to_trash, trash_supported};
 pub use volume::{DiskSpace, VolumeInfo, disk_space, volume_info};

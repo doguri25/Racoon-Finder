@@ -201,8 +201,4 @@ mod imp {
 }
 
 #[cfg(windows)]
-#[allow(
-    unused_imports,
-    reason = "first used by the trash module added in a later task"
-)]
 pub(crate) use imp::volume_root;
