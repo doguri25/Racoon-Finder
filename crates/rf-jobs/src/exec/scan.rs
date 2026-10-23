@@ -8,7 +8,7 @@ use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
-use rf_vfs::Provider;
+use rf_vfs::{Capabilities, Provider};
 
 use super::{At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Stopped, fold_path, folder_identity};
 use crate::preflight::{
@@ -27,11 +27,10 @@ pub(crate) struct Planned {
     /// The kind of file system the target folder is on; every item under this one is written
     /// to the same.
     pub fs: FsKind,
-    /// A move expected to end with one rename, so its tree is not walked.
-    #[expect(
-        dead_code,
-        reason = "unread until moves are implemented, which must remove this"
-    )]
+    /// A move the plan expects to end with one rename, because the source and the target
+    /// folder are on one volume of one provider. It is counted alone, as one item of no bytes,
+    /// and the tree under it is neither walked nor checked: the names in it are on that file
+    /// system already.
     pub rename: bool,
 }
 
@@ -42,11 +41,8 @@ pub(crate) struct Plan {
     /// Targets the pre-flight review left out, each with the first of its blocking issues; each
     /// fails as `Stage::Preflight` and is not written.
     pub blocked: HashMap<VPath, IssueKind>,
-    /// A move that copies, because a source location cannot be written to.
-    #[expect(
-        dead_code,
-        reason = "unread until moves are implemented, which must remove this"
-    )]
+    /// A move that copies instead and deletes no source, because the folder of one of its
+    /// sources cannot be written to (DND-06).
     pub moved_as_copy: bool,
 }
 
@@ -68,6 +64,14 @@ pub(crate) fn follows_links(spec: &TransferSpec) -> bool {
 /// A FIFO, socket or device is not counted, checked or opened: the run reports it. Nothing
 /// found below a source fails the plan; the run meets it again and reports it then.
 ///
+/// A move whose sources include one in a folder that cannot be written to (no
+/// `Capabilities::WRITE`) is planned as a copy, all of it (`moved_as_copy`, and
+/// `copied_instead_of_moved` in the report, DND-06). Otherwise a source of a move that is on
+/// the volume of its target folder (both `stat`s give the same volume ID, of one provider) is
+/// expected to end with one rename (`Planned::rename`): it counts as one file or folder of no
+/// bytes, and its tree is not walked, so moving a large folder within a volume never lists
+/// it. A source whose volume is another or unknown is walked as for a copy.
+///
 /// Every target name, path and file size is checked against the file system of its top-level
 /// target folder, names that only differ in case within one folder are looked for, and each
 /// such folder must have room for the bytes copied into it. The issues go to the report, and
@@ -78,36 +82,49 @@ pub(crate) fn follows_links(spec: &TransferSpec) -> bool {
 /// `None` when the job was cancelled or aborted.
 pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Plan> {
     let mut survey = Survey::new(ctx.env.naming_os, follows_links(spec));
-    let mut items = Vec::with_capacity(spec.items.len());
+    let mut found = Vec::with_capacity(spec.items.len());
     for item in &spec.items {
         let (source, target) = (&item.source, &item.target);
         match ctx.attempt(spec.options.errors, Some(source), Some(target), |ctx| {
             scan_item(ctx, &mut survey, item)
         }) {
-            Attempt::Done((src, entry, folder)) => {
-                let walked = survey.walk(
-                    ctx,
-                    &*src,
-                    source,
-                    entry.clone(),
-                    target,
-                    folder,
-                    Level::TOP,
-                );
-                if walked.is_err() {
-                    ctx.stop(Stopped::Cancelled);
-                    return None;
-                }
-                items.push(Planned {
-                    item: item.clone(),
-                    entry,
-                    fs: survey.folders[folder].fs,
-                    rename: false,
-                });
-            }
+            Attempt::Done(scanned) => found.push((item, scanned)),
             Attempt::Skipped => {}
             Attempt::Stop => return None,
         }
+    }
+    let moving = spec.mode == TransferMode::Move;
+    let moved_as_copy = moving
+        && found
+            .iter()
+            .any(|(item, _)| !source_folder_writable(ctx, &item.source));
+    ctx.report.copied_instead_of_moved = moved_as_copy;
+    let mut items = Vec::with_capacity(found.len());
+    for (item, scanned) in found {
+        let planned = Planned {
+            item: item.clone(),
+            entry: scanned.entry,
+            fs: survey.folders[scanned.folder].fs,
+            rename: moving && !moved_as_copy && scanned.same_volume,
+        };
+        if planned.rename {
+            survey.count_alone(&planned.entry, &item.target, scanned.folder);
+        } else {
+            let walked = survey.walk(
+                ctx,
+                &*scanned.src,
+                &item.source,
+                planned.entry.clone(),
+                &item.target,
+                scanned.folder,
+                Level::TOP,
+            );
+            if walked.is_err() {
+                ctx.stop(Stopped::Cancelled);
+                return None;
+            }
+        }
+        items.push(planned);
     }
     survey.check_space(ctx);
     ctx.report.issues = survey.issues;
@@ -116,8 +133,22 @@ pub(crate) fn scan_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) -> Option<Pl
     Some(Plan {
         items,
         blocked,
-        moved_as_copy: false,
+        moved_as_copy,
     })
+}
+
+/// A source of the job as `scan_item` found it.
+#[derive(Debug)]
+struct Scanned {
+    /// The provider of the source.
+    src: Arc<dyn Provider>,
+    /// The source as `stat` sees it.
+    entry: Entry,
+    /// The number of its top-level target folder in the survey.
+    folder: usize,
+    /// Whether the source and its target folder are of one provider and, by the volume IDs of
+    /// their `stat`s, on one volume. An unknown volume ID is not the same volume.
+    same_volume: bool,
 }
 
 /// The source of `item` with its provider and entry, and the number of its target folder in
@@ -126,24 +157,45 @@ fn scan_item(
     ctx: &mut Ctx<'_>,
     survey: &mut Survey,
     item: &TransferItem,
-) -> Result<(Arc<dyn Provider>, Entry, usize), Failed> {
+) -> Result<Scanned, Failed> {
     let (source, target) = (&item.source, &item.target);
     ctx.check().at(Stage::Plan)?;
     let src = ctx.provider(source).at(Stage::Plan)?;
     let entry = src.stat(source).at(Stage::Plan)?;
-    let parent = check_target_folder(ctx, target).at(Stage::Plan)?;
+    let (parent, folder_entry) = check_target_folder(ctx, target).at(Stage::Plan)?;
     let dst = ctx.provider(&parent).at(Stage::Plan)?;
     let folder = survey.folder(&*dst, &parent);
     if lands_inside(source, target, survey.folders[folder].fs) {
         let error = Error::Unsupported(format!("cannot copy or move {source} into itself"));
         return Err(Failed::new(Stage::Plan, error));
     }
-    Ok((src, entry, folder))
+    let same_volume = src.scheme() == dst.scheme()
+        && matches!(
+            (entry.volume_id, folder_entry.volume_id),
+            (Some(a), Some(b)) if a == b
+        );
+    Ok(Scanned {
+        src,
+        entry,
+        folder,
+        same_volume,
+    })
 }
 
-/// The folder `target` goes into. Fails with `NotFound` unless it exists; a link to a folder
-/// counts as a folder (macOS `/tmp`, a Windows junction).
-fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<VPath> {
+/// Whether the folder that holds `source` can be written to, so that a move can take the
+/// source out of it. A source in no folder (a volume root) cannot be taken out of one.
+fn source_folder_writable(ctx: &Ctx<'_>, source: &VPath) -> bool {
+    let Some(parent) = source.parent() else {
+        return false;
+    };
+    ctx.provider(&parent)
+        .is_ok_and(|src| src.capabilities(&parent).contains(Capabilities::WRITE))
+}
+
+/// The folder `target` goes into, and what `stat` says it is. Fails with `NotFound` unless it
+/// exists; a link to a folder counts as a folder (macOS `/tmp`, a Windows junction), and the
+/// entry is then that of the folder it leads to.
+fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<(VPath, Entry)> {
     let parent = target
         .parent()
         .ok_or_else(|| Error::Unsupported(format!("no folder to copy into: {target}")))?;
@@ -153,7 +205,7 @@ fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<VPath> 
         folder = dst.stat_target(&parent)?;
     }
     if folder.kind == EntryKind::Dir {
-        Ok(parent)
+        Ok((parent, folder))
     } else {
         let error = io::Error::new(io::ErrorKind::NotFound, "not a folder");
         Err(Error::io("stat", parent, error))
@@ -336,6 +388,19 @@ impl Survey {
             }
         }
         Ok(())
+    }
+
+    /// Counts `entry`, which a move takes to `target` in the top-level folder number `folder`
+    /// with one rename, as one file or folder of no bytes, and checks its name. What is under
+    /// it is on that file system already, and is not walked.
+    fn count_alone(&mut self, entry: &Entry, target: &VPath, folder: usize) {
+        if entry.kind == EntryKind::Dir {
+            self.totals.dirs += 1;
+        } else {
+            self.totals.files += 1;
+        }
+        let fs = self.folders[folder].fs;
+        self.check(target, fs);
     }
 
     /// Checks the name and the whole path of `target` on `fs`, and its name against the other

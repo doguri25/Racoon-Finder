@@ -115,11 +115,12 @@ pub struct JobReport {
     pub warnings: Vec<ItemFailure>,
     /// What the target file system cannot hold, found before the job wrote anything.
     pub issues: Vec<Issue>,
-    /// The top-level paths the job made, with any automatic rename applied. The UI selects
-    /// them and starts a rename on a new item.
+    /// The top-level paths the job made, or moved its items to, with any automatic rename
+    /// applied. The UI selects them and starts a rename on a new item.
     pub outputs: Vec<VPath>,
-    /// A move that had to copy and delete because its source and target are on different
-    /// volumes.
+    /// A move that copied instead and left every source in place, because the folder of one
+    /// of its sources cannot be written to (DND-06). A move to another volume copies and then
+    /// deletes, and is still a move.
     pub copied_instead_of_moved: bool,
     pub started: SystemTime,
     pub elapsed: Duration,

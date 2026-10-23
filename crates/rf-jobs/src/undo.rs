@@ -21,13 +21,15 @@ pub struct CreatedItem {
 }
 
 impl CreatedItem {
-    /// The item at `path`, as `entry` describes it.
+    /// The item at `path`, as `entry` describes it. A modification time before 1970 is left
+    /// out (`None`), since the journal cannot store it; an undo then cannot tell that the item
+    /// is unchanged, and leaves it.
     pub fn from_entry(path: VPath, entry: &Entry) -> CreatedItem {
         CreatedItem {
             path,
             is_dir: entry.kind == EntryKind::Dir,
             size: entry.size,
-            modified: entry.modified,
+            modified: entry.modified.filter(|t| *t >= SystemTime::UNIX_EPOCH),
             identity: entry.identity().map(|(volume, file)| (volume.0, file.0)),
         }
     }
@@ -96,6 +98,46 @@ impl UndoRecord {
             Self::Moved { moves, .. } => moves.len(),
             Self::Trashed { items } | Self::Restored { items } => items.len(),
             Self::Renamed { .. } | Self::Created { .. } | Self::Removed { .. } => 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rf_core::{FileId, VolumeId};
+
+    use super::*;
+
+    #[test]
+    fn a_time_before_1970_is_not_recorded() {
+        let path = VPath::local(std::env::temp_dir().join("a.txt")).unwrap();
+        let mut entry = Entry::new("a.txt", EntryKind::File);
+        (entry.size, entry.volume_id, entry.file_id) = (3, Some(VolumeId(1)), Some(FileId(7)));
+        let at = |offset: i64| {
+            let step = Duration::from_secs(offset.unsigned_abs());
+            if offset < 0 {
+                SystemTime::UNIX_EPOCH - step
+            } else {
+                SystemTime::UNIX_EPOCH + step
+            }
+        };
+        for (modified, kept) in [(-1, None), (0, Some(at(0))), (1, Some(at(1)))] {
+            entry.modified = Some(at(modified));
+            let item = CreatedItem::from_entry(path.clone(), &entry);
+            assert_eq!(
+                item,
+                CreatedItem {
+                    path: path.clone(),
+                    is_dir: false,
+                    size: 3,
+                    modified: kept,
+                    identity: Some((1, 7)),
+                }
+            );
+            // What the record keeps, the journal can store.
+            serde_json::to_string(&item).unwrap();
         }
     }
 }
