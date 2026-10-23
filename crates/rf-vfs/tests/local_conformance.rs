@@ -38,3 +38,18 @@ fn read_write() {
 fn delete_permanent() {
     run(testkit::check_delete_permanent);
 }
+
+#[test]
+fn rename_symlink_guard() {
+    run(testkit::check_rename_symlink_guard);
+}
+
+#[test]
+fn unicode_names() {
+    run(testkit::check_unicode_names);
+}
+
+#[test]
+fn long_paths() {
+    run(testkit::check_long_paths);
+}
