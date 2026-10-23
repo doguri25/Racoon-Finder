@@ -40,6 +40,11 @@ fn delete_permanent() {
 }
 
 #[test]
+fn delete_tree_keeps_link_target() {
+    run(testkit::check_delete_tree_keeps_link_target);
+}
+
+#[test]
 fn rename_symlink_guard() {
     run(testkit::check_rename_symlink_guard);
 }

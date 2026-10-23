@@ -316,6 +316,78 @@ pub fn check_delete_permanent(p: &dyn Provider, root: &VPath) {
     );
 }
 
+/// A permanent delete of a folder tree removes a link inside it, never what the link leads to.
+/// With `tree/inner/outside-link` a link to the folder `outside` next to `tree`, deleting
+/// `tree` removes the whole tree and leaves `outside` and everything in it as it was.
+///
+/// Skipped, with a note on stderr, where links cannot be made (Windows without the privilege)
+/// and for a root that is not a local path, because links are made with the file system
+/// directly.
+#[allow(
+    clippy::print_stderr,
+    reason = "a check that cannot run says so, as the skipped tests do"
+)]
+pub fn check_delete_tree_keeps_link_target(p: &dyn Provider, root: &VPath) {
+    let d = fresh(p, root, "delete-link");
+    let (outside, tree) = (fresh(p, &d, "outside"), fresh(p, &d, "tree"));
+    let nested = fresh(p, &outside, "nested");
+    write_all(
+        p,
+        &outside.join("keep.txt").unwrap(),
+        WriteMode::CreateNew,
+        b"keep",
+    );
+    write_all(
+        p,
+        &nested.join("deep.txt").unwrap(),
+        WriteMode::CreateNew,
+        b"deep",
+    );
+    let inner = fresh(p, &tree, "inner");
+    write_all(p, &inner.join("f.txt").unwrap(), WriteMode::CreateNew, b"x");
+    let link = inner.join("outside-link").unwrap();
+    let (Some(target_path), Some(link_path)) = (outside.as_local(), link.to_extended_length())
+    else {
+        eprintln!("skipped: links are made on the local file system only");
+        return;
+    };
+    match symlink_dir(target_path, &link_path) {
+        Ok(()) => {}
+        Err(e) if link_unavailable(&e) => {
+            eprintln!("skipped: no folder link can be made here: {e}");
+            return;
+        }
+        Err(e) => panic!("cannot make a folder link: {e}"),
+    }
+    assert_eq!(p.stat(&link).unwrap().kind, EntryKind::Symlink);
+    // The link really leads to `outside`, so a delete that followed it would reach the files.
+    assert_eq!(read_all(p, &link.join("keep.txt").unwrap()), b"keep");
+
+    assert_eq!(
+        p.delete(&tree, DeleteMode::Permanent).unwrap(),
+        Deleted::Permanently
+    );
+
+    assert_eq!(kind_of(p.stat(&tree)), ErrorKind::NotFound);
+    assert_eq!(names(p, &d), BTreeSet::from([OsString::from("outside")]));
+    assert_eq!(
+        names(p, &outside),
+        BTreeSet::from([OsString::from("keep.txt"), OsString::from("nested")])
+    );
+    assert_eq!(read_all(p, &outside.join("keep.txt").unwrap()), b"keep");
+    assert_eq!(read_all(p, &nested.join("deep.txt").unwrap()), b"deep");
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
 /// Names every provider must store and list byte-for-byte. Each one is tested in its own
 /// folder because APFS treats the NFC and NFD spellings of a name as the same file.
 pub const UNICODE_NAMES: &[&str] = &[
