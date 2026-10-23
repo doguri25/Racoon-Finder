@@ -27,17 +27,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rf-platform --test trash --test trash_diag --no-run --locked
-      - name: env
+      - name: fresh-bin parallel x15
         run: |
-          systeminfo | head -30 || true
-          reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\BitBucket" /s || true
-          ls -la "C:/\$Recycle.Bin" || true
-          powershell -Command "Get-MpComputerStatus | Select RealTimeProtectionEnabled,AMRunningMode" || true
-      - name: trash suite in parallel x6
+          SID=$(whoami //user //fo csv //nh | sed 's/.*,"//; s/"//g' | tr -d '\r')
+          echo "SID=$SID"
+          for i in $(seq 1 15); do
+            cmd //c "rd /s /q C:\\\$Recycle.Bin\\$SID" >/dev/null 2>&1 || true
+            [ -e "C:/\$Recycle.Bin/$SID" ] && echo "bin still there" || echo "bin removed"
+            echo "=== fresh parallel run $i"
+            cargo test -q -p rf-platform --test trash --locked -- --nocapture 2>&1 | grep -E "diag|test |panicked|Err|result" || true
+          done
+      - name: fresh-bin serial x8
         run: |
-          for i in 1 2 3 4 5 6; do echo "=== parallel run $i"; cargo test -q -p rf-platform --test trash --locked -- --nocapture 2>&1 | grep -E "diag|RESULT|test |panicked|Err" || true; done
-      - name: scenarios
-        run: cargo test -q -p rf-platform --test trash_diag --locked -- --nocapture 2>&1 | grep -E "diag|RESULT|==|SUMMARY|panicked" || true
-      - name: trash suite serial x4
-        run: |
-          for i in 1 2 3 4; do echo "=== serial run $i"; cargo test -q -p rf-platform --test trash --locked -- --nocapture --test-threads=1 2>&1 | grep -E "diag|test |panicked|Err" || true; done
+          SID=$(whoami //user //fo csv //nh | sed 's/.*,"//; s/"//g' | tr -d '\r')
+          for i in $(seq 1 8); do
+            cmd //c "rd /s /q C:\\\$Recycle.Bin\\$SID" >/dev/null 2>&1 || true
+            [ -e "C:/\$Recycle.Bin/$SID" ] && echo "bin still there" || echo "bin removed"
+            echo "=== fresh serial run $i"
+            cargo test -q -p rf-platform --test trash --locked -- --nocapture --test-threads=1 2>&1 | grep -E "diag|test |panicked|Err|result" || true
+          done
