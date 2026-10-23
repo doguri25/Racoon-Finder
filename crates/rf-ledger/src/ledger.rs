@@ -6,7 +6,7 @@ use rf_core::{AppPaths, InstallMode};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::SystemBackend;
-use crate::change::{Before, Change, Target};
+use crate::change::{Before, Change, Target, Value};
 use crate::error::LedgerError;
 use crate::store::{self, LedgerFile};
 
@@ -60,17 +60,21 @@ pub struct EntryFailure {
 /// What [`Ledger::open`] settled for the `Pending` entries a crash left, each list in
 /// processing order (newest entry first).
 ///
-/// A `Pending` entry beneath a newer entry of the same setting whose value is in place is in no
-/// list: whether its own change reached the system means nothing then, so it stays `Pending`
-/// for a revert to walk back to.
+/// A `Pending` entry beneath a newer entry of the same setting whose value is presumed in place
+/// is in no list: whether its own change reached the system means nothing then, so it stays
+/// `Pending` for a revert to walk back to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReconcileReport {
     /// Entries whose change the system holds; they are `Applied` now.
     pub confirmed: Vec<EntryId>,
-    /// Entries whose change the system did not hold: their before-state was put back and they
-    /// are no longer recorded.
+    /// Entries whose setting held their before-state, or the nothing a half-done write leaves,
+    /// instead of their change: their before-state was put back and they are no longer recorded.
     pub rolled_back: Vec<EntryId>,
+    /// Entries whose setting holds someone else's value (neither the app's value, nor the
+    /// entry's before-state, nor nothing), and the older entries of that setting, `Applied` ones
+    /// included: the other value was left alone and the entries are no longer recorded.
+    pub skipped: Vec<EntryId>,
     /// Entries that stay `Pending` because they could not be settled, or because a newer entry
     /// of the same setting could not.
     pub failed: Vec<EntryFailure>,
@@ -138,7 +142,7 @@ enum SlotMark {
     /// entries are dropped without a backend call: whatever they recorded, the value is not the
     /// app's to overwrite.
     Foreign,
-    /// It stays recorded with its value in place. The older entries stay as they are.
+    /// It stays recorded with its value presumed in place. The older entries stay as they are.
     Live,
 }
 
@@ -176,22 +180,35 @@ enum Holds {
     /// The entry's before-state. Its restore already happened (a crash came before the ledger
     /// file said so, or a power loss dropped the app's write), or its apply never did.
     Before,
+    /// Nothing, where the before-state is a value: what an apply of the entry that died
+    /// half-way leaves, since on macOS a write of another type removes the value before it
+    /// writes it again. Found only for a `Pending` entry, the only kind whose apply may have
+    /// died; for an `Applied` one an emptied setting is someone else's doing.
+    Nothing,
     /// Anything else: someone else changed the setting since, and the value is theirs.
     Other,
 }
 
-/// Asks the system what the setting of `entry` holds: whether it is the entry's value, and if
-/// not, whether it is the entry's before-state.
+/// Asks the system what the setting of `entry` holds: whether it is the entry's value; if not,
+/// whether it is the entry's before-state; and if not that either, for a `Pending` entry,
+/// whether it is nothing. Each question is one `is_applied` call, asked only when the one
+/// before it said no.
 fn holds(backend: &mut dyn SystemBackend, entry: &LedgerEntry) -> Result<Holds, LedgerError> {
     if backend.is_applied(&entry.change)? {
         return Ok(Holds::Ours);
     }
-    let before = Change {
+    let with = |value: Option<Value>| Change {
         target: entry.change.target.clone(),
-        value: entry.before.value.clone(),
+        value,
     };
-    if backend.is_applied(&before)? {
+    if backend.is_applied(&with(entry.before.value.clone()))? {
         return Ok(Holds::Before);
+    }
+    if entry.state == EntryState::Pending
+        && entry.before.value.is_some()
+        && backend.is_applied(&with(None))?
+    {
+        return Ok(Holds::Nothing);
     }
     Ok(Holds::Other)
 }
@@ -258,8 +275,11 @@ impl Ledger {
     /// [`SlotChain`]; saves the file once if any entry changed.
     ///
     /// A `Pending` entry that is the newest left of its setting is confirmed if the system
-    /// holds its value; otherwise its before-state is put back without further check (the
-    /// system may hold a half-written value of ours) and the entry is dropped as rolled back.
+    /// holds its value. If the system holds its before-state, or nothing (what an apply that
+    /// died half-way leaves), the before-state is put back (again, which changes nothing but
+    /// removes keys a crash left) and the entry is dropped as rolled back. Anything else is
+    /// someone else's value: it is left alone, and the entry and every older entry of the
+    /// setting are dropped as skipped without a backend call, as a revert would drop them.
     /// `Applied` entries are never asked about.
     fn reconcile(&mut self) -> Result<ReconcileReport, LedgerError> {
         let mut report = ReconcileReport::default();
@@ -287,38 +307,53 @@ impl Ledger {
                     }
                     continue;
                 }
-                // A newer entry's value is in place. No setting is found `Foreign` here: an
-                // open never reads a value as someone else's, so it never drops an entry
-                // without putting its before-state back.
-                Some(SlotMark::Live | SlotMark::Foreign) => continue,
+                // A newer entry's value is presumed in place.
+                Some(SlotMark::Live) => continue,
+                // A newer entry found someone else's value: whatever this older entry recorded,
+                // the live value is not the app's to overwrite, `Pending` or not.
+                Some(SlotMark::Foreign) => {
+                    self.entries.remove(index);
+                    report.skipped.push(id);
+                    continue;
+                }
             }
             if entry.state == EntryState::Applied {
                 chain.mark(target, SlotMark::Live);
                 continue;
             }
-            match self.backend.is_applied(&entry.change) {
-                Ok(true) => {
+            match holds(self.backend.as_mut(), entry) {
+                Ok(Holds::Ours) => {
                     chain.mark(target, SlotMark::Live);
                     self.entries[index].state = EntryState::Applied;
                     report.confirmed.push(id);
                 }
-                Ok(false) => match self.backend.restore(&entry.change, &entry.before) {
-                    Ok(()) => {
-                        self.entries.remove(index);
-                        report.rolled_back.push(id);
+                Ok(Holds::Other) => {
+                    chain.mark(target, SlotMark::Foreign);
+                    self.entries.remove(index);
+                    report.skipped.push(id);
+                }
+                Ok(Holds::Before | Holds::Nothing) => {
+                    match self.backend.restore(&entry.change, &entry.before) {
+                        Ok(()) => {
+                            self.entries.remove(index);
+                            report.rolled_back.push(id);
+                        }
+                        Err(e) => {
+                            chain.mark(target, SlotMark::Stuck);
+                            report.failed.push(fail(e.to_string()));
+                        }
                     }
-                    Err(e) => {
-                        chain.mark(target, SlotMark::Stuck);
-                        report.failed.push(fail(e.to_string()));
-                    }
-                },
+                }
                 Err(e) => {
                     chain.mark(target, SlotMark::Stuck);
                     report.failed.push(fail(e.to_string()));
                 }
             }
         }
-        if !(report.confirmed.is_empty() && report.rolled_back.is_empty()) {
+        if !(report.confirmed.is_empty()
+            && report.rolled_back.is_empty()
+            && report.skipped.is_empty())
+        {
             self.persist()?;
         }
         Ok(report)
@@ -433,12 +468,12 @@ impl Ledger {
     /// A value is put back only if the system still holds the value the app wrote, or the
     /// entry's own before-state: then the entry's restore already happened (a crash came before
     /// the ledger file said so, or a power loss dropped the app's write) and it is done again,
-    /// which changes nothing but removes keys a crash left, and the entry is `reverted`. A
-    /// setting is someone else's only when it holds neither: the entry is dropped as `skipped`
-    /// and the system is left alone, and so is every older entry for that setting, which is
-    /// dropped as `skipped` without asking the system. An entry a crash left `Pending` is put
-    /// back without the check, because the system may hold a half-written value of ours; but
-    /// not beneath a skipped entry of its setting.
+    /// which changes nothing but removes keys a crash left, and the entry is `reverted`. An
+    /// entry a crash or a failed rollback left `Pending` is also put back over a setting that
+    /// holds nothing, which is what its apply leaves if it died half-way. A setting is someone
+    /// else's only when it holds none of these: the entry is dropped as `skipped` and the
+    /// system is left alone, and so is every older entry for that setting, which is dropped as
+    /// `skipped` without asking the system.
     ///
     /// An entry that fails stays recorded, and so do the older entries for the same setting:
     /// the system still holds the newer value, so they could not be told apart from a value
@@ -487,10 +522,9 @@ impl Ledger {
                 // A newer entry found someone else's value here: whatever this older entry
                 // recorded, the live value is not the app's to overwrite, `Pending` or not.
                 Some(SlotMark::Foreign) => false,
-                // A crash may have left a half-written value of ours: put it back unasked.
-                None if entry.state == EntryState::Pending => true,
-                // The app's value, or the entry's before-state: then its restore already
-                // happened and is done again. Only anything else is someone else's.
+                // The app's value, the entry's before-state (then its restore already happened
+                // and is done again) or, for a `Pending` entry, the nothing a half-done apply
+                // leaves. Only anything else is someone else's.
                 None => match holds(self.backend.as_mut(), entry) {
                     Ok(found) => found != Holds::Other,
                     Err(e) => {

@@ -86,8 +86,10 @@ fn revert_group_touches_only_that_group() {
     assert_eq!(l.entries()[0].group, "macx.b");
 }
 
+/// A `Pending` entry's apply may have died half-way: on macOS a write of another type removes
+/// the value before it writes it again, so the setting may hold nothing. That is put back.
 #[test]
-fn pending_entries_are_restored_without_the_ownership_check() {
+fn a_pending_entry_is_restored_over_what_a_half_done_apply_left() {
     let fx = installed();
     let t = slot(1);
     fx.fake.set(&t, s("orig"));
@@ -95,9 +97,35 @@ fn pending_entries_are_restored_without_the_ownership_check() {
     fx.fake.fail_next(FakeOp::Apply, &t);
     fx.fake.fail_next(FakeOp::Restore, &t);
     assert!(l.apply("g", set(&t, "ours")).is_err());
-    fx.fake.set(&t, s("half-written"));
+    fx.fake.set(&t, None);
     assert_eq!(l.revert_all().reverted, [EntryId(1)]);
     assert_eq!(fx.fake.get(&t), s("orig"));
+}
+
+/// A `Pending` entry is put back only over the app's value, its own before-state, or the
+/// nothing a half-done write leaves: another app's value is left alone.
+#[test]
+fn a_pending_entry_is_not_restored_over_another_apps_value() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    fx.fake.fail_next(FakeOp::Apply, &t);
+    fx.fake.fail_next(FakeOp::Restore, &t);
+    assert!(l.apply("g", set(&t, "ours")).is_err());
+    fx.fake.set(&t, s("other-app"));
+    let calls = fx.fake.calls().len();
+    let r = l.revert_all();
+    assert_eq!(
+        (r.reverted, r.skipped, r.failed),
+        (vec![], vec![EntryId(1)], vec![])
+    );
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::IsApplied]
+    );
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
 }
 
 #[test]

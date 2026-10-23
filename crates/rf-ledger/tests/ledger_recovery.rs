@@ -219,8 +219,9 @@ fn a_pending_entry_beneath_a_newer_one_of_its_setting_is_left_alone() {
     fx.fake.set(&t, s("orig"));
     let mut l = fx.open();
     leave_pending(&fx, &mut l, &t, "a");
-    // The failed apply left a half-written value; then a newer change of the setting succeeds.
-    fx.fake.set(&t, s("half-written"));
+    // The failed apply left the setting half-written: removed, to be written again with the
+    // new type (what an interrupted macOS write leaves). Then a newer change succeeds.
+    fx.fake.set(&t, None);
     l.apply("g", set(&t, "b")).unwrap();
     drop(l);
     let calls = fx.fake.calls().len();
@@ -268,19 +269,23 @@ fn a_pending_entry_beneath_a_confirmed_one_is_left_alone() {
 
 #[test]
 fn a_pending_entry_waits_for_a_newer_one_that_could_not_be_settled() {
-    // The check fails, or the check says "not live" and the rollback fails.
+    // The check fails, or the check says "not live, the before-state is" and the rollback fails.
     for (fault, reached) in [
         (FakeOp::IsApplied, &[FakeOp::IsApplied][..]),
-        (FakeOp::Restore, &[FakeOp::IsApplied, FakeOp::Restore][..]),
+        (
+            FakeOp::Restore,
+            &[FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::Restore][..],
+        ),
     ] {
         let fx = installed();
         let t = slot(1);
         fx.fake.set(&t, s("orig"));
         let mut l = fx.open();
         leave_pending(&fx, &mut l, &t, "a");
-        fx.fake.set(&t, s("half-a"));
+        // Entry 1's failed apply left the setting half-written (removed, as an interrupted
+        // macOS write leaves it), and entry 2's apply failed without an effect.
+        fx.fake.set(&t, None);
         leave_pending(&fx, &mut l, &t, "b");
-        fx.fake.set(&t, s("half-b"));
         drop(l);
         fx.fake.fail_next(fault, &t);
         let calls = fx.fake.calls().len();
@@ -290,7 +295,7 @@ fn a_pending_entry_waits_for_a_newer_one_that_could_not_be_settled() {
         assert!(report.confirmed.is_empty() && report.rolled_back.is_empty());
         // Only entry 2 reached the system.
         assert_eq!(fx.fake.calls()[calls..], *reached, "{fault:?}");
-        assert_eq!(fx.fake.get(&t), s("half-b"));
+        assert_eq!(fx.fake.get(&t), None);
         assert_eq!(
             states(l.entries()),
             [
@@ -305,4 +310,90 @@ fn a_pending_entry_waits_for_a_newer_one_that_could_not_be_settled() {
         assert_eq!(l.entries(), []);
         assert_eq!(fx.fake.get(&t), s("orig"));
     }
+}
+
+/// Checks that an open reported exactly `ids` as skipped and nothing else, and that no entry
+/// is left in memory or in the ledger file.
+fn assert_dropped_as_skipped(fx: &Fx, report: &ReconcileReport, l: &Ledger, ids: &[EntryId]) {
+    assert_eq!(report.skipped, ids);
+    assert!(report.confirmed.is_empty() && report.rolled_back.is_empty());
+    assert_eq!(report.failed, []);
+    assert_eq!(l.entries(), []);
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+}
+
+/// The apply failed and so did its rollback, so the entry stays `Pending`; then another app
+/// takes the setting. The next open must not put the before-state over the other app's value.
+#[test]
+fn a_pending_entry_leaves_a_value_another_app_wrote_since() {
+    let fx = installed();
+    pending_not_applied(&fx);
+    fx.fake.set(&slot(1), s("other-app"));
+    let calls = fx.fake.calls().len();
+    let (l, report) = reopen(&fx);
+    assert_dropped_as_skipped(&fx, &report, &l, &[EntryId(1)]);
+    assert_eq!(fx.fake.get(&slot(1)), s("other-app"));
+    // Not ours, not the before-state, and not the empty setting a half-done write leaves.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::IsApplied]
+    );
+}
+
+/// The apply succeeded but the process died before the last save, so the file says `Pending`;
+/// then another app takes the setting. The next open leaves the other app's value alone.
+#[test]
+fn a_pending_entry_whose_last_save_was_lost_leaves_a_value_another_app_wrote_since() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    fx.fake.panic_after_next(FakeOp::Apply, &t);
+    assert!(catch_unwind(AssertUnwindSafe(|| l.apply("g", set(&t, "ours")))).is_err());
+    drop(l);
+    assert_eq!(
+        Ledger::inspect(&fx.paths).unwrap()[0].state,
+        EntryState::Pending
+    );
+    fx.fake.set(&t, s("other-app"));
+    let (l, report) = reopen(&fx);
+    assert_dropped_as_skipped(&fx, &report, &l, &[EntryId(1)]);
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+}
+
+/// A setting that holds nothing is what a write that died half-way leaves (removed, to be
+/// written again with the new type): the before-state is put back over it.
+#[test]
+fn a_pending_entry_puts_its_before_state_back_over_an_emptied_setting() {
+    let fx = installed();
+    pending_not_applied(&fx);
+    fx.fake.set(&slot(1), None);
+    let (l, report) = reopen(&fx);
+    assert_eq!(report.rolled_back, [EntryId(1)]);
+    assert!(report.skipped.is_empty() && report.failed.is_empty());
+    assert_eq!(l.entries(), []);
+    assert_eq!(fx.fake.get(&slot(1)), s("orig"));
+}
+
+/// Someone else's value beneath a `Pending` entry makes the setting theirs: the older entries
+/// of the setting are dropped too, without asking the system, as a revert would drop them.
+#[test]
+fn someone_elses_value_drops_the_older_entries_of_its_setting_unasked() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    l.apply("g", set(&t, "a")).unwrap();
+    leave_pending(&fx, &mut l, &t, "b");
+    drop(l);
+    fx.fake.set(&t, s("other-app"));
+    let calls = fx.fake.calls().len();
+    let (l, report) = reopen(&fx);
+    assert_dropped_as_skipped(&fx, &report, &l, &[EntryId(2), EntryId(1)]);
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+    // Only entry 2 was asked about.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::IsApplied, FakeOp::IsApplied]
+    );
 }
