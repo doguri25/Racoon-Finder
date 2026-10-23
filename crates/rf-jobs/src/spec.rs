@@ -156,6 +156,21 @@ pub enum JobKind {
     Undo,
 }
 
+impl JobKind {
+    /// The word the log writes for this kind: `copy`, `move`, `delete`, `rename`, `create` or
+    /// `undo`. It is English whatever language the UI shows, so logs can be compared.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+            Self::Delete => "delete",
+            Self::Rename => "rename",
+            Self::Create => "create",
+            Self::Undo => "undo",
+        }
+    }
+}
+
 impl JobSpec {
     pub fn kind(&self) -> JobKind {
         match self {
