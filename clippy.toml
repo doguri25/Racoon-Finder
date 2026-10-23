@@ -1,3 +1,47 @@
 allow-print-in-tests = true
 allow-dbg-in-tests = true
 doc-valid-idents = ["macOS", "NTFS", "APFS", "ReFS", "exFAT", "WTF-8", "WTF-16", "UTF-16", "FileId", "VolumeId", ".."]
+
+# PRD INST-02: every OS change goes through rf-ledger. Only crates/rf-ledger may suppress
+# these (crates/rf-ledger/tests/policy.rs checks it). `allow-invalid` keeps crates that do
+# not link an OS crate, or link it without the feature, free of "unresolved path" warnings.
+disallowed-methods = [
+    { path = "windows_registry::Key::create", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::rename", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::remove_tree", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::remove_value", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_u32", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_u64", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_string", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_hstring", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_expand_string", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_expand_hstring", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_multi_string", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_value", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::set_bytes", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::Key::raw_set_bytes", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows_registry::OpenOptions::create", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegCreateKeyExW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegCreateKeyTransactedW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegSetValueExW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegSetKeyValueW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegDeleteValueW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegDeleteKeyValueW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegDeleteKeyW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegDeleteKeyExW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegDeleteTreeW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegRenameKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "windows::Win32::System::Registry::RegCopyTreeW", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_core_foundation::CFPreferencesSetValue", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_core_foundation::CFPreferencesSetAppValue", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_core_foundation::CFPreferencesSetMultiple", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setObject_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::removeObjectForKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setInteger_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setFloat_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setDouble_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setBool_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setURL_forKey", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::setPersistentDomain_forName", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+    { path = "objc2_foundation::NSUserDefaults::removePersistentDomainForName", reason = "OS changes must go through rf-ledger (PRD INST-02)", allow-invalid = true },
+]
