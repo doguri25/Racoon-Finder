@@ -113,7 +113,7 @@ mod tests {
             parse_notify_records(&buf[..buf.len() - 1]),
             vec![(1, w("a.txt"))]
         );
-        assert!(parse_notify_records(&[]).is_empty());
+        assert_eq!(parse_notify_records(&[]), Vec::<(u32, Vec<u16>)>::new());
     }
 
     #[test]

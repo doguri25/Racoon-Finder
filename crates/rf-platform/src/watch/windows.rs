@@ -140,8 +140,9 @@ fn run(folder: &File, stop: &AtomicBool, mut handler: DirEventHandler) {
             Err(e) if e.code() == ERROR_NOTIFY_ENUM_DIR.to_hresult() => {
                 handler(DirEvent::Overflow);
             }
-            // Deleting the watched folder fails the call with `ERROR_ACCESS_DENIED`; any other
-            // failure means that the watch is dead as well.
+            // Deleting the watched folder permanently fails the call with `ERROR_ACCESS_DENIED`;
+            // any other failure means that the watch is dead as well. A move or rename of the
+            // folder does not fail the call: the handle follows the folder.
             Err(_) => {
                 handler(DirEvent::Ended);
                 return;

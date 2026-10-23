@@ -80,6 +80,10 @@ mod tests {
             .fold(Event::new(kind), |e, p| e.add_path(PathBuf::from(p)))
     }
 
+    fn none() -> Vec<DirEvent> {
+        Vec::new()
+    }
+
     fn ch(n: &str) -> DirEvent {
         DirEvent::Changed(n.into())
     }
@@ -116,16 +120,22 @@ mod tests {
         let from = EventKind::Modify(ModifyKind::Name(RenameMode::From));
         assert_eq!(route(&ev(from, &["/w"]), &w), [DirEvent::Ended]);
         let meta = EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any));
-        assert!(route(&ev(meta, &["/w"]), &w).is_empty());
+        assert_eq!(route(&ev(meta, &["/w"]), &w), none());
     }
 
     #[test]
     fn ignores_access_and_nested_events() {
         let w = [PathBuf::from("/w")];
         let open = EventKind::Access(AccessKind::Open(AccessMode::Any));
-        assert!(route(&ev(open, &["/w/a"]), &w).is_empty());
-        assert!(route(&ev(EventKind::Create(CreateKind::File), &["/w/sub/x"]), &w).is_empty());
-        assert!(route(&ev(EventKind::Create(CreateKind::File), &["/other/a"]), &w).is_empty());
+        assert_eq!(route(&ev(open, &["/w/a"]), &w), none());
+        assert_eq!(
+            route(&ev(EventKind::Create(CreateKind::File), &["/w/sub/x"]), &w),
+            none()
+        );
+        assert_eq!(
+            route(&ev(EventKind::Create(CreateKind::File), &["/other/a"]), &w),
+            none()
+        );
     }
 
     #[test]

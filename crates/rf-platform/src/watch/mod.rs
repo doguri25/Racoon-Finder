@@ -34,7 +34,13 @@ pub enum DirEvent {
     Renamed { from: OsString, to: OsString },
     /// Notifications were lost. The receiver reads the folder again.
     Overflow,
-    /// The folder itself is gone, or the watch cannot go on. No event follows.
+    /// The watch cannot go on, and no event follows.
+    ///
+    /// On macOS and Linux this is sent when the watched folder is removed, renamed or moved. On
+    /// Windows it is sent only when the folder is deleted permanently or the watch fails: the
+    /// watch follows the open folder handle, so moving, renaming or recycling the watched
+    /// folder (Explorer's Delete, `move_to_trash`) is not reported. A caller that needs to
+    /// notice such a move checks the path itself.
     Ended,
 }
 
@@ -51,8 +57,10 @@ pub type DirEventHandler = Box<dyn FnMut(DirEvent) + Send>;
 /// Never drop a watch from inside its own handler: dropping can wait for the thread that runs
 /// the handler, which would then be waiting for itself.
 ///
-/// After `DirEvent::Ended` the folder handle can stay open on Windows until the watch is
-/// dropped, which keeps the folder from disappearing; the receiver drops the watch right away.
+/// A watch may end on its own with `DirEvent::Ended` (see there for what ends it on each OS).
+/// On Windows the folder handle stays open until the watch is dropped, so the receiver drops
+/// the watch right away. A watch whose folder was moved or recycled on Windows keeps watching
+/// the folder at its new place and sends no event about the move.
 #[derive(Debug)]
 pub struct DirWatch {
     _backend: Backend,
