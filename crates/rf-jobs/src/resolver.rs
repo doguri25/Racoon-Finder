@@ -48,6 +48,9 @@ pub enum PreflightAnswer {
 /// `Send + Sync` because the engine hands the same resolver to every worker thread.
 pub trait Resolver: Send + Sync {
     /// The target of an item already exists and the policy is to ask.
+    ///
+    /// An answer of `ConflictAction::Overwrite`, once or for all, is still refused when either
+    /// side is a folder: that item fails as `Stage::Conflict` and both sides stay as they are.
     fn conflict(&self, job: JobId, conflict: &Conflict) -> ConflictAnswer;
 
     /// An item failed and the error policy is to ask.

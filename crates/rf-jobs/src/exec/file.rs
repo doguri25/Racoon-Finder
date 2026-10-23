@@ -8,7 +8,8 @@ use std::sync::Arc;
 use rf_core::{Entry, EntryKind, Error, VPath};
 use rf_vfs::{DeleteMode, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
-use super::{At, COPY_CHUNK, Ctx, Failed};
+use super::{At, COPY_CHUNK, Ctx, Failed, issue_error};
+use crate::preflight::check_path_len;
 use crate::report::Stage;
 
 /// Copies the file `source` of `src`, which `entry` describes, to `target` of `dst`.
@@ -22,7 +23,9 @@ use crate::report::Stage;
 /// copy itself has worked.
 ///
 /// A source that is no regular file is refused before anything is opened or created: a FIFO
-/// blocks a reader until a writer comes, and a device can be read without end.
+/// blocks a reader until a writer comes, and a device can be read without end. A temporary
+/// path longer than the OS allows is refused the same way, as `Stage::Preflight`: its name is
+/// longer than a short final name, so the final path alone may fit where it does not.
 pub(crate) fn copy_file(
     ctx: &mut Ctx<'_>,
     src: &Arc<dyn Provider>,
@@ -45,6 +48,11 @@ pub(crate) fn copy_file(
     }
     ctx.working_on(source);
     let tmp = ctx.temp_for(target).at(Stage::Write)?;
+    // The temporary name is at least 29 units, longer than a short final name, so the final
+    // path can fit where this one does not.
+    if let Some(issue) = check_path_len(&tmp, ctx.env.naming_os) {
+        return Err(Failed::new(Stage::Preflight, issue_error(&issue)));
+    }
     let mut reader = src.open_read(source).at(Stage::Read)?;
     let writer = dst
         .open_write(&tmp, WriteMode::CreateNew)
@@ -160,6 +168,7 @@ impl Drop for TempGuard<'_> {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use rf_core::{ErrorKind, VPath};
     use rf_vfs::Vfs;
@@ -248,24 +257,34 @@ mod tests {
         assert!(!d.dst.join("a.txt").exists());
     }
 
+    /// The target is free when the item is planned and taken by another program before the
+    /// commit: the commit must fail instead of replacing it, and the copy's temporary file
+    /// must go.
     #[test]
-    fn an_existing_target_fails_the_commit_and_keeps_its_content() {
+    fn a_target_made_during_the_copy_fails_the_commit_and_keeps_its_content() {
         let d = dirs();
         std::fs::write(d.src.join("a.txt"), "new").unwrap();
-        std::fs::write(d.dst.join("a.txt"), "old").unwrap();
-        let report = copy(
-            JobId::generate(),
-            &d.src.join("a.txt"),
-            &d.dst,
-            &Vfs::with_local(),
-        );
+        let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
+        let vfs = p.vfs();
+        let report = std::thread::scope(|scope| {
+            let job = scope.spawn(|| copy(JobId::generate(), &d.src.join("a.txt"), &d.dst, &vfs));
+            let held = p.wait_held(Duration::from_secs(10));
+            std::fs::write(d.dst.join("a.txt"), "theirs").unwrap();
+            p.release();
+            assert!(held, "the copy never reached its first write");
+            job.join().unwrap()
+        });
         assert_eq!(report.outcome, Outcome::CompletedWithErrors);
         assert_eq!(
             first_failure(&report),
             (Stage::Commit, ErrorKind::AlreadyExists)
         );
-        assert_eq!(std::fs::read_to_string(d.dst.join("a.txt")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(d.dst.join("a.txt")).unwrap(),
+            "theirs"
+        );
         assert_eq!(temp_files(&d.dst), Vec::<String>::new());
+        assert_eq!((report.done.files, report.skipped), (0, 0));
     }
 
     #[test]

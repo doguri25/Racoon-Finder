@@ -10,12 +10,14 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rf_core::{Error, ErrorKind, Os, VPath};
+use rf_core::{Error, ErrorKind, Os, PathError, VPath};
 use rf_vfs::{Provider, Vfs};
 
+use crate::conflict::{Conflict, ConflictAction};
 use crate::control::Control;
 use crate::id::JobId;
 use crate::naming::temp_name;
+use crate::preflight::IssueKind;
 use crate::progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
 use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
 use crate::resolver::{ErrorAction, Resolver};
@@ -159,6 +161,12 @@ impl Failed {
     }
 }
 
+/// The error of an item the target cannot hold: kind [`ErrorKind::InvalidPath`], with the log
+/// text of `issue` as its message.
+pub(crate) fn issue_error(issue: &IssueKind) -> Error {
+    Error::Path(PathError::Unsupported(issue.to_string()))
+}
+
 /// Tags the error of a result with the step it happened in.
 pub(crate) trait At<T> {
     fn at(self, stage: Stage) -> Result<T, Failed>;
@@ -208,6 +216,8 @@ pub(crate) struct Ctx<'e> {
     meter: SpeedMeter,
     /// Every later failure is skipped without asking ("skip all").
     skip_failures: bool,
+    /// The answer to every later conflict, once the user chose "apply to all".
+    conflict_for_all: Option<ConflictAction>,
     /// Whether, and why, the job stopped early.
     stopped: Stopped,
     /// The bytes [`add_bytes`](Self::add_bytes) counted for the step in progress. They stay
@@ -228,6 +238,7 @@ impl<'e> Ctx<'e> {
             last_progress: None,
             meter: SpeedMeter::new(SPEED_WINDOW),
             skip_failures: false,
+            conflict_for_all: None,
             stopped: Stopped::No,
             step_bytes: 0,
             temp_seq: 0,
@@ -318,6 +329,39 @@ impl<'e> Ctx<'e> {
                 }
             }
         }
+    }
+
+    /// What to do about `conflict`, an item whose target name is taken and whose policy is to
+    /// ask.
+    ///
+    /// The answer the user gave with "apply to all" comes back for every later conflict of the
+    /// job without a question. Otherwise an interactive job asks its resolver (between
+    /// `Waiting(true)` and `Waiting(false)`), and a job that may not ask (an undo) answers
+    /// [`ConflictAction::Skip`]. The answer is only what the user wants: the caller still
+    /// refuses an `Overwrite` that would replace a folder or put a file over one.
+    ///
+    /// A `Cancel` answer cancels the job's control and fails with `Error::Cancelled`, so the
+    /// step that asked stops the job.
+    pub(crate) fn resolve_conflict(
+        &mut self,
+        conflict: &Conflict,
+    ) -> rf_core::Result<ConflictAction> {
+        let action = if let Some(action) = self.conflict_for_all {
+            action
+        } else if self.interactive {
+            let answer = self.waiting(|| self.env.resolver.conflict(self.id, conflict));
+            if answer.apply_to_all {
+                self.conflict_for_all = Some(answer.action);
+            }
+            answer.action
+        } else {
+            ConflictAction::Skip
+        };
+        if action == ConflictAction::Cancel {
+            self.env.control.cancel();
+            return Err(Error::Cancelled);
+        }
+        Ok(action)
     }
 
     /// Records that a step went wrong without failing its item, such as copying metadata.
@@ -452,7 +496,10 @@ impl<'e> Ctx<'e> {
 mod tests {
     use std::sync::Mutex;
 
+    use rf_core::{Entry, EntryKind};
+
     use super::*;
+    use crate::conflict::ConflictAnswer;
     use crate::resolver::NonInteractive;
     use crate::spec::{TransferMode, TransferOptions, TransferSpec};
     use crate::testkit::ScriptedResolver;
@@ -553,5 +600,72 @@ mod tests {
         });
         assert!(matches!(outer, Attempt::Skipped));
         assert_eq!(ctx.report.done.bytes, 3);
+    }
+
+    /// A conflict over one name, as a file meeting a file.
+    fn clash() -> Conflict {
+        let path = VPath::local(std::env::temp_dir())
+            .unwrap()
+            .join("a.txt")
+            .unwrap();
+        Conflict {
+            source: path.clone(),
+            target: path,
+            incoming: Entry::new("a.txt", EntryKind::File),
+            existing: Entry::new("a.txt", EntryKind::File),
+        }
+    }
+
+    #[test]
+    fn a_job_that_may_not_ask_skips_every_conflict() {
+        let (vfs, spec) = (Vfs::with_local(), empty_copy());
+        // It has no answer, so it would panic if it were asked.
+        let resolver = ScriptedResolver::new();
+        let env = ExecEnv::new(&vfs, &resolver);
+        let mut ctx = Ctx::new(JobId(1), &env, JobReport::new(JobId(1), &spec));
+        ctx.interactive = false;
+        for _ in 0..2 {
+            assert_eq!(
+                ctx.resolve_conflict(&clash()).unwrap(),
+                ConflictAction::Skip
+            );
+        }
+        assert_eq!(resolver.calls(), Vec::new());
+    }
+
+    #[test]
+    fn an_answer_for_all_settles_the_later_conflicts_unasked() {
+        let (vfs, spec) = (Vfs::with_local(), empty_copy());
+        let resolver = ScriptedResolver::new()
+            .on_conflict(ConflictAnswer::once(ConflictAction::Overwrite))
+            .on_conflict(ConflictAnswer::all(ConflictAction::Rename));
+        let env = ExecEnv::new(&vfs, &resolver);
+        let mut ctx = Ctx::new(JobId(1), &env, JobReport::new(JobId(1), &spec));
+        let answers: Vec<_> = (0..4)
+            .map(|_| ctx.resolve_conflict(&clash()).unwrap())
+            .collect();
+        // An answer for one conflict is asked again; the one for all is not.
+        assert_eq!(
+            answers,
+            [
+                ConflictAction::Overwrite,
+                ConflictAction::Rename,
+                ConflictAction::Rename,
+                ConflictAction::Rename
+            ]
+        );
+        assert_eq!(resolver.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_cancel_answer_cancels_the_control_and_the_step() {
+        let (vfs, spec) = (Vfs::with_local(), empty_copy());
+        let resolver =
+            ScriptedResolver::new().on_conflict(ConflictAnswer::once(ConflictAction::Cancel));
+        let env = ExecEnv::new(&vfs, &resolver);
+        let mut ctx = Ctx::new(JobId(1), &env, JobReport::new(JobId(1), &spec));
+        let error = ctx.resolve_conflict(&clash()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Cancelled);
+        assert!(env.control.is_cancelled());
     }
 }

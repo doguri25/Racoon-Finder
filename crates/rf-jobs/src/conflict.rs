@@ -26,6 +26,8 @@ pub struct Conflict {
 /// What the user chose for a conflict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConflictAction {
+    /// Replace the existing item. The executor still refuses this when either side is a
+    /// folder, so a file and a folder never replace each other.
     Overwrite,
     Skip,
     /// Keep both: the incoming item gets a numbered name.
