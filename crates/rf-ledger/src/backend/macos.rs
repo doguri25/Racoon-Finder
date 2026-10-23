@@ -113,13 +113,16 @@ impl<'a> Slot<'a> {
     /// `CFPreferences` skips a write of a value it finds equal to the one stored, and it finds
     /// the boolean `true` equal to the integer 1, and an integer equal to a real of the same
     /// value: the old type would stay. When the value read back is not the one written, the key
-    /// is removed and written again.
+    /// is removed and written again. The value is written again even when the removal reports a
+    /// failure (its synchronization may fail after the key is gone), so a failure between the
+    /// two never leaves the key deleted.
     fn write(&self, value: Option<&CFType>) -> Result<(), LedgerError> {
         self.set(value)?;
         let mut live = self.read()?;
         if value.is_some() && !same(live.as_deref(), value) {
-            self.set(None)?;
+            let removed = self.set(None);
             self.set(value)?;
+            removed?;
             live = self.read()?;
         }
         if same(live.as_deref(), value) {

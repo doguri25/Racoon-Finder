@@ -113,6 +113,12 @@ fn remove(subkey: &str, name: &str) -> Result<(), LedgerError> {
 
 /// Deletes `HKCU\{subkey}` if it holds no key and no value; a missing key counts as deleted.
 /// Returns `false`, deleting nothing, when it holds something: that is someone else's.
+///
+/// The check and the delete are two calls, and the delete (`RegDeleteTreeW`) takes whatever the
+/// key holds by then: a key or value another program adds in the tiny window between them is
+/// deleted with it. `RegDeleteKeyW`, which refuses a key that has subkeys, would narrow this
+/// to values, but windows-registry 0.6.1 offers only `remove_tree`, and this backend stays on
+/// the crate's safe API (no `unsafe` outside the macOS backend).
 fn remove_if_empty(subkey: &str) -> Result<bool, LedgerError> {
     let Some(key) = open_key(subkey)? else {
         return Ok(true);
