@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::io::{Read, Seek, Write};
 
 use rf_core::{Entry, Result, Scheme, VPath};
-use rf_platform::DiskSpace;
+pub use rf_platform::DiskSpace;
 
 use crate::cancel::CancelToken;
 use crate::watch::{WatchHandle, WatchSink};

@@ -115,3 +115,15 @@ fn watch_handle_drops_its_guard() {
     drop(h);
     assert!(flag.load(Ordering::SeqCst));
 }
+
+#[test]
+fn disk_space_is_exported_from_provider_and_root() {
+    use rf_vfs::provider::DiskSpace as FromProvider;
+
+    let space: FromProvider = DiskSpace {
+        total: 3,
+        free: 2,
+        available: 1,
+    };
+    assert_eq!(space.total, 3);
+}

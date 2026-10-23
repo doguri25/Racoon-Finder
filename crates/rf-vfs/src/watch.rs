@@ -29,7 +29,8 @@ pub enum Change {
 /// What a watch reports to its sink.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
-    /// Changes since the last event, in the order they happened.
+    /// The net changes of one debounce window: each name appears at most once, with its state
+    /// after the window. Order is unspecified.
     Changes(Vec<Change>),
     /// Changes may have been lost; the receiver lists the folder again.
     Rescan,
