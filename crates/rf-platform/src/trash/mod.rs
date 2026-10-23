@@ -38,11 +38,16 @@ pub fn trash_supported(path: &VPath) -> bool {
 ///
 /// The item is never deleted permanently instead, and never swapped for another one: a
 /// symbolic link is moved itself, not what it points to, and a name that the Windows shell
-/// would read as a different item (`report.` as `report`) is refused. A non-local path, and a
-/// place without a trash, give `Error::Unsupported`, and a missing item gives
-/// `ErrorKind::NotFound`; in every error case the item is left where it was.
+/// would read as a different item (`report.` as `report`) is refused. A non-local path, a
+/// place without a trash, and an item the trash will not take (a refused recycle, a redirected
+/// name) give `Error::Unsupported`: the trash cannot take this item, and deleting it
+/// permanently is left to the caller, after asking the user. A missing item gives
+/// `ErrorKind::NotFound`, and anything else is an I/O error of the trash itself (on Windows the
+/// shell may fail to read a very long path, for example). In every error case the item is left
+/// where it was.
 ///
-/// This call blocks, and on macOS it can wait for Finder for up to 20 seconds.
+/// This call blocks. On Windows a refused recycle is tried once more after 300 ms, and on macOS
+/// the call can wait for Finder for up to 20 seconds.
 pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
     let Some(local) = path.to_extended_length() else {
         return Err(Error::Unsupported(format!(

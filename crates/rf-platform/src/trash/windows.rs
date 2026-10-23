@@ -10,6 +10,7 @@ use std::ffi::{OsString, c_void};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rf_core::{Error, Result, VPath};
 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
@@ -59,18 +60,37 @@ fn gone(extended: &Path) -> bool {
     std::fs::symlink_metadata(extended).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
 }
 
+/// How long a refused recycle waits before its one retry.
+const RETRY_REFUSED_AFTER: Duration = Duration::from_millis(300);
+
 /// Recycles the item at `path`. The shell does the work on a thread of its own, because
 /// `CoInitializeEx` ties COM to the calling thread, whose apartment is not ours to change.
+///
+/// A refused recycle is tried once more after 300 ms if the item is still there. On a fresh
+/// user profile the shell sometimes refuses to recycle (it offers a permanent delete instead)
+/// while several first recycles run at once and the recycle bin is still being set up; in CI
+/// one retry recycled every item refused that way. A refusal changes nothing, so the retry is
+/// safe. The cost is that a genuine refusal (a path the bin cannot take, an item too large for
+/// it, a policy) is reported 300 ms later. A redirected name and an I/O error are not retried.
 pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
     let (Some(local), Some(extended)) = (path.as_local(), path.to_extended_length()) else {
         return Err(Error::Unsupported(format!(
             "trash needs a local path: {path}"
         )));
     };
-    let (requested, local) = (path.clone(), local.to_path_buf());
-    let outcome = std::thread::spawn(move || recycle(&requested, &local))
-        .join()
-        .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))));
+    // Each attempt is a whole recycle on a new thread, the identity check included.
+    let attempt = || {
+        let (requested, local) = (path.clone(), local.to_path_buf());
+        std::thread::spawn(move || recycle(&requested, &local))
+            .join()
+            .unwrap_or_else(|_| Err(Failure::Io(io::Error::other("the recycle thread panicked"))))
+    };
+    let mut outcome = attempt();
+    if matches!(outcome, Err(Failure::Refused)) && !gone(&extended) {
+        // The bin of a fresh profile may refuse first recycles that run at the same time.
+        std::thread::sleep(RETRY_REFUSED_AFTER);
+        outcome = attempt();
+    }
     match outcome {
         // The shell must also have removed the item that was asked for, not another one.
         Ok(Some(location)) if gone(&extended) => Ok(Some(location)),
