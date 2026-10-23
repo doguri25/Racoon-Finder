@@ -19,7 +19,7 @@ pub(crate) struct LedgerFile {
 }
 
 /// An I/O failure of operation `op` on `path`.
-fn io_error(op: &'static str, path: &Path, source: io::Error) -> LedgerError {
+pub(crate) fn io_error(op: &'static str, path: &Path, source: io::Error) -> LedgerError {
     match VPath::local(path) {
         Ok(path) => rf_core::Error::io(op, path, source).into(),
         Err(path_error) => rf_core::Error::from(path_error).into(),

@@ -306,6 +306,13 @@ impl Ledger {
         &self.entries
     }
 
+    /// The backend, for the steps of a clean uninstall that are not recorded changes (clearing
+    /// the preferences domain). In portable mode the system must not be touched: callers never
+    /// get here then.
+    pub(crate) fn backend_mut(&mut self) -> &mut dyn SystemBackend {
+        self.backend.as_mut()
+    }
+
     /// Records `change` for the feature `group` (lowercase letters, digits, `.` and `-`) and
     /// makes it.
     ///
