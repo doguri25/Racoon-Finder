@@ -31,10 +31,6 @@ pub(crate) fn to_io(e: &windows::core::Error) -> std::io::Error {
 
 /// `s` as NUL-terminated UTF-16, ready to hand to a Win32 `PCWSTR` parameter.
 #[cfg(windows)]
-#[allow(
-    dead_code,
-    reason = "first used by the Windows modules added in later tasks"
-)]
 pub(crate) fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -50,5 +46,30 @@ mod tests {
         assert_eq!(win32_code_from_hresult(0x8007_00B7), Some(183));
         assert_eq!(win32_code_from_hresult(0x8000_4004), None);
         assert_eq!(win32_code_from_hresult(0), None);
+    }
+
+    #[cfg(windows)]
+    fn error_with_code(hresult: u32) -> windows::core::Error {
+        windows::core::Error::from_hresult(windows::core::HRESULT(i32::from_ne_bytes(
+            hresult.to_ne_bytes(),
+        )))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn to_io_unwraps_win32_codes_so_std_can_classify_them() {
+        // ERROR_ALREADY_EXISTS as an HRESULT; `io::Error::from` would keep it as 0x800700B7.
+        let e = to_io(&error_with_code(0x8007_00B7));
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(e.raw_os_error(), Some(183));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn to_io_keeps_the_message_of_other_hresults() {
+        // E_FAIL has no Win32 code to unwrap.
+        let e = to_io(&error_with_code(0x8000_4005));
+        assert_eq!(e.raw_os_error(), None);
+        assert_eq!(e.kind(), std::io::ErrorKind::Other);
     }
 }
