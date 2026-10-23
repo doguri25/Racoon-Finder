@@ -34,4 +34,4 @@ pub use spec::{
     ConflictPolicy, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy, JobKind, JobSpec,
     SymlinkMode, TransferItem, TransferMode, TransferOptions, TransferSpec,
 };
-pub use undo::{CreatedItem, MovedItem, TrashedItem, UndoRecord};
+pub use undo::{CreatedItem, MovedItem, TrashedItem, UNDO_LIMIT, UndoHistory, UndoRecord};

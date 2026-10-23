@@ -188,6 +188,7 @@ fn undo_identity_survives_json_at_full_width() {
     let rec = UndoRecord::Copied {
         created: vec![CreatedItem::from_entry(p, &e)],
         overwritten: 2,
+        at: Some(std::time::SystemTime::now()),
     };
     let json = serde_json::to_string(&rec).unwrap();
     assert_eq!(serde_json::from_str::<UndoRecord>(&json).unwrap(), rec);

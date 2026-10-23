@@ -1,6 +1,8 @@
-//! What a finished job records so it can be reversed (OPS-12). The journal stores these
-//! records, so their serialized shape is part of the on-disk format.
+//! What a finished job records so it can be reversed (OPS-12), and the history of those
+//! records the engine keeps for undo and redo. The journal stores the records, so their
+//! serialized shape is part of the on-disk format.
 
+use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, VPath};
@@ -61,6 +63,11 @@ pub enum UndoRecord {
         /// How many existing files the job replaced. Their old content is gone, so undo
         /// cannot bring it back.
         overwritten: u64,
+        /// When the job finished, after it wrote its last item: a copied folder is unchanged
+        /// only while nothing in it is newer. `None` in a record written before this was kept,
+        /// and an undo then leaves every copied folder where it is.
+        #[serde(default)]
+        at: Option<SystemTime>,
     },
     Moved {
         moves: Vec<MovedItem>,
@@ -98,6 +105,75 @@ impl UndoRecord {
             Self::Moved { moves, .. } => moves.len(),
             Self::Trashed { items } | Self::Restored { items } => items.len(),
             Self::Renamed { .. } | Self::Created { .. } | Self::Removed { .. } => 1,
+        }
+    }
+}
+
+/// How many jobs the engine can undo: the history keeps the latest this many.
+pub const UNDO_LIMIT: usize = 100;
+
+/// The records of the jobs that can be undone and of the undos that can be done again (redo),
+/// each list holding at most `limit` of them: the oldest goes first.
+#[derive(Clone, Debug)]
+pub struct UndoHistory {
+    limit: usize,
+    undo: VecDeque<UndoRecord>,
+    redo: VecDeque<UndoRecord>,
+}
+
+impl UndoHistory {
+    /// An empty history that keeps at most `limit` records in each list.
+    pub fn new(limit: usize) -> UndoHistory {
+        UndoHistory {
+            limit,
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
+        }
+    }
+
+    /// Notes `record`, the record of a job the user ran: it can be undone next. A new action
+    /// makes what was undone before it impossible to redo, so the redo list is emptied.
+    pub fn push(&mut self, record: UndoRecord) {
+        self.redo.clear();
+        Self::bounded_push(&mut self.undo, record, self.limit);
+    }
+
+    /// Takes the record of the job to undo next, the last one noted.
+    pub fn pop_undo(&mut self) -> Option<UndoRecord> {
+        self.undo.pop_back()
+    }
+
+    /// Notes `reverse`, the record an undo left: it redoes what was undone, next.
+    pub fn push_undone(&mut self, reverse: UndoRecord) {
+        Self::bounded_push(&mut self.redo, reverse, self.limit);
+    }
+
+    /// Takes the record of the undo to redo next, the last one undone.
+    pub fn pop_redo(&mut self) -> Option<UndoRecord> {
+        self.redo.pop_back()
+    }
+
+    /// Notes `reverse`, the record a redo left: it can be undone next. The redo list stays as
+    /// it is, so the undos before it can still be redone.
+    pub fn push_redone(&mut self, reverse: UndoRecord) {
+        Self::bounded_push(&mut self.undo, reverse, self.limit);
+    }
+
+    /// What can be undone, the oldest first: the last one is undone next.
+    pub fn undo_list(&self) -> Vec<UndoRecord> {
+        self.undo.iter().cloned().collect()
+    }
+
+    /// What can be redone: the last one is redone next.
+    pub fn redo_list(&self) -> Vec<UndoRecord> {
+        self.redo.iter().cloned().collect()
+    }
+
+    /// Adds `record` at the end of `list` and drops the oldest records beyond `limit`.
+    fn bounded_push(list: &mut VecDeque<UndoRecord>, record: UndoRecord, limit: usize) {
+        list.push_back(record);
+        while list.len() > limit {
+            list.pop_front();
         }
     }
 }

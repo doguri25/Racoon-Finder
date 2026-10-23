@@ -273,6 +273,7 @@ fn copy_records_what_it_created_for_undo() {
     let Some(UndoRecord::Copied {
         created,
         overwritten,
+        ..
     }) = rep.undo
     else {
         panic!("{:?}", rep.undo)

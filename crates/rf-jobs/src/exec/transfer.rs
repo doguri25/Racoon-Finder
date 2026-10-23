@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::ops::ControlFlow;
+use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_vfs::{MetadataPatch, Provider, RenameMode};
@@ -175,7 +176,8 @@ impl Log {
 
     /// The record that undoes a move (`moving`) or a copy that did what this log holds, or
     /// `None` when it changed nothing. A move that only made and removed folders changed
-    /// something: an empty folder moved across volumes.
+    /// something: an empty folder moved across volumes. A copy's record notes the time it is
+    /// made, after the job wrote its last item, so that an undo can tell what changed since.
     fn into_record(self, moving: bool) -> Option<UndoRecord> {
         let Log {
             created,
@@ -193,9 +195,10 @@ impl Log {
             })
         } else {
             let changed = !created.is_empty() || overwritten > 0;
-            changed.then_some(UndoRecord::Copied {
+            changed.then(|| UndoRecord::Copied {
                 created,
                 overwritten,
+                at: Some(SystemTime::now()),
             })
         }
     }

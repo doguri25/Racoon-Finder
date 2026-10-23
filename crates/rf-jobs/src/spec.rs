@@ -5,6 +5,8 @@ use std::ffi::OsString;
 use rf_core::{Error, Result, VPath};
 use serde::{Deserialize, Serialize};
 
+use crate::undo::UndoRecord;
+
 /// Whether a transfer keeps the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransferMode {
@@ -137,6 +139,9 @@ pub enum JobSpec {
         name: OsString,
         kind: CreateKind,
     },
+    /// Reverses an earlier job as its record says (OPS-12). The report's undo record reverses
+    /// this job in turn, which is how a redo is done.
+    Undo(UndoRecord),
 }
 
 /// The sort of job, for lanes, progress text and undo.
@@ -161,12 +166,14 @@ impl JobSpec {
             Self::Delete(_) => JobKind::Delete,
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
+            Self::Undo(_) => JobKind::Undo,
         }
     }
 
     /// Whether the job writes a journal. A rename or a create is one atomic step and needs
-    /// none; a transfer or a delete works through many items one by one and keeps one.
+    /// none; a transfer or a delete works through many items one by one and keeps one, and so
+    /// does an undo, which may move, copy or trash as many.
     pub fn journaled(&self) -> bool {
-        matches!(self, Self::Transfer(_) | Self::Delete(_))
+        matches!(self, Self::Transfer(_) | Self::Delete(_) | Self::Undo(_))
     }
 }

@@ -7,6 +7,7 @@ mod simple;
 #[cfg(all(test, unix))]
 mod swapping;
 mod transfer;
+mod undo;
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -162,6 +163,7 @@ fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
         JobSpec::Delete(delete) => delete::run_delete(ctx, delete),
         JobSpec::Rename { from, to } => simple::run_rename(ctx, from, to),
         JobSpec::Create { parent, name, kind } => simple::run_create(ctx, parent, name, *kind),
+        JobSpec::Undo(record) => undo::run_undo(ctx, record),
     }
 }
 

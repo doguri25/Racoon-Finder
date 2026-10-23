@@ -981,19 +981,37 @@ mod tests {
     /// part of the format too.
     #[test]
     fn undo_records_are_pinned() {
-        let undo = UndoRecord::Copied {
-            created: vec![CreatedItem {
-                path: remote(&["d", "a.txt"]),
-                is_dir: false,
-                size: 3,
-                modified: Some(golden_time()),
-                identity: Some((1, 7)),
-            }],
-            overwritten: 2,
+        let item = CreatedItem {
+            path: remote(&["d", "a.txt"]),
+            is_dir: false,
+            size: 3,
+            modified: Some(golden_time()),
+            identity: Some((1, 7)),
         };
-        let json = r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]}],"overwritten":2}}"#;
+        let undo = UndoRecord::Copied {
+            created: vec![item.clone()],
+            overwritten: 2,
+            at: Some(golden_time()),
+        };
+        let json = r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]}],"overwritten":2,"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}"#;
         assert_eq!(serde_json::to_string(&undo).unwrap(), json);
         assert_eq!(serde_json::from_str::<UndoRecord>(json).unwrap(), undo);
+        // A record written before `at` was kept still reads, without it.
+        let older = r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]}],"overwritten":2}}"#;
+        let without = UndoRecord::Copied {
+            created: vec![item],
+            overwritten: 2,
+            at: None,
+        };
+        assert_eq!(serde_json::from_str::<UndoRecord>(older).unwrap(), without);
+        // An undo job's spec holds its record.
+        let job = JobSpec::Undo(UndoRecord::Renamed {
+            from: remote(&["b.txt"]),
+            to: remote(&["a.txt"]),
+        });
+        let json = r#"{"Undo":{"Renamed":{"from":"remote://p/b.txt","to":"remote://p/a.txt"}}}"#;
+        assert_eq!(serde_json::to_string(&job).unwrap(), json);
+        assert_eq!(serde_json::from_str::<JobSpec>(json).unwrap(), job);
     }
 
     #[test]

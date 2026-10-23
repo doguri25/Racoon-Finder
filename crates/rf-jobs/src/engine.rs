@@ -32,6 +32,17 @@
 //! finished; a short-lived thread `rf-jobs-recovery` then removes their temporary files and
 //! announces them with one [`JobEvent::Recovered`], even when there are none. The user then
 //! resubmits or dismisses each one.
+//!
+//! # Undo
+//!
+//! The engine keeps the [`UndoHistory`] of the app, up to [`UNDO_LIMIT`] records in each list.
+//! When a job ends, its record (`JobReport::undo`) is noted before its `Finished` event, so a
+//! window that hears the event finds the history up to date: the record of a job the user ran
+//! can be undone next and empties the redo list, the record an undo left can be redone next, and
+//! the record a redo left can be undone next. A job without a record (a permanent delete, a job
+//! that changed nothing) leaves both lists as they are. [`JobEngine::undo`] and
+//! [`JobEngine::redo`] take the next record off its list and submit it as a
+//! [`JobSpec::Undo`] job, which runs like any other.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -53,6 +64,7 @@ use crate::progress::Progress;
 use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
 use crate::resolver::Resolver;
 use crate::spec::{JobKind, JobSpec};
+use crate::undo::{UNDO_LIMIT, UndoHistory, UndoRecord};
 
 /// How often [`JobEngine::shutdown`] looks whether the threads have ended.
 const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
@@ -76,15 +88,22 @@ pub trait LanePolicy: Send + Sync + fmt::Debug {
     fn lane(&self, spec: &JobSpec) -> LaneId;
 }
 
-/// Renames and creates in [`LaneId::QUICK`], everything else in [`LaneId::MAIN`].
+/// Renames and creates in [`LaneId::QUICK`], and so the undos of one step: of a rename, of a
+/// create and of that undo. Everything else, the other undos included, in [`LaneId::MAIN`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultLanes;
 
 impl LanePolicy for DefaultLanes {
     fn lane(&self, spec: &JobSpec) -> LaneId {
         match spec {
-            JobSpec::Rename { .. } | JobSpec::Create { .. } => LaneId::QUICK,
-            JobSpec::Transfer(_) | JobSpec::Delete(_) => LaneId::MAIN,
+            JobSpec::Rename { .. }
+            | JobSpec::Create { .. }
+            | JobSpec::Undo(
+                UndoRecord::Renamed { .. }
+                | UndoRecord::Created { .. }
+                | UndoRecord::Removed { .. },
+            ) => LaneId::QUICK,
+            JobSpec::Transfer(_) | JobSpec::Delete(_) | JobSpec::Undo(_) => LaneId::MAIN,
         }
     }
 }
@@ -257,6 +276,41 @@ impl JobEngine {
     /// [`Outcome::Cancelled`] after [`shutdown`](Self::shutdown), and as [`Outcome::Aborted`]
     /// with a [`Stage::Internal`] failure when the worker of its lane cannot be started.
     pub fn submit(&self, spec: JobSpec) -> JobId {
+        self.submit_as(spec, Origin::User)
+    }
+
+    /// Takes the record of the job to undo next off the undo list and submits it as a
+    /// [`JobSpec::Undo`] job, whose ID it gives (see [`submit`](Self::submit)); the record its
+    /// report gives can be redone next. `None` when there is nothing to undo.
+    ///
+    /// The record leaves the list now: an undo that ends with no record of its own (one that
+    /// could do nothing, or was cancelled before it ran) takes it off for good. The same holds
+    /// for [`redo`](Self::redo).
+    pub fn undo(&self) -> Option<JobId> {
+        let record = self.shared.lock().history.pop_undo()?;
+        Some(self.submit_as(JobSpec::Undo(record), Origin::Undo))
+    }
+
+    /// Takes the record of the undo to redo next off the redo list and submits it as a
+    /// [`JobSpec::Undo`] job, whose ID it gives; the record its report gives can be undone
+    /// next. `None` when there is nothing to redo.
+    pub fn redo(&self) -> Option<JobId> {
+        let record = self.shared.lock().history.pop_redo()?;
+        Some(self.submit_as(JobSpec::Undo(record), Origin::Redo))
+    }
+
+    /// What [`undo`](Self::undo) can undo, the oldest first: the last one is undone next.
+    pub fn undo_history(&self) -> Vec<UndoRecord> {
+        self.shared.lock().history.undo_list()
+    }
+
+    /// What [`redo`](Self::redo) can redo: the last one is redone next.
+    pub fn redo_history(&self) -> Vec<UndoRecord> {
+        self.shared.lock().history.redo_list()
+    }
+
+    /// [`submit`](Self::submit), for a job that `origin` asked for.
+    fn submit_as(&self, spec: JobSpec, origin: Origin) -> JobId {
         let id = JobId::generate();
         // Outside the lock: the policy is the caller's code.
         let lane = self.shared.lanes.lane(&spec);
@@ -292,6 +346,7 @@ impl JobEngine {
             spec,
             lane,
             paused: false,
+            origin,
         });
         state.broadcast(&JobEvent::State {
             id,
@@ -562,13 +617,14 @@ impl Shared {
     }
 
     /// Runs the job a worker took, without the state lock, and ends it: its `Finished` record,
-    /// then out of the state, then [`JobEvent::Finished`].
+    /// then out of the state and its undo record into the history, then [`JobEvent::Finished`].
     fn run(&self, job: Taken) {
         let Taken {
             id,
             spec,
             control,
             journal,
+            origin,
         } = job;
         let journaled = spec.journaled();
         if journaled {
@@ -595,6 +651,14 @@ impl Shared {
         }
         let mut state = self.lock();
         state.running.retain(|job| job.id != id);
+        if let Some(record) = &report.undo {
+            let record = record.clone();
+            match origin {
+                Origin::User => state.history.push(record),
+                Origin::Undo => state.history.push_undone(record),
+                Origin::Redo => state.history.push_redone(record),
+            }
+        }
         let report = Arc::new(report);
         state.broadcast(&JobEvent::Finished { id, report });
     }
@@ -685,6 +749,18 @@ struct Taken {
     /// The worker's handle to the job's control; the state keeps the other.
     control: Control,
     journal: JournalHandle,
+    origin: Origin,
+}
+
+/// Who asked for a job, which says where the record its report gives goes in the history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The user, with [`JobEngine::submit`].
+    User,
+    /// [`JobEngine::undo`].
+    Undo,
+    /// [`JobEngine::redo`].
+    Redo,
 }
 
 /// The engine's jobs, subscribers and threads, behind its one lock.
@@ -697,6 +773,8 @@ struct State {
     subscribers: Vec<Sender<JobEvent>>,
     /// The recovered jobs not yet resubmitted or dismissed.
     recovered: Vec<IncompleteJob>,
+    /// What can be undone and redone.
+    history: UndoHistory,
     /// A disabled handle without a journal.
     journal: JournalHandle,
     /// The worker of each lane that has had a job.
@@ -713,6 +791,7 @@ impl State {
             running: Vec::new(),
             subscribers: vec![subscriber],
             recovered: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             journal: JournalHandle::disabled(),
             workers: BTreeMap::new(),
             journal_threads: Vec::new(),
@@ -747,7 +826,13 @@ impl State {
     /// Takes the queued job at `index` up: it leaves the queue, runs as `Planning` with a new
     /// control, and is announced.
     fn start(&mut self, index: usize) -> Taken {
-        let QueuedJob { id, spec, lane, .. } = self.queue.remove(index);
+        let QueuedJob {
+            id,
+            spec,
+            lane,
+            origin,
+            ..
+        } = self.queue.remove(index);
         let control = Control::new();
         self.running.push(RunningJob {
             id,
@@ -769,6 +854,7 @@ impl State {
             spec,
             control,
             journal: self.journal.clone(),
+            origin,
         }
     }
 
@@ -840,6 +926,7 @@ struct QueuedJob {
     spec: JobSpec,
     lane: LaneId,
     paused: bool,
+    origin: Origin,
 }
 
 impl QueuedJob {
