@@ -237,7 +237,9 @@ impl Ledger {
     /// A value is put back only if the system still holds the value the app wrote. If someone
     /// else changed it since, it is theirs: the entry is dropped as `skipped` and the system
     /// is left alone. An entry a crash left `Pending` is put back without that check, because
-    /// the system may hold a half-written value of ours.
+    /// the system may hold a half-written value of ours; but not when a newer entry for the
+    /// same setting was skipped, since the value there is then someone else's: every older
+    /// entry for that setting is dropped as `skipped` without touching the system.
     ///
     /// An entry that fails stays recorded, and so do the older entries for the same setting:
     /// the system still holds the newer value, so they could not be told apart from a value
@@ -253,6 +255,8 @@ impl Ledger {
         let mut report = RevertReport::default();
         // Settings whose newest entry could not be settled.
         let mut stuck: Vec<Target> = Vec::new();
+        // Settings whose live value is someone else's.
+        let mut foreign: Vec<Target> = Vec::new();
         // Entries only leave the list at the index being settled, so lower indexes stay valid.
         for index in (0..self.entries.len()).rev() {
             let entry = &self.entries[index];
@@ -277,26 +281,35 @@ impl Ledger {
                 ));
                 continue;
             }
-            if entry.state == EntryState::Applied {
+            let ours = if foreign
+                .iter()
+                .any(|slot| slot.same_slot(&entry.change.target))
+            {
+                // A newer entry found someone else's value here: whatever this older entry
+                // recorded, the live value is not the app's to overwrite, `Pending` or not.
+                false
+            } else if entry.state == EntryState::Pending {
+                // A crash may have left a half-written value of ours: put it back unasked.
+                true
+            } else {
                 match self.backend.is_applied(&entry.change) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // The value is no longer the one the app wrote, so it is not the app's
-                        // to overwrite.
-                        match self.forget(index) {
-                            Ok(()) => report.skipped.push(id),
-                            Err(e) => report.failed.push(fail(format!(
-                                "left alone, but the ledger file could not be updated: {e}"
-                            ))),
-                        }
-                        continue;
-                    }
+                    Ok(applied) => applied,
                     Err(e) => {
                         stuck.push(entry.change.target.clone());
                         report.failed.push(fail(e.to_string()));
                         continue;
                     }
                 }
+            };
+            if !ours {
+                foreign.push(entry.change.target.clone());
+                match self.forget(index) {
+                    Ok(()) => report.skipped.push(id),
+                    Err(e) => report.failed.push(fail(format!(
+                        "left alone, but the ledger file could not be updated: {e}"
+                    ))),
+                }
+                continue;
             }
             if let Err(e) = self.backend.restore(&entry.change, &entry.before) {
                 stuck.push(entry.change.target.clone());

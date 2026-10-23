@@ -136,6 +136,30 @@ fn skipped_entries_are_reported_in_reverse_order_and_dropped() {
 }
 
 #[test]
+fn a_pending_entry_beneath_a_skipped_one_leaves_the_other_apps_value_alone() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    // Entry 1 stays `Pending`: its apply failed and so did the rollback.
+    fx.fake.fail_next(FakeOp::Apply, &t);
+    fx.fake.fail_next(FakeOp::Restore, &t);
+    assert!(l.apply("g", set(&t, "a")).is_err());
+    // Entry 2 is on the same slot and succeeds; then another app takes the setting.
+    l.apply("g", set(&t, "b")).unwrap();
+    fx.fake.set(&t, s("other-app"));
+    let calls = fx.fake.calls().len();
+    let r = l.revert_group("g");
+    assert_eq!(r.skipped, [EntryId(2), EntryId(1)]);
+    assert!(r.reverted.is_empty() && r.is_clean());
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+    // Entry 2 was checked; entry 1 was dropped without asking the system anything.
+    assert_eq!(fx.fake.calls()[calls..], [FakeOp::IsApplied]);
+    assert_eq!(l.entries(), []);
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap(), []);
+}
+
+#[test]
 fn a_failed_entry_keeps_the_older_entries_of_its_slot() {
     let fx = installed();
     let t = slot(1);
@@ -144,12 +168,18 @@ fn a_failed_entry_keeps_the_older_entries_of_its_slot() {
     l.apply("g", set(&t, "a")).unwrap();
     l.apply("g", set(&t, "b")).unwrap();
     fx.fake.fail_next(FakeOp::Restore, &t);
+    let calls = fx.fake.calls().len();
     let r = l.revert_all();
     // The live value is still ours ("b"), so entry 1 must not be mistaken for "taken over".
     assert_eq!((r.reverted.len(), r.skipped.len()), (0, 0));
     let failed: Vec<EntryId> = r.failed.iter().map(|f| f.id).collect();
     assert_eq!(failed, [EntryId(2), EntryId(1)]);
     assert!(!r.is_clean());
+    // Only entry 2 reached the system (checked, then the failing restore); entry 1 was held back.
+    assert_eq!(
+        fx.fake.calls()[calls..],
+        [FakeOp::IsApplied, FakeOp::Restore]
+    );
     assert_eq!(fx.fake.get(&t), s("b"));
     assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 2);
     let again = l.revert_all();
@@ -207,6 +237,32 @@ fn an_unsaved_removal_keeps_the_entry_and_says_so() {
         r.failed[0]
             .error
             .starts_with("restored, but the ledger file could not be updated: "),
+        "{}",
+        r.failed[0].error
+    );
+    assert!(!r.is_clean());
+    assert_eq!(l.entries().len(), 1);
+    assert_eq!(Ledger::inspect(&fx.paths).unwrap().len(), 1);
+}
+
+#[test]
+fn an_unsaved_skip_keeps_the_entry_and_says_so() {
+    let fx = installed();
+    let t = slot(1);
+    fx.fake.set(&t, s("orig"));
+    let mut l = fx.open();
+    l.apply("g", set(&t, "ours")).unwrap();
+    fx.fake.set(&t, s("other-app"));
+    // A folder where the temporary file must go, so the ledger file cannot be saved.
+    std::fs::create_dir(fx.paths.data_dir().join("ledger.json.tmp")).unwrap();
+    let r = l.revert_all();
+    assert_eq!(fx.fake.get(&t), s("other-app"));
+    assert!(r.reverted.is_empty() && r.skipped.is_empty());
+    assert_eq!((r.failed.len(), r.failed[0].id), (1, EntryId(1)));
+    assert!(
+        r.failed[0]
+            .error
+            .starts_with("left alone, but the ledger file could not be updated: "),
         "{}",
         r.failed[0].error
     );
