@@ -28,7 +28,7 @@ pub use preflight::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
 };
 pub use progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
-pub use report::{ItemFailure, JobReport, Outcome, Stage, Totals};
+pub use report::{ItemFailure, JobReport, Outcome, Stage, Totals, one_line};
 pub use resolver::{ErrorAction, ErrorAnswer, NonInteractive, PreflightAnswer, Resolver};
 pub use spec::{
     ConflictPolicy, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy, JobKind, JobSpec,

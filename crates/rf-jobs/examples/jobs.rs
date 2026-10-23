@@ -15,8 +15,9 @@
 //! - `trash <path>...`, which sends the paths to the trash, and `delete <path>...`, which
 //!   deletes them for good
 //! - `trash-undo <path>`, which trashes the path, waits for Enter and then undoes it
-//! - `recover`, which only prints what the journal found of the jobs a crash cut off, and the
-//!   temporary files removed
+//! - `recover`, which prints what the journal found of the jobs a crash cut off and the
+//!   temporary files removed, dismisses those jobs so that the next run does not list them
+//!   again, and ends
 //!
 //! The journal folder defaults to `jobs-example` in the temporary folder, named with the app's
 //! temporary-file prefix. `--conflict` is what a transfer does with a name that is taken, `ask`
@@ -28,7 +29,6 @@
 //! exit code is 0 when every job completed, 1 when one did not and 2 for a command line it
 //! cannot read.
 
-use std::fmt::Display;
 use std::io::{self, BufRead};
 use std::path::{self, PathBuf};
 use std::process::ExitCode;
@@ -42,7 +42,7 @@ use rf_jobs::{
     Conflict, ConflictAction, ConflictAnswer, ConflictPolicy, DeleteMethod, DeleteSpec,
     EngineConfig, ErrorAction, ErrorAnswer, ErrorPolicy, Issue, ItemFailure, JobEngine, JobEvent,
     JobId, JobReport, JobSpec, NonInteractive, Outcome, PreflightAnswer, Resolver, SymlinkMode,
-    TransferMode, TransferOptions, TransferSpec,
+    TransferMode, TransferOptions, TransferSpec, one_line,
 };
 use rf_vfs::Vfs;
 
@@ -53,7 +53,7 @@ commands:
   trash <path>...
   delete <path>...      (for good)
   trash-undo <path>     (trash, wait for Enter, undo)
-  recover               (print what the journal recovered, then end)";
+  recover               (print what the journal recovered, dismiss it, then end)";
 
 /// How long the engine gets to write its last journal records when the program ends.
 const SHUTDOWN: Duration = Duration::from_secs(10);
@@ -90,7 +90,7 @@ fn main() -> ExitCode {
             }
         }
         Err(message) => {
-            eprintln!("jobs: {}\n{USAGE}", one_line(message));
+            eprintln!("jobs: {}\n{USAGE}", one_line(&message));
             ExitCode::from(2)
         }
     }
@@ -221,7 +221,7 @@ fn run(options: Options) -> bool {
         } => match TransferSpec::into_dir(mode, &sources, &dest, transfer) {
             Ok(spec) => finish(&engine, &events, JobSpec::Transfer(spec)),
             Err(error) => {
-                eprintln!("jobs: {}", one_line(error));
+                eprintln!("jobs: {}", one_line(&error.to_string()));
                 false
             }
         },
@@ -236,6 +236,11 @@ fn run(options: Options) -> bool {
         Command::TrashUndo(path) => trash_undo(&engine, &events, path),
         Command::Recover => {
             wait_for_recovery(&events);
+            // Printed once is enough: the journal notes the jobs as dismissed (at the shutdown
+            // below), so the next run does not list them again.
+            for job in engine.recovered() {
+                engine.dismiss_recovered(job.id);
+            }
             true
         }
     };
@@ -277,7 +282,10 @@ fn finish(engine: &JobEngine, events: &Receiver<JobEvent>, spec: JobSpec) -> boo
 /// Writes the log of `report` to the standard output; `true` when the job completed.
 fn log(report: &JobReport) -> bool {
     if let Err(error) = report.write_log(&mut io::stdout().lock()) {
-        eprintln!("jobs: cannot write the log: {}", one_line(error));
+        eprintln!(
+            "jobs: cannot write the log: {}",
+            one_line(&error.to_string())
+        );
     }
     report.outcome == Outcome::Completed
 }
@@ -316,10 +324,10 @@ fn show(event: &JobEvent) {
             let eta = progress
                 .eta
                 .map_or_else(|| "?".to_owned(), |eta| eta.as_secs().to_string());
-            let current = progress
-                .current
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), one_line);
+            let current = progress.current.as_ref().map_or_else(
+                || "-".to_owned(),
+                |path| one_line(&path.to_string()).into_owned(),
+            );
             println!(
                 "progress {}/{} {} B/s eta {eta} {current}",
                 progress.done.bytes, progress.total.bytes, progress.bytes_per_sec
@@ -337,20 +345,6 @@ fn show(event: &JobEvent) {
         JobEvent::JournalError { message } => eprintln!("jobs: journal: {}", one_line(message)),
         _ => {}
     }
-}
-
-/// `text` for one line of output: a control character (a line break in a file name, say) is
-/// written as an escape, as in the job's log, so it cannot end the line or forge another.
-fn one_line(text: impl Display) -> String {
-    let mut line = String::new();
-    for c in text.to_string().chars() {
-        if c.is_control() {
-            line.extend(c.escape_debug());
-        } else {
-            line.push(c);
-        }
-    }
-    line
 }
 
 /// Reads one answer from the standard input: a letter, and an `a` after it for "all". `None`
@@ -381,7 +375,7 @@ impl Resolver for StdinResolver {
         loop {
             println!(
                 "conflict {}: incoming {} bytes, existing {} bytes. [o]verwrite [s]kip [r]ename [c]ancel (add a for all)",
-                one_line(&conflict.target),
+                one_line(&conflict.target.to_string()),
                 conflict.incoming.size,
                 conflict.existing.size
             );

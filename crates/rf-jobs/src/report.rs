@@ -295,9 +295,10 @@ impl JobReport {
     ///    message={message}`, where a missing path is `-`; then the same for each warning, as
     ///    `warning …`
     ///
-    /// Every path, name and text in a line has its control characters written as escapes
-    /// (`\n`, `\t`, `\u{7f}`), so a file name with a line break in it cannot end a record
-    /// early or forge another one.
+    /// Every path, name and text in a line goes through [`one_line`]: control characters and the
+    /// Unicode line separators and bidirectional controls are written as escapes (`\n`, `\t`,
+    /// `\u{7f}`, `\u{2028}`), so a file name with a line break in it cannot end a record early
+    /// or forge another one, and a name cannot change how the line reads.
     pub fn write_log(&self, out: &mut dyn Write) -> io::Result<()> {
         let mut out = BufWriter::new(out);
         writeln!(
@@ -344,8 +345,8 @@ impl JobReport {
 impl Issue {
     /// The line the log (see [`JobReport::write_log`]) and a command-line question write for
     /// this issue: `issue target={target} {text}`, with `text` the English log text of the
-    /// issue (the `Display` of [`IssueKind`](crate::IssueKind)). Control characters in either
-    /// are written as escapes, so the line is one line whatever the names in it.
+    /// issue (the `Display` of [`IssueKind`](crate::IssueKind)). Both go through [`one_line`],
+    /// so the line is one line whatever the names in it.
     pub fn log_line(&self) -> String {
         format!(
             "issue target={} {}",
@@ -355,21 +356,50 @@ impl Issue {
     }
 }
 
-/// `text` for one line of a log: every control character is written as its escape (`\n`,
-/// `\t`, `\u{7f}`), every other character as it is.
-fn one_line(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(char::is_control) {
+/// `text` for one line of a log or a terminal: the characters that could end the line, start
+/// another one or change what the text looks like are written as escapes, every other character
+/// as it is.
+///
+/// - A control character (`char::is_control`: U+0000 to U+001F, U+007F to U+009F) becomes its
+///   `char::escape_debug` form: `\n`, `\r`, `\t`, `\0`, or `\u{7f}`.
+/// - U+2028 and U+2029 (line and paragraph separators, which Unicode-aware splitters take for
+///   line breaks), U+200E and U+200F (left-to-right and right-to-left marks), U+202A to U+202E
+///   and U+2066 to U+2069 (bidirectional embeddings, overrides and isolates, which reorder the
+///   text shown) become `\u{..}` with lower-case hex digits.
+///
+/// A backslash stays a backslash, so a name with a backslash and an `n` in it and a name with a
+/// line break read alike. The text is borrowed when there is nothing to escape. Everything the
+/// log (see [`JobReport::write_log`]) and a command-line tool print of a name, a path or a
+/// message goes through it.
+pub fn one_line(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(needs_escape) {
         return Cow::Borrowed(text);
     }
     let mut line = String::with_capacity(text.len() + 8);
     for c in text.chars() {
         if c.is_control() {
             line.extend(c.escape_debug());
+        } else if needs_escape(c) {
+            line.extend(c.escape_unicode());
         } else {
             line.push(c);
         }
     }
     Cow::Owned(line)
+}
+
+/// Whether [`one_line`] writes `c` as an escape.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 /// The path of a failure for a log line: `-` when there is none.
@@ -718,6 +748,7 @@ mod tests {
 
     #[test]
     fn control_characters_are_escaped_in_every_field_of_a_record() {
+        let (raw, escaped) = unicode_escapes();
         let mut report = move_report();
         report.issues = vec![
             Issue {
@@ -727,37 +758,51 @@ mod tests {
             Issue {
                 target: path("u"),
                 kind: IssueKind::CaseCollision {
-                    other: "a\tb\r\nc".into(),
+                    other: format!("a\tb\r\nc{raw}").into(),
                 },
             },
+            Issue {
+                target: path("v"),
+                kind: IssueKind::InvalidCharacter('\u{202e}'),
+            },
         ];
-        let error = Error::Unsupported("first\nfailure: x\r\nforged line\u{7f}".into());
+        let error = Error::Unsupported(format!("first\nfailure: x\r\nforged line\u{7f}{raw}"));
         report.failures = vec![ItemFailure::new(Stage::Write, None, None, &error)];
         report.warnings = vec![ItemFailure::new(Stage::Metadata, None, None, &error)];
         let log = log_of(&report);
-        assert_eq!(log.matches('\n').count(), 8, "{log:?}");
-        assert!(log.chars().all(|c| !c.is_control() || c == '\n'), "{log:?}");
+        assert_eq!(log.matches('\n').count(), 9, "{log:?}");
+        assert!(
+            log.chars()
+                .all(|c| c == '\n' || !(c.is_control() || raw.contains(c))),
+            "{log:?}"
+        );
         let lines: Vec<&str> = log.lines().collect();
         assert!(
             lines[4].ends_with("name contains '\\n', which the target file system does not allow"),
             "{}",
             lines[4]
         );
+        let collision = format!("name differs only in case from a\\tb\\r\\nc{escaped}");
+        assert!(lines[5].ends_with(&collision), "{}", lines[5]);
         assert!(
-            lines[5].ends_with("name differs only in case from a\\tb\\r\\nc"),
-            "{}",
-            lines[5]
-        );
-        let message = "message=not supported: first\\nfailure: x\\r\\nforged line\\u{7f}";
-        assert!(
-            lines[6].starts_with("failure stage=write ") && lines[6].ends_with(message),
+            lines[6].ends_with(
+                "name contains '\\u{202e}', which the target file system does not allow"
+            ),
             "{}",
             lines[6]
         );
+        let message =
+            format!("message=not supported: first\\nfailure: x\\r\\nforged line\\u{{7f}}{escaped}");
+        let message = message.as_str();
         assert!(
-            lines[7].starts_with("warning stage=metadata ") && lines[7].ends_with(message),
+            lines[7].starts_with("failure stage=write ") && lines[7].ends_with(message),
             "{}",
             lines[7]
+        );
+        assert!(
+            lines[8].starts_with("warning stage=metadata ") && lines[8].ends_with(message),
+            "{}",
+            lines[8]
         );
     }
 
@@ -766,7 +811,10 @@ mod tests {
     fn control_characters_in_a_path_are_escaped_too() {
         use std::os::unix::ffi::OsStrExt;
 
-        let name = std::ffi::OsStr::from_bytes(b"a\nb\tc");
+        let (raw, escaped) = unicode_escapes();
+        let mut bytes = b"a\nb\tc".to_vec();
+        bytes.extend_from_slice(raw.as_bytes());
+        let name = std::ffi::OsStr::from_bytes(&bytes);
         let odd = VPath::local(std::env::temp_dir().join(name)).unwrap();
         let mut report = move_report();
         report.issues = vec![Issue {
@@ -783,7 +831,7 @@ mod tests {
         let log = log_of(&report);
         assert_eq!(log.matches('\n').count(), 6, "{log:?}");
         let base = VPath::local(std::env::temp_dir()).unwrap();
-        let shown = format!("{base}/a\\nb\\tc");
+        let shown = format!("{base}/a\\nb\\tc{escaped}");
         let lines: Vec<&str> = log.lines().collect();
         assert_eq!(
             lines[4],
@@ -797,14 +845,43 @@ mod tests {
     }
 
     #[test]
-    fn one_line_escapes_control_characters_and_nothing_else() {
-        let plain = "tab\u{2003}and 한글 'quoted' back\\slash \u{2028}";
+    fn one_line_escapes_what_could_split_or_spoof_a_line_and_nothing_else() {
+        // Characters next to the escaped ones stay as they are, an emoji's joiner included.
+        let plain = "tab\u{2003}and 한글 'quoted' back\\slash \u{2027}\u{202f}\u{2065}\u{206a}\
+                     \u{200b}\u{200d}\u{2030} 👨\u{200d}👩\u{200d}👧 \u{a0}\u{ad}é";
         assert!(matches!(one_line(plain), Cow::Borrowed(_)));
         assert_eq!(one_line(plain), plain);
         assert_eq!(
-            one_line("a\nb\tc\rd\0e\u{7f}f\u{85}g"),
-            "a\\nb\\tc\\rd\\0e\\u{7f}f\\u{85}g"
+            one_line("a\nb\tc\rd\0e\u{7f}f\u{85}g\u{9f}h\u{1b}"),
+            "a\\nb\\tc\\rd\\0e\\u{7f}f\\u{85}g\\u{9f}h\\u{1b}"
         );
+        let (raw, escaped) = unicode_escapes();
+        assert_eq!(one_line(&raw), escaped);
+        assert_eq!(one_line(&format!("x{raw}y")), format!("x{escaped}y"));
+        assert!(matches!(one_line(&raw), Cow::Owned(_)));
+    }
+
+    /// The characters beyond the controls that `one_line` escapes, as text, and the text it
+    /// writes for them.
+    fn unicode_escapes() -> (String, String) {
+        const TABLE: [(char, &str); 13] = [
+            ('\u{2028}', "\\u{2028}"),
+            ('\u{2029}', "\\u{2029}"),
+            ('\u{200e}', "\\u{200e}"),
+            ('\u{200f}', "\\u{200f}"),
+            ('\u{202a}', "\\u{202a}"),
+            ('\u{202b}', "\\u{202b}"),
+            ('\u{202c}', "\\u{202c}"),
+            ('\u{202d}', "\\u{202d}"),
+            ('\u{202e}', "\\u{202e}"),
+            ('\u{2066}', "\\u{2066}"),
+            ('\u{2067}', "\\u{2067}"),
+            ('\u{2068}', "\\u{2068}"),
+            ('\u{2069}', "\\u{2069}"),
+        ];
+        let raw = TABLE.iter().map(|&(c, _)| c).collect();
+        let escaped = TABLE.iter().map(|&(_, escape)| escape).collect();
+        (raw, escaped)
     }
 
     #[test]

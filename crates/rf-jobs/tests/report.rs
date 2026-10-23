@@ -113,7 +113,10 @@ fn a_failed_trash_can_be_retried_as_a_permanent_delete() {
 #[test]
 fn a_file_name_with_control_characters_cannot_split_a_log_record() {
     let f = fx();
-    let rep = run(&copy(&[f.src.join("a\nb\tc\rd\u{7f}")], &f.dst));
+    let rep = run(&copy(
+        &[f.src.join("a\nb\tc\rd\u{7f}\u{2028}\u{202e}x")],
+        &f.dst,
+    ));
     let mut out = Vec::new();
     rep.write_log(&mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
@@ -123,9 +126,11 @@ fn a_file_name_with_control_characters_cannot_split_a_log_record() {
         text.chars().all(|c| !c.is_control() || c == '\n'),
         "{text:?}"
     );
+    // Nor does the log hold a Unicode line separator or a bidirectional override.
+    assert!(!text.contains(['\u{2028}', '\u{202e}']), "{text:?}");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 5, "{text:?}");
-    let name = r"a\nb\tc\rd\u{7f}";
+    let name = r"a\nb\tc\rd\u{7f}\u{2028}\u{202e}x";
     let failure = format!(
         "failure stage=plan kind=NotFound source={}/{name} target={}/{name} message=",
         v(&f.src),
