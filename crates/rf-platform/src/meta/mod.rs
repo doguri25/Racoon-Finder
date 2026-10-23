@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 use rf_core::{Attributes, Error, Result, VPath};
 
+use crate::fileid::file_identity;
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
@@ -73,18 +75,34 @@ pub fn set_attributes(path: &VPath, attributes: Attributes) -> Result<()> {
 ///   none to copy.
 /// - macOS, in addition: the `UF_HIDDEN` flag.
 /// - Windows: every alternate data stream (`Zone.Identifier` among them), not the main
-///   `::$DATA` stream. A source file system that cannot list streams (FAT, exFAT) has none to
-///   copy; a stream that cannot be made on `to` is an error.
+///   `::$DATA` stream. A `to` that is a reparse point (a link, a junction) keeps its streams as
+///   they are, because they would be written on what it points to. A source file system that
+///   cannot list streams (FAT, exFAT) has none to copy; any other failure to list them, and a
+///   stream that cannot be made on `to`, is an error.
 ///
-/// A failure does not stop the copy of the rest; the first one is returned. A non-local path
-/// gives `Error::Unsupported` and changes nothing.
+/// If `from` and `to` are the same item (the same path, or the same file identity), nothing is
+/// touched. A failure does not stop the copy of the rest; the first one is returned. A
+/// non-local path gives `Error::Unsupported` and changes nothing.
 pub fn copy_extras(from: &VPath, to: &VPath) -> Result<()> {
     let (Some(source), Some(target)) = (from.to_extended_length(), to.to_extended_length()) else {
         return Err(Error::Unsupported(format!(
             "copying extras needs local paths: {from} to {to}"
         )));
     };
+    // Onto itself there is nothing to copy, and on Windows each stream would be emptied before
+    // it is read.
+    if source == target || same_item(from, to) {
+        return Ok(());
+    }
     imp::copy_extras(from, to, &source, &target)
+}
+
+/// Whether `a` and `b` are one item: only when both identities can be read and are equal.
+fn same_item(a: &VPath, b: &VPath) -> bool {
+    matches!(
+        (file_identity(a), file_identity(b)),
+        (Ok(x), Ok(y)) if x == y
+    )
 }
 
 /// Keeps the first of several errors.
@@ -150,7 +168,8 @@ mod imp {
     }
 
     /// The creation time through `fsetattrlist`, which std uses on macOS. `O_SYMLINK` opens a
-    /// final link itself, as `utimensat` changes it.
+    /// final link itself, as `utimensat` changes it, and `O_NONBLOCK` keeps the open of a FIFO
+    /// from waiting for a writer.
     #[cfg(target_os = "macos")]
     fn set_created(local: &Path, created: SystemTime) -> io::Result<()> {
         use std::fs::{FileTimes, OpenOptions};
@@ -159,7 +178,7 @@ mod imp {
 
         OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_SYMLINK)
+            .custom_flags(libc::O_SYMLINK | libc::O_NONBLOCK)
             .open(local)?
             .set_times(FileTimes::new().set_created(created))
     }

@@ -74,9 +74,9 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
 /// `location` as its path.
 ///
 /// On Windows, once the item is back, the recycle bin's record of it is deleted too: the `$I…`
-/// file next to a `$R…` location inside a `$Recycle.Bin` folder. A failure there is ignored,
-/// because the item is back either way. Any other pair of paths is renamed in the same way,
-/// and nothing else is deleted.
+/// file next to a `$R…` location that sits where the bin keeps its items,
+/// `<root>\$Recycle.Bin\<user SID>\$R…`. A failure there is ignored, because the item is back
+/// either way. Any other pair of paths is renamed in the same way, and nothing else is deleted.
 pub fn restore_from_trash(location: &VPath, original: &VPath) -> Result<()> {
     crate::fsops::rename_no_replace(location, original)?;
     #[cfg(windows)]
@@ -85,21 +85,22 @@ pub fn restore_from_trash(location: &VPath, original: &VPath) -> Result<()> {
 }
 
 /// Deletes the `$I…` record that belongs to the recycle bin item `location` (`$R…`), if
-/// `location` lies inside a `$Recycle.Bin` folder. Errors are ignored.
+/// `location` lies in a user folder of a `$Recycle.Bin` folder (its grandparent). Errors are
+/// ignored.
 #[cfg(windows)]
 fn remove_recycle_record(location: &VPath) {
     use std::ffi::{OsStr, OsString};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
 
     let Some(local) = location.to_extended_length() else {
         return;
     };
-    let bin = OsStr::new("$Recycle.Bin");
-    let in_bin = local.parent().is_some_and(|parent| {
-        parent
-            .components()
-            .any(|part| part.as_os_str().eq_ignore_ascii_case(bin))
-    });
+    let in_bin = local
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .is_some_and(|bin| bin.eq_ignore_ascii_case(OsStr::new("$Recycle.Bin")));
     let Some(name) = local.file_name().filter(|_| in_bin) else {
         return;
     };

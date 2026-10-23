@@ -11,15 +11,18 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use rf_core::{Attributes, Error, Result, VPath};
-use windows::Win32::Foundation::{ERROR_HANDLE_EOF, HANDLE};
+use windows::Win32::Foundation::{
+    ERROR_HANDLE_EOF, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
+    WIN32_ERROR,
+};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_PINNED,
-    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, FILE_ATTRIBUTE_TEMPORARY,
-    FILE_ATTRIBUTE_UNPINNED, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
-    SetFileAttributesW, WIN32_FIND_STREAM_DATA,
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SYSTEM,
+    FILE_ATTRIBUTE_TEMPORARY, FILE_ATTRIBUTE_UNPINNED, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FindClose, FindFirstStreamW, FindNextStreamW,
+    FindStreamInfoStandard, SetFileAttributesW, WIN32_FIND_STREAM_DATA,
 };
 use windows::core::PCWSTR;
 
@@ -89,6 +92,14 @@ pub fn set_attributes(local: &Path, attributes: Attributes) -> io::Result<()> {
 }
 
 pub fn copy_extras(from: &VPath, to: &VPath, source: &Path, target: &Path) -> Result<()> {
+    let target_attributes = std::fs::symlink_metadata(target)
+        .map_err(|e| Error::io("copy_extras", to.clone(), e))?
+        .file_attributes();
+    // The streams of a link or junction would be opened on what it points to, outside what is
+    // being copied, so a reparse point keeps its streams as they are.
+    if target_attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Ok(());
+    }
     let streams = stream_names(source).map_err(|e| Error::io("copy_extras", from.clone(), e))?;
     let mut first = None;
     for stream in streams {
@@ -110,7 +121,14 @@ fn copy_stream(
 ) -> Result<()> {
     let mut reader = File::open(with_stream(source, stream))
         .map_err(|e| Error::io("copy_extras", from.clone(), e))?;
-    let mut writer = File::create(with_stream(target, stream))
+    // `copy_extras` has made sure `target` is no link; the reparse flag keeps it that way if one
+    // takes its place in the meantime.
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(with_stream(target, stream))
         .map_err(|e| Error::io("copy_extras", to.clone(), e))?;
     io::copy(&mut reader, &mut writer).map_err(|e| Error::io("copy_extras", to.clone(), e))?;
     Ok(())
@@ -134,11 +152,22 @@ impl Drop for StreamSearch {
     }
 }
 
+/// The errors with which a stream search fails to start when there is nothing to list: the item
+/// has no stream at all (a folder), or the file system knows no streams (FAT, exFAT, some
+/// network file systems).
+const NO_STREAMS: [WIN32_ERROR; 4] = [
+    ERROR_HANDLE_EOF,
+    ERROR_INVALID_PARAMETER,
+    ERROR_INVALID_FUNCTION,
+    ERROR_NOT_SUPPORTED,
+];
+
 /// The names (`:name:$DATA`) of the alternate data streams of `local`, without the main
 /// `::$DATA` stream.
 ///
-/// If the search cannot even start, the file system knows no streams (FAT, exFAT), or the item
-/// has none at all (a folder), and the answer is an empty list.
+/// A search that cannot start for one of the `NO_STREAMS` reasons gives an empty list. Any other
+/// failure (access denied, for example) is an error, so that a `Zone.Identifier` is never
+/// dropped without a word.
 fn stream_names(local: &Path) -> io::Result<Vec<OsString>> {
     let name = wide(local.as_os_str());
     let mut data = WIN32_FIND_STREAM_DATA::default();
@@ -152,8 +181,10 @@ fn stream_names(local: &Path) -> io::Result<Vec<OsString>> {
             None,
         )
     };
-    let Ok(handle) = first else {
-        return Ok(Vec::new());
+    let handle = match first {
+        Ok(handle) => handle,
+        Err(e) if NO_STREAMS.iter().any(|&code| e.code() == code.into()) => return Ok(Vec::new()),
+        Err(e) => return Err(to_io(&e)),
     };
     let search = StreamSearch(handle);
     let mut names = Vec::new();

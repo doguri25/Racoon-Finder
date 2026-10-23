@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use rf_core::{Attributes, ErrorKind, Scheme, VPath};
@@ -176,6 +177,97 @@ fn copy_extras_copies_alternate_streams() {
     assert_eq!(std::fs::read(t.path().join("to.txt")).unwrap(), b"main");
 }
 
+/// A `to` that is a link keeps its streams: writing them would change the file it points to.
+#[cfg(windows)]
+#[test]
+fn copy_extras_writes_no_stream_through_a_link() {
+    let t = tempfile::tempdir().unwrap();
+    let (pointed, link, from) = (
+        t.path().join("pointed.txt"),
+        t.path().join("link.txt"),
+        t.path().join("from.txt"),
+    );
+    std::fs::write(&pointed, b"main").unwrap();
+    std::fs::write(t.path().join("pointed.txt:Zone.Identifier"), b"keep").unwrap();
+    std::fs::write(&from, b"x").unwrap();
+    std::fs::write(t.path().join("from.txt:Zone.Identifier"), b"new").unwrap();
+    if let Err(e) = std::os::windows::fs::symlink_file(&pointed, &link) {
+        // CI runners may create symbolic links: a failure there is a broken test, not a skip.
+        assert!(
+            std::env::var_os("GITHUB_ACTIONS").is_none(),
+            "cannot create symbolic links on CI: {e}"
+        );
+        eprintln!("skipped: cannot create symbolic links here: {e}");
+        return;
+    }
+    copy_extras(&VPath::local(&from).unwrap(), &VPath::local(&link).unwrap()).unwrap();
+    assert_eq!(
+        std::fs::read(t.path().join("pointed.txt:Zone.Identifier")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(std::fs::read(&pointed).unwrap(), b"main");
+}
+
+/// Onto itself (the same path, or a hard link to the same file) nothing is touched; on Windows
+/// a stream would otherwise be emptied before it is read.
+#[test]
+fn copy_extras_onto_the_same_item_changes_nothing() {
+    let (t, f) = tmp_file("self.txt", b"main");
+    #[cfg(windows)]
+    std::fs::write(t.path().join("self.txt:side"), b"side").unwrap();
+    let hard = t.path().join("hard.txt");
+    std::fs::hard_link(f.as_local().unwrap(), &hard).unwrap();
+    copy_extras(&f, &f).unwrap();
+    copy_extras(&f, &VPath::local(&hard).unwrap()).unwrap();
+    assert_eq!(std::fs::read(f.as_local().unwrap()).unwrap(), b"main");
+    #[cfg(windows)]
+    assert_eq!(
+        std::fs::read(t.path().join("self.txt:side")).unwrap(),
+        b"side"
+    );
+}
+
+/// A final link is changed itself, or left alone, but what it points to never changes.
+#[cfg(unix)]
+#[test]
+fn a_final_link_is_never_followed() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let (pointed, link, from) = (
+        t.path().join("pointed"),
+        t.path().join("link"),
+        t.path().join("from"),
+    );
+    std::fs::write(&pointed, b"keep").unwrap();
+    std::fs::set_permissions(&pointed, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::fs::write(&from, b"x").unwrap();
+    std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let name = if cfg!(target_os = "macos") {
+        "com.example.rf-test"
+    } else {
+        "user.rf-test"
+    };
+    let flags = rustix::fs::XattrFlags::empty();
+    let xattr_ok = rustix::fs::lsetxattr(&from, name, b"value", flags).is_ok();
+    std::os::unix::fs::symlink(&pointed, &link).unwrap();
+    let before = std::fs::metadata(&pointed).unwrap().modified().unwrap();
+
+    let at_link = VPath::local(&link).unwrap();
+    set_times(&at_link, Some(at(T1)), Some(at(T2)), None).unwrap();
+    set_attributes(&at_link, Attributes::READONLY).unwrap();
+    copy_extras(&VPath::local(&from).unwrap(), &at_link).unwrap();
+
+    let meta = std::fs::metadata(&pointed).unwrap();
+    assert_eq!(meta.modified().unwrap(), before);
+    assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+    if xattr_ok {
+        let mut buf = [0u8; 16];
+        assert!(rustix::fs::lgetxattr(&pointed, name, &mut buf[..]).is_err());
+    }
+    let link_meta = std::fs::symlink_metadata(&link).unwrap();
+    assert_eq!(link_meta.modified().unwrap(), at(T1));
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn restore_from_trash_puts_the_item_back() {
@@ -226,18 +318,30 @@ fn restore_never_overwrites() {
     );
 }
 
-/// Outside a recycle bin a `$R…` name is an ordinary file, and the `$I…` file next to it is
-/// someone's data, not a bin record.
+/// The bin keeps its items in `<root>\$Recycle.Bin\<user SID>\$R…`. Anywhere else a `$R…`
+/// name is an ordinary file, and the `$I…` file next to it is someone's data, not a bin record.
 #[test]
-fn restore_moves_only_the_item() {
+fn restore_deletes_a_bin_record_only_next_to_a_bin_item() {
     let t = tempfile::tempdir().unwrap();
-    std::fs::write(t.path().join("$Rabc.txt"), b"item").unwrap();
-    std::fs::write(t.path().join("$Iabc.txt"), b"keep").unwrap();
-    let location = VPath::local(t.path().join("$Rabc.txt")).unwrap();
-    let original = VPath::local(t.path().join("back.txt")).unwrap();
-    restore_from_trash(&location, &original).unwrap();
-    assert_eq!(std::fs::read(t.path().join("back.txt")).unwrap(), b"item");
-    assert_eq!(std::fs::read(t.path().join("$Iabc.txt")).unwrap(), b"keep");
+    // Restores `dir/$R{stem}.txt` and says whether `dir/$I{stem}.txt` is still there.
+    let restore_keeps_record = |dir: &Path, stem: &str| {
+        std::fs::create_dir_all(dir).unwrap();
+        let (item, record) = (
+            dir.join(format!("$R{stem}.txt")),
+            dir.join(format!("$I{stem}.txt")),
+        );
+        std::fs::write(&item, b"item").unwrap();
+        std::fs::write(&record, b"record").unwrap();
+        let back = t.path().join(format!("back-{stem}.txt"));
+        let original = VPath::local(&back).unwrap();
+        restore_from_trash(&VPath::local(&item).unwrap(), &original).unwrap();
+        assert_eq!(std::fs::read(&back).unwrap(), b"item");
+        record.exists()
+    };
+    let user = t.path().join("$Recycle.Bin").join("S-1-5-21-1");
+    assert!(restore_keeps_record(t.path(), "plain"));
+    assert!(restore_keeps_record(&user.join("deeper"), "deep"));
+    assert_eq!(restore_keeps_record(&user, "bin"), cfg!(not(windows)));
 }
 
 #[cfg(unix)]
