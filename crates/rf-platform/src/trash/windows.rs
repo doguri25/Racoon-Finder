@@ -150,12 +150,18 @@ fn run(requested: &VPath, local: &Path) -> std::result::Result<Option<PathBuf>, 
         return Err(Failure::Redirected);
     }
 
+    sink::diag(&format!("run start {}", local.display()));
     let guard = RecycleGuard::new();
     let sink: IFileOperationProgressSink = guard.to_interface();
     // SAFETY: `operation`, `item` and `sink` are live interface pointers.
     let queued = unsafe { operation.DeleteItem(&item, &sink) };
     // SAFETY: as above.
+    sink::diag(&format!("queued={queued:?}"));
     let performed = queued.and_then(|()| unsafe { operation.PerformOperations() });
+    sink::diag(&format!(
+        "run done performed={performed:?} refused={}",
+        guard.get().was_refused()
+    ));
     if guard.get().was_refused() {
         return Err(Failure::Refused);
     }
@@ -219,6 +225,14 @@ mod sink {
 
     use super::file_system_path;
 
+    pub(super) fn diag(msg: &str) {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        eprintln!("[diag {t} {:?}] {msg}", std::thread::current().id());
+    }
+
     /// A progress sink that lets a delete go ahead only if the shell will recycle the item, and
     /// records where the item lands.
     #[implement(IFileOperationProgressSink)]
@@ -250,10 +264,12 @@ mod sink {
 
     impl IFileOperationProgressSink_Impl for RecycleGuard_Impl {
         fn StartOperations(&self) -> windows::core::Result<()> {
+            diag("StartOperations");
             Ok(())
         }
 
         fn FinishOperations(&self, _hrresult: HRESULT) -> windows::core::Result<()> {
+            diag(&format!("FinishOperations hr={:#x}", _hrresult.0));
             Ok(())
         }
 
@@ -326,6 +342,10 @@ mod sink {
             dwflags: u32,
             _psiitem: Ref<'_, IShellItem>,
         ) -> windows::core::Result<()> {
+            diag(&format!(
+                "PreDeleteItem flags={dwflags:#x} item={:?}",
+                _psiitem.as_ref().and_then(file_system_path)
+            ));
             // Without the recycle bit the shell is about to delete the item for good.
             let recycles = u32::try_from(TSF_DELETE_RECYCLE_IF_POSSIBLE.0)
                 .is_ok_and(|recycle| dwflags & recycle != 0);
@@ -344,6 +364,12 @@ mod sink {
             hrdelete: HRESULT,
             psinewlycreated: Ref<'_, IShellItem>,
         ) -> windows::core::Result<()> {
+            diag(&format!(
+                "PostDeleteItem flags={_dwflags:#x} hr={:#x} item={:?} new={:?}",
+                hrdelete.0,
+                _psiitem.as_ref().and_then(file_system_path),
+                psinewlycreated.as_ref().and_then(file_system_path)
+            ));
             if hrdelete.is_ok() {
                 if let Some(location) = psinewlycreated.as_ref().and_then(file_system_path) {
                     *self.location.borrow_mut() = Some(location);

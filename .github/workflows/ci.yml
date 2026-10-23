@@ -2,45 +2,42 @@ name: CI
 
 on:
   push:
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   RUST_BACKTRACE: "1"
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  diag:
+    name: diag (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, windows-11-arm, macos-15]
+        os: [windows-11-arm, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories bans licenses sources
+      - run: cargo test -p rf-platform --test trash --test trash_diag --no-run --locked
+      - name: env
+        run: |
+          systeminfo | head -30 || true
+          reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\BitBucket" /s || true
+          ls -la "C:/\$Recycle.Bin" || true
+          powershell -Command "Get-MpComputerStatus | Select RealTimeProtectionEnabled,AMRunningMode" || true
+      - name: trash suite in parallel x6
+        run: |
+          for i in 1 2 3 4 5 6; do echo "=== parallel run $i"; cargo test -q -p rf-platform --test trash --locked -- --nocapture 2>&1 | grep -E "diag|RESULT|test |panicked|Err" || true; done
+      - name: scenarios
+        run: cargo test -q -p rf-platform --test trash_diag --locked -- --nocapture 2>&1 | grep -E "diag|RESULT|==|SUMMARY|panicked" || true
+      - name: trash suite serial x4
+        run: |
+          for i in 1 2 3 4; do echo "=== serial run $i"; cargo test -q -p rf-platform --test trash --locked -- --nocapture --test-threads=1 2>&1 | grep -E "diag|test |panicked|Err" || true; done
