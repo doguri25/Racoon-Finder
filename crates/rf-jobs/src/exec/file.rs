@@ -46,12 +46,12 @@ pub(crate) struct Source<'a> {
 /// `Stage::Preflight`: its name is longer than a short final name, so the final path alone may
 /// fit where it does not.
 ///
-/// `own_folder` is for a move that cannot tell by identity whether the target folder is the
-/// source's own folder under another path (a link to it): the source's folder, where the
-/// finished temporary file is looked for just before the commit. Found there, the two folders
-/// are one, the commit would put the copy over the source itself and the move would then
-/// delete its only copy, so the commit is refused as `Stage::Commit` and the temporary file
-/// removed.
+/// `own_folder` is for a move, which cannot tell for sure by identity whether the target
+/// folder is the source's own folder under another path (a link to it, or a second mount of
+/// it): the source's folder, where the finished temporary file is looked for just before the
+/// commit. Found there, the two folders are one, the commit would put the copy over the source
+/// itself and the move would then delete its only copy, so the commit is refused as
+/// `Stage::Commit` and the temporary file removed.
 pub(crate) fn copy_file(
     ctx: &mut Ctx<'_>,
     from: Source<'_>,

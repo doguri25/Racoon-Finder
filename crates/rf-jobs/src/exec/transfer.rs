@@ -558,9 +558,10 @@ fn move_entry(
 /// Moves the file or link `source`, which `entry` describes, to `to`: with one rename where it
 /// can (see [`settle_move`]), else by a copy (see `copy_file`) and a delete of the source once
 /// the copy is committed and its name durable (see [`delete_source`]). A `top` item that
-/// reaches its target goes to the outputs. A source without an identity has its copy refused
-/// when the target folder turns out to be its own folder under another path (`own_folder` of
-/// `copy_file`), since nothing else would tell.
+/// reaches its target goes to the outputs. A copy is refused when the target folder turns out
+/// to be the source's own folder under another path (`own_folder` of `copy_file`): without
+/// identities nothing else would tell, and through a second mount of the folder the same item
+/// has another identity.
 ///
 /// The delete is a step of its own, so that trying it again after a failure does not copy the
 /// file again. It comes right after the commit, with no checkpoint between them: a pause or a
@@ -594,9 +595,10 @@ fn move_file(
             // Only two folders merge; a file is never written into one.
             Way::Merge(_) => return Err(Failed::new(Stage::Conflict, taken(target))),
         };
-        // Without an identity, nothing else tells whether the target folder is the source's
-        // own folder under another path.
-        let own_folder = source.parent().filter(|_| entry.identity().is_none());
+        // Nothing else tells for sure whether the target folder is the source's own folder
+        // under another path: without identities nothing does, and through a second mount the
+        // same item has another one.
+        let own_folder = source.parent();
         copy_file(ctx, from, &*dst, &path, commit, own_folder.as_ref())
             .map_err(|failed| failed.writing(&path))?;
         Ok(Some((path, true)))
@@ -686,9 +688,9 @@ enum MovedDir {
 /// them has gone with everything in it: nothing failed, was skipped, was left out by the
 /// pre-flight review or was too deep. A file that another program put in it meanwhile keeps
 /// it, since `remove_dir` removes only an empty folder; that and any other failed removal is a
-/// `Stage::DeleteSource` warning. A folder merged into an existing one is removed only when
-/// its identity shows it is a folder of its own (see [`merged_from_elsewhere`]); a folder
-/// made at the target cannot be the source. A folder this job made gets the extras, times and
+/// `Stage::DeleteSource` warning. A folder merged into an existing one is removed only once
+/// it is known to be a folder of its own, by its identity and, across volumes, by a marker
+/// (see [`merged_from_elsewhere`]); a folder made at the target cannot be the source. A folder this job made gets the extras, times and
 /// attributes of the source before that, while the source is still there to give them. Only a
 /// top-level folder that was renamed or made goes to the outputs; one merged into was there
 /// before.
@@ -774,29 +776,98 @@ fn move_dir(
 
 /// Whether the source folder `source`, which `entry` describes and whose children went into
 /// the existing folder `target`, is known to be a folder of its own, so that removing it once
-/// it is empty removes nothing that was not moved.
-///
-/// Only its identity tells: the listed entry's, else the one `stat` gives (a Windows listing
-/// has none). Without one, `target` may be the source folder itself under another path (a link
-/// to it), every child then merged into itself, and an empty folder in it would look moved
-/// when nothing was. Such a folder is kept, with a `Stage::DeleteSource` warning.
+/// it is empty removes nothing that was not moved. If `target` were `source` under another
+/// path, every child would have merged into itself, and an empty folder in it would look moved
+/// when nothing was. A folder that is not known to be its own is kept, with a
+/// `Stage::DeleteSource` warning that says why (see [`check_own_folder`]).
 fn merged_from_elsewhere(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, target: &VPath) -> bool {
-    let known = entry.identity().is_some()
-        || ctx
-            .provider(source)
-            .and_then(|src| src.stat(source))
-            .is_ok_and(|now| now.identity().is_some());
-    if !known {
-        let error = Error::Unsupported(format!(
-            "kept {source}: cannot tell whether it is the target folder"
-        ));
+    let Err(why) = check_own_folder(ctx, source, entry, target) else {
+        return true;
+    };
+    let error = Error::Unsupported(format!("kept {source}: {why}"));
+    ctx.warn(
+        Failed::new(Stage::DeleteSource, error),
+        Some(source),
+        Some(target),
+    );
+    false
+}
+
+/// Checks that the merged source folder `source`, which `entry` describes, is not the folder
+/// `target` it was merged into under another path, or says why that cannot be told.
+///
+/// 1. Its identity must be known: the listed entry's, else the one `stat` gives (a Windows
+///    listing has none). Without one, a link to the folder could not have been told from it.
+/// 2. When `target` is on the source's volume of the same provider (their volume IDs are
+///    equal), the identity has told already: on one file system the same folder through a
+///    link has the same identity, and the move took it for the source itself instead of
+///    merging into it. This is the merge whose children are renamed.
+/// 3. Otherwise the children were copied (another volume, another provider, or one not
+///    known), and `target` may still be `source` through a second mount of it (bindfs, an NFS
+///    or SMB loopback, one share mounted twice), where the same folder has another identity.
+///    A marker made in `target` tells (see [`shows_through`]).
+fn check_own_folder(
+    ctx: &mut Ctx<'_>,
+    source: &VPath,
+    entry: &Entry,
+    target: &VPath,
+) -> Result<(), String> {
+    const UNKNOWN: &str = "cannot tell whether it is the target folder";
+    let (src, dst) = match (ctx.provider(source), ctx.provider(target)) {
+        (Ok(src), Ok(dst)) => (src, dst),
+        (Err(error), _) | (_, Err(error)) => return Err(format!("{UNKNOWN}: {error}")),
+    };
+    let identity = entry
+        .identity()
+        .or_else(|| src.stat(source).ok()?.identity());
+    let Some((volume, _)) = identity else {
+        return Err(UNKNOWN.to_owned());
+    };
+    let same_volume = src.scheme() == dst.scheme()
+        && dst
+            .stat(target)
+            .is_ok_and(|merged| merged.volume_id == Some(volume));
+    if same_volume {
+        return Ok(());
+    }
+    match shows_through(ctx, &*src, &*dst, source, target) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("it is the target folder under another path".to_owned()),
+        Err(error) => Err(format!("{UNKNOWN}: {error}")),
+    }
+}
+
+/// Whether the folder `target` of `dst` shows through as the folder `source` of `src`: an empty
+/// marker under a temporary name of the job (which crash recovery removes too) is made in
+/// `target` without replacing anything, looked for in `source`, and removed again. A marker
+/// that cannot be removed is a `Stage::Write` warning. An error that leaves it unknown, from
+/// the making or from the look (any but `NotFound`), is returned.
+fn shows_through(
+    ctx: &mut Ctx<'_>,
+    src: &dyn Provider,
+    dst: &dyn Provider,
+    source: &VPath,
+    target: &VPath,
+) -> rf_core::Result<bool> {
+    let marker = ctx.temp_in(target)?;
+    let name = marker
+        .file_name()
+        .ok_or_else(|| Error::Unsupported(format!("no name for a marker in {target}")))?;
+    let there = source.join(name)?;
+    dst.create_file(&marker)?;
+    let seen = match src.stat(&there) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = dst.delete(&marker, DeleteMode::Permanent) {
         ctx.warn(
-            Failed::new(Stage::DeleteSource, error),
+            Failed::new(Stage::Write, error),
             Some(source),
-            Some(target),
+            Some(&marker),
         );
     }
-    known
+    seen
 }
 
 /// The first step of moving the folder `source`, which `entry` describes, to `to`: where it

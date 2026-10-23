@@ -939,3 +939,108 @@ fn a_made_folder_that_cannot_be_taken_back_is_reported() {
     assert!(f.dst.join("dir").is_dir());
     assert_eq!(read(&f.src.join("dir").join("a.txt")), "A");
 }
+
+/// Folders moved into their own folder through a second mount of it (bindfs, an NFS or SMB
+/// loopback, one share mounted twice): the two sides have identities, but different ones, so
+/// each folder merges into itself. A marker made in the merge target shows through at the
+/// source, so no merged folder is removed, and no file is copied over itself.
+#[cfg(unix)]
+#[test]
+fn a_folder_merged_into_itself_across_mounts_is_kept() {
+    use rf_jobs::testkit::Node;
+    for (policy, skipped, refused) in [
+        (ConflictPolicy::Ask, 1, 0),
+        (ConflictPolicy::Overwrite, 0, 1),
+    ] {
+        let f = fx();
+        write_tree(
+            &f.src,
+            &[
+                ("dir/a.txt", "A"),
+                ("dir/empty/", ""),
+                ("only/e1/", ""),
+                ("only/e2/", ""),
+            ],
+        );
+        let before = tree(&f.src);
+        std::os::unix::fs::symlink(&f.src, f.dst.join("alias")).unwrap();
+        let p = FaultyProvider::local(vec![
+            Fault::CrossDevice,
+            Fault::OtherVolume {
+                under: v(f.dst.join("alias")),
+            },
+        ]);
+        let job = spec(
+            TransferMode::Move,
+            &[f.src.join("dir"), f.src.join("only")],
+            &f.dst.join("alias"),
+            with(policy),
+        );
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        // Every folder and file is there, and no marker or temporary file is left.
+        assert_eq!(tree(&f.src), before, "{policy:?}");
+        assert_eq!(
+            tree(&f.dst),
+            BTreeMap::from([("alias".to_string(), Node::Link(f.src.clone()))])
+        );
+        let failures: Vec<_> = rep.failures.iter().map(|x| (x.stage, x.kind)).collect();
+        assert_eq!(
+            (rep.skipped, failures),
+            (
+                skipped,
+                vec![(Stage::Commit, ErrorKind::Unsupported); refused]
+            ),
+            "{policy:?}"
+        );
+        assert!(
+            rep.warnings.iter().all(|w| w.stage == Stage::DeleteSource),
+            "{policy:?}: {:?}",
+            rep.warnings
+        );
+        let kept: BTreeSet<_> = rep
+            .warnings
+            .iter()
+            .filter_map(|w| w.source.clone())
+            .collect();
+        let expected = ["dir/empty", "only/e1", "only/e2"].map(|dir| v(f.src.join(dir)));
+        assert_eq!(
+            (rep.warnings.len(), kept),
+            (3, BTreeSet::from(expected)),
+            "{policy:?}"
+        );
+        assert_eq!(rep.undo, None, "{policy:?}");
+    }
+}
+
+/// A merge into a folder that really is on another volume: the marker is not seen at the
+/// source, so the emptied source folders are removed as usual, and the marker is gone.
+#[test]
+fn a_merge_across_volumes_still_removes_the_emptied_source_folders() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/empty/", "")]);
+    write_tree(&f.dst, &[("dir/other.txt", "O"), ("dir/empty/", "")]);
+    let p = FaultyProvider::local(vec![
+        Fault::CrossDevice,
+        Fault::OtherVolume { under: v(&f.dst) },
+    ]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert_eq!(rep.warnings, Vec::new());
+    assert!(!f.src.join("dir").exists());
+    assert_eq!(
+        tree(&f.dst).into_keys().collect::<Vec<_>>(),
+        ["dir", "dir/a.txt", "dir/empty", "dir/other.txt"]
+    );
+    let moves = vec![MovedItem {
+        from: v(f.src.join("dir/a.txt")),
+        to: v(f.dst.join("dir/a.txt")),
+    }];
+    assert_eq!(
+        rep.undo,
+        Some(UndoRecord::Moved {
+            moves,
+            created_dirs: vec![],
+            removed_dirs: vec![v(f.src.join("dir/empty")), v(f.src.join("dir"))]
+        })
+    );
+}

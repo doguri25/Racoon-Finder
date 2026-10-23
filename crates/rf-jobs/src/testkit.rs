@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use rf_core::{Entry, Error, Result, Scheme, VPath};
+use rf_core::{Entry, Error, Result, Scheme, VPath, VolumeId};
 use rf_vfs::{
     CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LinkTarget, LocalProvider,
     MetadataPatch, Provider, ReadStream, RenameMode, Vfs, WatchHandle, WatchSink, WriteMode,
@@ -289,6 +289,10 @@ pub enum Fault {
     FailSyncDir,
     /// Every `remove_dir` fails with `injected remove_dir failure` and removes nothing.
     FailRemoveDir,
+    /// `stat`, `stat_target` and `list` give the items at or under `under` another volume ID,
+    /// as the same items show through a second mount of their file system (bindfs, an NFS or
+    /// SMB loopback, one share mounted twice). Their file IDs stay as they are.
+    OtherVolume { under: VPath },
 }
 
 impl Fault {
@@ -433,11 +437,20 @@ impl FaultyProvider {
         self.counters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// `entry` without its identity under [`Fault::NoIdentity`], else as it is.
-    fn identity_of(&self, mut entry: Entry) -> Entry {
+    /// `entry`, which describes the item at `path`: without its identity under
+    /// [`Fault::NoIdentity`], with another volume ID under a [`Fault::OtherVolume`] above it,
+    /// else as it is.
+    fn identity_of(&self, path: &VPath, mut entry: Entry) -> Entry {
         if self.faults.contains(&Fault::NoIdentity) {
             entry.volume_id = None;
             entry.file_id = None;
+        }
+        let other_volume = self
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::OtherVolume { under } if path.starts_with(under)));
+        if other_volume {
+            entry.volume_id = entry.volume_id.map(|volume| VolumeId(!volume.0));
         }
         entry
     }
@@ -489,7 +502,11 @@ impl Provider for FaultyProvider {
         sink: &mut dyn FnMut(Vec<Entry>),
     ) -> Result<()> {
         self.inner.list(dir, cancel, &mut |batch: Vec<Entry>| {
-            sink(batch.into_iter().map(|e| self.identity_of(e)).collect());
+            let batch = batch.into_iter().map(|entry| match dir.join(&entry.name) {
+                Ok(path) => self.identity_of(&path, entry),
+                Err(_) => entry,
+            });
+            sink(batch.collect());
         })
     }
 
@@ -501,7 +518,7 @@ impl Provider for FaultyProvider {
             let error = io::Error::from(io::ErrorKind::PermissionDenied);
             return Err(Error::io("stat", path.clone(), error));
         }
-        self.inner.stat(path).map(|e| self.identity_of(e))
+        self.inner.stat(path).map(|e| self.identity_of(path, e))
     }
 
     fn create_dir(&self, path: &VPath) -> Result<()> {
@@ -596,7 +613,9 @@ impl Provider for FaultyProvider {
     }
 
     fn stat_target(&self, path: &VPath) -> Result<Entry> {
-        self.inner.stat_target(path).map(|e| self.identity_of(e))
+        self.inner
+            .stat_target(path)
+            .map(|e| self.identity_of(path, e))
     }
 
     fn read_link(&self, path: &VPath) -> Result<LinkTarget> {
@@ -936,6 +955,44 @@ mod tests {
             .remove_dir(&local(&empty))
             .unwrap();
         assert!(!empty.exists());
+    }
+
+    #[test]
+    fn other_volume_changes_the_volume_of_what_is_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tree(dir.path(), &[("a/x", "x"), ("b", "b")]);
+        let (a, x, b) = (
+            local(&dir.path().join("a")),
+            local(&dir.path().join("a").join("x")),
+            local(&dir.path().join("b")),
+        );
+        let plain = FaultyProvider::local(vec![]);
+        let p = FaultyProvider::local(vec![Fault::OtherVolume { under: a.clone() }]);
+        for path in [&a, &x] {
+            let (real, seen) = (plain.stat(path).unwrap(), p.stat(path).unwrap());
+            assert_ne!(seen.volume_id, real.volume_id);
+            assert_eq!(seen.file_id, real.file_id);
+            assert_eq!(p.stat_target(path).unwrap().volume_id, seen.volume_id);
+        }
+        assert_eq!(
+            p.stat(&b).unwrap().volume_id,
+            plain.stat(&b).unwrap().volume_id
+        );
+        // A listing has identities off Windows only.
+        #[cfg(unix)]
+        {
+            let mut listed = Vec::new();
+            p.list(&local(dir.path()), &CancelToken::new(), &mut |batch| {
+                listed.extend(batch.into_iter().map(|e| (e.name, e.volume_id)));
+            })
+            .unwrap();
+            listed.sort();
+            let expected = [
+                ("a".into(), p.stat(&a).unwrap().volume_id),
+                ("b".into(), plain.stat(&b).unwrap().volume_id),
+            ];
+            assert_eq!(listed, expected);
+        }
     }
 
     #[test]

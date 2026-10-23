@@ -582,9 +582,15 @@ impl<'e> Ctx<'e> {
         let parent = target.parent().ok_or_else(|| {
             Error::Unsupported(format!("no folder to write a temporary file in: {target}"))
         })?;
+        self.temp_in(&parent)
+    }
+
+    /// A new temporary name in the folder `folder`, numbered on from the job's other ones (see
+    /// [`temp_for`](Self::temp_for)).
+    pub(crate) fn temp_in(&mut self, folder: &VPath) -> rf_core::Result<VPath> {
         let seq = self.temp_seq;
         self.temp_seq += 1;
-        Ok(parent.join(temp_name(self.id, seq))?)
+        Ok(folder.join(temp_name(self.id, seq))?)
     }
 
     /// Records what the plan expects to process and announces it.
