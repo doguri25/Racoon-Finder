@@ -107,6 +107,25 @@ fn parse_rejects_unknown_scheme_and_bad_escape() {
     );
 }
 
+#[test]
+fn unimplemented_scheme_is_unsupported() {
+    assert!(matches!(
+        VPath::parse("archive:/x"),
+        Err(PathError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn scheme_names_ignore_ascii_case() {
+    let p = local(&["x"]);
+    let uri = p.to_uri();
+    assert!(uri.starts_with("local:"));
+    for name in ["LOCAL", "Local"] {
+        let spelled = uri.replacen("local", name, 1);
+        assert_eq!(VPath::parse(&spelled), Ok(p.clone()), "{spelled}");
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;
@@ -191,6 +210,16 @@ mod windows {
             VPath::local(r"C:\a\b:c"),
             Err(PathError::InvalidName("b:c".into()))
         );
+    }
+
+    #[test]
+    fn unc_share_root_needs_no_trailing_separator() {
+        let root = Some(PathBuf::from(r"\\srv\share\"));
+        assert_eq!(lp(r"\\srv\share"), root);
+        assert_eq!(lp(r"\\srv\share\"), root);
+        assert_eq!(lp(r"\\?\UNC\srv\share"), root);
+        assert_eq!(lp(r"\\srv\share\.."), root);
+        assert_eq!(lp(r"\\srv"), None);
     }
 
     #[test]
