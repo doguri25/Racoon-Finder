@@ -1,6 +1,8 @@
 //! The only way the app touches operating system settings.
 
 pub mod fake;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use crate::change::{Before, Change};
 use crate::error::LedgerError;
@@ -51,7 +53,16 @@ impl SystemBackend for UnsupportedBackend {
     }
 }
 
-/// The backend for the operating system this build runs on.
+/// The backend for the operating system this build runs on: on Windows the registry of the
+/// current user ([`windows::RegistryBackend`]).
+#[cfg(target_os = "windows")]
+pub fn os_backend() -> Box<dyn SystemBackend> {
+    Box::new(windows::RegistryBackend)
+}
+
+/// The backend for the operating system this build runs on: none here, so every change is
+/// refused ([`UnsupportedBackend`]).
+#[cfg(not(target_os = "windows"))]
 pub fn os_backend() -> Box<dyn SystemBackend> {
     Box::new(UnsupportedBackend)
 }
