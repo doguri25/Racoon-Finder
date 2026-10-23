@@ -3,11 +3,15 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
-use rf_core::{EntryKind, ErrorKind, VPath};
+use rf_core::{Attributes, EntryKind, ErrorKind, VPath};
 
-use crate::{CancelToken, DeleteMode, Deleted, LIST_BATCH_SIZE, Provider, RenameMode, WriteMode};
+use crate::{
+    CancelToken, DeleteMode, Deleted, LIST_BATCH_SIZE, LinkTarget, MetadataPatch, Provider,
+    RenameMode, WriteMode,
+};
 
 fn fresh(p: &dyn Provider, root: &VPath, name: &str) -> VPath {
     let d = root.join(name).unwrap();
@@ -386,6 +390,127 @@ fn symlink_dir(target: &Path, link: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn symlink_dir(target: &Path, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
+}
+
+/// Links are made and read back exactly as given (a relative target stays relative), never
+/// replace anything, and are not followed by `stat`, `delete` or `remove_dir`; `stat_target`
+/// follows them to what they lead to.
+///
+/// Skipped, with a note on stderr, on Windows when the OS refuses the first link (no Developer
+/// Mode and no privilege to make links), which a provider may pass on.
+#[allow(
+    clippy::print_stderr,
+    reason = "a check that cannot run says so, as the skipped tests do"
+)]
+pub fn check_links(p: &dyn Provider, root: &VPath) {
+    let d = fresh(p, root, "links");
+    let file = d.join("f.txt").unwrap();
+    write_all(p, &file, WriteMode::CreateNew, b"target");
+    let sub = fresh(p, &d, "sub");
+    let (flink, dlink) = (d.join("flink").unwrap(), d.join("dlink").unwrap());
+    let ft = LinkTarget {
+        target: PathBuf::from("f.txt"),
+        is_dir: false,
+    };
+    match p.create_symlink(&flink, &ft) {
+        Ok(()) => {}
+        Err(e) if cfg!(windows) => {
+            eprintln!("skipped: the OS refuses links here (no Developer Mode): {e}");
+            return;
+        }
+        Err(e) => panic!("create_symlink failed: {e}"),
+    }
+    let dt = LinkTarget {
+        target: PathBuf::from("sub"),
+        is_dir: true,
+    };
+    p.create_symlink(&dlink, &dt).unwrap();
+    assert_eq!(p.stat(&flink).unwrap().kind, EntryKind::Symlink);
+    assert_eq!(p.stat(&dlink).unwrap().kind, EntryKind::Symlink);
+    assert_eq!(p.read_link(&flink).unwrap(), ft);
+    assert_eq!(p.read_link(&dlink).unwrap(), dt);
+    // `stat_target` describes what a link leads to, under the name of the link.
+    let target = p.stat_target(&flink).unwrap();
+    assert_eq!(
+        (target.name.as_os_str(), target.kind, target.size),
+        (OsStr::new("flink"), EntryKind::File, 6)
+    );
+    if let (Some(through_link), Some(direct)) =
+        (target.identity(), p.stat(&file).unwrap().identity())
+    {
+        assert_eq!(through_link, direct);
+    }
+    assert_eq!(p.stat_target(&dlink).unwrap().kind, EntryKind::Dir);
+    assert_eq!(p.stat_target(&file).unwrap().kind, EntryKind::File);
+    // A link to nothing can be made and read back, but has no target to describe.
+    let dangling = d.join("dangling").unwrap();
+    let nowhere = LinkTarget {
+        target: PathBuf::from("missing"),
+        is_dir: false,
+    };
+    p.create_symlink(&dangling, &nowhere).unwrap();
+    assert_eq!(p.read_link(&dangling).unwrap(), nowhere);
+    assert_eq!(kind_of(p.stat_target(&dangling)), ErrorKind::NotFound);
+    assert_eq!(
+        kind_of(p.create_symlink(&flink, &dt)),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(p.read_link(&flink).unwrap(), ft);
+    assert!(p.read_link(&file).is_err());
+    p.delete(&flink, DeleteMode::Permanent).unwrap();
+    assert_eq!(read_all(p, &file), b"target");
+    // `remove_dir` never follows a link: it fails (Unix) or removes only the link (Windows),
+    // and the empty folder the link leads to stays.
+    let _ = p.remove_dir(&dlink);
+    assert_eq!(p.stat(&sub).unwrap().kind, EntryKind::Dir);
+}
+
+/// `set_metadata` changes only what the patch holds, and attributes become exactly the given
+/// value.
+pub fn check_metadata(p: &dyn Provider, root: &VPath) {
+    let d = fresh(p, root, "meta");
+    let f = d.join("f.txt").unwrap();
+    write_all(p, &f, WriteMode::CreateNew, b"x");
+    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let times = MetadataPatch {
+        modified: Some(when),
+        ..MetadataPatch::default()
+    };
+    p.set_metadata(&f, &times).unwrap();
+    assert_eq!(p.stat(&f).unwrap().modified, Some(when));
+    let mut attrs = MetadataPatch {
+        attributes: Some(Attributes::READONLY),
+        ..MetadataPatch::default()
+    };
+    p.set_metadata(&f, &attrs).unwrap();
+    let s = p.stat(&f).unwrap();
+    assert!(s.attributes.contains(Attributes::READONLY));
+    assert_eq!(s.modified, Some(when));
+    attrs.attributes = Some(Attributes::empty());
+    p.set_metadata(&f, &attrs).unwrap();
+    assert!(
+        !p.stat(&f)
+            .unwrap()
+            .attributes
+            .contains(Attributes::READONLY)
+    );
+}
+
+/// `remove_dir` removes an empty folder and nothing else: a folder with something in it and a
+/// file stay as they are.
+pub fn check_remove_dir(p: &dyn Provider, root: &VPath) {
+    let d = fresh(p, root, "rmdir");
+    let (empty, full) = (d.join("empty").unwrap(), d.join("full").unwrap());
+    p.create_dir(&empty).unwrap();
+    p.create_dir(&full).unwrap();
+    let keep = full.join("keep.txt").unwrap();
+    write_all(p, &keep, WriteMode::CreateNew, b"keep");
+    assert_eq!(kind_of(p.remove_dir(&full)), ErrorKind::DirectoryNotEmpty);
+    assert!(p.remove_dir(&keep).is_err());
+    assert_eq!(read_all(p, &keep), b"keep");
+    p.remove_dir(&empty).unwrap();
+    assert_eq!(kind_of(p.stat(&empty)), ErrorKind::NotFound);
+    assert_eq!(kind_of(p.remove_dir(&empty)), ErrorKind::NotFound);
 }
 
 /// Names every provider must store and list byte-for-byte. Each one is tested in its own

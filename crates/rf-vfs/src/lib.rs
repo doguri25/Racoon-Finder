@@ -14,8 +14,8 @@ pub use cancel::CancelToken;
 pub use filter::VisibilityFilter;
 pub use local::LocalProvider;
 pub use provider::{
-    Capabilities, DeleteMode, Deleted, LIST_BATCH_SIZE, Provider, ReadStream, RenameMode,
-    WriteMode, WriteStream,
+    Capabilities, DeleteMode, Deleted, LIST_BATCH_SIZE, LinkTarget, MetadataPatch, Provider,
+    ReadStream, RenameMode, WriteMode, WriteStream,
 };
 pub use registry::Vfs;
 pub use rf_platform::DiskSpace;

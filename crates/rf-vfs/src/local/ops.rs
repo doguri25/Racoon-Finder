@@ -1,4 +1,4 @@
-//! Renaming, deleting, and the read and write streams.
+//! Renaming, deleting, links, metadata, and the read and write streams.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -7,7 +7,9 @@ use rf_core::{Error, ErrorKind, Result, VPath};
 
 use super::native;
 use crate::names::fold_name;
-use crate::provider::{DeleteMode, Deleted, ReadStream, RenameMode, WriteMode, WriteStream};
+use crate::provider::{
+    DeleteMode, Deleted, LinkTarget, MetadataPatch, ReadStream, RenameMode, WriteMode, WriteStream,
+};
 
 /// Renames or moves `from` to `to`; see `Provider::rename`.
 ///
@@ -123,6 +125,54 @@ fn delete_permanently(path: &VPath) -> Result<()> {
     } else {
         std::fs::remove_file(&local).map_err(fail)
     }
+}
+
+/// Removes the empty folder `path`; see `Provider::remove_dir`. The OS itself refuses a folder
+/// with anything in it and a file, and does not follow a final link: Unix refuses a link, and
+/// Windows removes a folder link or junction itself.
+pub(super) fn remove_dir(path: &VPath) -> Result<()> {
+    std::fs::remove_dir(native(path)?).map_err(|e| Error::io("remove_dir", path.clone(), e))
+}
+
+/// What the link at `path` leads to; see `Provider::read_link`.
+pub(super) fn read_link(path: &VPath) -> Result<LinkTarget> {
+    let local = native(path)?;
+    let fail = |e| Error::io("read_link", path.clone(), e);
+    let target = std::fs::read_link(&local).map_err(fail)?;
+    // Windows makes folder links apart from file links, so the link itself tells; elsewhere
+    // only what it leads to can.
+    #[cfg(windows)]
+    let is_dir = std::os::windows::fs::FileTypeExt::is_symlink_dir(
+        &std::fs::symlink_metadata(&local).map_err(fail)?.file_type(),
+    );
+    #[cfg(not(windows))]
+    let is_dir = std::fs::metadata(&local).is_ok_and(|meta| meta.is_dir());
+    Ok(LinkTarget { target, is_dir })
+}
+
+/// Makes the link `link` to `target`; see `Provider::create_symlink`. The OS never replaces
+/// an existing item with a link.
+pub(super) fn create_symlink(link: &VPath, target: &LinkTarget) -> Result<()> {
+    let local = native(link)?;
+    #[cfg(windows)]
+    let made = if target.is_dir {
+        std::os::windows::fs::symlink_dir(&target.target, &local)
+    } else {
+        std::os::windows::fs::symlink_file(&target.target, &local)
+    };
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&target.target, &local);
+    made.map_err(|e| Error::io("create_symlink", link.clone(), e))
+}
+
+/// Puts the times, then the attributes of `patch` on `path`; see `Provider::set_metadata`.
+pub(super) fn set_metadata(path: &VPath, patch: &MetadataPatch) -> Result<()> {
+    // Without any time this opens nothing, but it still refuses a path that is not local.
+    rf_platform::set_times(path, patch.modified, patch.accessed, patch.created)?;
+    if let Some(attributes) = patch.attributes {
+        rf_platform::set_attributes(path, attributes)?;
+    }
+    Ok(())
 }
 
 /// Opens `path` for reading; the `File` itself is the stream.

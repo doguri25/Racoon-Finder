@@ -117,6 +117,38 @@ fn watch_handle_drops_its_guard() {
 }
 
 #[test]
+fn new_methods_have_safe_defaults() {
+    let f = Fake(Scheme::Remote);
+    let p = VPath::new(Scheme::Remote, "c", &["x"]).unwrap();
+    let link = rf_vfs::LinkTarget {
+        target: "t".into(),
+        is_dir: false,
+    };
+    assert_eq!(
+        f.stat_target(&p).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(f.read_link(&p).unwrap_err().kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        f.create_symlink(&p, &link).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        f.set_metadata(&p, &rf_vfs::MetadataPatch::default())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(f.remove_dir(&p).unwrap_err().kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        f.restore_trashed(&p, &p).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    assert!(f.copy_extras(&p, &p).is_ok());
+    assert_eq!(f.fs_name(&p), None);
+}
+
+#[test]
 fn disk_space_is_exported_from_provider_and_root() {
     use rf_vfs::provider::DiskSpace as FromProvider;
 

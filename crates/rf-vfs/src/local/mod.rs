@@ -12,8 +12,8 @@ use rf_core::{Entry, EntryKind, Error, Result, Scheme, VPath};
 
 use crate::cancel::CancelToken;
 use crate::provider::{
-    Capabilities, DeleteMode, Deleted, DiskSpace, Provider, ReadStream, RenameMode, WriteMode,
-    WriteStream,
+    Capabilities, DeleteMode, Deleted, DiskSpace, LinkTarget, MetadataPatch, Provider, ReadStream,
+    RenameMode, WriteMode, WriteStream,
 };
 use crate::watch::{WatchHandle, WatchSink};
 
@@ -52,10 +52,11 @@ pub(crate) fn kind_of(file_type: FileType) -> EntryKind {
     }
 }
 
-/// Builds the `Entry` named `name` from `meta`, which must have been taken without following
-/// links. On Unix the volume and file IDs come from the metadata, unless the file system
-/// reports no usable ID (inode 0); on Windows they need an open handle per file. In both of
-/// those cases they stay empty here.
+/// Builds the `Entry` named `name` from `meta`. For `stat` and `list` the metadata is taken
+/// without following links; for `stat_target` it is taken through them and so describes what
+/// the link leads to. On Unix the volume and file IDs come from the metadata, unless the file
+/// system reports no usable ID (inode 0); on Windows they need an open handle per file. In both
+/// of those cases they stay empty here.
 pub(crate) fn entry_from_metadata(name: OsString, meta: &Metadata) -> Entry {
     let kind = kind_of(meta.file_type());
     let attributes = rf_platform::entry_attributes(&name, meta);
@@ -72,6 +73,38 @@ pub(crate) fn entry_from_metadata(name: OsString, meta: &Metadata) -> Entry {
         entry.file_id = Some(file);
     }
     entry
+}
+
+/// The entry `stat` gives for `path`, or with `follow` the one `stat_target` gives: the
+/// metadata and the identity of what `path` leads to through every link.
+fn stat_entry(path: &VPath, follow: bool) -> Result<Entry> {
+    let local = native(path)?;
+    let meta = if follow {
+        std::fs::metadata(&local)
+    } else {
+        std::fs::symlink_metadata(&local)
+    }
+    .map_err(|e| Error::io("stat", path.clone(), e))?;
+    // A root has no file name; it is shown under its whole path.
+    let name = path
+        .file_name()
+        .or_else(|| path.as_local().map(Path::as_os_str))
+        .unwrap_or_default();
+    let mut entry = entry_from_metadata(name.to_owned(), &meta);
+    if entry.identity().is_none() {
+        // Windows: the IDs need a handle. A file system without usable IDs fails this too,
+        // and without them the entry is still correct.
+        let identity = if follow {
+            rf_platform::resolved_file_identity(path)
+        } else {
+            rf_platform::file_identity(path)
+        };
+        if let Ok((volume, file)) = identity {
+            entry.volume_id = Some(volume);
+            entry.file_id = Some(file);
+        }
+    }
+    Ok(entry)
 }
 
 impl Provider for LocalProvider {
@@ -103,24 +136,7 @@ impl Provider for LocalProvider {
     }
 
     fn stat(&self, path: &VPath) -> Result<Entry> {
-        let local = native(path)?;
-        let meta =
-            std::fs::symlink_metadata(&local).map_err(|e| Error::io("stat", path.clone(), e))?;
-        // A root has no file name; it is shown under its whole path.
-        let name = path
-            .file_name()
-            .or_else(|| path.as_local().map(Path::as_os_str))
-            .unwrap_or_default();
-        let mut entry = entry_from_metadata(name.to_owned(), &meta);
-        if entry.identity().is_none() {
-            // Windows: the IDs need a handle. A file system without usable IDs fails this too,
-            // and without them the entry is still correct.
-            if let Ok((volume, file)) = rf_platform::file_identity(path) {
-                entry.volume_id = Some(volume);
-                entry.file_id = Some(file);
-            }
-        }
-        Ok(entry)
+        stat_entry(path, false)
     }
 
     fn create_dir(&self, path: &VPath) -> Result<()> {
@@ -158,5 +174,39 @@ impl Provider for LocalProvider {
 
     fn watch(&self, dir: &VPath, sink: WatchSink) -> Result<WatchHandle> {
         watch::start(dir, sink)
+    }
+
+    fn stat_target(&self, path: &VPath) -> Result<Entry> {
+        stat_entry(path, true)
+    }
+
+    fn read_link(&self, path: &VPath) -> Result<LinkTarget> {
+        ops::read_link(path)
+    }
+
+    fn create_symlink(&self, link: &VPath, target: &LinkTarget) -> Result<()> {
+        ops::create_symlink(link, target)
+    }
+
+    fn set_metadata(&self, path: &VPath, patch: &MetadataPatch) -> Result<()> {
+        ops::set_metadata(path, patch)
+    }
+
+    fn copy_extras(&self, from: &VPath, to: &VPath) -> Result<()> {
+        rf_platform::copy_extras(from, to)
+    }
+
+    fn remove_dir(&self, path: &VPath) -> Result<()> {
+        ops::remove_dir(path)
+    }
+
+    fn fs_name(&self, path: &VPath) -> Option<String> {
+        rf_platform::volume_info(path)
+            .ok()
+            .and_then(|info| info.fs_name)
+    }
+
+    fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
+        rf_platform::restore_from_trash(location, original)
     }
 }
