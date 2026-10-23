@@ -1,0 +1,3 @@
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+doc-valid-idents = ["macOS", "NTFS", "APFS", "ReFS", "exFAT", "WTF-8", "WTF-16", "UTF-16", "FileId", "VolumeId", ".."]
