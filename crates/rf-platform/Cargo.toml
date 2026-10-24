@@ -1,0 +1,35 @@
+[package]
+name = "rf-platform"
+description = "OS integration: natural sort, trash, file ids, attributes, known folders, volumes, rename, directory watching."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dirs = "7.0.0"
+rf-core = { version = "0.1.0", path = "../rf-core" }
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Ioctl", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+windows-core = "0.62.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.191"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities"] }
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.5", features = ["fs"] }
+
+[target."cfg(not(windows))".dependencies]
+notify = "8.2.0"
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3.27.0"

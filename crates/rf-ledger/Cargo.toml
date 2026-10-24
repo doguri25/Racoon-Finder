@@ -1,0 +1,28 @@
+[package]
+name = "rf-ledger"
+description = "System change ledger: records every OS change with its before-state and reverts them for a clean uninstall."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rf-core = { version = "0.1.0", path = "../rf-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+toml = "1.1.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-registry = "0.6.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFArray", "CFData", "CFError", "CFNumber", "CFPreferences", "CFPropertyList", "CFString"] }

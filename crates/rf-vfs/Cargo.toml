@@ -1,0 +1,25 @@
+[package]
+name = "rf-vfs"
+description = "Virtual file system: the Provider trait, the local provider, sorting, filtering and conformance checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = "2.13.2"
+rf-core = { version = "0.1.0", path = "../rf-core" }
+rf-platform = { version = "0.1.0", path = "../rf-platform" }
+
+[dev-dependencies]
+criterion = "0.7.0"
+tempfile = "3.27.0"
+
+[[bench]]
+name = "list"
+harness = false
