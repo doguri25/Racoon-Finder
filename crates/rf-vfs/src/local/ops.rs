@@ -169,9 +169,10 @@ pub(super) fn remove_dir(path: &VPath) -> Result<()> {
 /// It is `rf_platform::sync_dir`: on Unix the folder is opened with `O_DIRECTORY | O_NONBLOCK`
 /// (an item that is no folder, a FIFO among them, is refused at once) and synced, with the
 /// macOS fallback of `rf_platform::sync_file` from `F_FULLFSYNC` to `fsync`; on Windows it is
-/// opened with write access and flushed (`FlushFileBuffers`), since NTFS writes its log
-/// lazily. Only a file system that cannot sync a folder at all (`EINVAL`, `EOPNOTSUPP` or
-/// `ENOSYS` on Unix; `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED` or
+/// opened with the one right the flush needs (`FILE_WRITE_DATA`, or `FILE_APPEND_DATA` where
+/// only that is granted, as to users on `C:\`) and flushed (`FlushFileBuffers`), since NTFS
+/// writes its log lazily. Only a file system that cannot sync a folder at all (`EINVAL`,
+/// `EOPNOTSUPP` or `ENOSYS` on Unix; `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED` or
 /// `ERROR_INVALID_PARAMETER` on Windows) counts as synced. Every other error fails, with the op
 /// `"sync_dir"`, and a move then keeps its source: a folder that can be written to and entered
 /// but not read (the macOS `~/Public/Drop Box`) cannot be opened for the sync, so a move across
@@ -197,7 +198,8 @@ pub(super) fn read_link(path: &VPath) -> Result<LinkTarget> {
 }
 
 /// Makes the link `link` to `target`; see `Provider::create_symlink`. The OS never replaces
-/// an existing item with a link.
+/// an existing item with a link. On Windows `CreateSymbolicLinkW` refuses a path a folder
+/// takes with `ERROR_ACCESS_DENIED`, not `ERROR_ALREADY_EXISTS`; see [`link_refused`].
 pub(super) fn create_symlink(link: &VPath, target: &LinkTarget) -> Result<()> {
     let local = native(link)?;
     #[cfg(windows)]
@@ -205,10 +207,27 @@ pub(super) fn create_symlink(link: &VPath, target: &LinkTarget) -> Result<()> {
         std::os::windows::fs::symlink_dir(&target.target, &local)
     } else {
         std::os::windows::fs::symlink_file(&target.target, &local)
-    };
+    }
+    .map_err(|e| link_refused(e, || std::fs::symlink_metadata(&local).is_ok()));
     #[cfg(unix)]
     let made = std::os::unix::fs::symlink(&target.target, &local);
     made.map_err(|e| Error::io("create_symlink", link.clone(), e))
+}
+
+/// The error of a link the OS would not make: `error`, except that a `PermissionDenied` while
+/// something is at the link's path (`taken`) is `AlreadyExists`. Windows answers a path a
+/// folder takes with `ERROR_ACCESS_DENIED`, and the path being taken is the reason the link
+/// cannot be made there, as `EEXIST` says on Unix.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used on Windows; tested on every OS")
+)]
+fn link_refused(error: io::Error, taken: impl FnOnce() -> bool) -> io::Error {
+    if error.kind() == io::ErrorKind::PermissionDenied && taken() {
+        io::ErrorKind::AlreadyExists.into()
+    } else {
+        error
+    }
 }
 
 /// Puts the times, then the attributes of `patch` on `path`; see `Provider::set_metadata`.
@@ -223,7 +242,9 @@ pub(super) fn set_metadata(path: &VPath, patch: &MetadataPatch) -> Result<()> {
 
 /// Opens `path` for reading, if it is a regular file (`rf_platform::open_regular_file`): an item
 /// that is no file by then, such as a FIFO put in the place of a file after the file was found,
-/// fails with `ErrorKind::Unsupported` ("not a regular file") at once, and never blocks.
+/// fails with `ErrorKind::Unsupported` (`rf_platform::not_a_regular_file`) at once, and never
+/// blocks. A file another program holds a lease on is waited for about 2 s, and then fails with
+/// `ErrorKind::Busy`.
 pub(super) fn open_read(path: &VPath) -> Result<Box<dyn ReadStream>> {
     let file = rf_platform::open_regular_file(&native(path)?)
         .map_err(|e| Error::io("open_read", path.clone(), e))?;
@@ -357,5 +378,39 @@ impl WriteStream for LocalWriter {
         self.file.seek(SeekFrom::Current(offset)).map_err(fail)?;
         self.holes = Holes::Made;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::io;
+
+    use super::link_refused;
+
+    /// A link refused for a path that something takes (on Windows a folder's, with
+    /// `ERROR_ACCESS_DENIED`) is `AlreadyExists`.
+    #[test]
+    fn a_link_refused_where_something_is_already_exists() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            link_refused(denied, || true).kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    /// A denial at a free path stays one, and another error is kept without a look at the
+    /// path (`ERROR_PRIVILEGE_NOT_HELD`, 1314, of a user who may not make links).
+    #[test]
+    fn a_link_refused_otherwise_keeps_its_error() {
+        let kept = link_refused(io::ErrorKind::PermissionDenied.into(), || false);
+        assert_eq!(kept.kind(), io::ErrorKind::PermissionDenied);
+        let looked = Cell::new(false);
+        let refused = link_refused(io::Error::from_raw_os_error(1314), || {
+            looked.set(true);
+            true
+        });
+        assert_eq!(refused.raw_os_error(), Some(1314));
+        assert!(!looked.get());
     }
 }

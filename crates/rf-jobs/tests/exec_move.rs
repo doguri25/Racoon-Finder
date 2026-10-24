@@ -790,6 +790,36 @@ fn cancelling_a_move_in_the_middle_of_a_copy_keeps_the_source() {
     assert_eq!(rep.undo, None);
 }
 
+/// A target that cannot be examined (its `stat` fails) is never taken for a free name, not even
+/// to be overwritten: the move fails at the conflict step and keeps its source, whether it
+/// would rename or copy across volumes.
+#[test]
+fn a_target_that_cannot_be_examined_keeps_the_source() {
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|cross| [ConflictPolicy::Overwrite, ConflictPolicy::Ask].map(|c| (cross, c)));
+    for (cross_device, conflict) in cases {
+        let f = fx();
+        std::fs::write(f.src.join("a.txt"), "A").unwrap();
+        let mut faults = vec![Fault::FailStat {
+            name: "b.txt".into(),
+        }];
+        if cross_device {
+            faults.push(Fault::CrossDevice);
+        }
+        let p = FaultyProvider::local(faults);
+        let job = mv_to(&f.src.join("a.txt"), &f.dst.join("b.txt"), with(conflict));
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        let case = format!("cross device {cross_device}, {conflict:?}");
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors, "{case}");
+        assert_eq!(rep.failures.len(), 1, "{case}: {:?}", rep.failures);
+        assert_eq!(rep.failures[0].stage, Stage::Conflict, "{case}");
+        assert_eq!(read(&f.src.join("a.txt")), "A", "{case}");
+        assert_eq!(tree(&f.dst), BTreeMap::new(), "{case}");
+        assert_eq!((p.opened_writes(), rep.done.files), (0, 0), "{case}");
+    }
+}
+
 /// A file two levels down that stays keeps both folders above it at the source.
 #[test]
 fn a_grandchild_that_stays_keeps_both_its_source_folders() {

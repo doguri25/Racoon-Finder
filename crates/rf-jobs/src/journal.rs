@@ -409,11 +409,15 @@ impl JournalHandle {
     ///
     /// Fails with `Error::io("journal", file, …)` when the system cannot start the thread;
     /// `on_start` and `on_error` are then dropped without being called.
+    ///
+    /// A relative `dir` is made absolute first ([`absolute_dir`]), so that the thread never
+    /// depends on the working folder.
     pub(crate) fn spawn(
         dir: PathBuf,
         on_start: Box<dyn FnOnce() + Send>,
         on_error: Box<dyn Fn(&Error) + Send>,
     ) -> rf_core::Result<(JournalHandle, JoinHandle<()>)> {
+        let dir = absolute_dir(dir);
         let file = dir.join(JOURNAL_FILE);
         let mut writer = Writer::new(dir);
         let (sender, messages) = mpsc::channel();
@@ -497,6 +501,28 @@ impl JournalHandle {
     }
 }
 
+/// `dir` as an absolute path (`std::path::absolute`), or as it is when it cannot be made one
+/// (the working folder is gone). A journal folder given relative to the working folder is
+/// taken in the working folder of the time the journal starts: every folder its writer makes
+/// and syncs has a real path then, and every error names the file by its full path, where a
+/// relative one cannot be named at all (`VPath::local` refuses it).
+pub(crate) fn absolute_dir(dir: PathBuf) -> PathBuf {
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+/// The folders whose entries the making of the folder `dir` changes: the folder each missing
+/// folder of `dir` (it included) is made in, the lowest first. A relative `dir` (one
+/// [`absolute_dir`] could not make absolute) has the empty path as the folder of its first
+/// folder, and that path names no folder to sync: it is left out.
+fn unsynced_parents(dir: &Path) -> Vec<PathBuf> {
+    dir.ancestors()
+        .take_while(|folder| !folder.exists())
+        .filter_map(Path::parent)
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 /// How the journal file ends, as the journal thread finds it before a record.
 enum Tail {
     /// There is no file.
@@ -536,11 +562,7 @@ impl Writer {
     /// were made in, and the journal file to be made in the new folder, so that the next
     /// durable record makes their entries durable too.
     fn create_dirs(&mut self) -> io::Result<()> {
-        let missing = self.dir.ancestors().take_while(|folder| !folder.exists());
-        let parents: Vec<PathBuf> = missing
-            .filter_map(Path::parent)
-            .map(Path::to_path_buf)
-            .collect();
+        let parents = unsynced_parents(&self.dir);
         fs::create_dir_all(&self.dir)?;
         self.dirs_unsynced.extend(parents);
         self.entry_unsynced = true;
@@ -798,6 +820,76 @@ mod tests {
         thread.join().unwrap();
         let want = [Record::Started { job: A }, Record::Started { job: B }];
         assert_eq!(records(&state), want);
+    }
+
+    /// Set for [`a_relative_journal_folder_in_the_working_folder`], which this test process
+    /// runs in a working folder of its own.
+    const IN_OWN_WORKING_FOLDER: &str = "RF_JOBS_TEST_IN_OWN_WORKING_FOLDER";
+
+    /// A journal folder given relative to the working folder, `a/b/state` with no `a`, is made
+    /// there, and its durable records are written without an error: no folder of an empty
+    /// path is ever synced. The test runs [`a_relative_journal_folder_in_the_working_folder`]
+    /// in a new process with a temporary working folder, because the working folder is the
+    /// whole process's and the other tests run in parallel.
+    #[test]
+    fn a_relative_journal_folder_is_made_in_the_working_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let test = "journal::tests::a_relative_journal_folder_in_the_working_folder";
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--include-ignored", "--test-threads=1"])
+            .env(IN_OWN_WORKING_FOLDER, "1")
+            .current_dir(t.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        let state = t.path().join("a").join("b").join("state");
+        let want = [Record::Started { job: A }, Record::Started { job: B }];
+        assert_eq!(records(&state), want);
+    }
+
+    /// The folders to sync after making a journal folder are those the missing folders are
+    /// made in, and never the empty path, even for a relative folder whose first folder is
+    /// missing too.
+    #[test]
+    fn the_folders_to_sync_are_real_ones() {
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("a").join("b"));
+        assert_eq!(
+            unsynced_parents(&b.join("state")),
+            [b.clone(), a, t.path().to_path_buf()]
+        );
+        let first = PathBuf::from(format!("rf-jobs-no-such-folder-{}", std::process::id()));
+        let relative = first.join("b");
+        assert_eq!(unsynced_parents(&relative.join("state")), [relative, first]);
+        assert_eq!(unsynced_parents(Path::new("")), Vec::<PathBuf>::new());
+        assert_eq!(
+            unsynced_parents(&b),
+            [t.path().join("a"), t.path().to_path_buf()]
+        );
+        // A relative journal folder is made absolute, in the working folder.
+        let state = std::env::current_dir().unwrap().join("state");
+        assert_eq!(absolute_dir(PathBuf::from("state")), state);
+        assert_eq!(absolute_dir(state.clone()), state);
+    }
+
+    /// Run by [`a_relative_journal_folder_is_made_in_the_working_folder`] only, in a working
+    /// folder of its own; anywhere else it does nothing.
+    #[test]
+    #[ignore = "run by a_relative_journal_folder_is_made_in_the_working_folder"]
+    fn a_relative_journal_folder_in_the_working_folder() {
+        if std::env::var_os(IN_OWN_WORKING_FOLDER).is_none() {
+            return;
+        }
+        let state = PathBuf::from("a").join("b").join("state");
+        let (h, thread) =
+            JournalHandle::spawn(state, Box::new(|| {}), Box::new(|e| panic!("{e}"))).unwrap();
+        h.append_durable(Record::Started { job: A }).unwrap();
+        h.append_durable(Record::Started { job: B }).unwrap();
+        h.shutdown();
+        thread.join().unwrap();
     }
 
     #[test]

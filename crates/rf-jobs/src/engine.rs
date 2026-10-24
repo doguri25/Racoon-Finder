@@ -155,7 +155,8 @@ pub struct EngineConfig {
     /// Who answers the questions of every job, on the job's worker thread.
     pub resolver: Arc<dyn Resolver>,
     /// The folder the journal is kept in, or `None` for no journal: then nothing is recovered
-    /// after a crash.
+    /// after a crash. A relative path is taken in the working folder of the time the engine
+    /// starts.
     pub journal_dir: Option<PathBuf>,
     /// Which lane each job runs in.
     pub lanes: Arc<dyn LanePolicy>,
@@ -176,7 +177,8 @@ impl EngineConfig {
         }
     }
 
-    /// Keeps the journal in the folder `dir`, which is made with the first record.
+    /// Keeps the journal in the folder `dir`, which is made with the first record; a relative
+    /// `dir` is in the working folder of the time the engine starts.
     #[must_use]
     pub fn with_journal(mut self, dir: impl Into<PathBuf>) -> EngineConfig {
         self.journal_dir = Some(dir.into());
@@ -620,6 +622,8 @@ impl fmt::Debug for JobEngine {
 /// thread. A thread that cannot be started leaves the engine without a journal, with a
 /// `JournalError` and an empty `Recovered`.
 fn start_journal(shared: &Arc<Shared>, dir: PathBuf) {
+    // The recovery reads the journal the thread then writes, by the same full path.
+    let dir = journal::absolute_dir(dir);
     let (found, recovery) = mpsc::channel();
     let recovery_thread = {
         let shared = Arc::clone(shared);

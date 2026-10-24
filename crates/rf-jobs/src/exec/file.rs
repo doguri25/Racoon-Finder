@@ -102,16 +102,8 @@ pub(crate) fn copy_file(
         return Ok(());
     }
     // An item that is no regular file by now (a FIFO put in the file's place) is refused by
-    // the open itself, with `Unsupported` (`Provider::open_read`).
-    let mut reader = src.open_read(source).map_err(|error| {
-        let not_a_file = error.kind() == ErrorKind::Unsupported;
-        let failed = Failed::new(Stage::Read, error);
-        if not_a_file {
-            failed.because(FailureReason::NotARegularFile)
-        } else {
-            failed
-        }
-    })?;
+    // the open itself (`Provider::open_read`).
+    let mut reader = src.open_read(source).map_err(open_failed)?;
     let writer = dst
         .open_write(&tmp, WriteMode::CreateNew)
         .at(Stage::Write)?;
@@ -386,6 +378,23 @@ impl Content<'_, '_> {
     }
 }
 
+/// The failure of a source `Provider::open_read` could not open, as `Stage::Read`. Only the
+/// open's refusal of an item that is no regular file (`rf_platform::is_not_a_regular_file`)
+/// has the reason `NotARegularFile`; any other error, an `Unsupported` of a provider that
+/// cannot read at all among them, has none.
+fn open_failed(error: Error) -> Failed {
+    let not_a_file = matches!(
+        &error,
+        Error::Io { source, .. } if rf_platform::is_not_a_regular_file(source)
+    );
+    let failed = Failed::new(Stage::Read, error);
+    if not_a_file {
+        failed.because(FailureReason::NotARegularFile)
+    } else {
+        failed
+    }
+}
+
 /// A byte count as a `u64`; no `usize` this code sees is larger.
 fn bytes(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
@@ -405,8 +414,8 @@ mod tests {
     use crate::testkit::Node;
     use crate::testkit::{Fault, FaultyProvider, temp_files, tree};
     use crate::{
-        ExecEnv, ExecEvent, JobId, JobReport, JobSpec, NonInteractive, Outcome, Stage,
-        TransferMode, TransferOptions, TransferSpec, execute, temp_name,
+        ExecEnv, ExecEvent, FailureReason, JobId, JobReport, JobSpec, NonInteractive, Outcome,
+        Stage, TransferMode, TransferOptions, TransferSpec, execute, temp_name,
     };
 
     struct Dirs {
@@ -810,5 +819,28 @@ mod tests {
         );
         assert_eq!(report.outcome, Outcome::Completed, "{:?}", report.failures);
         assert_eq!(std::fs::read_to_string(d.dst.join("a.txt")).unwrap(), "a");
+    }
+
+    /// Only the open's refusal of an item that is no regular file gets `NotARegularFile`; any
+    /// other `Unsupported`, as of a provider that cannot read at all, has no reason.
+    #[test]
+    fn only_an_open_that_found_no_regular_file_says_so() {
+        let d = dirs();
+        let path = v(&d.src.join("a.txt"));
+        let refused = rf_platform::not_a_regular_file();
+        let failed = super::open_failed(rf_core::Error::io("open_read", path.clone(), refused));
+        assert_eq!(
+            (failed.stage, failed.reason.as_deref()),
+            (Stage::Read, Some(&FailureReason::NotARegularFile))
+        );
+        let others = [
+            rf_core::Error::Unsupported("open_read is not supported".into()),
+            rf_core::Error::io("open_read", path, std::io::ErrorKind::Unsupported.into()),
+        ];
+        for error in others {
+            assert_eq!(error.kind(), ErrorKind::Unsupported);
+            let failed = super::open_failed(error);
+            assert_eq!((failed.stage, failed.reason), (Stage::Read, None));
+        }
     }
 }

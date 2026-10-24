@@ -276,7 +276,13 @@ pub trait Provider: Send + Sync + Debug {
     /// Opens the file at `path` for reading and seeking. An item that is no regular file (a
     /// FIFO, a socket, a device, a folder) is refused with `ErrorKind::Unsupported`, at once: an
     /// open never waits for the writer of a FIFO, which another program can put where a file
-    /// was found.
+    /// was found. The I/O error of that refusal is `rf_platform::not_a_regular_file`, which
+    /// `rf_platform::is_not_a_regular_file` tells from any other `Unsupported`, such as that of
+    /// a provider that cannot read at all.
+    ///
+    /// A file another program holds a lease on (on Linux, Samba with kernel oplocks or the NFS
+    /// server's delegations) cannot be opened until that program lets go of it: the local
+    /// provider waits about 2 s for that, and then fails with `ErrorKind::Busy`.
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>>;
     /// The data is durable only after `WriteStream::finish` returns `Ok`.
     fn open_write(&self, path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteStream>>;

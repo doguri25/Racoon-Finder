@@ -16,7 +16,10 @@ pub use attrs::{
     attributes_from_bsd_flags, attributes_from_windows, entry_attributes, is_dot_file,
 };
 pub use fileid::{file_identity, metadata_identity, resolved_file_identity};
-pub use fsops::{open_regular_file, rename_no_replace, sync_dir, sync_file};
+pub use fsops::{
+    is_not_a_regular_file, not_a_regular_file, open_regular_file, rename_no_replace, sync_dir,
+    sync_file,
+};
 pub use known::{KnownFolder, known_folder};
 pub use meta::{copy_extras, set_attributes, set_times};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};

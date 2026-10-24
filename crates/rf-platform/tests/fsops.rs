@@ -186,5 +186,127 @@ fn a_fifo_never_blocks_an_open() {
     let read = read.unwrap_err();
     assert_eq!(read.kind(), std::io::ErrorKind::Unsupported, "{read}");
     assert_eq!(read.to_string(), "not a regular file");
+    assert!(rf_platform::is_not_a_regular_file(&read));
     assert!(synced.is_err());
+}
+
+/// Holds a write lease on a file, as Samba with kernel oplocks or the NFS server's delegations
+/// do: `python3` writes `leased` to the file, takes the lease (`F_SETLEASE`, 1024) and says
+/// `held`. When an open of the file starts the lease break (`SIGIO`), it lets go after the
+/// number of seconds it was given, or never with `never`. It ends after 10 s in any case.
+#[cfg(target_os = "linux")]
+const LEASE_HOLDER: &str = r#"
+import fcntl, os, signal, sys, time
+path, delay = sys.argv[1], sys.argv[2]
+with open(path, "w") as f:
+    f.write("leased")
+broken = []
+signal.signal(signal.SIGIO, lambda *_: broken.append(time.monotonic()))
+fd = os.open(path, os.O_RDONLY)
+try:
+    fcntl.fcntl(fd, 1024, fcntl.F_WRLCK)
+except OSError as e:
+    print("unsupported", e, flush=True)
+    sys.exit()
+print("held", flush=True)
+end = time.monotonic() + 10
+while time.monotonic() < end:
+    if broken and delay != "never" and time.monotonic() >= broken[0] + float(delay):
+        fcntl.fcntl(fd, 1024, fcntl.F_UNLCK)
+        delay = "never"
+    time.sleep(0.01)
+"#;
+
+/// A `python3` running [`LEASE_HOLDER`]; it is killed when this is dropped.
+#[cfg(target_os = "linux")]
+struct LeaseHolder(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for LeaseHolder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts a [`LEASE_HOLDER`] on `path` that lets go `delay` after the break begins, once it
+/// holds the lease; without `python3`, or where no lease can be taken, why not.
+#[cfg(target_os = "linux")]
+fn hold_lease(path: &std::path::Path, delay: &str) -> Result<LeaseHolder, String> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("python3")
+        .args(["-c", LEASE_HOLDER])
+        .arg(path)
+        .arg(delay)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("no python3: {error}"))?;
+    let stdout = child.stdout.take().ok_or("no output")?;
+    let holder = LeaseHolder(child);
+    let mut line = String::new();
+    std::io::BufReader::new(stdout)
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    if line.trim() == "held" {
+        Ok(holder)
+    } else {
+        Err(format!("no lease here: {line}"))
+    }
+}
+
+/// A file another program holds a write lease on cannot be opened, not even for reading, until
+/// that program lets go: a non-blocking open fails with `EAGAIN` meanwhile. The open waits a
+/// while for it, and then fails with a clear `ResourceBusy` error instead of `EAGAIN`.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_waits_a_while_for_a_lease_to_be_let_go() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let t = tempfile::tempdir().unwrap();
+    let path = t.path().join("leased.txt");
+    let holder = match hold_lease(&path, "0.3") {
+        Ok(holder) => holder,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let mut content = String::new();
+    let mut file = open_regular_file(&path).unwrap();
+    file.read_to_string(&mut content).unwrap();
+    assert_eq!(content, "leased");
+    drop((file, holder));
+
+    // The kernel breaks a lease itself after `lease-break-time`, 45 s by default.
+    let break_time = std::fs::read_to_string("/proc/sys/fs/lease-break-time")
+        .ok()
+        .and_then(|secs| secs.trim().parse::<u64>().ok());
+    if break_time.is_none_or(|secs| secs < 5) {
+        eprintln!("skipped: the kernel breaks leases too soon");
+        return;
+    }
+    let holder = match hold_lease(&path, "never") {
+        Ok(holder) => holder,
+        Err(why) => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+    };
+    let started = Instant::now();
+    let error = open_regular_file(&path).unwrap_err();
+    let waited = started.elapsed();
+    drop(holder);
+    assert_eq!(error.kind(), std::io::ErrorKind::ResourceBusy, "{error}");
+    assert!(
+        error.to_string().contains("locked by another program"),
+        "{error}"
+    );
+    assert!(
+        (Duration::from_millis(1500)..Duration::from_secs(5)).contains(&waited),
+        "{waited:?}"
+    );
 }
