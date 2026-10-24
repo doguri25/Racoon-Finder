@@ -296,9 +296,7 @@ fn compact(dir: &Path, path: &Path, content: &[u8]) -> rf_core::Result<()> {
     let tmp = dir.join(COMPACTED_FILE);
     let written = File::create(&tmp).and_then(|mut file| {
         file.write_all(content)?;
-        // TODO(final-wave-A): `rf_platform::sync_file(&file)`, for the macOS fallback from
-        // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
-        file.sync_all()
+        rf_platform::sync_file(&file)
     });
     if let Err(error) = written {
         // `remove_file` never removes a folder that might be in the way.
@@ -315,43 +313,24 @@ fn compact(dir: &Path, path: &Path, content: &[u8]) -> rf_core::Result<()> {
 /// Makes the entry of the file `file` in its folder `dir` durable, after the file was renamed
 /// into the folder or made there.
 ///
-/// On Unix that is a flush of the folder ([`sync_folder`]).
+/// On Unix that is a flush of the folder (`rf_platform::sync_dir`, which takes a file system
+/// that cannot flush a folder as being as durable as it gets).
 #[cfg(unix)]
 fn sync_entry(dir: &Path, file: &Path) -> io::Result<()> {
     let _ = file;
-    sync_folder(dir)
-}
-
-/// Flushes the folder `dir`, which makes the entries in it durable. A file system that cannot
-/// flush a folder (`EINVAL`, `ENOTSUP`) is as durable as it gets without one.
-#[cfg(unix)]
-fn sync_folder(dir: &Path) -> io::Result<()> {
-    // TODO(final-wave-A): `rf_platform::sync_file(&folder)`, for the macOS fallback from
-    // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
-    match File::open(dir)?.sync_all() {
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-            ) =>
-        {
-            Ok(())
-        }
-        synced => synced,
-    }
+    rf_platform::sync_dir(dir)
 }
 
 /// Makes the entry of the file `file` in its folder `dir` durable, after the file was renamed
 /// into the folder or made there.
 ///
-/// On Windows std cannot open a folder, and NTFS writes its log of the change lazily, so a
-/// power loss soon after could undo it. Flushing the file itself (`FlushFileBuffers`, which
-/// needs write access) commits that log, the change included.
+/// On Windows NTFS writes its log of the change lazily, so a power loss soon after could undo
+/// it. Flushing the file itself (`FlushFileBuffers`, which needs write access) commits that
+/// log, the change included.
 #[cfg(windows)]
 fn sync_entry(dir: &Path, file: &Path) -> io::Result<()> {
     let _ = dir;
-    // TODO(final-wave-A): `rf_platform::sync_file`, as on the other syncs of the journal.
-    OpenOptions::new().write(true).open(file)?.sync_all()
+    rf_platform::sync_file(&OpenOptions::new().write(true).open(file)?)
 }
 
 /// Removes what `job` left in its temporary folders: each file or link there whose name is a
@@ -573,7 +552,7 @@ impl Writer {
     #[cfg(unix)]
     fn sync_dirs(&mut self) -> io::Result<()> {
         while let Some(parent) = self.dirs_unsynced.last() {
-            sync_folder(parent)?;
+            rf_platform::sync_dir(parent)?;
             self.dirs_unsynced.pop();
         }
         Ok(())
@@ -622,9 +601,9 @@ impl Writer {
             file.write_all(line)?;
         }
         if durable {
-            // TODO(final-wave-A): `rf_platform::sync_file(&file)`, for the macOS fallback from
-            // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
-            file.sync_data()?;
+            // The whole file, not only its data: on macOS only `F_FULLFSYNC` gets past the
+            // drive's own cache.
+            rf_platform::sync_file(&file)?;
             drop(file);
             if self.entry_unsynced {
                 sync_entry(&self.dir, &self.file)?;
