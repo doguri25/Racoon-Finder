@@ -17,9 +17,9 @@ use rf_jobs::testkit::{
     Fault, FaultyProvider, ScriptedResolver, temp_files, tree, wait_finished, wait_for,
 };
 use rf_jobs::{
-    CreateKind, DefaultLanes, DeleteMethod, DeleteSpec, EngineConfig, ErrorPolicy, IncompleteJob,
-    JobEngine, JobEvent, JobId, JobSnapshot, JobSpec, JobState, LaneId, LanePolicy, NonInteractive,
-    Outcome, Stage,
+    CreateKind, DefaultLanes, DeleteMethod, DeleteSpec, EngineConfig, ErrorAction, ErrorAnswer,
+    ErrorPolicy, IncompleteJob, JobEngine, JobEvent, JobId, JobSnapshot, JobSpec, JobState, LaneId,
+    LanePolicy, NonInteractive, Outcome, Stage, TransferMode, TransferOptions,
 };
 use rf_vfs::Vfs;
 
@@ -412,4 +412,129 @@ fn a_lane_policy_can_run_jobs_in_parallel() {
     p.release();
     wait_finished(&rx, a, WAIT);
     assert!(e.shutdown(WAIT));
+}
+
+// Final review B.
+
+/// The states of the job `id` and its `Planned`, as they are announced until its end.
+fn states_of(rx: &Receiver<JobEvent>, id: JobId) -> Vec<String> {
+    let mut seen = Vec::new();
+    loop {
+        match wait_for(rx, WAIT, |_| true) {
+            JobEvent::State { id: of, state } if of == id => seen.push(format!("{state:?}")),
+            JobEvent::Planned { id: of, totals, .. } if of == id => {
+                seen.push(format!("Planned {}", totals.files));
+            }
+            JobEvent::Finished { id: of, .. } if of == id => return seen,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_question_while_planning_shows_planning_again_once_answered() {
+    let f = fx();
+    std::fs::write(f.src.join("ok"), "ok").unwrap();
+    let options = TransferOptions {
+        errors: ErrorPolicy::Ask,
+        ..TransferOptions::default()
+    };
+    let sources = [f.src.join("missing"), f.src.join("ok")];
+    let job = spec(TransferMode::Copy, &sources, &f.dst, options);
+    let resolver = ScriptedResolver::new().on_error(ErrorAnswer {
+        action: ErrorAction::Skip,
+        apply_to_all: false,
+    });
+    let (e, rx) = JobEngine::start(EngineConfig::new(Vfs::with_local(), Arc::new(resolver)));
+    let id = e.submit(job);
+    // Never `Running` before the plan is made.
+    assert_eq!(
+        states_of(&rx, id),
+        [
+            "Queued",
+            "Planning",
+            "Waiting",
+            "Planning",
+            "Planned 1",
+            "Running"
+        ]
+    );
+    assert_eq!(std::fs::read(f.dst.join("ok")).unwrap(), b"ok");
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn a_snapshot_shows_what_each_job_is() {
+    let f = fx();
+    let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
+    let (e, rx) = engine(p.vfs());
+    let (first, second) = (one_file(&f, "a", 10), one_file(&f, "b", 10));
+    let a = e.submit(first.clone());
+    assert!(p.wait_held(WAIT));
+    let b = e.submit(second.clone());
+    let (later, jobs) = e.subscribe_with_jobs();
+    let shown: Vec<_> = jobs
+        .iter()
+        .map(|j| (j.id, j.state, (*j.spec).clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [(a, JobState::Running, first), (b, JobState::Queued, second)]
+    );
+    assert_eq!(e.jobs(), jobs);
+    // Nothing from before the snapshot reaches the new subscriber.
+    assert!(later.try_recv().is_err());
+    assert!(e.cancel(b));
+    assert!(matches!(
+        wait_for(&later, WAIT, |_| true),
+        JobEvent::Queue { order } if order.is_empty()
+    ));
+    assert_eq!(wait_finished(&later, b, WAIT).outcome, Outcome::Cancelled);
+    p.release();
+    assert_eq!(wait_finished(&later, a, WAIT).outcome, Outcome::Completed);
+    wait_finished(&rx, a, WAIT);
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn shutdown_says_false_while_a_worker_is_stuck() {
+    let f = fx();
+    // The worker stops for good in the middle of the file, like a call into a hung share.
+    let p = FaultyProvider::local(vec![Fault::Crash {
+        file: 0,
+        after: 1 << 20,
+    }]);
+    let (e, _rx) = engine(p.vfs());
+    e.submit(one_file(&f, "a.bin", 4 << 20));
+    assert!(p.wait_crashed(WAIT));
+    let started = Instant::now();
+    assert!(!e.shutdown(Duration::from_millis(300)));
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+
+#[test]
+fn shutdown_gives_the_journal_time_of_its_own() {
+    let f = fx();
+    let journal = f.root.join("state");
+    let (e, rx) = JobEngine::start(
+        EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive)).with_journal(&journal),
+    );
+    wait_for(&rx, WAIT, |ev| matches!(ev, JobEvent::Recovered { .. }));
+    // No worker to wait for and no time left: the journal still gets its own short time to
+    // write what it has and end.
+    assert!(e.shutdown(Duration::ZERO));
+}
+
+#[test]
+fn wait_for_looks_at_every_event_that_is_ready_past_its_deadline() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for message in ["a", "b"] {
+        let message = message.to_owned();
+        tx.send(JobEvent::JournalError { message }).unwrap();
+    }
+    tx.send(JobEvent::Queue { order: Vec::new() }).unwrap();
+    let found = wait_for(&rx, Duration::ZERO, |ev| {
+        matches!(ev, JobEvent::Queue { .. })
+    });
+    assert!(matches!(found, JobEvent::Queue { .. }));
 }

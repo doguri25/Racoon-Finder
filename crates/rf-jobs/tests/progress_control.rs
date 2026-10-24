@@ -182,6 +182,80 @@ fn control_is_shared_between_threads_and_cancel_is_final() {
     assert!(c.is_cancelled());
 }
 
+// Final review B.
+
+#[test]
+fn speed_meter_starts_again_after_bytes_are_taken_back() {
+    let t0 = Instant::now();
+    let ms = |millis| t0 + Duration::from_millis(millis);
+    let mut m = SpeedMeter::new(Duration::from_secs(3));
+    m.record(ms(0), 1_000);
+    m.record(ms(1_000), 2_000);
+    assert_eq!(m.bytes_per_sec(), 1_000);
+    // A failed attempt takes its bytes back; the speed is measured from there on at once,
+    // not from the higher count still in the window.
+    m.record(ms(2_000), 500);
+    assert_eq!((m.bytes_per_sec(), m.eta(100)), (0, None));
+    m.record(ms(2_500), 1_500);
+    assert_eq!(m.bytes_per_sec(), 2_000);
+    assert_eq!(m.eta(4_000), Some(Duration::from_secs(2)));
+}
+
+#[test]
+fn eta_of_the_largest_count_does_not_overflow() {
+    let t0 = Instant::now();
+    let mut m = SpeedMeter::new(Duration::from_secs(3));
+    m.record(t0, 0);
+    m.record(t0 + Duration::from_secs(1), 1);
+    // 1 byte a second: the time is cut at what a millisecond count can hold.
+    assert_eq!(m.eta(u64::MAX), Some(Duration::from_millis(u64::MAX)));
+    m.record(t0 + Duration::from_secs(2), u64::MAX);
+    assert_eq!(m.bytes_per_sec(), u64::MAX / 2);
+    // Twice the speed's worth of bytes is two seconds, not a product cut short.
+    assert_eq!(m.eta(u64::MAX), Some(Duration::from_secs(2)));
+}
+
+#[test]
+fn a_cancel_wakes_every_paused_checkpoint_and_every_token() {
+    let c = Control::new();
+    let before = c.cancel_token();
+    c.pause();
+    let workers: Vec<_> = (0..3)
+        .map(|_| {
+            let c = c.clone();
+            std::thread::spawn(move || (c.checkpoint(), c.cancel_token()))
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(50));
+    c.cancel();
+    for worker in workers {
+        let (checked, token) = worker.join().unwrap();
+        assert_eq!(checked.unwrap_err().kind(), ErrorKind::Cancelled);
+        assert!(token.is_cancelled());
+    }
+    assert!(before.is_cancelled() && c.cancel_token().is_cancelled());
+}
+
+#[test]
+fn cancelling_the_token_alone_fails_no_checkpoint() {
+    let c = Control::new();
+    c.cancel_token().cancel();
+    assert!(c.cancel_token().is_cancelled());
+    assert!(c.checkpoint().is_ok() && !c.is_cancelled());
+    // Nor does it wake a paused one: only `cancel` and `resume` do.
+    c.pause();
+    let (tx, rx) = mpsc::channel();
+    let worker = {
+        let c = c.clone();
+        std::thread::spawn(move || tx.send(c.checkpoint().is_ok()).unwrap())
+    };
+    c.cancel_token().cancel();
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    c.cancel();
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(false));
+    worker.join().unwrap();
+}
+
 #[test]
 fn undo_identity_survives_json_at_full_width() {
     let mut e = Entry::new("a", EntryKind::Dir);

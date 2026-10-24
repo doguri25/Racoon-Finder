@@ -7,7 +7,7 @@ use std::fs::ReadDir;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -233,7 +233,8 @@ pub fn temp_files(root: &Path) -> Vec<String> {
 
 /// The first event from `rx` that `pred` accepts; the events before it are dropped. It waits
 /// up to `timeout` in all and panics when no such event comes in that time, or when the engine
-/// has ended and no event will come.
+/// has ended and no event will come. Past the deadline, every event that is ready is still
+/// looked at, once each, before it panics.
 pub fn wait_for(
     rx: &Receiver<JobEvent>,
     timeout: Duration,
@@ -242,14 +243,25 @@ pub fn wait_for(
     let started = Instant::now();
     loop {
         let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
         match rx.recv_timeout(left) {
             Ok(event) if pred(&event) => return event,
-            // Past the deadline, events that are ready are still looked at, once each.
-            Ok(_) if !left.is_zero() => {}
-            Ok(_) | Err(RecvTimeoutError::Timeout) => {
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("wait_for: the engine ended before a matching job event")
+            }
+        }
+    }
+    loop {
+        match rx.try_recv() {
+            Ok(event) if pred(&event) => return event,
+            Ok(_) => {}
+            Err(TryRecvError::Empty) => {
                 panic!("wait_for: no matching job event within {timeout:?}")
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(TryRecvError::Disconnected) => {
                 panic!("wait_for: the engine ended before a matching job event")
             }
         }

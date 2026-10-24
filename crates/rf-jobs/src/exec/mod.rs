@@ -49,6 +49,7 @@ pub const MAX_DEPTH: usize = 128;
 
 /// What a running job tells the one who started it, on the job's own thread.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ExecEvent {
     /// The plan is made: what the job expects to process, and how many problems the
     /// pre-flight check found on the target.

@@ -24,12 +24,15 @@
 //! field ignores it when it reads the line, and its compaction keeps the line as it was
 //! written. A new enum variant needs no new format number. A build that does not know it skips
 //! the line, except a `Finished` line, which still ends its job whatever its outcome says, so
-//! that a new outcome does not bring a finished job back. A build that cannot read a job's
-//! `Submitted` line does not know the job: its compaction drops every line of that job, the
-//! `TempDir` lines included. That is safe, but the temporary files those lines point to are
-//! then never removed. Any other change of shape (a field or a variant renamed or removed, a
-//! field's type changed, a new field that a job must not run without) takes a new format
-//! number, so that builds skip the lines of the other number instead of misreading them.
+//! that a new outcome does not bring a finished job back. Its compaction keeps only the lines
+//! it can read, so it drops a line with an unknown variant even of a job it knows (a new kind
+//! of record, or a `TempDir` with a new kind of path): a newer build that comes back to the
+//! journal does not find that line again. A build that cannot read a job's `Submitted` line
+//! does not know the job: its compaction drops every line of that job, the `TempDir` lines
+//! included. That is safe, but the temporary files those lines point to are then never
+//! removed. Any other change of shape (a field or a variant renamed or removed, a field's type
+//! changed, a new field that a job must not run without) takes a new format number, so that
+//! builds skip the lines of the other number instead of misreading them.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -43,6 +46,7 @@ use rf_core::{EntryKind, Error, VPath};
 use rf_vfs::{CancelToken, Vfs};
 use serde::{Deserialize, Serialize};
 
+use crate::engine::spawn_thread;
 use crate::id::JobId;
 use crate::naming::temp_job;
 use crate::report::Outcome;
@@ -52,7 +56,7 @@ use crate::spec::JobSpec;
 pub const JOURNAL_FILE: &str = "jobs.journal";
 
 /// The name compaction writes the new journal under, next to the old one, before the rename.
-const COMPACTED_FILE: &str = "jobs.journal.tmp";
+pub(crate) const COMPACTED_FILE: &str = "jobs.journal.tmp";
 
 /// The format number every line carries as `v`; see the module doc for when it changes.
 const FORMAT: u32 = 1;
@@ -162,10 +166,11 @@ fn journal_error(path: &Path, error: io::Error) -> Error {
 pub(crate) struct Recovered {
     /// The jobs that were submitted and never finished, in the order they were submitted.
     pub jobs: Vec<IncompleteJob>,
-    /// Why the journal could not be compacted, if it could not. The jobs are found all the
-    /// same, and the journal on the disk still holds every record of them: the old journal
-    /// stays until the compacted one is renamed over it, and when only the flush after that
-    /// rename fails, the old and the new journal both hold them, whichever a crash leaves.
+    /// Why the journal could not be compacted, if it could not, or why a compacted file put in
+    /// its place could not be made durable. The jobs are found all the same, and the journal
+    /// on the disk still holds every record of them: the old journal stays until the compacted
+    /// one is renamed over it, and when only the flush after that rename fails, the old and the
+    /// new journal both hold them, whichever a crash leaves.
     pub compaction: Option<Error>,
 }
 
@@ -189,7 +194,7 @@ pub(crate) struct Recovered {
 /// journal thread writes anything: the engine runs it as that thread's `on_start`.
 pub(crate) fn recover(dir: &Path) -> rf_core::Result<Recovered> {
     let path = dir.join(JOURNAL_FILE);
-    let Some(content) = read_journal(dir, &path)? else {
+    let Some((content, promoted)) = read_journal(dir, &path)? else {
         return Ok(Recovered {
             jobs: Vec::new(),
             compaction: None,
@@ -243,24 +248,32 @@ pub(crate) fn recover(dir: &Path) -> rf_core::Result<Recovered> {
         kept.extend_from_slice(line);
         kept.push(b'\n');
     }
-    let compaction = if kept == content {
-        None
-    } else {
+    let compaction = if kept != content {
+        // Its flush after the rename makes a promoted journal's rename durable too.
         compact(dir, &path, &kept).err()
+    } else if promoted {
+        // Durable before the journal thread appends to it under its new name.
+        sync_entry(dir, &path)
+            .map_err(|error| journal_error(&path, error))
+            .err()
+    } else {
+        None
     };
     Ok(Recovered { jobs, compaction })
 }
 
-/// The content of the journal `path` in the folder `dir`, or `None` when there is none.
+/// The content of the journal `path` in the folder `dir`, or `None` when there is none, and
+/// whether it was a compacted file this call renamed into place (its rename is not durable
+/// yet).
 ///
 /// A file system whose rename over a file deletes the old file before it renames the new one
 /// (FAT, exFAT) can lose the journal to a crash in the middle of a compaction and leave only
 /// the compacted file. That file is complete, since it is renamed only after it is flushed, so
 /// a compacted file found without a journal is renamed into place first and read. A folder or
 /// a link of that name is not.
-fn read_journal(dir: &Path, path: &Path) -> rf_core::Result<Option<Vec<u8>>> {
+fn read_journal(dir: &Path, path: &Path) -> rf_core::Result<Option<(Vec<u8>, bool)>> {
     match fs::read(path) {
-        Ok(content) => return Ok(Some(content)),
+        Ok(content) => return Ok(Some((content, false))),
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             return Err(journal_error(path, error));
         }
@@ -270,11 +283,11 @@ fn read_journal(dir: &Path, path: &Path) -> rf_core::Result<Option<Vec<u8>>> {
     if !fs::symlink_metadata(&compacted).is_ok_and(|meta| meta.is_file()) {
         return Ok(None);
     }
-    // No flush is needed: a crash before this rename is on the disk leaves the same state,
-    // which the next recovery puts right in the same way.
+    // A crash before this rename is on the disk leaves the same state, which the next recovery
+    // puts right in the same way; `recover` makes it durable before anything is appended.
     fs::rename(&compacted, path).map_err(|error| journal_error(path, error))?;
     fs::read(path)
-        .map(Some)
+        .map(|content| Some((content, true)))
         .map_err(|error| journal_error(path, error))
 }
 
@@ -283,6 +296,8 @@ fn compact(dir: &Path, path: &Path, content: &[u8]) -> rf_core::Result<()> {
     let tmp = dir.join(COMPACTED_FILE);
     let written = File::create(&tmp).and_then(|mut file| {
         file.write_all(content)?;
+        // TODO(final-wave-A): `rf_platform::sync_file(&file)`, for the macOS fallback from
+        // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
         file.sync_all()
     });
     if let Err(error) = written {
@@ -300,11 +315,19 @@ fn compact(dir: &Path, path: &Path, content: &[u8]) -> rf_core::Result<()> {
 /// Makes the entry of the file `file` in its folder `dir` durable, after the file was renamed
 /// into the folder or made there.
 ///
-/// On Unix that is a flush of the folder; a file system that cannot flush a folder
-/// (`EINVAL`, `ENOTSUP`) is as durable as it gets without one.
+/// On Unix that is a flush of the folder ([`sync_folder`]).
 #[cfg(unix)]
 fn sync_entry(dir: &Path, file: &Path) -> io::Result<()> {
     let _ = file;
+    sync_folder(dir)
+}
+
+/// Flushes the folder `dir`, which makes the entries in it durable. A file system that cannot
+/// flush a folder (`EINVAL`, `ENOTSUP`) is as durable as it gets without one.
+#[cfg(unix)]
+fn sync_folder(dir: &Path) -> io::Result<()> {
+    // TODO(final-wave-A): `rf_platform::sync_file(&folder)`, for the macOS fallback from
+    // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
     match File::open(dir)?.sync_all() {
         Err(error)
             if matches!(
@@ -327,6 +350,7 @@ fn sync_entry(dir: &Path, file: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn sync_entry(dir: &Path, file: &Path) -> io::Result<()> {
     let _ = dir;
+    // TODO(final-wave-A): `rf_platform::sync_file`, as on the other syncs of the journal.
     OpenOptions::new().write(true).open(file)?.sync_all()
 }
 
@@ -403,39 +427,43 @@ impl JournalHandle {
     /// `on_start` and `on_error` may [`append`](Self::append), but a durable record from them
     /// would have the thread wait for itself, so [`append_durable`](Self::append_durable)
     /// refuses it there.
+    ///
+    /// Fails with `Error::io("journal", file, …)` when the system cannot start the thread;
+    /// `on_start` and `on_error` are then dropped without being called.
     pub(crate) fn spawn(
         dir: PathBuf,
         on_start: Box<dyn FnOnce() + Send>,
         on_error: Box<dyn Fn(&Error) + Send>,
-    ) -> (JournalHandle, JoinHandle<()>) {
+    ) -> rf_core::Result<(JournalHandle, JoinHandle<()>)> {
         let file = dir.join(JOURNAL_FILE);
         let mut writer = Writer::new(dir);
         let (sender, messages) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("rf-jobs-journal".to_owned())
-            .spawn(move || {
-                on_start();
-                for message in messages {
-                    let Message::Write { record, done } = message else {
-                        break;
-                    };
-                    let written = writer.write(record, done.is_some());
-                    if let Err(error) = &written {
-                        on_error(error);
-                    }
-                    if let Some(done) = done {
-                        // A writer that stopped waiting needs no answer.
-                        let _ = done.send(written);
-                    }
+        let thread = spawn_thread("rf-jobs-journal".to_owned(), move || {
+            on_start();
+            for message in messages {
+                let Message::Write { record, done } = message else {
+                    break;
+                };
+                let written = writer.write(record, done.is_some());
+                if let Err(error) = &written {
+                    on_error(error);
                 }
-            })
-            .expect("the journal thread could not be started");
+                if let Some(done) = done {
+                    // A writer that stopped waiting needs no answer.
+                    let _ = done.send(written);
+                }
+            }
+        });
+        let thread = thread.map_err(|error| {
+            let text = format!("the journal thread could not be started: {error}");
+            journal_error(&file, io::Error::new(error.kind(), text))
+        })?;
         let queue = Queue {
             sender,
             thread: thread.thread().id(),
             file,
         };
-        (JournalHandle { queue: Some(queue) }, thread)
+        Ok((JournalHandle { queue: Some(queue) }, thread))
     }
 
     /// Queues `record` and returns at once. A failure to write it goes to the thread's
@@ -509,6 +537,9 @@ struct Writer {
     look: bool,
     /// Whether this writer made the file and its entry in the folder is not flushed yet.
     entry_unsynced: bool,
+    /// The folders this writer made the journal's folder in, or a missing folder above it:
+    /// the entries of the new folders in them are not flushed yet.
+    dirs_unsynced: Vec<PathBuf>,
 }
 
 impl Writer {
@@ -518,7 +549,42 @@ impl Writer {
             dir,
             look: true,
             entry_unsynced: false,
+            dirs_unsynced: Vec::new(),
         }
+    }
+
+    /// Makes the journal's folder and the missing folders above it, and notes the folders they
+    /// were made in, and the journal file to be made in the new folder, so that the next
+    /// durable record makes their entries durable too.
+    fn create_dirs(&mut self) -> io::Result<()> {
+        let missing = self.dir.ancestors().take_while(|folder| !folder.exists());
+        let parents: Vec<PathBuf> = missing
+            .filter_map(Path::parent)
+            .map(Path::to_path_buf)
+            .collect();
+        fs::create_dir_all(&self.dir)?;
+        self.dirs_unsynced.extend(parents);
+        self.entry_unsynced = true;
+        Ok(())
+    }
+
+    /// Makes the entries of the folders this writer made durable, after the journal file's
+    /// own: each folder they were made in is flushed.
+    #[cfg(unix)]
+    fn sync_dirs(&mut self) -> io::Result<()> {
+        while let Some(parent) = self.dirs_unsynced.last() {
+            sync_folder(parent)?;
+            self.dirs_unsynced.pop();
+        }
+        Ok(())
+    }
+
+    /// Makes the entries of the folders this writer made durable, after the journal file's
+    /// own: the flush of the journal file, made in the newest of them, has committed the log
+    /// of NTFS up to it, their entries included.
+    #[cfg(windows)]
+    fn sync_dirs(&mut self) {
+        self.dirs_unsynced.clear();
     }
 
     /// Appends the line of `record`, and with `durable` flushes it to the disk.
@@ -538,16 +604,11 @@ impl Writer {
                 Tail::Torn => torn = true,
             }
         }
-        let open = || {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.file)
-        };
-        let mut file = match open() {
+        let open = |file: &Path| OpenOptions::new().create(true).append(true).open(file);
+        let mut file = match open(&self.file) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(&self.dir)?;
-                open()?
+                self.create_dirs()?;
+                open(&self.file)?
             }
             opened => opened?,
         };
@@ -561,12 +622,18 @@ impl Writer {
             file.write_all(line)?;
         }
         if durable {
+            // TODO(final-wave-A): `rf_platform::sync_file(&file)`, for the macOS fallback from
+            // F_FULLFSYNC to fsync (rf-jobs then needs rf-platform as a dependency).
             file.sync_data()?;
             drop(file);
             if self.entry_unsynced {
                 sync_entry(&self.dir, &self.file)?;
                 self.entry_unsynced = false;
             }
+            #[cfg(unix)]
+            self.sync_dirs()?;
+            #[cfg(windows)]
+            self.sync_dirs();
         }
         Ok(())
     }
@@ -612,7 +679,7 @@ mod tests {
         TransferSpec,
     };
     use crate::testkit::{Fault, FaultyProvider, temp_files};
-    use crate::undo::{CreatedItem, UndoRecord};
+    use crate::undo::{CreatedItem, MovedItem, TrashedItem, UndoRecord};
 
     const A: JobId = JobId(1);
     const B: JobId = JobId(2);
@@ -632,7 +699,8 @@ mod tests {
             dir.to_path_buf(),
             Box::new(|| {}),
             Box::new(|e| panic!("{e}")),
-        );
+        )
+        .unwrap();
         for r in records {
             h.append_durable(r).unwrap();
         }
@@ -728,6 +796,32 @@ mod tests {
     }
 
     #[test]
+    fn a_torn_finished_line_does_not_end_its_job() {
+        let (t, _, _) = a_done_b_running();
+        // A crash in the middle of B's `Finished`: the job did not end as far as the disk knows.
+        append_raw(t.path(), r#"{"v":1,"rec":{"Finished":{"job":2,"outc"#);
+        assert_eq!(ids(t.path()), [B]);
+        let (t, _, _) = a_done_b_running();
+        append_raw(t.path(), r#"{"v":1,"rec":{"Finished":{"job":2"#);
+        assert_eq!(ids(t.path()), [B]);
+    }
+
+    #[test]
+    fn a_durable_record_in_folders_the_journal_made_is_written() {
+        let t = tempfile::tempdir().unwrap();
+        let state = t.path().join("a").join("b").join("state");
+        let (h, thread) =
+            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")))
+                .unwrap();
+        h.append_durable(Record::Started { job: A }).unwrap();
+        h.append_durable(Record::Started { job: B }).unwrap();
+        h.shutdown();
+        thread.join().unwrap();
+        let want = [Record::Started { job: A }, Record::Started { job: B }];
+        assert_eq!(records(&state), want);
+    }
+
+    #[test]
     fn unknown_versions_are_skipped() {
         let (t, _, _) = a_done_b_running();
         append_raw(t.path(), "{\"v\":2,\"rec\":{}}\n");
@@ -754,7 +848,8 @@ mod tests {
         assert_eq!(jobs(&state), Vec::<IncompleteJob>::new());
         assert!(!state.exists());
         let (h, j) =
-            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")));
+            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")))
+                .unwrap();
         h.append(Record::Started { job: A });
         h.shutdown();
         j.join().unwrap();
@@ -828,7 +923,8 @@ mod tests {
             Box::new(move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
             }),
-        );
+        )
+        .unwrap();
         (h, t, errors)
     }
 
@@ -977,69 +1073,236 @@ mod tests {
         assert_eq!(read, want.into_iter().map(Some).collect::<Vec<_>>());
     }
 
-    /// The undo records go into the journal inside the specs of undo jobs, so their shape is
-    /// part of the format too.
+    /// An undo record written before a field of it was kept still reads, with the field's
+    /// default. The shape of today of every record is pinned in `every_undo_record_is_pinned`.
     #[test]
-    fn undo_records_are_pinned() {
-        let item = CreatedItem {
-            path: remote(&["d", "a.txt"]),
-            is_dir: false,
-            size: 3,
-            modified: Some(golden_time()),
-            identity: Some((1, 7)),
-        };
-        let undo = UndoRecord::Copied {
-            created: vec![item.clone()],
-            overwritten: 2,
-            at: Some(golden_time()),
-        };
-        let json = r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]}],"overwritten":2,"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}"#;
-        assert_eq!(serde_json::to_string(&undo).unwrap(), json);
-        assert_eq!(serde_json::from_str::<UndoRecord>(json).unwrap(), undo);
-        // A record written before `at` was kept still reads, without it.
+    fn older_undo_records_still_read() {
+        // A copy's record from before `at` was kept.
         let older = r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]}],"overwritten":2}}"#;
         let without = UndoRecord::Copied {
-            created: vec![item],
+            created: vec![CreatedItem {
+                path: remote(&["d", "a.txt"]),
+                is_dir: false,
+                size: 3,
+                modified: Some(golden_time()),
+                identity: Some((1, 7)),
+            }],
             overwritten: 2,
             at: None,
         };
         assert_eq!(serde_json::from_str::<UndoRecord>(older).unwrap(), without);
-        // A move's record, with how many files it replaced and the folders it made for the
-        // folders it moved across volumes; one written before those were kept still reads.
-        let moved = UndoRecord::Moved {
-            moves: vec![crate::undo::MovedItem {
+        // A move's record from before the files it replaced and the folders it made for the
+        // folders it moved across volumes were kept.
+        let older = r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"]}}"#;
+        let without = UndoRecord::Moved {
+            moves: vec![MovedItem {
                 from: remote(&["a.txt"]),
                 to: remote(&["d", "a.txt"]),
             }],
             created_dirs: vec![remote(&["d", "f"])],
             removed_dirs: vec![remote(&["f"])],
-            overwritten: 1,
-            copied_dirs: vec![crate::undo::MovedItem {
-                from: remote(&["f"]),
-                to: remote(&["d", "f"]),
-            }],
+            overwritten: 0,
+            copied_dirs: Vec::new(),
         };
-        let json = r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"],"overwritten":1,"copied_dirs":[{"from":"remote://p/f","to":"remote://p/d/f"}]}}"#;
-        assert_eq!(serde_json::to_string(&moved).unwrap(), json);
-        assert_eq!(serde_json::from_str::<UndoRecord>(json).unwrap(), moved);
-        let older = r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"]}}"#;
-        let Ok(UndoRecord::Moved {
-            overwritten,
-            copied_dirs,
-            ..
-        }) = serde_json::from_str::<UndoRecord>(older)
-        else {
-            panic!("an older move record does not read: {older}")
+        assert_eq!(serde_json::from_str::<UndoRecord>(older).unwrap(), without);
+    }
+
+    /// `value` is written as `want`, and `want` reads back as `value`.
+    fn pinned<T>(value: &T, want: &str)
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(serde_json::to_string(value).unwrap(), want);
+        assert_eq!(&serde_json::from_str::<T>(want).unwrap(), value);
+    }
+
+    /// Every name of a variant that a record can hold, once. The matches make a new variant a
+    /// compile error here until it is pinned too.
+    #[test]
+    fn every_variant_name_is_pinned() {
+        use ConflictPolicy as P;
+        use Outcome as O;
+        for p in [
+            P::Ask,
+            P::Overwrite,
+            P::Skip,
+            P::OverwriteIfNewer,
+            P::OverwriteIfSizeDiffers,
+            P::AutoRename,
+        ] {
+            let name = match p {
+                P::Ask => "Ask",
+                P::Overwrite => "Overwrite",
+                P::Skip => "Skip",
+                P::OverwriteIfNewer => "OverwriteIfNewer",
+                P::OverwriteIfSizeDiffers => "OverwriteIfSizeDiffers",
+                P::AutoRename => "AutoRename",
+            };
+            pinned(&p, &format!("\"{name}\""));
+        }
+        for e in [ErrorPolicy::Continue, ErrorPolicy::Ask, ErrorPolicy::Abort] {
+            let name = match e {
+                ErrorPolicy::Continue => "Continue",
+                ErrorPolicy::Ask => "Ask",
+                ErrorPolicy::Abort => "Abort",
+            };
+            pinned(&e, &format!("\"{name}\""));
+        }
+        for s in [SymlinkMode::CopyLink, SymlinkMode::Follow] {
+            let name = match s {
+                SymlinkMode::CopyLink => "CopyLink",
+                SymlinkMode::Follow => "Follow",
+            };
+            pinned(&s, &format!("\"{name}\""));
+        }
+        for m in [DeleteMethod::Trash, DeleteMethod::Permanent] {
+            let name = match m {
+                DeleteMethod::Trash => "Trash",
+                DeleteMethod::Permanent => "Permanent",
+            };
+            pinned(&m, &format!("\"{name}\""));
+        }
+        for k in [CreateKind::Dir, CreateKind::File] {
+            let name = match k {
+                CreateKind::Dir => "Dir",
+                CreateKind::File => "File",
+            };
+            pinned(&k, &format!("\"{name}\""));
+        }
+        for m in [TransferMode::Copy, TransferMode::Move] {
+            let name = match m {
+                TransferMode::Copy => "Copy",
+                TransferMode::Move => "Move",
+            };
+            pinned(&m, &format!("\"{name}\""));
+        }
+        for o in [
+            O::Completed,
+            O::CompletedWithErrors,
+            O::Cancelled,
+            O::Aborted,
+        ] {
+            let name = match o {
+                O::Completed => "Completed",
+                O::CompletedWithErrors => "CompletedWithErrors",
+                O::Cancelled => "Cancelled",
+                O::Aborted => "Aborted",
+            };
+            pinned(&o, &format!("\"{name}\""));
+        }
+    }
+
+    /// One undo record of every kind with every field it has, as the specs of undo jobs hold
+    /// them: the one pinned literal of each kind.
+    fn undo_golden() -> Vec<(UndoRecord, &'static str)> {
+        let (a, b, d) = (remote(&["a.txt"]), remote(&["d", "a.txt"]), remote(&["d"]));
+        let trashed = vec![
+            TrashedItem {
+                original: a.clone(),
+                location: Some(remote(&["bin", "a.txt"])),
+            },
+            TrashedItem {
+                original: b.clone(),
+                location: None,
+            },
+        ];
+        // A file with every field set, and a folder without the ones it may lack.
+        let copied = vec![
+            CreatedItem {
+                path: b.clone(),
+                is_dir: false,
+                size: 3,
+                modified: Some(golden_time()),
+                identity: Some((1, 7)),
+            },
+            CreatedItem {
+                path: d.clone(),
+                is_dir: true,
+                size: 0,
+                modified: None,
+                identity: None,
+            },
+        ];
+        let (f, d_f) = (remote(&["f"]), remote(&["d", "f"]));
+        vec![
+            (
+                UndoRecord::Copied {
+                    created: copied,
+                    overwritten: 2,
+                    at: Some(golden_time()),
+                },
+                r#"{"Copied":{"created":[{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]},{"path":"remote://p/d","is_dir":true,"size":0,"modified":null,"identity":null}],"overwritten":2,"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}"#,
+            ),
+            (
+                UndoRecord::Moved {
+                    moves: vec![MovedItem {
+                        from: a.clone(),
+                        to: b.clone(),
+                    }],
+                    created_dirs: vec![d_f.clone()],
+                    removed_dirs: vec![f.clone()],
+                    overwritten: 1,
+                    copied_dirs: vec![MovedItem { from: f, to: d_f }],
+                },
+                r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"],"overwritten":1,"copied_dirs":[{"from":"remote://p/f","to":"remote://p/d/f"}]}}"#,
+            ),
+            (
+                UndoRecord::Renamed {
+                    from: a.clone(),
+                    to: b.clone(),
+                },
+                r#"{"Renamed":{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}}"#,
+            ),
+            (
+                UndoRecord::Created {
+                    path: d.clone(),
+                    kind: CreateKind::Dir,
+                },
+                r#"{"Created":{"path":"remote://p/d","kind":"Dir"}}"#,
+            ),
+            (
+                UndoRecord::Removed {
+                    path: a,
+                    kind: CreateKind::File,
+                },
+                r#"{"Removed":{"path":"remote://p/a.txt","kind":"File"}}"#,
+            ),
+            (
+                UndoRecord::Trashed {
+                    items: trashed.clone(),
+                },
+                r#"{"Trashed":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt"},{"original":"remote://p/d/a.txt","location":null}]}}"#,
+            ),
+            (
+                UndoRecord::Restored { items: trashed },
+                r#"{"Restored":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt"},{"original":"remote://p/d/a.txt","location":null}]}}"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_undo_record_is_pinned() {
+        let golden = undo_golden();
+        for (record, want) in &golden {
+            pinned(record, want);
+            // An undo job's spec holds its record as it is.
+            pinned(
+                &JobSpec::Undo(record.clone()),
+                &format!(r#"{{"Undo":{want}}}"#),
+            );
+        }
+        // One of every kind, which the match keeps true when a kind is added.
+        let kind = |record: &UndoRecord| match record {
+            UndoRecord::Copied { .. } => 0,
+            UndoRecord::Moved { .. } => 1,
+            UndoRecord::Renamed { .. } => 2,
+            UndoRecord::Created { .. } => 3,
+            UndoRecord::Removed { .. } => 4,
+            UndoRecord::Trashed { .. } => 5,
+            UndoRecord::Restored { .. } => 6,
         };
-        assert_eq!((overwritten, copied_dirs), (0, Vec::new()));
-        // An undo job's spec holds its record.
-        let job = JobSpec::Undo(UndoRecord::Renamed {
-            from: remote(&["b.txt"]),
-            to: remote(&["a.txt"]),
-        });
-        let json = r#"{"Undo":{"Renamed":{"from":"remote://p/b.txt","to":"remote://p/a.txt"}}}"#;
-        assert_eq!(serde_json::to_string(&job).unwrap(), json);
-        assert_eq!(serde_json::from_str::<JobSpec>(json).unwrap(), job);
+        let kinds: Vec<_> = golden.iter().map(|(record, _)| kind(record)).collect();
+        assert_eq!(kinds, (0..7).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1115,7 +1378,7 @@ mod tests {
         let file = t.path().join(JOURNAL_FILE);
         let before = fs::read(&file).unwrap();
         // A folder where the compacted copy is written makes the compaction fail.
-        let blocker = t.path().join("jobs.journal.tmp");
+        let blocker = t.path().join(COMPACTED_FILE);
         fs::create_dir(&blocker).unwrap();
         let recovered = recover(t.path()).unwrap();
         // The jobs are found all the same, and the failure is not hidden.
@@ -1135,7 +1398,8 @@ mod tests {
         let (t, dst, spec) = copy_fixture(&["a.txt", "b.txt"], 3);
         let state = t.path().join("state");
         let (h, thread) =
-            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")));
+            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")))
+                .unwrap();
         let vfs = Vfs::with_local();
         let report = execute(C, &spec, &ExecEnv::new(&vfs, &NonInteractive).journal(&h));
         assert_eq!((report.outcome, report.done.files), (Outcome::Completed, 2));
@@ -1171,7 +1435,8 @@ mod tests {
         let (t, dst, spec) = copy_fixture(&["a.bin"], 2 << 20);
         let state = t.path().join("state");
         let (h, thread) =
-            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")));
+            JournalHandle::spawn(state.clone(), Box::new(|| {}), Box::new(|e| panic!("{e}")))
+                .unwrap();
         let at = golden_time();
         h.append(Record::Submitted {
             job: C,
@@ -1223,7 +1488,8 @@ mod tests {
             t.path().to_path_buf(),
             Box::new(|| {}),
             Box::new(|e| panic!("{e}")),
-        );
+        )
+        .unwrap();
         h.shutdown();
         thread.join().unwrap();
         h.append(Record::Started { job: A });
@@ -1248,7 +1514,8 @@ mod tests {
                 lines_at_start.store(found, Ordering::SeqCst);
             }),
             Box::new(|e| panic!("{e}")),
-        );
+        )
+        .unwrap();
         h.append(Record::Started { job: A });
         h.shutdown();
         thread.join().unwrap();
@@ -1330,7 +1597,8 @@ mod tests {
                 tell.send(refused).unwrap();
             }),
             Box::new(|e| panic!("{e}")),
-        );
+        )
+        .unwrap();
         give.send(h.clone()).unwrap();
         let error = told
             .recv_timeout(WAIT)

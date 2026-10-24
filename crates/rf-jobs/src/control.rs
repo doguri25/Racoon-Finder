@@ -85,6 +85,10 @@ impl Control {
     /// Called by the worker between steps. Returns at once while running, waits while the
     /// job is paused until it is resumed or cancelled, and fails with `Error::Cancelled` once
     /// it is cancelled.
+    ///
+    /// Only [`cancel`](Self::cancel) cancels the job: cancelling the
+    /// [`cancel_token`](Self::cancel_token) alone stops the provider calls that take it, but
+    /// fails no checkpoint and wakes no paused one.
     pub fn checkpoint(&self) -> Result<()> {
         let state = self
             .inner

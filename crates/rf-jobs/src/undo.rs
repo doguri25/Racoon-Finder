@@ -154,18 +154,18 @@ impl UndoHistory {
     }
 
     /// Notes `record`, the record of a job the user ran: it can be undone next. A new action
-    /// makes what was undone before it impossible to redo, so the redo list is emptied. It
-    /// starts a new [`generation`](Self::generation).
+    /// makes what was undone before it impossible to redo, so the redo list is emptied.
     pub fn push(&mut self, record: UndoRecord) {
         self.redo.clear();
         self.generation += 1;
         Self::bounded_push(&mut self.undo, record, self.limit);
     }
 
-    /// How many records of jobs the user ran were noted so far. A record taken off a list is
-    /// put back only in the generation it was taken in (see
+    /// How many records of jobs the user ran were noted so far ([`push`](Self::push)). The
+    /// engine puts a record it took off a list back, and notes what its undo or redo left,
+    /// only in the generation it took the record in (see
     /// [`put_back_undo`](Self::put_back_undo)).
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -173,7 +173,7 @@ impl UndoHistory {
     /// back at the end of the undo list, for an undo that never ran; the redo list stays as it
     /// is. Only while no record of a job the user ran was noted since: that newer record must
     /// be undone first, so the old one is dropped then. Says whether it was put back.
-    pub fn put_back_undo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
+    pub(crate) fn put_back_undo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
         let current = popped_at == self.generation;
         if current {
             Self::bounded_push(&mut self.undo, record, self.limit);
@@ -185,7 +185,7 @@ impl UndoHistory {
     /// back at the end of the redo list, for a redo that never ran. Only while no record of a
     /// job the user ran was noted since, after which nothing can be redone: the record is
     /// dropped then. Says whether it was put back.
-    pub fn put_back_redo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
+    pub(crate) fn put_back_redo(&mut self, record: UndoRecord, popped_at: u64) -> bool {
         let current = popped_at == self.generation;
         if current {
             Self::bounded_push(&mut self.redo, record, self.limit);
@@ -270,5 +270,36 @@ mod tests {
             // What the record keeps, the journal can store.
             serde_json::to_string(&item).unwrap();
         }
+    }
+
+    #[test]
+    fn a_record_goes_back_only_in_the_generation_it_was_taken_in() {
+        let r = |n: &str| UndoRecord::Renamed {
+            from: VPath::local(std::env::temp_dir().join(n)).unwrap(),
+            to: VPath::local(std::env::temp_dir().join(format!("{n}2"))).unwrap(),
+        };
+        let mut h = UndoHistory::new(10);
+        h.push(r("a"));
+        h.push(r("b"));
+        h.push_undone(r("x"));
+        let at = h.generation();
+        let b = h.pop_undo().unwrap();
+        assert!(h.put_back_undo(b, at));
+        // Back on top, and the redo list as it was.
+        assert_eq!(
+            (h.undo_list(), h.redo_list()),
+            (vec![r("a"), r("b")], vec![r("x")])
+        );
+        let x = h.pop_redo().unwrap();
+        assert!(h.put_back_redo(x, at));
+        assert_eq!(h.redo_list(), [r("x")]);
+        let (b, x) = (h.pop_undo().unwrap(), h.pop_redo().unwrap());
+        h.push(r("c"));
+        assert_eq!(h.generation(), at + 1);
+        assert!(!h.put_back_undo(b, at) && !h.put_back_redo(x, at));
+        assert_eq!(
+            (h.undo_list(), h.redo_list()),
+            (vec![r("a"), r("c")], Vec::new())
+        );
     }
 }

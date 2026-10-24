@@ -237,6 +237,7 @@ impl FailureReason {
 
 /// How a job ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Every item was processed (skips the user chose count as processed).
     Completed,

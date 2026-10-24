@@ -96,6 +96,28 @@ fn into_dir_refuses_volume_roots() {
     )
     .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
+    let want = format!("not supported: cannot transfer a volume root: {}", root());
+    assert_eq!(err.to_string(), want);
+}
+
+/// A name a local file system holds but a remote address cannot: the join fails, and the
+/// error says which name.
+#[cfg(unix)]
+#[test]
+fn into_dir_gives_the_join_error_for_a_name_the_target_cannot_hold() {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::OsStr::from_bytes(b"\xff.txt");
+    let source = VPath::local(std::path::Path::new("/a").join(name)).unwrap();
+    let remote = VPath::new(Scheme::Remote, "p", &["dst"]).unwrap();
+    let err = TransferSpec::into_dir(
+        TransferMode::Copy,
+        &[source],
+        &remote,
+        TransferOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidPath);
+    assert_eq!(err.to_string(), "invalid name `\u{fffd}.txt`");
 }
 
 #[test]

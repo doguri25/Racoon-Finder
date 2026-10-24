@@ -918,32 +918,45 @@ mod one_at_a_time {
 
     use super::*;
 
-    /// An engine whose provider holds the first file it writes until it is released, with
-    /// `a.txt`, `x` and `big.bin` in `src` and an empty folder `held`.
-    fn engine(f: &Fx) -> (Arc<FaultyProvider>, JobEngine, Receiver<JobEvent>) {
+    /// Writes `a.txt`, `b.txt`, `c.txt`, `x` and `big.bin` in `src` and an empty folder
+    /// `held`.
+    fn fixture(f: &Fx) {
         write_tree(
             &f.root,
             &[
                 ("src/a.txt", "A"),
+                ("src/b.txt", "B"),
+                ("src/c.txt", "C"),
                 ("src/x", "X"),
                 ("src/big.bin", "B"),
                 ("held/", ""),
             ],
         );
+    }
+
+    /// The fixture, and an engine whose provider holds the first file it writes until it is
+    /// released.
+    fn engine(f: &Fx) -> (Arc<FaultyProvider>, JobEngine, Receiver<JobEvent>) {
+        fixture(f);
         let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
         let (e, rx) = engine_on(p.vfs());
         (p, e, rx)
     }
 
-    /// Moves `a.txt` from `src` to `dst`; its undo runs on the main lane.
-    fn move_a(f: &Fx, e: &JobEngine, rx: &Receiver<JobEvent>) {
+    /// Moves `name` from `src` to `dst`; its undo runs on the main lane.
+    fn move_one(f: &Fx, e: &JobEngine, rx: &Receiver<JobEvent>, name: &str) {
         let moved = spec(
             TransferMode::Move,
-            &[f.src.join("a.txt")],
+            &[f.src.join(name)],
             &f.dst,
             TransferOptions::default(),
         );
         assert_eq!(done(e, rx, moved).outcome, Outcome::Completed);
+    }
+
+    /// Moves `a.txt` from `src` to `dst`.
+    fn move_a(f: &Fx, e: &JobEngine, rx: &Receiver<JobEvent>) {
+        move_one(f, e, rx, "a.txt");
     }
 
     /// Submits a copy whose first write waits, so that it holds the main lane, and gives its ID.
@@ -968,52 +981,159 @@ mod one_at_a_time {
 
     #[test]
     fn a_record_goes_back_only_in_the_generation_it_was_taken_in() {
-        let r = |n: &str| UndoRecord::Renamed {
-            from: v(std::env::temp_dir().join(n)),
-            to: v(std::env::temp_dir().join(format!("{n}2"))),
-        };
-        let mut h = UndoHistory::new(10);
-        h.push(r("a"));
-        h.push(r("b"));
-        h.push_undone(r("x"));
-        let at = h.generation();
-        let b = h.pop_undo().unwrap();
-        assert!(h.put_back_undo(b, at));
-        // Back on top, and the redo list as it was.
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        move_one(&f, &e, &rx, "b.txt");
+        move_one(&f, &e, &rx, "c.txt");
+        assert_eq!(undo(&e, &rx).outcome, Outcome::Completed);
+        let (undos, redos) = (e.undo_history(), e.redo_history());
+        assert_eq!((undos.len(), redos.len()), (2, 1));
+        let held = hold_the_main_lane(&f, &p, &e);
+        // An undo that never runs: its record goes back on top, and the redo list stays.
+        let first = e.undo().expect("something to undo");
+        cancel(&e, &rx, first);
         assert_eq!(
-            (h.undo_list(), h.redo_list()),
-            (vec![r("a"), r("b")], vec![r("x")])
+            (e.undo_history(), e.redo_history()),
+            (undos.clone(), redos.clone())
         );
-        let x = h.pop_redo().unwrap();
-        assert!(h.put_back_redo(x, at));
-        assert_eq!(h.redo_list(), [r("x")]);
-        let (b, x) = (h.pop_undo().unwrap(), h.pop_redo().unwrap());
-        h.push(r("c"));
-        assert!(!h.put_back_undo(b, at) && !h.put_back_redo(x, at));
-        assert_eq!(
-            (h.undo_list(), h.redo_list()),
-            (vec![r("a"), r("c")], Vec::new())
-        );
+        // A redo that never runs: likewise, and the undo list stays.
+        let first = e.redo().expect("something to redo");
+        cancel(&e, &rx, first);
+        assert_eq!((e.undo_history(), e.redo_history()), (undos.clone(), redos));
+        // A new action of the user's in between: the record taken before it is dropped.
+        let first = e.undo().expect("something to undo");
+        done(&e, &rx, rename(&f, "x", "y"));
+        cancel(&e, &rx, first);
+        let after = e.undo_history();
+        assert_eq!((after.len(), &after[0]), (2, &undos[0]));
+        assert!(matches!(after[1], UndoRecord::Renamed { .. }));
+        assert_eq!(e.redo_history(), Vec::new());
+        finish(&p, &e, &rx, held);
     }
 
     #[test]
     fn one_undo_at_a_time_and_a_cancelled_one_keeps_its_record() {
         let f = fx();
         let (p, e, rx) = engine(&f);
+        // Two records of the main lane: the one put back must go back on top.
         move_a(&f, &e, &rx);
+        move_one(&f, &e, &rx, "b.txt");
         let history = e.undo_history();
+        assert_eq!(history.len(), 2);
         let held = hold_the_main_lane(&f, &p, &e);
         let first = e.undo().expect("something to undo");
         assert_eq!((e.undo(), e.redo()), (None, None));
         cancel(&e, &rx, first);
         assert_eq!(e.undo_history(), history);
-        // The next undo may start again, and is put back again.
+        // The next undo may start again, takes the same record, and is put back again.
         let again = e.undo().expect("the record is back");
+        assert_eq!(e.undo_history(), &history[..1]);
         assert_eq!(e.undo(), None);
         cancel(&e, &rx, again);
         assert_eq!(e.undo_history(), history);
-        assert!(f.dst.join("a.txt").exists());
+        assert!(f.dst.join("a.txt").exists() && f.dst.join("b.txt").exists());
         finish(&p, &e, &rx, held);
+    }
+
+    // Final review B.
+
+    #[test]
+    fn an_undo_that_runs_after_a_new_action_leaves_nothing_to_redo() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        let held = hold_the_main_lane(&f, &p, &e);
+        let undone = e.undo().expect("something to undo");
+        // A job the user runs meanwhile, on the quick lane, notes its record.
+        done(&e, &rx, rename(&f, "x", "y"));
+        p.release();
+        assert_eq!(wait_finished(&rx, held, WAIT).outcome, Outcome::Completed);
+        // The undo runs all the same, after the new action.
+        assert_eq!(wait_finished(&rx, undone, WAIT).outcome, Outcome::Completed);
+        assert!(f.src.join("a.txt").exists() && !f.dst.join("a.txt").exists());
+        // Nothing undone before a new action can be redone, so its reverse is dropped; the
+        // records of the user's jobs (the rename and the held copy) stay.
+        assert_eq!(e.redo_history(), Vec::new());
+        assert_eq!(e.undo_history().len(), 2);
+        assert!(e.shutdown(WAIT));
+    }
+
+    /// Panics, once, when it is asked for the lane of an undo.
+    #[derive(Debug)]
+    struct PanicsOnAnUndo(std::sync::atomic::AtomicBool);
+
+    impl LanePolicy for PanicsOnAnUndo {
+        fn lane(&self, spec: &JobSpec) -> LaneId {
+            let undo = matches!(spec, JobSpec::Undo(_));
+            let first = undo && self.0.swap(false, std::sync::atomic::Ordering::SeqCst);
+            assert!(!first, "a bug in the policy");
+            DefaultLanes.lane(spec)
+        }
+    }
+
+    #[test]
+    fn a_lane_policy_that_panics_gives_the_record_back() {
+        let f = fx();
+        fixture(&f);
+        let mut config = EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive));
+        config.lanes = Arc::new(PanicsOnAnUndo(true.into()));
+        let (e, rx) = JobEngine::start(config);
+        done(&e, &rx, rename(&f, "a.txt", "a2.txt"));
+        done(&e, &rx, rename(&f, "b.txt", "b2.txt"));
+        let history = e.undo_history();
+        let panicking = e.clone();
+        assert!(std::thread::spawn(move || panicking.undo()).join().is_err());
+        // The record is back on top, and the next undo may start.
+        assert_eq!(e.undo_history(), history);
+        assert_eq!(undo(&e, &rx).outcome, Outcome::Completed);
+        assert!(f.src.join("b.txt").exists() && f.src.join("a2.txt").exists());
+        assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn a_queued_undo_ended_by_shutdown_keeps_its_record_and_is_recovered() {
+        let f = fx();
+        fixture(&f);
+        let journal = f.root.join("state");
+        let p = FaultyProvider::local(vec![Fault::Hold { file: 0 }]);
+        let config = EngineConfig::new(p.vfs(), Arc::new(NonInteractive)).with_journal(&journal);
+        let (e, rx) = JobEngine::start(config);
+        move_a(&f, &e, &rx);
+        let history = e.undo_history();
+        let held = hold_the_main_lane(&f, &p, &e);
+        let queued = e.undo().expect("something to undo");
+        let releaser = {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                p.release();
+            })
+        };
+        assert!(e.shutdown(WAIT));
+        releaser.join().unwrap();
+        assert_eq!(wait_finished(&rx, queued, WAIT).outcome, Outcome::Cancelled);
+        // In this process it never ran, so its record is back on the list.
+        assert_eq!(e.undo_history(), history);
+        assert!(f.dst.join("a.txt").exists());
+        // The app's end cut it off: the next start offers it again, as never started, and the
+        // copy that held the lane as started.
+        let (again, rx) = engine_with_journal(&journal);
+        let JobEvent::Recovered { jobs, .. } =
+            rf_jobs::testkit::wait_for(&rx, WAIT, |ev| matches!(ev, JobEvent::Recovered { .. }))
+        else {
+            unreachable!()
+        };
+        let found: Vec<_> = jobs.iter().map(|j| (j.id, j.started)).collect();
+        assert_eq!(found, [(held, true), (queued, false)]);
+        assert_eq!(jobs[1].spec, JobSpec::Undo(history[0].clone()));
+        assert!(again.shutdown(WAIT));
+    }
+
+    /// An engine on the local disk with the journal in `journal`.
+    fn engine_with_journal(journal: &std::path::Path) -> (JobEngine, Receiver<JobEvent>) {
+        let config = EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive));
+        JobEngine::start(config.with_journal(journal))
     }
 
     #[test]

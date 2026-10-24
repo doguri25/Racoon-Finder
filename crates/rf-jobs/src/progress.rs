@@ -48,7 +48,18 @@ impl SpeedMeter {
     /// Adds the sample "`bytes_done` bytes in all at `now`" and drops the samples older than
     /// `now - window`. The newest two samples always stay, so a pause longer than the window
     /// still leaves two points to measure between.
+    ///
+    /// A count lower than the last one (bytes taken back after a failed attempt) starts the
+    /// window again from this sample, so the speed is measured from there on at once instead
+    /// of reading 0 until the higher counts have left the window.
     pub fn record(&mut self, now: Instant, bytes_done: u64) {
+        if self
+            .samples
+            .back()
+            .is_some_and(|&(_, last)| bytes_done < last)
+        {
+            self.samples.clear();
+        }
         self.samples.push_back((now, bytes_done));
         // A window longer than the time since the clock started has no start: keep everything.
         let Some(oldest_kept) = now.checked_sub(self.window) else {
@@ -80,8 +91,9 @@ impl SpeedMeter {
         u64::try_from(bytes * 1_000 / millis).unwrap_or(u64::MAX)
     }
 
-    /// The time `remaining` bytes take at the current speed: zero when nothing remains,
-    /// `None` when the speed is 0.
+    /// The time `remaining` bytes take at the current speed, to the millisecond: zero when
+    /// nothing remains, `None` when the speed is 0. A time longer than `u64::MAX` milliseconds
+    /// is cut there.
     pub fn eta(&self, remaining: u64) -> Option<Duration> {
         if remaining == 0 {
             return Some(Duration::ZERO);
@@ -90,8 +102,9 @@ impl SpeedMeter {
         if speed == 0 {
             return None;
         }
+        let millis = u128::from(remaining) * 1_000 / u128::from(speed);
         Some(Duration::from_millis(
-            remaining.saturating_mul(1_000) / speed,
+            u64::try_from(millis).unwrap_or(u64::MAX),
         ))
     }
 }

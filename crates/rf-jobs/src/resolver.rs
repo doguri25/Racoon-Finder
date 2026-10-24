@@ -36,8 +36,8 @@ pub enum PreflightAnswer {
 }
 
 /// The one who answers a job's questions. A job calls it from its own worker thread and waits
-/// for the answer, so only that job stands still while a question is open; the other jobs
-/// keep running.
+/// for the answer, so only that job's lane stands still while a question is open: the jobs
+/// queued behind it in its lane wait for it, and the other lanes keep running.
 ///
 /// A window-based implementation sends the question to the UI thread and blocks on a channel
 /// until the user answers. While it blocks, `JobEngine::cancel` on that job takes effect

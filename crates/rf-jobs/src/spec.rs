@@ -92,7 +92,8 @@ impl TransferSpec {
     /// A transfer of `sources` into the folder `dest_dir`, each keeping its own name.
     ///
     /// Fails with `Unsupported` for a source without a name (a volume root), and with the
-    /// join error when a name cannot be appended to `dest_dir`.
+    /// join error when a name cannot be appended to `dest_dir` (a name that is not UTF-8, from
+    /// a Unix disk, into a remote folder).
     pub fn into_dir(
         mode: TransferMode,
         sources: &[VPath],
