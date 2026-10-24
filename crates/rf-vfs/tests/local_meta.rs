@@ -131,20 +131,55 @@ fn new_methods_refuse_non_local_paths() {
     assert_eq!(p.fs_name(&r), None);
 }
 
-/// A folder whose entries changed can be synced. Off Windows a missing folder is an error, so
-/// the call really reaches the file system; on Windows it does nothing.
+/// A folder whose entries changed can be synced. A missing folder is an error on every system,
+/// so the call really reaches the file system, on Windows too; so is a file, which is no folder.
 #[test]
 fn sync_dir_syncs_an_existing_folder() {
     let t = tempfile::tempdir().unwrap();
     let p = LocalProvider::new();
     let dir = VPath::local(t.path()).unwrap();
-    p.create_file(&dir.join("a").unwrap()).unwrap();
+    let file = dir.join("a").unwrap();
+    p.create_file(&file).unwrap();
     p.sync_dir(&dir).unwrap();
-    let missing = p.sync_dir(&dir.join("missing").unwrap());
-    #[cfg(unix)]
-    assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
-    #[cfg(windows)]
-    missing.unwrap();
+    let missing = p.sync_dir(&dir.join("missing").unwrap()).unwrap_err();
+    assert_eq!(missing.kind(), ErrorKind::NotFound);
+    assert!(
+        missing.to_string().starts_with("sync_dir failed for "),
+        "{missing}"
+    );
+    assert!(p.sync_dir(&file).is_err());
+}
+
+/// A FIFO put where a file or a folder was found never blocks the provider: reading it and
+/// syncing it as a folder are refused at once. A plain open of its read end would wait for a
+/// writer forever.
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_blocking() {
+    use std::sync::mpsc;
+
+    let t = tempfile::tempdir().unwrap();
+    let fifo = t.path().join("fifo");
+    // `mkfifo(1)` is on Linux and macOS alike.
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success(), "mkfifo failed");
+    let path = VPath::local(&fifo).unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let p = LocalProvider::new();
+        let read = p.open_read(&path).map(drop);
+        let synced = p.sync_dir(&path);
+        let _ = tx.send((read, synced));
+    });
+    let Ok((read, synced)) = rx.recv_timeout(Duration::from_secs(10)) else {
+        // Opening the other end lets the blocked open go on, so the thread ends.
+        let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        panic!("the provider blocked on a FIFO");
+    };
+    let read = read.unwrap_err();
+    assert_eq!(read.kind(), ErrorKind::Unsupported, "{read}");
+    assert!(read.to_string().ends_with("not a regular file"), "{read}");
+    assert!(synced.is_err());
 }
 
 #[test]
@@ -192,6 +227,16 @@ fn read_streams_report_the_ranges_of_their_own_file() {
         assert_eq!(sparse, None, "macOS never reports holes");
     } else if cfg!(windows) {
         assert!(sparse.is_some(), "NTFS keeps holes");
+    } else {
+        // A file with fewer blocks than its length needs has holes, and they must be found:
+        // the rest of the test would pass with none.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(dir.path().join("s.bin")).unwrap();
+            let has_holes = meta.blocks().saturating_mul(512) < meta.len();
+            assert!(!has_holes || sparse.is_some(), "holes kept but not found");
+        }
     }
     let mut reader = p.open_read(&file).unwrap();
     let dense = dir.path().join("dense.bin");

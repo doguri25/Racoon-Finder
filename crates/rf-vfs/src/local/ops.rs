@@ -166,41 +166,18 @@ pub(super) fn remove_dir(path: &VPath) -> Result<()> {
 
 /// Makes the changes to the entries of the folder `path` durable; see `Provider::sync_dir`.
 ///
-/// On Unix the folder is opened for reading and synced (`fsync`, `F_FULLFSYNC` on macOS). A
-/// file system that cannot sync a folder says so with `EINVAL`, which PostgreSQL's
-/// `fsync_fname_ext` also ignores for a folder (with `EBADF`), or with an error that std
-/// reports as `ErrorKind::Unsupported` (`EOPNOTSUPP`, `ENOSYS`); then there is nothing more
-/// this can do, and it returns `Ok`. The macOS `ENOTSUP` (45, not `EOPNOTSUPP`, 102) is
-/// neither, and fails: a move then keeps its source. So does a folder that can be written to
-/// and entered but not read (write and execute only, as the macOS `~/Public/Drop Box`): it
-/// cannot be opened for reading, the sync fails with `PermissionDenied`, and a move across
+/// It is `rf_platform::sync_dir`: on Unix the folder is opened with `O_DIRECTORY | O_NONBLOCK`
+/// (an item that is no folder, a FIFO among them, is refused at once) and synced, with the
+/// macOS fallback of `rf_platform::sync_file` from `F_FULLFSYNC` to `fsync`; on Windows it is
+/// opened with write access and flushed (`FlushFileBuffers`), since NTFS writes its log
+/// lazily. Only a file system that cannot sync a folder at all (`EINVAL`, `EOPNOTSUPP` or
+/// `ENOSYS` on Unix; `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED` or
+/// `ERROR_INVALID_PARAMETER` on Windows) counts as synced. Every other error fails, with the op
+/// `"sync_dir"`, and a move then keeps its source: a folder that can be written to and entered
+/// but not read (the macOS `~/Public/Drop Box`) cannot be opened for the sync, so a move across
 /// volumes into it keeps its sources.
-///
-/// On Windows it does nothing: NTFS keeps the changes to its folders in its journal, and
-/// `File::open` cannot open a folder there.
 pub(super) fn sync_dir(path: &VPath) -> Result<()> {
-    let local = native(path)?;
-    #[cfg(unix)]
-    {
-        let fail = |e| Error::io("sync_dir", path.clone(), e);
-        let dir = File::open(&local).map_err(fail)?;
-        match dir.sync_all() {
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-                ) =>
-            {
-                Ok(())
-            }
-            synced => synced.map_err(fail),
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = local;
-        Ok(())
-    }
+    rf_platform::sync_dir(&native(path)?).map_err(|e| Error::io("sync_dir", path.clone(), e))
 }
 
 /// What the link at `path` leads to; see `Provider::read_link`.
@@ -244,9 +221,12 @@ pub(super) fn set_metadata(path: &VPath, patch: &MetadataPatch) -> Result<()> {
     Ok(())
 }
 
-/// Opens `path` for reading.
+/// Opens `path` for reading, if it is a regular file (`rf_platform::open_regular_file`): an item
+/// that is no file by then, such as a FIFO put in the place of a file after the file was found,
+/// fails with `ErrorKind::Unsupported` ("not a regular file") at once, and never blocks.
 pub(super) fn open_read(path: &VPath) -> Result<Box<dyn ReadStream>> {
-    let file = File::open(native(path)?).map_err(|e| Error::io("open_read", path.clone(), e))?;
+    let file = rf_platform::open_regular_file(&native(path)?)
+        .map_err(|e| Error::io("open_read", path.clone(), e))?;
     Ok(Box::new(LocalReader {
         file,
         path: path.clone(),
@@ -345,7 +325,9 @@ impl Write for LocalWriter {
 impl WriteStream for LocalWriter {
     /// A file with a hole at its end is first made as long as that hole reaches (`set_len`).
     /// Only a hole moves the position past the end of the file, so a file without one is
-    /// never measured.
+    /// never measured. The sync is `rf_platform::sync_file`: on macOS `F_FULLFSYNC`, or a plain
+    /// `fsync` on a file system that cannot do a full one (an SMB share), so that a copy to a
+    /// network share from a Mac can finish at all.
     fn finish(mut self: Box<Self>) -> Result<()> {
         let extended = if self.holes == Holes::Made {
             self.extend_to_position()
@@ -354,7 +336,7 @@ impl WriteStream for LocalWriter {
         };
         extended
             .and_then(|()| self.file.flush())
-            .and_then(|()| self.file.sync_all())
+            .and_then(|()| rf_platform::sync_file(&self.file))
             .map_err(|e| Error::io("finish", self.path.clone(), e))
     }
 

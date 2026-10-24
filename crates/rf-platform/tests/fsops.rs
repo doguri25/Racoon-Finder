@@ -1,5 +1,5 @@
 use rf_core::{Error, ErrorKind, Scheme, VPath};
-use rf_platform::rename_no_replace;
+use rf_platform::{open_regular_file, rename_no_replace, sync_dir, sync_file};
 
 fn setup() -> (tempfile::TempDir, VPath) {
     let t = tempfile::tempdir().unwrap();
@@ -120,4 +120,71 @@ fn another_volume_crosses_devices() {
     );
     assert_eq!(read(&a), "A");
     assert!(!far.as_local().unwrap().exists());
+}
+
+/// A file and a folder with new entries are made durable; a folder that is missing is an error
+/// on every system, never a silent success.
+#[test]
+fn files_and_folders_are_synced() {
+    let (t, d) = setup();
+    let a = d.join("a").unwrap();
+    write(&a, "A");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(a.as_local().unwrap())
+        .unwrap();
+    sync_file(&file).unwrap();
+    let native = d.to_extended_length().unwrap();
+    sync_dir(&native).unwrap();
+    let missing = sync_dir(&native.join("missing")).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    // A file is no folder to sync.
+    assert!(sync_dir(&t.path().join("a")).is_err());
+}
+
+/// A regular file opens and reads from its start; a folder is refused.
+#[test]
+fn only_a_regular_file_opens_for_reading() {
+    use std::io::Read;
+
+    let (t, d) = setup();
+    write(&d.join("a").unwrap(), "content");
+    let mut file = open_regular_file(&t.path().join("a")).unwrap();
+    let mut read = String::new();
+    file.read_to_string(&mut read).unwrap();
+    assert_eq!(read, "content");
+    let missing = open_regular_file(&t.path().join("missing")).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    assert!(open_regular_file(t.path()).is_err());
+}
+
+/// The end of a FIFO with no writer would block a plain open for good; both the open for
+/// reading and the folder sync refuse it at once instead.
+#[cfg(unix)]
+#[test]
+fn a_fifo_never_blocks_an_open() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let t = tempfile::tempdir().unwrap();
+    let fifo = t.path().join("fifo");
+    // `mkfifo(1)` is on Linux and macOS alike; rustix has no `mkfifoat` on macOS.
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success(), "mkfifo failed");
+    let (tx, rx) = mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let read = open_regular_file(&path).map(drop);
+        let synced = sync_dir(&path);
+        let _ = tx.send((read, synced));
+    });
+    let Ok((read, synced)) = rx.recv_timeout(Duration::from_secs(10)) else {
+        // Opening the other end lets the blocked open go on, so the thread ends.
+        let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        panic!("an open of a FIFO blocked");
+    };
+    let read = read.unwrap_err();
+    assert_eq!(read.kind(), std::io::ErrorKind::Unsupported, "{read}");
+    assert_eq!(read.to_string(), "not a regular file");
+    assert!(synced.is_err());
 }

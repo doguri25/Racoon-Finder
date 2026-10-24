@@ -248,6 +248,14 @@ fn link_unavailable(e: &io::Error) -> bool {
     ) || (cfg!(windows) && e.raw_os_error() == Some(1314))
 }
 
+/// Whether `e`, the error of a provider's `create_symlink`, only means that the user may not make
+/// links here: on Windows without Developer Mode or the privilege, `ERROR_PRIVILEGE_NOT_HELD`
+/// (1314). Any other failure of a link is a failure of the check.
+fn links_refused(e: &rf_core::Error) -> bool {
+    cfg!(windows)
+        && matches!(e, rf_core::Error::Io { source, .. } if source.raw_os_error() == Some(1314))
+}
+
 #[cfg(unix)]
 fn symlink_file(target: &str, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -324,7 +332,7 @@ pub fn check_delete_permanent(p: &dyn Provider, root: &VPath) {
 /// real folder, empty or not, gives `IsADirectory` and stays as it is with everything in it.
 ///
 /// The links are skipped, with a note on stderr, on Windows when the OS refuses the first one
-/// (no Developer Mode and no privilege to make links), which a provider may pass on.
+/// for want of the privilege to make links (no Developer Mode), which a provider may pass on.
 #[allow(
     clippy::print_stderr,
     reason = "a check that cannot run says so, as the skipped tests do"
@@ -352,7 +360,7 @@ pub fn check_delete_leaf(p: &dyn Provider, root: &VPath) {
     };
     match p.create_symlink(&flink, &to_file) {
         Ok(()) => {}
-        Err(e) if cfg!(windows) => {
+        Err(e) if links_refused(&e) => {
             eprintln!("skipped: the OS refuses links here (no Developer Mode): {e}");
             return;
         }
@@ -447,11 +455,12 @@ fn symlink_dir(target: &Path, link: &Path) -> io::Result<()> {
 }
 
 /// Links are made and read back exactly as given (a relative target stays relative), never
-/// replace anything, and are not followed by `stat`, `delete` or `remove_dir`; `stat_target`
-/// follows them to what they lead to.
+/// replace anything (a link, a file or a folder), and are not followed by `stat`, `delete` or
+/// `remove_dir`; `stat_target` follows them to what they lead to.
 ///
-/// Skipped, with a note on stderr, on Windows when the OS refuses the first link (no Developer
-/// Mode and no privilege to make links), which a provider may pass on.
+/// Skipped, with a note on stderr, on Windows when the OS refuses the first link for want of
+/// the privilege to make links (no Developer Mode), which a provider may pass on. Any other
+/// failure to make a link fails the check.
 #[allow(
     clippy::print_stderr,
     reason = "a check that cannot run says so, as the skipped tests do"
@@ -468,7 +477,7 @@ pub fn check_links(p: &dyn Provider, root: &VPath) {
     };
     match p.create_symlink(&flink, &ft) {
         Ok(()) => {}
-        Err(e) if cfg!(windows) => {
+        Err(e) if links_refused(&e) => {
             eprintln!("skipped: the OS refuses links here (no Developer Mode): {e}");
             return;
         }
@@ -510,17 +519,40 @@ pub fn check_links(p: &dyn Provider, root: &VPath) {
         ErrorKind::AlreadyExists
     );
     assert_eq!(p.read_link(&flink).unwrap(), ft);
+    // Nor is a regular file or a folder ever replaced by a link.
+    assert_eq!(
+        kind_of(p.create_symlink(&file, &dt)),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(read_all(p, &file), b"target");
+    assert_eq!(
+        kind_of(p.create_symlink(&sub, &ft)),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(p.stat(&sub).unwrap().kind, EntryKind::Dir);
     assert!(p.read_link(&file).is_err());
     p.delete(&flink, DeleteMode::Permanent).unwrap();
     assert_eq!(read_all(p, &file), b"target");
-    // `remove_dir` never follows a link: it fails (Unix) or removes only the link (Windows),
-    // and the empty folder the link leads to stays.
-    let _ = p.remove_dir(&dlink);
+    // `remove_dir` never follows a link, and the empty folder the link leads to stays. On
+    // Windows a folder link is removed itself, like an empty folder; on Unix `rmdir` refuses a
+    // link (`ENOTDIR`), which stays.
+    let windows = cfg!(windows);
+    match p.remove_dir(&dlink) {
+        Ok(()) => {
+            assert!(windows, "remove_dir took a link away off Windows");
+            assert_eq!(kind_of(p.stat(&dlink)), ErrorKind::NotFound);
+        }
+        Err(e) => {
+            assert!(!windows, "remove_dir kept a folder link on Windows: {e}");
+            assert_eq!(e.kind(), ErrorKind::NotADirectory, "{e}");
+            assert_eq!(p.stat(&dlink).unwrap().kind, EntryKind::Symlink);
+        }
+    }
     assert_eq!(p.stat(&sub).unwrap().kind, EntryKind::Dir);
 }
 
 /// `set_metadata` changes only what the patch holds, and attributes become exactly the given
-/// value.
+/// value, on a file and on a folder alike.
 pub fn check_metadata(p: &dyn Provider, root: &VPath) {
     let d = fresh(p, root, "meta");
     let f = d.join("f.txt").unwrap();
@@ -548,6 +580,24 @@ pub fn check_metadata(p: &dyn Provider, root: &VPath) {
             .attributes
             .contains(Attributes::READONLY)
     );
+
+    // A folder takes its times and attributes the same way, in one patch: the times first, so
+    // that a folder made read-only still gets them.
+    let sub = fresh(p, &d, "sub");
+    let folder = MetadataPatch {
+        modified: Some(when),
+        attributes: Some(Attributes::READONLY),
+        ..MetadataPatch::default()
+    };
+    p.set_metadata(&sub, &folder).unwrap();
+    let s = p.stat(&sub).unwrap();
+    assert_eq!((s.kind, s.modified), (EntryKind::Dir, Some(when)));
+    assert!(s.attributes.contains(Attributes::READONLY));
+    // Writable again, so that the folder can be removed with the rest.
+    p.set_metadata(&sub, &attrs).unwrap();
+    let s = p.stat(&sub).unwrap();
+    assert!(!s.attributes.contains(Attributes::READONLY));
+    assert_eq!(s.modified, Some(when));
 }
 
 /// `remove_dir` removes an empty folder and nothing else: a folder with something in it and a

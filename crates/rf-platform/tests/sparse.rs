@@ -18,19 +18,39 @@ fn holey(dir: &Path) -> VPath {
     VPath::local(&p).unwrap()
 }
 
+/// Whether the file at `path` keeps holes where it was written: NTFS does, and on Unix the
+/// file has fewer blocks than its length needs (`st_blocks` counts units of 512 bytes). A test
+/// may skip only where this is false, never where holes are there to be found.
+fn keeps_holes(path: &VPath) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path.as_local().unwrap()).unwrap();
+        meta.blocks().saturating_mul(512) < meta.len()
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        true
+    }
+}
+
 #[test]
 fn holes_are_the_gaps_between_data_ranges() {
     let t = tempfile::tempdir().unwrap();
-    let found = data_ranges(&holey(t.path())).unwrap();
+    let file = holey(t.path());
+    let found = data_ranges(&file).unwrap();
     // macOS never reports holes, because its answers can hide data.
     if cfg!(target_os = "macos") {
         assert_eq!(found, None);
         return;
     }
     let Some(ranges) = found else {
-        // NTFS keeps holes, so there the test must not be skipped.
-        let keeps_holes = cfg!(windows);
-        assert!(!keeps_holes, "NTFS keeps holes");
+        // A file that has holes must have them found; only one without may skip.
+        assert!(
+            !keeps_holes(&file),
+            "the file has holes, but none were found"
+        );
         eprintln!("skipped: this temp file system keeps no holes");
         return;
     };
@@ -68,6 +88,9 @@ fn an_open_file_answers_for_itself() {
     let local = path.as_local().unwrap().to_path_buf();
     let opened = std::fs::File::open(&local).unwrap();
     let before = file_data_ranges(&opened).unwrap();
+    // Off macOS, a file with holes has them found, so the rest is no vacuous pass.
+    let found_where_kept = cfg!(target_os = "macos") || !keeps_holes(&path) || before.is_some();
+    assert!(found_where_kept, "the file has holes, but none were found");
     assert_eq!(
         before.as_ref().map(|found| &found.ranges),
         data_ranges(&path).unwrap().as_ref()

@@ -221,6 +221,12 @@ pub trait Provider: Send + Sync + Debug {
     /// (never empty); checks `cancel` at least between batches and then returns
     /// `Err(Error::Cancelled)`. Order is unspecified. An empty folder calls `sink` zero times.
     ///
+    /// Each entry describes the child itself, as `stat` does, without following links: a link
+    /// is `EntryKind::Symlink` with the link's own times, a link to a folder (a Windows
+    /// junction too) included, and never the item it leads to. The move and delete walks rely
+    /// on this: they enter only an entry of kind `EntryKind::Dir`, so they never walk into
+    /// another folder through a link.
+    ///
     /// `Entry::identity()` may be `None`, as for `stat`. The local provider leaves it empty on
     /// Windows for every listed entry, because the IDs need an open handle per file.
     fn list(
@@ -267,7 +273,10 @@ pub trait Provider: Send + Sync + Debug {
     /// it leads to. An error names `path`, not the item inside the tree that failed, and a tree
     /// may then be partly removed.
     fn delete(&self, path: &VPath, mode: DeleteMode) -> Result<Deleted>;
-    /// Opens the file at `path` for reading and seeking.
+    /// Opens the file at `path` for reading and seeking. An item that is no regular file (a
+    /// FIFO, a socket, a device, a folder) is refused with `ErrorKind::Unsupported`, at once: an
+    /// open never waits for the writer of a FIFO, which another program can put where a file
+    /// was found.
     fn open_read(&self, path: &VPath) -> Result<Box<dyn ReadStream>>;
     /// The data is durable only after `WriteStream::finish` returns `Ok`.
     fn open_write(&self, path: &VPath, mode: WriteMode) -> Result<Box<dyn WriteStream>>;
@@ -291,6 +300,9 @@ pub trait Provider: Send + Sync + Debug {
     /// `ErrorKind::NotFound`, and a loop of links an error too. The default implementation
     /// gives `Error::Unsupported`: the provider cannot follow links, so a caller that wanted to
     /// skips the link and reports it.
+    ///
+    /// `Entry::identity()` may be `None`, as for `stat`. Two entries are the same item only when
+    /// both identities are `Some` and equal; a caller never takes two `None` for one item.
     fn stat_target(&self, path: &VPath) -> Result<Entry> {
         Err(unsupported("stat_target", path))
     }
@@ -298,7 +310,12 @@ pub trait Provider: Send + Sync + Debug {
     /// What the link at `path` leads to, exactly as it is stored; a relative target stays
     /// relative. `LinkTarget::is_dir` tells whether it is a folder link: on Windows a folder
     /// symlink or a junction, elsewhere a link whose target is a folder now (so `false` for a
-    /// link to nothing). An item that is no link is an error.
+    /// link to nothing).
+    ///
+    /// An item that is no link is an error, never `ErrorKind::NotFound`, which means that
+    /// nothing is at `path`: for the local provider `ErrorKind::Other`, from the OS's `EINVAL`
+    /// (Unix) or `ERROR_NOT_A_REPARSE_POINT` (Windows). The default implementation gives
+    /// `Error::Unsupported`.
     fn read_link(&self, path: &VPath) -> Result<LinkTarget> {
         Err(unsupported("read_link", path))
     }
@@ -337,6 +354,15 @@ pub trait Provider: Send + Sync + Debug {
     /// what `rf_platform::copy_extras` copies: the Unix permission bits and extended
     /// attributes, the macOS hidden flag, and the Windows alternate data streams. The default
     /// implementation has nothing to copy and returns `Ok(())`.
+    ///
+    /// Links: nothing is ever written through a `to` that is a link. On Unix the local provider
+    /// follows no final link on either side: it reads and writes the extended attributes of a
+    /// link itself, and leaves the mode alone when either side is a link (changing it would
+    /// change the item the link leads to). On Windows a `to` that is a reparse point (a link, a
+    /// junction) keeps its streams as they are, while the streams of a `from` that is one are
+    /// read through it, from the item it leads to. A transfer never passes a link: it copies a
+    /// link as a link without extras, and a copy in Follow mode passes the item the link leads
+    /// to as `from`.
     fn copy_extras(&self, from: &VPath, to: &VPath) -> Result<()> {
         let _ = (from, to);
         Ok(())
@@ -364,8 +390,11 @@ pub trait Provider: Send + Sync + Debug {
     ///
     /// The default implementation `stat`s `path` and refuses a folder, else calls `delete` with
     /// `DeleteMode::Permanent`. An item that turns into a folder between the two would still go
-    /// with everything in it, so a provider that can remove one item in one step that never
-    /// takes a folder along (as the local provider does) implements it itself.
+    /// with everything in it, so a provider that can delete a folder tree in one call (a
+    /// `delete` that removes a folder with everything in it, as `DeleteMode::Permanent` does)
+    /// must override this with a removal of one item that never takes a folder along, as the
+    /// local provider does. Only a provider whose `delete` cannot remove a folder tree may keep
+    /// the default.
     fn delete_leaf(&self, path: &VPath) -> Result<()> {
         if self.stat(path)?.kind == EntryKind::Dir {
             let error = std::io::Error::from(std::io::ErrorKind::IsADirectory);
@@ -413,7 +442,10 @@ pub trait Provider: Send + Sync + Debug {
     ///
     /// Never replaces anything: if `original` is taken, the result is
     /// `ErrorKind::AlreadyExists` and both items stay as they are. If the folder of `original`
-    /// is gone, the result is `ErrorKind::NotFound`.
+    /// is gone, or the trash no longer holds the item, the result is `ErrorKind::NotFound`; a
+    /// trash on another volume than `original` gives `ErrorKind::CrossesDevices` (nothing is
+    /// copied across). An error names `location`, the place in the trash, as its path, never
+    /// `original`. For the local provider it is `rf_platform::restore_from_trash`.
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         let _ = original;
         Err(unsupported("restore_trashed", location))

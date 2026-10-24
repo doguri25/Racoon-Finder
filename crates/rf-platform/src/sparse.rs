@@ -45,16 +45,20 @@ pub struct DataRanges {
 /// The offset of `file` is never moved, so a reader of it can go on where it was.
 ///
 /// `Ok(None)` means there are no holes to keep, or that the answer cannot be trusted:
-/// - Linux and other Unix systems: a file whose allocated blocks (`st_blocks` × 512) cover its
-///   length has none, and nothing more is asked; pseudo-files such as those of `/proc` report
-///   no length and stop there too. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks a
-///   second open file description of the same file (`/proc/self/fd`), which leaves the offset
-///   of `file` alone; one that cannot be opened gives `None`. A file system that does not know
-///   these seeks (`EINVAL`, `ENOTSUP`, `ESPIPE`) gives `None`, and so do answers that do not
-///   agree with each other: an `ENXIO` ("no data from here on") for an offset that `SEEK_HOLE`
-///   does not confirm as the start of a hole (some file systems answer `ENXIO` for data they
-///   keep elsewhere, QEMU issue 3124), and data that starts after offset 0 when `SEEK_HOLE`
-///   does not find a hole at 0.
+/// - Linux: a file whose allocated blocks (`st_blocks` × 512) cover its length has none, and
+///   nothing more is asked; pseudo-files such as those of `/proc` report no length and stop
+///   there too. Otherwise `lseek` with `SEEK_DATA` and `SEEK_HOLE` walks a second open file
+///   description of the same file, opened from `/proc/thread-self/fd` or else `/proc/self/fd`,
+///   which leaves the offset of `file` alone. One that cannot be opened gives `None`, and so
+///   does one that turns out to be another file (by device and inode), as a `/proc` that is
+///   not the kernel's can give. A file system that does not know these seeks (`EINVAL`,
+///   `ENOTSUP`, `ESPIPE`) gives `None`, and so do answers that do not agree with each other: an
+///   `ENXIO` ("no data from here on") for an offset that `SEEK_HOLE` does not confirm as the
+///   start of a hole (some file systems answer `ENXIO` for data they keep elsewhere, QEMU issue
+///   3124), and data that starts after offset 0 when `SEEK_HOLE` does not find a hole at 0.
+/// - Other Unix systems (the BSDs): the same code, but the walk needs the second open file
+///   description that only Linux's `/proc` gives, so in effect it is Linux only: elsewhere no
+///   place opens and the answer is `None`.
 /// - macOS: always. A file compressed by the file system (decmpfs, `UF_COMPRESSED`) has fewer
 ///   blocks than its length and answers `ENXIO` to `SEEK_DATA` inside it, and APFS answers to
 ///   `SEEK_HOLE` have lost data before (GNU coreutils bugs 51857 and 61386), so its files are
@@ -222,13 +226,14 @@ fn allocation_shows_data(attributes: u32) -> bool {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod imp {
-    use std::fs::File;
+    use std::fs::{File, Metadata};
     use std::io;
     use std::ops::Range;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
 
-    use rustix::fs::SeekFrom;
+    use rustix::fs::{Mode, OFlags, SeekFrom};
     use rustix::io::Errno;
 
     use super::{Found, To, walk};
@@ -244,7 +249,9 @@ mod imp {
         }
         // Seeking moves the offset of the open file description, which `file` shares with
         // every duplicate of it. A new description of the same file has an offset of its own.
-        let Ok(walked) = File::open(format!("/proc/self/fd/{}", file.as_raw_fd())) else {
+        let fd = file.as_raw_fd();
+        let places = ["thread-self", "self"].map(|of| PathBuf::from(format!("/proc/{of}/fd/{fd}")));
+        let Some(walked) = reopened(&meta, places) else {
             return Ok(None);
         };
         let ranges = walk(len, |to| {
@@ -265,6 +272,31 @@ mod imp {
             }
         })?;
         Ok(ranges.map(|ranges| (len, ranges)))
+    }
+
+    /// The file that `meta` describes (by its `fstat`), opened again from the first of `places`
+    /// that opens: a new open file description of it, with an offset of its own. The kernel
+    /// names an open file of this thread at `/proc/thread-self/fd/N` (since Linux 3.17) and of
+    /// this process at `/proc/self/fd/N`; the thread's own table comes first, since a thread can
+    /// have a table of its own.
+    ///
+    /// `None` when no place opens, and when the first one that opens is another file, by device
+    /// and inode: a `/proc` that is not the kernel's (in a chroot, say) or a table that is not
+    /// this thread's can name one, and its holes are not the file's. The open never blocks
+    /// (`O_NONBLOCK`), should a place lead to a FIFO.
+    pub(super) fn reopened(
+        meta: &Metadata,
+        places: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Option<File> {
+        let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let opened = places
+            .into_iter()
+            .find_map(|place| rustix::fs::open(place.as_ref(), flags, Mode::empty()).ok())?;
+        let opened = File::from(opened);
+        let same = opened
+            .metadata()
+            .is_ok_and(|now| (now.dev(), now.ino()) == (meta.dev(), meta.ino()));
+        same.then_some(opened)
     }
 }
 
@@ -490,6 +522,31 @@ mod tests {
         for served_elsewhere in [0x400, 0x1000, 0x4_0000, 0x40_0000] {
             assert_eq!(SERVED_ELSEWHERE & served_elsewhere, served_elsewhere);
             assert!(!allocation_shows_data(SPARSE_FILE | served_elsewhere));
+        }
+    }
+
+    /// The walk runs on a new open of the file it was asked about, never on another file: a
+    /// place that opens another one (a `/proc` that is not the kernel's) gives nothing, a place
+    /// that does not open is passed over, and the kernel's own places name the open file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reopen_that_finds_another_file_is_not_walked() {
+        use std::os::fd::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let file = std::fs::File::open(&a).unwrap();
+        let meta = file.metadata().unwrap();
+        assert!(super::imp::reopened(&meta, [b.clone()]).is_none());
+        // The first place that opens decides: another file there is not passed over.
+        assert!(super::imp::reopened(&meta, [b, a.clone()]).is_none());
+        assert!(super::imp::reopened(&meta, [dir.path().join("missing"), a]).is_some());
+        let fd = file.as_raw_fd();
+        for place in ["thread-self", "self"] {
+            let path = std::path::PathBuf::from(format!("/proc/{place}/fd/{fd}"));
+            assert!(super::imp::reopened(&meta, [path]).is_some(), "{place}");
         }
     }
 
