@@ -101,7 +101,7 @@ mod rules {
 
     use rf_core::{Scheme, VPath};
     use rf_jobs::testkit::{Fault, FaultyProvider, tree};
-    use rf_jobs::{IssueKind, Totals};
+    use rf_jobs::{FailureReason, IssueKind, Totals};
 
     use super::*;
 
@@ -144,6 +144,7 @@ mod rules {
                 .to_string()
             )
         );
+        assert_eq!(failure.reason, Some(FailureReason::AcrossLocations));
         assert_eq!(std::fs::read_to_string(f.src.join("a.txt")).unwrap(), "A");
         assert_eq!((rep.outputs, rep.undo), (Vec::new(), None));
     }
@@ -241,6 +242,8 @@ mod rules {
             ("a?b", IssueKind::InvalidCharacter('?')),
             ("CON", IssueKind::ReservedName),
             ("end.", IssueKind::TrailingDotOrSpace),
+            ("CONIN$", IssueKind::ReservedName),
+            ("com\u{b9}.txt", IssueKind::ReservedName),
         ];
         for (name, issue) in cases {
             let rep = run_on(
@@ -254,6 +257,7 @@ mod rules {
                 (Stage::Create, ErrorKind::InvalidPath, issue.to_string()),
                 "{name}"
             );
+            assert_eq!(failure.reason, Some(FailureReason::Issue(issue)), "{name}");
         }
         assert_eq!(tree(&f.src), BTreeMap::new());
     }
@@ -270,6 +274,8 @@ mod rules {
             ("CON", IssueKind::ReservedName),
             ("a.", IssueKind::TrailingDotOrSpace),
             ("a|b.txt", IssueKind::InvalidCharacter('|')),
+            ("CONOUT$.log", IssueKind::ReservedName),
+            ("LPT\u{b3}", IssueKind::ReservedName),
         ];
         for (name, issue) in cases {
             let job = JobSpec::Rename {

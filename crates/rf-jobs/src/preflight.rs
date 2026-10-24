@@ -127,8 +127,8 @@ pub enum Severity {
 pub enum IssueKind {
     /// The name holds a character the target file system does not allow.
     InvalidCharacter(char),
-    /// The name is a Windows device name (`CON`, `NUL`, `COM1`, ...), with or without an
-    /// extension.
+    /// The name is a Windows device name (`CON`, `NUL`, `CONIN$`, `COM1`, `COM¹`, ...), with
+    /// or without an extension.
     ReservedName,
     /// The name ends with a dot or a space, which Windows file systems cannot keep.
     TrailingDotOrSpace,
@@ -147,6 +147,22 @@ pub enum IssueKind {
 }
 
 impl IssueKind {
+    /// The word the log writes for this issue as the reason of a failure
+    /// (`reason=name_too_long`): the variant's name in `snake_case`. It is English whatever
+    /// language the UI shows.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            IssueKind::InvalidCharacter(_) => "invalid_character",
+            IssueKind::ReservedName => "reserved_name",
+            IssueKind::TrailingDotOrSpace => "trailing_dot_or_space",
+            IssueKind::NameTooLong { .. } => "name_too_long",
+            IssueKind::PathTooLong { .. } => "path_too_long",
+            IssueKind::FileTooLarge { .. } => "file_too_large",
+            IssueKind::CaseCollision { .. } => "case_collision",
+            IssueKind::NotEnoughSpace { .. } => "not_enough_space",
+        }
+    }
+
     /// Whether the user may go on despite the issue. Only a reserved name and a trailing dot
     /// or space are warnings; everything else stops the item.
     pub fn severity(&self) -> Severity {
@@ -234,21 +250,28 @@ fn is_forbidden(c: char) -> bool {
 }
 
 /// Whether `name` is a Windows device name: the part before the first dot, without trailing
-/// spaces, is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9` in any ASCII
-/// case. `COM0`, `COM10` and names that merely start with a device name are ordinary.
+/// spaces, is `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1` to `COM9`, `COM¹`, `COM²`,
+/// `COM³`, `LPT1` to `LPT9`, `LPT¹`, `LPT²` or `LPT³` in any ASCII case (the superscript
+/// digits are U+00B9, U+00B2 and U+00B3, which Windows takes for 1, 2 and 3 there). `COM0`,
+/// `COM10`, `COM` with any other digit (a full-width `１`) and names that merely start with a
+/// device name are ordinary.
 fn is_reserved(name: &str) -> bool {
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
         .trim_end_matches(' ');
-    let device = ["CON", "PRN", "AUX", "NUL"]
+    let device = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
         .iter()
         .any(|device| stem.eq_ignore_ascii_case(device));
-    let numbered = stem.len() == 4
-        && stem.get(..3).is_some_and(|head| {
-            head.eq_ignore_ascii_case("COM") || head.eq_ignore_ascii_case("LPT")
-        })
-        && matches!(stem.as_bytes().last(), Some(b'1'..=b'9'));
+    let port = stem
+        .get(..3)
+        .is_some_and(|head| head.eq_ignore_ascii_case("COM") || head.eq_ignore_ascii_case("LPT"));
+    let mut number = stem.get(3..).unwrap_or_default().chars();
+    let numbered = port
+        && matches!(
+            (number.next(), number.next()),
+            (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+        );
     device || numbered
 }
 
@@ -260,7 +283,9 @@ fn is_reserved(name: &str) -> bool {
 /// Only a file system with [`FsKind::windows_names`] gets the character, reserved-name and
 /// trailing-dot checks: `< > : " / \ | ? *` and U+0001 to U+001F are forbidden, and a reserved
 /// name is the part before the first dot, without trailing spaces, equal to `CON`, `PRN`,
-/// `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9` in any ASCII case.
+/// `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1` to `COM9`, `COM¹` to `COM³`, `LPT1` to `LPT9` or
+/// `LPT¹` to `LPT³` in any ASCII case. A rename and a create refuse every name with an issue,
+/// a reserved one too.
 ///
 /// The length limit is [`NAME_LIMIT`] (255) on every file system, counted in UTF-16 units on
 /// Windows file systems, SMB shares and `HfsPlus` and in UTF-8 bytes on `Apfs` and `Other`. A

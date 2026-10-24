@@ -10,10 +10,12 @@ mod transfer;
 mod undo;
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,7 +29,7 @@ use crate::journal::{JournalHandle, Record};
 use crate::naming::temp_name;
 use crate::preflight::{FsKind, IssueKind, fold_name};
 use crate::progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
-use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
+use crate::report::{FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals};
 use crate::resolver::{ErrorAction, Resolver};
 use crate::spec::{ErrorPolicy, JobKind, JobSpec};
 
@@ -37,8 +39,12 @@ pub(crate) const COPY_CHUNK: usize = 1 << 20;
 /// How deep a transfer or a permanent delete goes into folders: the items it was given are at
 /// depth 0, their children at 1. An item deeper than this is not counted in the plan and fails
 /// as [`Stage::Plan`] when the job reaches it; a folder there is not entered, and a delete
-/// removes neither it nor the folders above it. It ends a loop of links that Follow mode would
-/// walk forever, well inside the 1,023-byte path limit of macOS.
+/// removes neither it nor the folders above it.
+///
+/// A loop of links that a copy in Follow mode would walk forever is caught by identity where
+/// identities are known: a followed folder that is one of the folders above it is not entered.
+/// Only where they are unknown (a file system without file IDs) does this depth end such a
+/// loop, well inside the 1,023-byte path limit of macOS.
 pub const MAX_DEPTH: usize = 128;
 
 /// What a running job tells the one who started it, on the job's own thread.
@@ -146,6 +152,7 @@ pub fn execute(id: JobId, spec: &JobSpec, env: &ExecEnv<'_>) -> JobReport {
             stage: Stage::Internal,
             kind: ErrorKind::Other,
             message: format!("internal error: {}", panic_text(payload.as_ref())),
+            reason: None,
         });
         ctx.stop(Stopped::Aborted);
     }
@@ -229,6 +236,9 @@ pub(crate) struct Failed {
     /// numbered name). The failure names it as its target. Boxed, so that every `Result` that
     /// fails with a `Failed` stays small.
     pub target: Option<Box<VPath>>,
+    /// Why the job refused the item itself, when it did (see [`FailureReason`]). A failure of
+    /// an issue has the issue as its reason without this. Boxed, as `target` is.
+    pub reason: Option<Box<FailureReason>>,
 }
 
 impl Failed {
@@ -237,16 +247,32 @@ impl Failed {
             stage,
             cause: Cause::Error(error),
             target: None,
+            reason: None,
         }
     }
 
-    /// The failure of an item the target cannot hold because of `issue`.
+    /// The failure of an item the target cannot hold because of `issue`; its reason is the
+    /// issue.
     pub(crate) fn issue(stage: Stage, issue: IssueKind) -> Failed {
         Failed {
             stage,
             cause: Cause::Issue(issue),
             target: None,
+            reason: None,
         }
+    }
+
+    /// The failure of an item the job refuses itself, by the rule `reason`, at `stage`;
+    /// `error` gives its kind and its log text.
+    pub(crate) fn refused(stage: Stage, error: Error, reason: FailureReason) -> Failed {
+        Failed::new(stage, error).because(reason)
+    }
+
+    /// Gives the failure the reason `reason`.
+    #[must_use]
+    pub(crate) fn because(mut self, reason: FailureReason) -> Failed {
+        self.reason = Some(Box::new(reason));
+        self
     }
 
     /// Names `path` as the path that was being written, unless a path is named already.
@@ -257,14 +283,23 @@ impl Failed {
     }
 
     /// The record of this failure for a step on `source` and `target`; the path that was being
-    /// written, if one is named, is the target instead.
+    /// written, if one is named, is the target instead. The reason is the one given, else the
+    /// issue of a failure of an issue, else none.
     pub(crate) fn record(self, source: Option<&VPath>, target: Option<&VPath>) -> ItemFailure {
+        let reason = self
+            .reason
+            .map(|reason| *reason)
+            .or_else(|| match &self.cause {
+                Cause::Issue(issue) => Some(FailureReason::Issue(issue.clone())),
+                Cause::Error(_) => None,
+            });
         ItemFailure {
             source: source.cloned(),
             target: self.target.map(|path| *path).or_else(|| target.cloned()),
             stage: self.stage,
             kind: self.cause.kind(),
             message: self.cause.to_string(),
+            reason,
         }
     }
 }
@@ -286,6 +321,7 @@ impl<T> At<T> for Result<T, Cause> {
             stage,
             cause,
             target: None,
+            reason: None,
         })
     }
 }
@@ -388,11 +424,12 @@ pub(crate) fn folder_identity(
         .or_else(|| provider.stat(path).ok()?.identity())
 }
 
-/// The error of a followed folder that is one of the folders above it.
-pub(crate) fn link_loop(source: &VPath) -> Error {
-    Error::Unsupported(format!(
+/// The failure of a followed folder that is one of the folders above it.
+pub(crate) fn link_loop(source: &VPath) -> Failed {
+    let error = Error::Unsupported(format!(
         "folder link loop: {source} leads back to a folder above it"
-    ))
+    ));
+    Failed::refused(Stage::Plan, error, FailureReason::LinkLoop)
 }
 
 /// Whether the item a fresh `stat` finds, `now`, is no longer the one `was` described: of
@@ -401,6 +438,95 @@ pub(crate) fn link_loop(source: &VPath) -> Error {
 /// earlier leaves it in place then.
 pub(crate) fn replaced(was: &Entry, now: &Entry) -> bool {
     now.kind != was.kind || matches!((now.identity(), was.identity()), (Some(a), Some(b)) if a != b)
+}
+
+/// What a walk that takes items away was doing to an item it found changed: the words of the
+/// failure that leaves it in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Walking {
+    /// A move, which takes each item away once its copy is committed.
+    Moving,
+    /// A permanent delete.
+    Deleting,
+}
+
+impl Walking {
+    /// The failure, at `stage`, of `path`, which changed under the walk (see [`replaced`]):
+    /// `Unsupported` with "{path} changed while it was moved (or deleted); left in place".
+    pub(crate) fn changed(self, stage: Stage, path: &VPath) -> Failed {
+        let (done, reason) = match self {
+            Walking::Moving => ("moved", FailureReason::ChangedWhileMoved),
+            Walking::Deleting => ("deleted", FailureReason::ChangedWhileDeleted),
+        };
+        let error =
+            Error::Unsupported(format!("{path} changed while it was {done}; left in place"));
+        Failed::refused(stage, error, reason)
+    }
+}
+
+/// The folder an item of a walk is in, as the walk found it when it listed it: its path, and
+/// what `stat` gave for it then (its kind, and its identity where the file system has one,
+/// also on Windows, where a listing carries none).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Parent<'a> {
+    pub path: &'a VPath,
+    pub entry: &'a Entry,
+}
+
+/// `stat`s `path` of `provider` again and gives what it finds. Fails at `stage`, leaving the
+/// item in place, when it is no longer the item `entry` described (see [`replaced`]): of
+/// another kind (a file turned into a folder, a folder into a link to one) or, when both
+/// identities are known, another item. A `stat` that fails fails at `stage` too.
+pub(crate) fn restat(
+    provider: &dyn Provider,
+    path: &VPath,
+    entry: &Entry,
+    stage: Stage,
+    walking: Walking,
+) -> Result<Entry, Failed> {
+    let now = provider.stat(path).at(stage)?;
+    if replaced(entry, &now) {
+        return Err(walking.changed(stage, path));
+    }
+    Ok(now)
+}
+
+/// Checks that the folder an item is in, `parent` (`None` for an item of the job), is still the
+/// folder the walk listed (see [`restat`]). A swap of that folder for a link makes it a link
+/// (another kind) on every system; a swap of a folder further above makes its path lead to
+/// another folder, which has another identity where the file system has identities.
+pub(crate) fn check_parent(
+    provider: &dyn Provider,
+    parent: Option<Parent<'_>>,
+    stage: Stage,
+    walking: Walking,
+) -> Result<(), Failed> {
+    match parent {
+        Some(parent) => restat(provider, parent.path, parent.entry, stage, walking).map(drop),
+        None => Ok(()),
+    }
+}
+
+/// The volume of the folder `path` of `provider`, which `entry` describes: the entry's, or the
+/// one `stat` gives for a listed folder that has none (a Windows listing). `None` when neither
+/// tells.
+pub(crate) fn volume_of(provider: &dyn Provider, path: &VPath, entry: &Entry) -> Option<VolumeId> {
+    entry
+        .volume_id
+        .or_else(|| provider.stat(path).ok()?.volume_id)
+}
+
+/// Whether a folder on `volume` in a folder on `above` is on another volume (a mount point):
+/// only when both are known and differ.
+pub(crate) fn on_another_volume(above: Option<VolumeId>, volume: Option<VolumeId>) -> bool {
+    matches!((above, volume), (Some(a), Some(b)) if a != b)
+}
+
+/// The failure, at `stage`, of the folder `path`, which is on another volume than the folder it
+/// is in and is not entered: `Unsupported` with "{path} is on another volume".
+pub(crate) fn other_volume(stage: Stage, path: &VPath) -> Failed {
+    let error = Error::Unsupported(format!("{path} is on another volume"));
+    Failed::refused(stage, error, FailureReason::OtherVolume)
 }
 
 /// Fails the item `source`, which goes to `target` if anything is written, as deeper than
@@ -418,7 +544,7 @@ pub(crate) fn too_deep(
     }
     Some(ctx.attempt(policy, Some(source), target, |_| {
         let error = Error::Unsupported(format!("folder nesting deeper than {MAX_DEPTH} levels"));
-        Err(Failed::new(Stage::Plan, error))
+        Err(Failed::refused(Stage::Plan, error, FailureReason::TooDeep))
     }))
 }
 
@@ -471,6 +597,82 @@ pub(crate) struct Ctx<'e> {
     temp_seq: u64,
     /// The folders of temporary files noted in the journal so far.
     temp_dirs: HashSet<VPath>,
+    /// The temporary files and markers the job could not remove (see [`Leftovers`]).
+    leftovers: Leftovers,
+    /// Whether a metadata step has failed with `Unsupported` before, which is warned about
+    /// once per job (see [`warn_metadata`](Self::warn_metadata)).
+    metadata_unsupported: bool,
+}
+
+/// The temporary files and markers of a job that their guards could not remove, as warnings
+/// for the job's report. A guard notes one as it is dropped, also while a panic unwinds, when
+/// nothing else can reach the report; the job hands them over to the report as it ends. A
+/// leftover keeps its temporary name, and crash recovery looks only at the folders of jobs
+/// that never ended, so without this nobody would hear of it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Leftovers(Rc<RefCell<Vec<ItemFailure>>>);
+
+impl Leftovers {
+    /// Notes that `path`, a temporary file or marker of the job made for `source`, could not be
+    /// removed because of `error`: a `Stage::Write` warning that names it as its target, with
+    /// the reason `TempLeftBehind`. A `NotFound` is nothing to note: the file is gone.
+    pub(crate) fn note(&self, error: Error, source: Option<&VPath>, path: &VPath) {
+        if error.kind() == ErrorKind::NotFound {
+            return;
+        }
+        let failed = Failed::refused(Stage::Write, error, FailureReason::TempLeftBehind);
+        self.0.borrow_mut().push(failed.record(source, Some(path)));
+    }
+
+    fn take(&self) -> Vec<ItemFailure> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
+}
+
+/// A temporary file or marker that a job made at `path` of `provider`, removed when the guard
+/// goes out of scope still armed: after an error, a cancel, or while a panic unwinds. It goes
+/// with `Provider::delete_leaf`, so a folder that took its name meanwhile is never removed with
+/// it. A file it cannot remove keeps its temporary name and is noted in the job's
+/// [`Leftovers`], so the report names it.
+pub(crate) struct TempGuard<'a> {
+    provider: &'a dyn Provider,
+    path: &'a VPath,
+    source: Option<&'a VPath>,
+    leftovers: Leftovers,
+    armed: bool,
+}
+
+impl<'a> TempGuard<'a> {
+    /// The guard of the item this job made at `path`, for the item `source`.
+    pub(crate) fn new(
+        ctx: &Ctx<'_>,
+        provider: &'a dyn Provider,
+        path: &'a VPath,
+        source: Option<&'a VPath>,
+    ) -> TempGuard<'a> {
+        TempGuard {
+            provider,
+            path,
+            source,
+            leftovers: ctx.leftovers.clone(),
+            armed: true,
+        }
+    }
+
+    /// Leaves the item where it is: it was committed.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(error) = self.provider.delete_leaf(self.path) {
+                self.leftovers.note(error, self.source, self.path);
+            }
+        }
+    }
 }
 
 impl<'e> Ctx<'e> {
@@ -489,6 +691,8 @@ impl<'e> Ctx<'e> {
             step_bytes: 0,
             temp_seq: 0,
             temp_dirs: HashSet::new(),
+            leftovers: Leftovers::default(),
+            metadata_unsupported: false,
         }
     }
 
@@ -617,6 +821,29 @@ impl<'e> Ctx<'e> {
         self.report.warnings.push(warning);
     }
 
+    /// Records that copying metadata (`Provider::set_metadata`, `Provider::copy_extras`) onto
+    /// `target` failed with `error`, as a `Stage::Metadata` warning; the item itself is done.
+    ///
+    /// An `Unsupported` error means that the target cannot keep that metadata at all: a
+    /// provider without `set_metadata` (its default implementation), or a file system that has
+    /// no place for it. That is nothing to do for each item, so it is warned about once per
+    /// job, for the first item it happens to, and every later one is passed over. Any other
+    /// error is warned about for each item.
+    pub(crate) fn warn_metadata(
+        &mut self,
+        error: Error,
+        source: Option<&VPath>,
+        target: Option<&VPath>,
+    ) {
+        if error.kind() == ErrorKind::Unsupported {
+            if self.metadata_unsupported {
+                return;
+            }
+            self.metadata_unsupported = true;
+        }
+        self.warn(Failed::new(Stage::Metadata, error), source, target);
+    }
+
     /// Every child of the folder `dir` of `provider`. All the batches are gathered before the
     /// caller uses any of them, so that a change to the folder while the job works through it
     /// cannot shake the list. A cancel of the job stops the listing with `Error::Cancelled`.
@@ -628,12 +855,19 @@ impl<'e> Ctx<'e> {
     }
 
     /// A new temporary file next to `target`: `.rf-{job}-{seq}.rfpart` in its folder, with
-    /// `seq` counting from 0 in each job.
-    pub(crate) fn temp_for(&mut self, target: &VPath) -> rf_core::Result<VPath> {
-        let parent = target.parent().ok_or_else(|| {
-            Error::Unsupported(format!("no folder to write a temporary file in: {target}"))
-        })?;
-        self.temp_in(&parent)
+    /// `seq` counting from 0 in each job. A target in no folder (a volume root) fails as
+    /// `Stage::Write` with the reason `NoTargetFolder`.
+    pub(crate) fn temp_for(&mut self, target: &VPath) -> Result<VPath, Failed> {
+        let Some(parent) = target.parent() else {
+            let error =
+                Error::Unsupported(format!("no folder to write a temporary file in: {target}"));
+            return Err(Failed::refused(
+                Stage::Write,
+                error,
+                FailureReason::NoTargetFolder,
+            ));
+        };
+        self.temp_in(&parent).at(Stage::Write)
     }
 
     /// A new temporary name in the folder `folder`, numbered on from the job's other ones (see
@@ -743,8 +977,11 @@ impl<'e> Ctx<'e> {
         }
     }
 
-    /// The report of the finished job, with its outcome and the time since `started`.
+    /// The report of the finished job, with its outcome and the time since `started`. The
+    /// temporary files the job could not remove go to its warnings.
     fn finish(mut self, started: Instant) -> JobReport {
+        let leftovers = self.leftovers.take();
+        self.report.warnings.extend(leftovers);
         if self.env.control.is_cancelled() {
             self.stop(Stopped::Cancelled);
         }

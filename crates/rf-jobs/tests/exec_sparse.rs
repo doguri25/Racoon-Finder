@@ -34,9 +34,17 @@ fn sparse_files_stay_sparse() {
         return;
     }
     if source_holes.is_none() {
-        // NTFS keeps holes, so there the test must not stop here.
-        let keeps_holes = cfg!(windows);
-        assert!(!keeps_holes, "NTFS keeps holes");
+        // Only a source without holes may stop here: NTFS keeps them, and on Unix a file with
+        // fewer blocks than its length needs has them (`st_blocks` counts units of 512 bytes).
+        #[cfg(unix)]
+        let keeps_holes = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&a).unwrap();
+            meta.blocks().saturating_mul(512) < meta.len()
+        };
+        #[cfg(windows)]
+        let keeps_holes = true;
+        assert!(!keeps_holes, "the source has holes, but none were found");
         eprintln!("this temp file system keeps no holes: only the content was checked");
         return;
     }

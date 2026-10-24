@@ -270,6 +270,7 @@ mod walk {
             "{}",
             failure.message
         );
+        assert_eq!(failure.reason, Some(rf_jobs::FailureReason::OtherVolume));
         // What is on the other volume is not planned either.
         assert_eq!(
             (rep.planned, rep.done),
@@ -656,4 +657,93 @@ mod walk {
         );
         assert_eq!(tree(&f.src).into_keys().collect::<Vec<_>>(), ["keep.txt"]);
     }
+}
+
+/// A provider that deletes an item for good when it is asked to trash it breaks its promise:
+/// the job says so with a warning, and keeps no record that would claim to bring the item back.
+#[test]
+fn a_trash_that_deleted_for_good_is_a_warning() {
+    use rf_jobs::FailureReason;
+    use rf_jobs::testkit::{Fault, FaultyProvider};
+
+    let f = fx();
+    write_tree(&f.src, &[("a.txt", "A")]);
+    let p = FaultyProvider::local(vec![Fault::TrashDeletesForGood]);
+    let rep = run_on(
+        &del(&[f.src.join("a.txt")], DeleteMethod::Trash),
+        &p.vfs(),
+        &NonInteractive,
+    );
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert!(!f.src.join("a.txt").exists());
+    let warned: Vec<_> = rep
+        .warnings
+        .iter()
+        .map(|w| (w.stage, w.kind, w.source.clone(), w.reason.clone()))
+        .collect();
+    assert_eq!(
+        warned,
+        [(
+            Stage::Delete,
+            ErrorKind::Unsupported,
+            Some(v(f.src.join("a.txt"))),
+            Some(FailureReason::DeletedNotTrashed)
+        )]
+    );
+    assert!(
+        rep.warnings[0]
+            .message
+            .contains("deleted for good, not trashed"),
+        "{}",
+        rep.warnings[0].message
+    );
+    assert_eq!((rep.done.files, rep.undo), (1, None));
+}
+
+/// The trash of an undo meets the same provider the same way: the warning, and no redo.
+#[test]
+fn an_undos_trash_that_deleted_for_good_is_a_warning() {
+    use rf_jobs::testkit::{Fault, FaultyProvider};
+    use rf_jobs::{FailureReason, TransferMode, TransferOptions, UndoRecord};
+
+    let f = fx();
+    write_tree(&f.src, &[("a.txt", "A")]);
+    let p = FaultyProvider::local(vec![Fault::TrashDeletesForGood]);
+    let copy = spec(
+        TransferMode::Copy,
+        &[f.src.join("a.txt")],
+        &f.dst,
+        TransferOptions::default(),
+    );
+    let copied = run_on(&copy, &p.vfs(), &NonInteractive);
+    let Some(record @ UndoRecord::Copied { .. }) = copied.undo else {
+        panic!("{:?}", copied.undo)
+    };
+    let rep = run_on(&JobSpec::Undo(record), &p.vfs(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert!(!f.dst.join("a.txt").exists());
+    let warned: Vec<_> = rep
+        .warnings
+        .iter()
+        .map(|w| (w.stage, w.reason.clone()))
+        .collect();
+    assert_eq!(
+        warned,
+        [(Stage::Delete, Some(FailureReason::DeletedNotTrashed))]
+    );
+    assert_eq!(rep.undo, None);
+}
+
+/// A trash that is not there refuses the item with its reason, for the UI to word.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_refused_trash_has_its_reason() {
+    let f = fx();
+    write_tree(&f.src, &[("a.txt", "A")]);
+    let rep = run(&del(&[f.src.join("a.txt")], DeleteMethod::Trash));
+    assert_eq!(
+        rep.failures[0].reason,
+        Some(rf_jobs::FailureReason::TrashRefused)
+    );
+    assert!(f.src.join("a.txt").exists());
 }

@@ -1004,6 +1004,34 @@ mod tests {
             at: None,
         };
         assert_eq!(serde_json::from_str::<UndoRecord>(older).unwrap(), without);
+        // A move's record, with how many files it replaced and the folders it made for the
+        // folders it moved across volumes; one written before those were kept still reads.
+        let moved = UndoRecord::Moved {
+            moves: vec![crate::undo::MovedItem {
+                from: remote(&["a.txt"]),
+                to: remote(&["d", "a.txt"]),
+            }],
+            created_dirs: vec![remote(&["d", "f"])],
+            removed_dirs: vec![remote(&["f"])],
+            overwritten: 1,
+            copied_dirs: vec![crate::undo::MovedItem {
+                from: remote(&["f"]),
+                to: remote(&["d", "f"]),
+            }],
+        };
+        let json = r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"],"overwritten":1,"copied_dirs":[{"from":"remote://p/f","to":"remote://p/d/f"}]}}"#;
+        assert_eq!(serde_json::to_string(&moved).unwrap(), json);
+        assert_eq!(serde_json::from_str::<UndoRecord>(json).unwrap(), moved);
+        let older = r#"{"Moved":{"moves":[{"from":"remote://p/a.txt","to":"remote://p/d/a.txt"}],"created_dirs":["remote://p/d/f"],"removed_dirs":["remote://p/f"]}}"#;
+        let Ok(UndoRecord::Moved {
+            overwritten,
+            copied_dirs,
+            ..
+        }) = serde_json::from_str::<UndoRecord>(older)
+        else {
+            panic!("an older move record does not read: {older}")
+        };
+        assert_eq!((overwritten, copied_dirs), (0, Vec::new()));
         // An undo job's spec holds its record.
         let job = JobSpec::Undo(UndoRecord::Renamed {
             from: remote(&["b.txt"]),

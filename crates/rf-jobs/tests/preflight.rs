@@ -374,10 +374,22 @@ fn characters_are_reported_in_the_order_they_first_appear() {
 
 #[test]
 fn reserved_names_cover_exactly_the_documented_devices() {
-    let mut reserved = vec!["CON".to_owned(), "PRN".into(), "AUX".into(), "NUL".into()];
+    let mut reserved = vec![
+        "CON".to_owned(),
+        "PRN".into(),
+        "AUX".into(),
+        "NUL".into(),
+        "CONIN$".into(),
+        "CONOUT$".into(),
+    ];
     for n in 1..=9 {
         reserved.push(format!("COM{n}"));
         reserved.push(format!("LPT{n}"));
+    }
+    // The superscript digits one, two and three, which Windows takes for 1, 2 and 3.
+    for digit in ['\u{b9}', '\u{b2}', '\u{b3}'] {
+        reserved.push(format!("COM{digit}"));
+        reserved.push(format!("LPT{digit}"));
     }
     for name in &reserved {
         for spelling in [name.clone(), name.to_lowercase(), format!("{name}.txt")] {
@@ -411,6 +423,12 @@ fn reserved_names_cover_exactly_the_documented_devices() {
         "ＣＯＮ",
         "COM１",
         "CÓN",
+        "CONIN",
+        "CONOUT",
+        "CONIN$$",
+        "COM\u{2074}",
+        "LPT\u{2070}",
+        "COM\u{b9}\u{b9}",
     ] {
         ok(name, FsKind::Ntfs);
     }
@@ -759,5 +777,30 @@ fn an_issue_pairs_a_target_with_what_is_wrong() {
             target,
             kind: IssueKind::ReservedName
         }
+    );
+}
+
+/// A Unix path that is not text is counted by its raw bytes, each byte once, as the kernel
+/// counts it: never by the lossy text, which shows each invalid byte as a `U+FFFD` of three.
+#[cfg(unix)]
+#[test]
+fn a_path_that_is_not_text_counts_its_raw_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = |len: usize| OsStr::from_bytes(&vec![0xff; len]).to_owned();
+    let mut folder = local_root();
+    for _ in 0..3 {
+        folder = folder.join(name(255)).unwrap();
+    }
+    // The root, three names of 255 bytes and one of 254, and three separators.
+    let at_limit = folder.join(name(254)).unwrap();
+    assert_eq!(check_path_len(&at_limit, Os::MacOs), None);
+    let past = folder.join(name(255)).unwrap();
+    assert_eq!(
+        check_path_len(&past, Os::MacOs),
+        Some(IssueKind::PathTooLong {
+            len: MACOS_PATH_LIMIT + 1,
+            max: MACOS_PATH_LIMIT
+        })
     );
 }

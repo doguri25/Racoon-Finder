@@ -216,6 +216,8 @@ fn undo_routes_quick_records_to_the_quick_lane() {
         moves: vec![],
         created_dirs: vec![],
         removed_dirs: vec![],
+        overwritten: 0,
+        copied_dirs: vec![],
     };
     assert_eq!(DefaultLanes.lane(&JobSpec::Undo(moved)), LaneId::MAIN);
 }

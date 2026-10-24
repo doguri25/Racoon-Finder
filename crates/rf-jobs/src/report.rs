@@ -9,7 +9,7 @@ use rf_core::{ErrorKind, VPath};
 use serde::{Deserialize, Serialize};
 
 use crate::id::JobId;
-use crate::preflight::Issue;
+use crate::preflight::{Issue, IssueKind};
 use crate::spec::{DeleteSpec, JobKind, JobSpec, TransferItem, TransferSpec};
 use crate::undo::UndoRecord;
 
@@ -33,7 +33,8 @@ pub enum Stage {
     Metadata,
     /// Removing a source after a move has committed its copy.
     DeleteSource,
-    /// Deleting or trashing an item in a delete job.
+    /// Deleting or trashing an item: in a delete job, or the trash an undo sends an item to
+    /// (an undo of a copy, or the redo of a restore from the trash).
     Delete,
     /// Renaming an item.
     Rename,
@@ -78,12 +79,17 @@ pub struct ItemFailure {
     pub target: Option<VPath>,
     pub stage: Stage,
     pub kind: ErrorKind,
-    /// The error's log text, in English. The UI words its own message from `stage` and `kind`.
+    /// The error's log text, in English. The UI words its own message from `stage`, `kind` and
+    /// `reason`.
     pub message: String,
+    /// Why the job refused the item itself, when it did (see [`FailureReason`]); `None` for an
+    /// ordinary error of the system or of a provider, which `stage` and `kind` word.
+    pub reason: Option<FailureReason>,
 }
 
 impl ItemFailure {
-    /// The failure of `stage` on `source` and `target`, described by `error`.
+    /// The failure of `stage` on `source` and `target`, described by `error`, with no
+    /// [`FailureReason`].
     pub fn new(
         stage: Stage,
         source: Option<&VPath>,
@@ -96,6 +102,135 @@ impl ItemFailure {
             stage,
             kind: error.kind(),
             message: error.to_string(),
+            reason: None,
+        }
+    }
+}
+
+/// Why a job refused an item, or part of one, itself: a rule of the job, not an error of the
+/// system. Many of these share one [`Stage`] and one [`ErrorKind`] (most are `Unsupported`), so
+/// the UI picks its wording by the reason (I18N-02); the English `message` is for the log only.
+/// An ordinary error of the system or of a provider has none. Each variant says the stage and
+/// the kind it comes with; a warning (`JobReport::warnings`) says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureReason {
+    /// `Plan`, `Unsupported`: a folder copied or moved into itself or into one of its
+    /// subfolders (DND-09).
+    IntoItself,
+    /// `Plan` (or `Write` for a temporary file), `Unsupported`: the target has no folder to go
+    /// into (a volume root as the target).
+    NoTargetFolder,
+    /// `Plan`, `NotFound`: what should be the folder of the target is no folder.
+    TargetNotAFolder,
+    /// `Plan`, `Unsupported`: the item is deeper than `MAX_DEPTH` folders below an item of the
+    /// job, and is neither entered nor touched.
+    TooDeep,
+    /// `Plan`, `Unsupported`: a link a copy in Follow mode followed leads back to a folder above
+    /// it (a loop of links), and is not entered.
+    LinkLoop,
+    /// `Read`, `Other`: a link leads through more links than are followed for one path (40).
+    TooManyLinks,
+    /// `Read`, `Other`: a link changed while it was followed.
+    LinkChanged,
+    /// `Read`, `Unsupported`: a link to an absolute path in a location that is not local, which
+    /// cannot be followed.
+    AbsoluteLink,
+    /// `Plan` (by its kind when it was found) or `Read` (when it is opened), `Unsupported`: the
+    /// item is no regular file (a FIFO, a socket, a device) and is never opened for data.
+    NotARegularFile,
+    /// `Read`, `Other`: the source ended before the data it was found with (another program cut
+    /// it short), so no copy of it is committed.
+    SourceCutShort,
+    /// `Conflict`, `AlreadyExists`: the name is taken by an item of the other kind; a file and a
+    /// folder never replace each other.
+    KindMismatch,
+    /// `Conflict` (or `Create`), `AlreadyExists`: every numbered name is taken too.
+    NoFreeName,
+    /// `Commit`, `Unsupported`: the target folder of a move is the source's own folder under
+    /// another path, so the copy would replace the source itself.
+    OntoItself,
+    /// `Read` (before the copy) or `DeleteSource` (before the delete), `Unsupported`, and as a
+    /// `DeleteSource` warning for a folder: the item or a folder above it changed while it was
+    /// moved (replaced, or swapped for a link), and is left in place.
+    ChangedWhileMoved,
+    /// `DeleteSource` warning, `Unsupported`: a source folder that was merged into the target is
+    /// kept, because it is the target folder itself under another path.
+    KeptAsTargetFolder,
+    /// `DeleteSource` warning, `Unsupported`: a source folder that was merged into the target is
+    /// kept, because it cannot be told whether it is the target folder under another path.
+    CannotTellOwnFolder,
+    /// `Read` (a move) or `Delete`, `Unsupported`: a folder inside the walk is on another volume
+    /// (a mount point) and is never entered.
+    OtherVolume,
+    /// `Delete`, `Unsupported`: the trash refused the item, or there is none here; the item
+    /// stays, and is never deleted for good instead.
+    TrashRefused,
+    /// `Delete` warning, `Unsupported`: the provider deleted the item for good when it was asked
+    /// to trash it, so nothing can bring it back.
+    DeletedNotTrashed,
+    /// `Delete`, `Unsupported`: the item or a folder above it changed while it was deleted, and
+    /// is left in place.
+    ChangedWhileDeleted,
+    /// `Undo` warning, `Unsupported`: a file the job replaced (a copy or a move under an
+    /// overwrite policy); its old content cannot be brought back.
+    Overwritten,
+    /// `Undo`, `Unsupported`: an item a copy made changed after the copy, and is left in place.
+    ChangedSinceCopy,
+    /// `Undo`, `Unsupported`: an item a create job made is no longer of the kind it made, and is
+    /// left in place.
+    ChangedSinceCreated,
+    /// `Undo`, `Unsupported`: a file a create job made has content now, and is left in place.
+    NotEmpty,
+    /// `Undo`, `Unsupported`: the trash did not say where it put the item, so it cannot be put
+    /// back.
+    TrashLocationUnknown,
+    /// `Rename`, `Unsupported`: the two paths are in different locations, which no rename joins.
+    AcrossLocations,
+    /// `Write` warning: a temporary file of the job could not be removed and stays under its
+    /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
+    /// crash recovery will not look for it.
+    TempLeftBehind,
+    /// `Preflight`, or the stage that checked the name (`Rename`, `Create`, `Conflict`,
+    /// `Write`), `InvalidPath` or `FileTooLarge`: the target file system or the OS cannot hold
+    /// the item as it is.
+    Issue(IssueKind),
+}
+
+impl FailureReason {
+    /// The word the log writes for this reason (`reason=into_itself`, ...): the variant's name
+    /// in `snake_case`, and for an [`FailureReason::Issue`] the issue's own
+    /// ([`IssueKind::name`]). It is English whatever language the UI shows.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::IntoItself => "into_itself",
+            Self::NoTargetFolder => "no_target_folder",
+            Self::TargetNotAFolder => "target_not_a_folder",
+            Self::TooDeep => "too_deep",
+            Self::LinkLoop => "link_loop",
+            Self::TooManyLinks => "too_many_links",
+            Self::LinkChanged => "link_changed",
+            Self::AbsoluteLink => "absolute_link",
+            Self::NotARegularFile => "not_a_regular_file",
+            Self::SourceCutShort => "source_cut_short",
+            Self::KindMismatch => "kind_mismatch",
+            Self::NoFreeName => "no_free_name",
+            Self::OntoItself => "onto_itself",
+            Self::ChangedWhileMoved => "changed_while_moved",
+            Self::KeptAsTargetFolder => "kept_as_target_folder",
+            Self::CannotTellOwnFolder => "cannot_tell_own_folder",
+            Self::OtherVolume => "other_volume",
+            Self::TrashRefused => "trash_refused",
+            Self::DeletedNotTrashed => "deleted_not_trashed",
+            Self::ChangedWhileDeleted => "changed_while_deleted",
+            Self::Overwritten => "overwritten",
+            Self::ChangedSinceCopy => "changed_since_copy",
+            Self::ChangedSinceCreated => "changed_since_created",
+            Self::NotEmpty => "not_empty",
+            Self::TrashLocationUnknown => "trash_location_unknown",
+            Self::AcrossLocations => "across_locations",
+            Self::TempLeftBehind => "temp_left_behind",
+            Self::Issue(issue) => issue.name(),
         }
     }
 }
@@ -168,8 +303,13 @@ pub struct JobReport {
 }
 
 impl JobReport {
-    /// The report of a job that has not done anything yet: completed, with nothing counted.
-    pub(crate) fn new(id: JobId, spec: &JobSpec) -> JobReport {
+    /// The report of job `id` running `spec` before it has done anything: `Completed`, nothing
+    /// planned, done, skipped or failed, no issue, output or undo record, `started` now and
+    /// `elapsed` zero. The executor starts every job's report from this and fills it in as the
+    /// job runs. It is public so that code which shows reports (the UI and its tests) can build
+    /// one and set the fields it needs; the struct is `non_exhaustive`, so it cannot be written
+    /// as a literal outside this crate.
+    pub fn new(id: JobId, spec: &JobSpec) -> JobReport {
         JobReport {
             id,
             kind: spec.kind(),
@@ -292,8 +432,9 @@ impl JobReport {
     /// 4. `elapsed_ms={} average_bps={}`
     /// 5. for each issue, `issue target={target} {text}` (see [`Issue::log_line`])
     /// 6. for each failure, `failure stage={stage} kind={kind:?} source={source} target={target}
-    ///    message={message}`, where a missing path is `-`; then the same for each warning, as
-    ///    `warning …`
+    ///    message={message} reason={reason}`, where a missing path is `-` and `reason` is the
+    ///    [`FailureReason::name`], or `-` for an ordinary error; then the same for each warning,
+    ///    as `warning …`
     ///
     /// Every path, name and text in a line goes through [`one_line`]: control characters and the
     /// Unicode line separators and bidirectional controls are written as escapes (`\n`, `\t`,
@@ -345,7 +486,7 @@ impl JobReport {
 impl Issue {
     /// The line the log (see [`JobReport::write_log`]) and a command-line question write for
     /// this issue: `issue target={target} {text}`, with `text` the English log text of the
-    /// issue (the `Display` of [`IssueKind`](crate::IssueKind)). Both go through [`one_line`],
+    /// issue (the `Display` of [`IssueKind`]). Both go through [`one_line`],
     /// so the line is one line whatever the names in it.
     pub fn log_line(&self) -> String {
         format!(
@@ -363,9 +504,10 @@ impl Issue {
 /// - A control character (`char::is_control`: U+0000 to U+001F, U+007F to U+009F) becomes its
 ///   `char::escape_debug` form: `\n`, `\r`, `\t`, `\0`, or `\u{7f}`.
 /// - U+2028 and U+2029 (line and paragraph separators, which Unicode-aware splitters take for
-///   line breaks), U+200E and U+200F (left-to-right and right-to-left marks), U+202A to U+202E
-///   and U+2066 to U+2069 (bidirectional embeddings, overrides and isolates, which reorder the
-///   text shown) become `\u{..}` with lower-case hex digits.
+///   line breaks), U+061C, U+200E and U+200F (the Arabic letter, left-to-right and
+///   right-to-left marks), U+202A to U+202E and U+2066 to U+2069 (bidirectional embeddings,
+///   overrides and isolates, which reorder the text shown) become `\u{..}` with lower-case hex
+///   digits.
 ///
 /// A backslash stays a backslash, so a name with a backslash and an `n` in it and a name with a
 /// line break read alike. The text is borrowed when there is nothing to escape. Everything the
@@ -395,6 +537,7 @@ fn needs_escape(c: char) -> bool {
             c,
             '\u{2028}'
                 | '\u{2029}'
+                | '\u{061c}'
                 | '\u{200e}'
                 | '\u{200f}'
                 | '\u{202a}'..='\u{202e}'
@@ -414,12 +557,13 @@ fn path_field(path: Option<&VPath>) -> String {
 fn write_item(out: &mut dyn Write, label: &str, item: &ItemFailure) -> io::Result<()> {
     writeln!(
         out,
-        "{label} stage={} kind={:?} source={} target={} message={}",
+        "{label} stage={} kind={:?} source={} target={} message={} reason={}",
         item.stage.name(),
         item.kind,
         path_field(item.source.as_ref()),
         path_field(item.target.as_ref()),
-        one_line(&item.message)
+        one_line(&item.message),
+        item.reason.as_ref().map_or("-", FailureReason::name)
     )
 }
 
@@ -553,6 +697,28 @@ mod tests {
         ];
         for (stage, name) in stages {
             assert_eq!(stage.name(), name);
+        }
+    }
+
+    #[test]
+    fn reasons_have_the_words_of_the_log() {
+        let reasons = [
+            (FailureReason::IntoItself, "into_itself"),
+            (FailureReason::ChangedWhileMoved, "changed_while_moved"),
+            (FailureReason::OtherVolume, "other_volume"),
+            (FailureReason::TrashRefused, "trash_refused"),
+            (FailureReason::TempLeftBehind, "temp_left_behind"),
+            (
+                FailureReason::Issue(IssueKind::ReservedName),
+                "reserved_name",
+            ),
+            (
+                FailureReason::Issue(IssueKind::CaseCollision { other: "A".into() }),
+                "case_collision",
+            ),
+        ];
+        for (reason, name) in reasons {
+            assert_eq!(reason.name(), name, "{reason:?}");
         }
     }
 
@@ -717,27 +883,38 @@ mod tests {
                 },
             },
         ];
-        report.failures = vec![
-            failed(Stage::Commit, Some("a"), Some("b")),
-            failed(Stage::Internal, None, None),
-        ];
+        let mut refused = failed(Stage::Commit, Some("a"), Some("b"));
+        refused.reason = Some(FailureReason::OntoItself);
+        let mut too_long = failed(Stage::Preflight, Some("d"), Some("e"));
+        too_long.reason = Some(FailureReason::Issue(IssueKind::NameTooLong {
+            len: 9,
+            max: 8,
+        }));
+        report.failures = vec![refused, failed(Stage::Internal, None, None), too_long];
         report.warnings = vec![failed(Stage::Metadata, Some("c"), None)];
         let shown = |name: &str| path(name).to_string();
         let expected = format!(
             "job 000000000000002a move completed_with_errors\n\
              planned files=4 dirs=2 bytes=9000\n\
-             done files=3 dirs=1 bytes=3000 skipped=5 failed=2 warnings=1\n\
+             done files=3 dirs=1 bytes=3000 skipped=5 failed=3 warnings=1\n\
              elapsed_ms=1500 average_bps=2000\n\
              issue target={t1} name contains '?', which the target file system does not allow\n\
              issue target={t2} needs 9 bytes; 4 available\n\
-             failure stage=commit kind=Unsupported source={a} target={b} message=not supported: no\n\
-             failure stage=internal kind=Unsupported source=- target=- message=not supported: no\n\
-             warning stage=metadata kind=Unsupported source={c} target=- message=not supported: no\n",
+             failure stage=commit kind=Unsupported source={a} target={b} message=not supported: no \
+             reason=onto_itself\n\
+             failure stage=internal kind=Unsupported source=- target=- message=not supported: no \
+             reason=-\n\
+             failure stage=preflight kind=Unsupported source={d} target={e} \
+             message=not supported: no reason=name_too_long\n\
+             warning stage=metadata kind=Unsupported source={c} target=- message=not supported: no \
+             reason=-\n",
             t1 = shown("t1"),
             t2 = shown("t2"),
             a = shown("a"),
             b = shown("b"),
             c = shown("c"),
+            d = shown("d"),
+            e = shown("e"),
         );
         assert_eq!(log_of(&report), expected);
         assert_eq!(
@@ -791,8 +968,9 @@ mod tests {
             "{}",
             lines[6]
         );
-        let message =
-            format!("message=not supported: first\\nfailure: x\\r\\nforged line\\u{{7f}}{escaped}");
+        let message = format!(
+            "message=not supported: first\\nfailure: x\\r\\nforged line\\u{{7f}}{escaped} reason=-"
+        );
         let message = message.as_str();
         assert!(
             lines[7].starts_with("failure stage=write ") && lines[7].ends_with(message),
@@ -848,7 +1026,8 @@ mod tests {
     fn one_line_escapes_what_could_split_or_spoof_a_line_and_nothing_else() {
         // Characters next to the escaped ones stay as they are, an emoji's joiner included.
         let plain = "tab\u{2003}and 한글 'quoted' back\\slash \u{2027}\u{202f}\u{2065}\u{206a}\
-                     \u{200b}\u{200d}\u{2030} 👨\u{200d}👩\u{200d}👧 \u{a0}\u{ad}é";
+                     \u{200b}\u{200d}\u{2030} 👨\u{200d}👩\u{200d}👧 \u{a0}\u{ad}é \
+                     \u{61b}\u{61d} عربي";
         assert!(matches!(one_line(plain), Cow::Borrowed(_)));
         assert_eq!(one_line(plain), plain);
         assert_eq!(
@@ -864,9 +1043,10 @@ mod tests {
     /// The characters beyond the controls that `one_line` escapes, as text, and the text it
     /// writes for them.
     fn unicode_escapes() -> (String, String) {
-        const TABLE: [(char, &str); 13] = [
+        const TABLE: [(char, &str); 14] = [
             ('\u{2028}', "\\u{2028}"),
             ('\u{2029}', "\\u{2029}"),
+            ('\u{061c}', "\\u{61c}"),
             ('\u{200e}', "\\u{200e}"),
             ('\u{200f}', "\\u{200f}"),
             ('\u{202a}', "\\u{202a}"),

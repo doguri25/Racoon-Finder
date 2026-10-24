@@ -110,6 +110,7 @@ fn a_full_disk_during_a_move_never_deletes_the_source() {
 fn an_fsync_failure_leaves_no_file() {
     let f = fx();
     std::fs::write(f.src.join("a.bin"), pattern(MIB)).unwrap();
+    let before = tree(&f.src);
     let p = FaultyProvider::local(vec![Fault::FailFinish { file: 0 }]);
     let rep = run_on(
         &copy(&[f.src.join("a.bin")], &f.dst),
@@ -118,12 +119,14 @@ fn an_fsync_failure_leaves_no_file() {
     );
     assert_eq!(rep.failures[0].stage, Stage::Write);
     assert_eq!(tree(&f.dst), BTreeMap::new());
+    assert_eq!(tree(&f.src), before);
 }
 
 #[test]
 fn a_commit_failure_cleans_the_temp_file() {
     let f = fx();
     std::fs::write(f.src.join("a.bin"), pattern(MIB)).unwrap();
+    let before = tree(&f.src);
     let p = FaultyProvider::local(vec![Fault::FailRename { call: 0 }]);
     let rep = run_on(
         &copy(&[f.src.join("a.bin")], &f.dst),
@@ -132,6 +135,7 @@ fn a_commit_failure_cleans_the_temp_file() {
     );
     assert_eq!(rep.failures[0].stage, Stage::Commit);
     assert_eq!(tree(&f.dst), BTreeMap::new());
+    assert_eq!(tree(&f.src), before);
 }
 
 #[test]
@@ -144,10 +148,21 @@ fn a_failed_overwrite_keeps_the_old_content() {
         conflict: ConflictPolicy::Overwrite,
         ..TransferOptions::default()
     };
-    run_on(
+    let rep = run_on(
         &spec(TransferMode::Copy, &[f.src.join("a.txt")], &f.dst, opts),
         &p.vfs(),
         &NonInteractive,
+    );
+    // The new content was being written when the write failed: the old one is still there.
+    assert_eq!(p.opened_writes(), 1);
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::Write)
+    );
+    assert!(
+        rep.failures[0].message.contains("injected write failure"),
+        "{}",
+        rep.failures[0].message
     );
     assert_eq!(std::fs::read_to_string(f.dst.join("a.txt")).unwrap(), "old");
     assert_eq!(temp_files(&f.dst), Vec::<String>::new());
@@ -182,12 +197,18 @@ fn cancelling_a_move_keeps_every_file_in_one_place() {
     );
     assert_eq!(rep.outcome, Outcome::Cancelled);
     assert_one_place(&f, &originals);
+    // The cancel came before the end: some source was never moved.
+    assert!(
+        originals.keys().any(|name| f.src.join(name).exists()),
+        "every file was moved before the cancel"
+    );
 }
 
 #[test]
 fn a_panicking_provider_is_contained() {
     let f = fx();
     std::fs::write(f.src.join("a.bin"), pattern(MIB)).unwrap();
+    let before = tree(&f.src);
     let p = FaultyProvider::local(vec![Fault::Panic { file: 0 }]);
     let rep = run_on(
         &copy(&[f.src.join("a.bin")], &f.dst),
@@ -200,6 +221,34 @@ fn a_panicking_provider_is_contained() {
     );
     assert!(rep.failures[0].message.contains("injected panic"));
     assert_eq!(tree(&f.dst), BTreeMap::new());
+    assert_eq!(tree(&f.src), before);
+}
+
+/// The faults the random test may draw, each once, deterministically, for a move across
+/// volumes: a failed commit, a failed sync of the copy, and a panic in the middle of a file.
+/// Every file is in exactly one place with its content, and no temporary file is left.
+#[test]
+fn move_faults_never_lose_data() {
+    for fault in [
+        Fault::FailRename { call: 1 },
+        Fault::FailFinish { file: 0 },
+        Fault::Panic { file: 0 },
+    ] {
+        let f = fx();
+        let srcs = five_files(&f);
+        let originals = tree(&f.src);
+        let p = FaultyProvider::local(vec![Fault::CrossDevice, fault.clone()]);
+        let job = spec(
+            TransferMode::Move,
+            &srcs,
+            &f.dst,
+            TransferOptions::default(),
+        );
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        assert_ne!(rep.outcome, Outcome::Completed, "{fault:?}");
+        assert_one_place(&f, &originals);
+        assert!(f.src.read_dir().unwrap().next().is_some(), "{fault:?}");
+    }
 }
 
 proptest::proptest! {
@@ -241,4 +290,42 @@ proptest::proptest! {
             assert_no_partial(&f);
         }
     }
+}
+
+/// A temporary file that cannot be removed after its commit failed stays under its temporary
+/// name, and the report names it: crash recovery looks only at jobs that never ended, so
+/// nothing else would.
+#[test]
+fn a_temp_file_that_cannot_be_removed_is_reported() {
+    let f = fx();
+    std::fs::write(f.src.join("a.bin"), pattern(MIB)).unwrap();
+    let id = JobId(7);
+    let temp = rf_jobs::temp_name(id, 0);
+    let p = FaultyProvider::local(vec![
+        Fault::FailRename { call: 0 },
+        Fault::FailDelete { name: temp.clone() },
+    ]);
+    let (vfs, res) = (p.vfs(), NonInteractive);
+    let rep = execute(
+        id,
+        &copy(&[f.src.join("a.bin")], &f.dst),
+        &ExecEnv::new(&vfs, &res),
+    );
+    assert_eq!(
+        (rep.failures.len(), rep.failures[0].stage),
+        (1, Stage::Commit)
+    );
+    let leftover = f.dst.join(&temp);
+    assert_eq!(std::fs::read(&leftover).unwrap(), pattern(MIB));
+    let warned: Vec<_> = rep
+        .warnings
+        .iter()
+        .map(|w| (w.stage, w.target.clone()))
+        .collect();
+    assert_eq!(warned, [(Stage::Write, Some(v(&leftover)))]);
+    assert!(
+        rep.warnings[0].message.contains(".rfpart"),
+        "{}",
+        rep.warnings[0].message
+    );
 }

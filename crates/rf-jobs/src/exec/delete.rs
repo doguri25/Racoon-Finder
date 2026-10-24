@@ -7,11 +7,18 @@
 //! another program changing the tree while it is deleted, each step of a permanent delete looks
 //! at its item again, then checks that the folder the item is in is still the folder the walk
 //! listed, and only then acts (see [`restat`] and [`checked`]); a folder is also checked right
-//! after it is listed and right before it is removed. The folder is checked by `stat`, which
-//! gives an identity on every system, so a swap of any folder above an item for a link is
-//! caught on Windows, whose listings carry no identities, as on Unix. A leaf goes with
+//! after it is listed and right before it is removed. A leaf goes with
 //! `Provider::delete_leaf`, which never removes a folder, and a folder with
 //! `Provider::remove_dir`, which removes only an empty one, so nothing takes a tree with it.
+//!
+//! The folder is checked by `stat`. Where the file system has identities, `stat` gives one on
+//! every system, also on Windows, whose listings carry none, so a swap of any folder above an
+//! item for a link is caught there as on Unix: the folder itself turns into a link (another
+//! kind), and the folder its path leads to below a swapped one is another item. On a file
+//! system without identities (FAT, some network file systems) only the kind is left to tell:
+//! a swap of the item's own folder for a link is still caught, since the folder becomes a
+//! link, but one of a folder further above makes the path lead to another folder that looks
+//! the same, and the step goes on there.
 //!
 //! What remains, on every system now, is the race Unix listings already left: a swap timed
 //! between two system calls of a step, after its last check and before its delete, or undone
@@ -24,8 +31,11 @@ use std::ops::ControlFlow;
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath, VolumeId};
 use rf_vfs::{DeleteMode, Deleted, Provider};
 
-use super::{At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Stopped, replaced, too_deep};
-use crate::report::{Stage, Totals};
+use super::{
+    At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Parent, Stopped, Walking, on_another_volume,
+    other_volume, too_deep, volume_of,
+};
+use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{DeleteMethod, DeleteSpec, ErrorPolicy};
 use crate::undo::{TrashedItem, UndoRecord};
 
@@ -158,19 +168,26 @@ fn count_tree(
     Ok(())
 }
 
-/// The volume of the folder `path` of `provider`, which `entry` describes: the entry's, or the
-/// one `stat` gives for a listed folder that has none (a Windows listing). `None` when neither
-/// tells.
-fn volume_of(provider: &dyn Provider, path: &VPath, entry: &Entry) -> Option<VolumeId> {
-    entry
-        .volume_id
-        .or_else(|| provider.stat(path).ok()?.volume_id)
+/// The trash of `path` by `provider`, as a step at `Stage::Delete`: a refusal of the trash
+/// (`Unsupported`: no trash there, or one that refuses the item) has the reason
+/// `TrashRefused`, and the item stays. It is never deleted for good instead (OPS-03).
+pub(crate) fn trash_one(provider: &dyn Provider, path: &VPath) -> Result<Deleted, Failed> {
+    provider.delete(path, DeleteMode::Trash).map_err(|error| {
+        let refused = error.kind() == ErrorKind::Unsupported;
+        let failed = Failed::new(Stage::Delete, error);
+        if refused {
+            failed.because(FailureReason::TrashRefused)
+        } else {
+            failed
+        }
+    })
 }
 
-/// Whether a folder on `volume` in a folder on `above` is on another volume (a mount point):
-/// only when both are known and differ.
-fn on_another_volume(above: Option<VolumeId>, volume: Option<VolumeId>) -> bool {
-    matches!((above, volume), (Some(a), Some(b)) if a != b)
+/// The warning of an item `path` that a provider deleted for good when it was asked to trash
+/// it: it is gone, and no undo brings it back.
+pub(crate) fn deleted_not_trashed(path: &VPath) -> Failed {
+    let error = Error::Unsupported(format!("{path} was deleted for good, not trashed"));
+    Failed::refused(Stage::Delete, error, FailureReason::DeletedNotTrashed)
 }
 
 /// Sends each of `items` to the trash, as a step of its own under `errors` (`Stage::Delete`).
@@ -178,7 +195,9 @@ fn on_another_volume(above: Option<VolumeId>, volume: Option<VolumeId>) -> bool 
 /// A path the trash cannot take fails, `Unsupported` (no trash there, or one that refuses the
 /// item) as much as any other error, and stays where it is: it is never deleted for good
 /// instead (OPS-03). The report's undo record lists every path that went, with where the trash
-/// holds it when the system tells (`UndoRecord::Trashed`); `None` when none went.
+/// holds it when the system tells (`UndoRecord::Trashed`); `None` when none went. A provider
+/// that deletes an item for good when it is asked to trash it leaves a `Stage::Delete` warning
+/// (`DeletedNotTrashed`) and no undo record for that item.
 fn trash(ctx: &mut Ctx<'_>, errors: ErrorPolicy, items: &[(VPath, Entry)]) {
     let mut trashed = Vec::new();
     for (path, entry) in items {
@@ -186,7 +205,7 @@ fn trash(ctx: &mut Ctx<'_>, errors: ErrorPolicy, items: &[(VPath, Entry)]) {
             ctx.check().at(Stage::Delete)?;
             let provider = ctx.provider(path).at(Stage::Delete)?;
             ctx.working_on(path);
-            provider.delete(path, DeleteMode::Trash).at(Stage::Delete)
+            trash_one(&*provider, path)
         });
         let is_dir = entry.kind == EntryKind::Dir;
         match deleted {
@@ -199,8 +218,7 @@ fn trash(ctx: &mut Ctx<'_>, errors: ErrorPolicy, items: &[(VPath, Entry)]) {
             }
             // A provider that breaks its promise: the item is gone, but no undo brings it back.
             Attempt::Done(Deleted::Permanently) => {
-                let error = Error::Unsupported(format!("{path} was deleted for good, not trashed"));
-                ctx.warn(Failed::new(Stage::Delete, error), Some(path), None);
+                ctx.warn(deleted_not_trashed(path), Some(path), None);
                 ctx.item_done(!is_dir, is_dir);
             }
             Attempt::Skipped => {}
@@ -222,15 +240,6 @@ fn kept<T>(attempt: &Attempt<T>) -> Flow {
         Attempt::Stop => ControlFlow::Break(()),
         Attempt::Done(_) | Attempt::Skipped => ControlFlow::Continue(false),
     }
-}
-
-/// The folder an item of a permanent delete is in, as the walk found it when it listed it: its
-/// path, and what `stat` gave for it then. That `stat` carries the folder's identity on every
-/// system, also on Windows, where a listing carries none.
-#[derive(Clone, Copy, Debug)]
-struct Parent<'a> {
-    path: &'a VPath,
-    entry: &'a Entry,
 }
 
 /// What a step on an item below a path of the job (a `child`, not a path of the job) makes of a
@@ -295,19 +304,13 @@ fn delete_entry(
     }
 }
 
-/// `stat`s `path` of `provider` again and gives what it finds. Fails as `Stage::Delete`,
-/// leaving the item in place, when it is no longer the item `entry` described (see
-/// [`replaced`]): of another kind (a file turned into a folder, a folder into a link to one)
-/// or, when both identities are known, another item.
+/// `stat`s `path` of `provider` again and gives what it finds (`super::restat`). Fails as
+/// `Stage::Delete`, leaving the item in place, when it is no longer the item `entry` described
+/// (see `super::replaced`): of another kind (a file turned into a folder, a folder into a link
+/// to one) or, when both identities are known, another item. The failure says the item
+/// "changed while it was deleted" (`ChangedWhileDeleted`).
 fn restat(provider: &dyn Provider, path: &VPath, entry: &Entry) -> Result<Entry, Failed> {
-    let now = provider.stat(path).at(Stage::Delete)?;
-    if replaced(entry, &now) {
-        let error = Error::Unsupported(format!(
-            "{path} changed while it was deleted; left in place"
-        ));
-        return Err(Failed::new(Stage::Delete, error));
-    }
-    Ok(now)
+    super::restat(provider, path, entry, Stage::Delete, Walking::Deleting)
 }
 
 /// Deletes the file, link or other item `path` in `parent`, which `entry` describes, by its
@@ -374,8 +377,7 @@ fn open_dir(
     };
     let above = parent.and_then(|parent| parent.entry.volume_id);
     if on_another_volume(above, before.volume_id) {
-        let error = Error::Unsupported(format!("{path} is on another volume"));
-        return Err(Failed::new(Stage::Delete, error));
+        return Err(other_volume(Stage::Delete, path));
     }
     ctx.working_on(path);
     let child = parent.is_some();
@@ -526,6 +528,7 @@ mod tests {
             "{}",
             failure.message
         );
+        assert_eq!(failure.reason, Some(FailureReason::ChangedWhileDeleted));
     }
 
     /// Where `root/dir` went when it was swapped.

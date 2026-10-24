@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::*;
 use rf_core::ErrorKind;
-use rf_jobs::testkit::{Fault, FaultyProvider, ScriptedResolver, tree, write_tree};
+use rf_jobs::testkit::{Fault, FaultyProvider, ScriptedResolver, temp_files, tree, write_tree};
 use rf_jobs::{
     ConflictPolicy, Control, ErrorAction, ErrorAnswer, ErrorPolicy, ExecEnv, JobId, JobSpec,
     MovedItem, NonInteractive, Outcome, Stage, Totals, TransferItem, TransferMode, TransferOptions,
@@ -85,7 +85,9 @@ fn same_volume_move_is_a_rename() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![]
+            removed_dirs: vec![],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
     );
 }
@@ -104,6 +106,8 @@ fn cross_volume_move_copies_then_deletes() {
         moves,
         created_dirs,
         removed_dirs,
+        overwritten,
+        copied_dirs,
     }) = rep.undo
     else {
         panic!("{:?}", rep.undo)
@@ -127,6 +131,16 @@ fn cross_volume_move_copies_then_deletes() {
         removed_dirs,
         [v(f.src.join("dir/sub")), v(f.src.join("dir"))]
     );
+    // Each folder made at the target, with the source folder it was made for.
+    let made_for: Vec<_> = copied_dirs.into_iter().map(|m| (m.from, m.to)).collect();
+    assert_eq!(
+        made_for,
+        [
+            (v(f.src.join("dir")), v(f.dst.join("dir"))),
+            (v(f.src.join("dir/sub")), v(f.dst.join("dir/sub")))
+        ]
+    );
+    assert_eq!(overwritten, 0);
 }
 
 #[test]
@@ -214,7 +228,9 @@ fn moving_into_an_existing_folder_merges() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![v(f.src.join("dir"))]
+            removed_dirs: vec![v(f.src.join("dir"))],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
     );
 }
@@ -363,7 +379,9 @@ fn a_case_only_rename_changes_the_name() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![]
+            removed_dirs: vec![],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
     );
 }
@@ -545,7 +563,9 @@ fn a_merge_keeps_the_source_folder_when_a_child_stays() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![]
+            removed_dirs: vec![],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
     );
 }
@@ -581,7 +601,9 @@ fn a_move_that_stops_early_records_what_it_moved() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![]
+            removed_dirs: vec![],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
     );
 }
@@ -604,7 +626,12 @@ fn an_empty_folder_moved_across_volumes_can_be_undone() {
         Some(UndoRecord::Moved {
             moves: vec![],
             created_dirs: vec![v(f.dst.join("empty"))],
-            removed_dirs: vec![v(f.src.join("empty"))]
+            removed_dirs: vec![v(f.src.join("empty"))],
+            overwritten: 0,
+            copied_dirs: vec![MovedItem {
+                from: v(f.src.join("empty")),
+                to: v(f.dst.join("empty")),
+            }],
         })
     );
 }
@@ -768,7 +795,8 @@ fn cancelling_a_move_in_the_middle_of_a_copy_keeps_the_source() {
 fn a_grandchild_that_stays_keeps_both_its_source_folders() {
     let f = fx();
     write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
-    // The target of `b.txt` cannot be examined, so `b.txt` is not moved.
+    // Nothing called `b.txt` can be examined, so `b.txt` is not moved: the move looks at its
+    // source again first, and fails there.
     let p = FaultyProvider::local(vec![
         Fault::CrossDevice,
         Fault::FailStat {
@@ -778,7 +806,7 @@ fn a_grandchild_that_stays_keeps_both_its_source_folders() {
     let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
     assert_eq!(
         (rep.failures.len(), rep.failures[0].stage),
-        (1, Stage::Conflict)
+        (1, Stage::Read)
     );
     assert_eq!(
         tree(&f.src.join("dir")).into_keys().collect::<Vec<_>>(),
@@ -796,7 +824,18 @@ fn a_grandchild_that_stays_keeps_both_its_source_folders() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![v(f.dst.join("dir")), v(f.dst.join("dir/sub"))],
-            removed_dirs: vec![]
+            removed_dirs: vec![],
+            overwritten: 0,
+            copied_dirs: vec![
+                MovedItem {
+                    from: v(f.src.join("dir")),
+                    to: v(f.dst.join("dir")),
+                },
+                MovedItem {
+                    from: v(f.src.join("dir/sub")),
+                    to: v(f.dst.join("dir/sub")),
+                },
+            ],
         })
     );
 }
@@ -1041,7 +1080,275 @@ fn a_merge_across_volumes_still_removes_the_emptied_source_folders() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs: vec![],
-            removed_dirs: vec![v(f.src.join("dir/empty")), v(f.src.join("dir"))]
+            removed_dirs: vec![v(f.src.join("dir/empty")), v(f.src.join("dir"))],
+            overwritten: 0,
+            copied_dirs: vec![],
         })
+    );
+}
+
+/// A folder on another volume than the folder it is in (a mount point) inside a folder moved
+/// across volumes is never entered: what is on that volume stays, and so do the folders above
+/// it. The rest moves.
+#[test]
+fn a_move_never_enters_a_folder_on_another_volume() {
+    let f = fx();
+    write_tree(
+        &f.src,
+        &[
+            ("dir/a.txt", "A"),
+            ("dir/mnt/x.txt", "X"),
+            ("dir/sub/b.txt", "B"),
+        ],
+    );
+    let mnt = f.src.join("dir").join("mnt");
+    let p = FaultyProvider::local(vec![
+        Fault::CrossDevice,
+        Fault::OtherVolume { under: v(&mnt) },
+    ]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(
+        tree(&f.src.join("dir")).into_keys().collect::<Vec<_>>(),
+        ["mnt", "mnt/x.txt"]
+    );
+    assert_eq!(read(&mnt.join("x.txt")), "X");
+    assert_eq!(
+        tree(&f.dst.join("dir")).into_keys().collect::<Vec<_>>(),
+        ["a.txt", "sub", "sub/b.txt"]
+    );
+    assert_eq!(rep.failures.len(), 1, "{:?}", rep.failures);
+    let failure = &rep.failures[0];
+    assert_eq!(
+        (failure.kind, failure.source.clone()),
+        (ErrorKind::Unsupported, Some(v(&mnt)))
+    );
+    assert!(
+        failure.message.contains("is on another volume"),
+        "{}",
+        failure.message
+    );
+    assert_eq!(failure.reason, Some(rf_jobs::FailureReason::OtherVolume));
+}
+
+/// The undo of a folder moved across volumes makes the source folders again with the times
+/// they had: the folders made at the target kept them, and give them back before they go.
+#[test]
+fn undoing_a_move_across_volumes_gives_the_folders_their_times_back() {
+    let f = fx();
+    write_tree(
+        &f.src,
+        &[
+            ("dir/a.txt", "A"),
+            ("dir/sub/b.txt", "B"),
+            ("dir/empty/", ""),
+        ],
+    );
+    let times = [
+        ("dir/sub", 1_000_000_000),
+        ("dir/empty", 1_100_000_000),
+        ("dir", 1_200_000_000),
+    ];
+    for (folder, secs) in times {
+        set_mtime(&f.src.join(folder), secs);
+    }
+    let p = FaultyProvider::local(vec![Fault::CrossDevice]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    for (folder, secs) in times {
+        assert_eq!(
+            mtime(&f.dst.join(folder)),
+            at(secs),
+            "{folder} at the target"
+        );
+    }
+    let record = rep.undo.expect("the move can be undone");
+    let undo = run_on(&JobSpec::Undo(record), &p.vfs(), &NonInteractive);
+    assert_eq!(undo.outcome, Outcome::Completed, "{:?}", undo.failures);
+    assert!(!f.dst.join("dir").exists());
+    assert_eq!(read(&f.src.join("dir/sub/b.txt")), "B");
+    for (folder, secs) in times {
+        assert_eq!(
+            mtime(&f.src.join(folder)),
+            at(secs),
+            "{folder} back at the source"
+        );
+    }
+    // The redo moves the folders forth again, and they keep their times that way too.
+    let record = undo.undo.expect("the undo can be redone");
+    let redo = run_on(&JobSpec::Undo(record), &p.vfs(), &NonInteractive);
+    assert_eq!(redo.outcome, Outcome::Completed, "{:?}", redo.failures);
+    assert!(!f.src.join("dir").exists());
+    for (folder, secs) in times {
+        assert_eq!(
+            mtime(&f.dst.join(folder)),
+            at(secs),
+            "{folder} at the target again"
+        );
+    }
+}
+
+/// A move that replaced files under `Overwrite` cannot bring their old content back: its undo
+/// moves the items back and says so once for each file it replaced, on one volume (a rename
+/// over the file) and across volumes (a copy committed over it).
+#[test]
+fn undoing_a_move_that_overwrote_says_what_cannot_come_back() {
+    for faults in [vec![], vec![Fault::CrossDevice]] {
+        let f = fx();
+        std::fs::write(f.src.join("a.txt"), "new").unwrap();
+        std::fs::write(f.dst.join("a.txt"), "old").unwrap();
+        std::fs::write(f.src.join("b.txt"), "b").unwrap();
+        let p = FaultyProvider::local(faults.clone());
+        let job = spec(
+            TransferMode::Move,
+            &[f.src.join("a.txt"), f.src.join("b.txt")],
+            &f.dst,
+            with(ConflictPolicy::Overwrite),
+        );
+        let rep = run_on(&job, &p.vfs(), &NonInteractive);
+        assert_eq!(
+            rep.outcome,
+            Outcome::Completed,
+            "{faults:?}: {:?}",
+            rep.failures
+        );
+        assert_eq!(read(&f.dst.join("a.txt")), "new");
+        let record = rep.undo.expect("the move can be undone");
+        let undo = run_on(&JobSpec::Undo(record), &p.vfs(), &NonInteractive);
+        assert_eq!(
+            undo.outcome,
+            Outcome::Completed,
+            "{faults:?}: {:?}",
+            undo.failures
+        );
+        assert_eq!(read(&f.src.join("a.txt")), "new");
+        assert_eq!(tree(&f.dst), BTreeMap::new(), "{faults:?}");
+        let warned: Vec<_> = undo.warnings.iter().map(|w| (w.stage, w.kind)).collect();
+        assert_eq!(
+            warned,
+            [(Stage::Undo, ErrorKind::Unsupported)],
+            "{faults:?}"
+        );
+        assert!(
+            undo.warnings[0].message.contains("overwritten by the move"),
+            "{}",
+            undo.warnings[0].message
+        );
+        assert_eq!(
+            undo.warnings[0].reason,
+            Some(rf_jobs::FailureReason::Overwritten)
+        );
+    }
+}
+
+/// A merge across volumes of folders listed without identities, as the local provider lists
+/// them on Windows, still knows each merged folder for its own: the move looks at each folder
+/// with `stat`, which gives its identity, so the emptied source folders go as they do on Unix.
+#[test]
+fn a_merge_of_folders_listed_without_identities_still_removes_them() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/empty/", "")]);
+    write_tree(&f.dst, &[("dir/other.txt", "O"), ("dir/empty/", "")]);
+    let p = FaultyProvider::local(vec![
+        Fault::CrossDevice,
+        Fault::NoListedIdentity,
+        Fault::OtherVolume { under: v(&f.dst) },
+    ]);
+    let rep = run_on(&mv(&[f.src.join("dir")], &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert_eq!(rep.warnings, Vec::new());
+    assert!(!f.src.join("dir").exists());
+    assert_eq!(read(&f.dst.join("dir/a.txt")), "A");
+}
+
+/// Merges two empty folders across volumes with job `id` under `faults`: `src/dir/empty` into
+/// `dst/dir/empty`. The marker that tells whether a merged folder is its own target is the
+/// job's first temporary name, `temp_name(id, 0)`, made in `dst/dir/empty`.
+fn merge_empty_folders(f: &Fx, id: JobId, faults: Vec<Fault>) -> rf_jobs::JobReport {
+    write_tree(&f.src, &[("dir/empty/", "")]);
+    write_tree(&f.dst, &[("dir/empty/", "")]);
+    let mut faults = faults;
+    faults.extend([Fault::CrossDevice, Fault::OtherVolume { under: v(&f.dst) }]);
+    let p = FaultyProvider::local(faults);
+    let (vfs, res) = (p.vfs(), NonInteractive);
+    execute(
+        id,
+        &mv(&[f.src.join("dir")], &f.dst),
+        &ExecEnv::new(&vfs, &res),
+    )
+}
+
+/// The marker cannot be looked for at the source: whether the merged folder is the target
+/// folder under another path cannot be told, so it is kept, and so is the folder above it,
+/// with a warning that says why. The marker itself is gone.
+#[test]
+fn a_marker_that_cannot_be_looked_for_keeps_the_merged_folder() {
+    let f = fx();
+    let id = JobId(9);
+    let marker = rf_jobs::temp_name(id, 0);
+    let rep = merge_empty_folders(
+        &f,
+        id,
+        vec![Fault::FailStat {
+            name: marker.clone(),
+        }],
+    );
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert_eq!(
+        tree(&f.src).into_keys().collect::<Vec<_>>(),
+        ["dir", "dir/empty"]
+    );
+    assert_eq!(rep.warnings.len(), 1, "{:?}", rep.warnings);
+    let warning = &rep.warnings[0];
+    assert_eq!(
+        (
+            warning.stage,
+            warning.source.clone(),
+            warning.reason.clone()
+        ),
+        (
+            Stage::DeleteSource,
+            Some(v(f.src.join("dir/empty"))),
+            Some(rf_jobs::FailureReason::CannotTellOwnFolder)
+        )
+    );
+    let kept = format!(
+        "kept {}: cannot tell whether it is the target folder: ",
+        v(f.src.join("dir/empty"))
+    );
+    assert!(warning.message.contains(&kept), "{}", warning.message);
+    assert_eq!(temp_files(&f.dst), Vec::<String>::new());
+}
+
+/// The marker cannot be removed again: it stays under its temporary name, and the report names
+/// it. It was not seen at the source, so the merged folders are removed there as usual.
+#[test]
+fn a_marker_that_cannot_be_removed_is_reported() {
+    let f = fx();
+    let id = JobId(9);
+    let marker = rf_jobs::temp_name(id, 0);
+    let rep = merge_empty_folders(
+        &f,
+        id,
+        vec![Fault::FailDelete {
+            name: marker.clone(),
+        }],
+    );
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert!(!f.src.join("dir").exists());
+    let left = f.dst.join("dir").join("empty").join(&marker);
+    assert!(left.is_file());
+    let warned: Vec<_> = rep
+        .warnings
+        .iter()
+        .map(|w| (w.stage, w.target.clone(), w.reason.clone()))
+        .collect();
+    assert_eq!(
+        warned,
+        [(
+            Stage::Write,
+            Some(v(&left)),
+            Some(rf_jobs::FailureReason::TempLeftBehind)
+        )]
     );
 }

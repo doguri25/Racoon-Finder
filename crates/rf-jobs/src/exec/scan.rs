@@ -14,7 +14,7 @@ use super::{At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Stopped, fold_path, fold
 use crate::preflight::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
 };
-use crate::report::{Stage, Totals};
+use crate::report::{FailureReason, Stage, Totals};
 use crate::resolver::PreflightAnswer;
 use crate::spec::{SymlinkMode, TransferItem, TransferMode, TransferSpec};
 
@@ -164,12 +164,16 @@ fn scan_item(
     ctx.check().at(Stage::Plan)?;
     let src = ctx.provider(source).at(Stage::Plan)?;
     let entry = src.stat(source).at(Stage::Plan)?;
-    let (parent, folder_entry) = check_target_folder(ctx, target).at(Stage::Plan)?;
+    let (parent, folder_entry) = check_target_folder(ctx, target)?;
     let dst = ctx.provider(&parent).at(Stage::Plan)?;
     let folder = survey.folder(&*dst, &parent);
     if lands_inside(source, target, survey.folders[folder].fs) {
         let error = Error::Unsupported(format!("cannot copy or move {source} into itself"));
-        return Err(Failed::new(Stage::Plan, error));
+        return Err(Failed::refused(
+            Stage::Plan,
+            error,
+            FailureReason::IntoItself,
+        ));
     }
     let same_volume = src.scheme() == dst.scheme()
         && matches!(
@@ -197,23 +201,35 @@ fn source_folder_writable(ctx: &Ctx<'_>, source: &VPath, known: &mut HashMap<VPa
     })
 }
 
-/// The folder `target` goes into, and what `stat` says it is. Fails with `NotFound` unless it
-/// exists; a link to a folder counts as a folder (macOS `/tmp`, a Windows junction), and the
-/// entry is then that of the folder it leads to.
-fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> rf_core::Result<(VPath, Entry)> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| Error::Unsupported(format!("no folder to copy into: {target}")))?;
-    let dst = ctx.provider(&parent)?;
-    let mut folder = dst.stat(&parent)?;
+/// The folder `target` goes into, and what `stat` says it is. Every failure is `Stage::Plan`.
+/// A target in no folder (a volume root) fails with `Unsupported` (`NoTargetFolder`), and one
+/// whose folder does not exist with `NotFound`; a link to a folder counts as a folder (macOS
+/// `/tmp`, a Windows junction), and the entry is then that of the folder it leads to. A folder
+/// that turns out to be no folder fails with `NotFound` too (`TargetNotAFolder`).
+fn check_target_folder(ctx: &Ctx<'_>, target: &VPath) -> Result<(VPath, Entry), Failed> {
+    let Some(parent) = target.parent() else {
+        let error = Error::Unsupported(format!("no folder to copy into: {target}"));
+        return Err(Failed::refused(
+            Stage::Plan,
+            error,
+            FailureReason::NoTargetFolder,
+        ));
+    };
+    let dst = ctx.provider(&parent).at(Stage::Plan)?;
+    let mut folder = dst.stat(&parent).at(Stage::Plan)?;
     if folder.kind == EntryKind::Symlink {
-        folder = dst.stat_target(&parent)?;
+        folder = dst.stat_target(&parent).at(Stage::Plan)?;
     }
     if folder.kind == EntryKind::Dir {
         Ok((parent, folder))
     } else {
         let error = io::Error::new(io::ErrorKind::NotFound, "not a folder");
-        Err(Error::io("stat", parent, error))
+        let error = Error::io("stat", parent, error);
+        Err(Failed::refused(
+            Stage::Plan,
+            error,
+            FailureReason::TargetNotAFolder,
+        ))
     }
 }
 
@@ -463,12 +479,11 @@ impl Survey {
 /// What the link at `path` of `provider` leads to: the path of that item, with every link on
 /// the way resolved (see [`resolve_links`]), and the entry `Provider::stat_target` gives for it,
 /// under the name of the link. The entry is never of kind `Symlink`; one of kind `Other` is
-/// never opened. A provider that cannot follow links fails with `Unsupported`.
-pub(crate) fn follow_link(
-    provider: &dyn Provider,
-    path: &VPath,
-) -> rf_core::Result<(VPath, Entry)> {
-    let entry = provider.stat_target(path)?;
+/// never opened. Every failure is `Stage::Read`: a provider that cannot follow links fails with
+/// `Unsupported`, and a link that changed between the two looks with `Other`
+/// (`LinkChanged`).
+pub(crate) fn follow_link(provider: &dyn Provider, path: &VPath) -> Result<(VPath, Entry), Failed> {
+    let entry = provider.stat_target(path).at(Stage::Read)?;
     let (resolved, found) = resolve_links(provider, path)?;
     // Both describe one item, unless a link changed between the two.
     let changed = matches!(
@@ -477,7 +492,12 @@ pub(crate) fn follow_link(
     );
     if changed {
         let error = io::Error::other("the link changed while it was followed");
-        return Err(Error::io("stat", path.clone(), error));
+        let error = Error::io("stat", path.clone(), error);
+        return Err(Failed::refused(
+            Stage::Read,
+            error,
+            FailureReason::LinkChanged,
+        ));
     }
     Ok((resolved, entry))
 }
@@ -499,9 +519,10 @@ enum Step {
 /// The names are taken from the root one at a time. A name that is a link is replaced by what
 /// the link stores: an absolute target starts again at its root, a relative one goes on from
 /// the folder resolved so far. That folder is reached through no link, so a `..` in a target
-/// goes up from the folder the link is really in, as Unix resolves it. More than
-/// [`MAX_LINKS`] links fail like a loop of links.
-fn resolve_links(provider: &dyn Provider, path: &VPath) -> rf_core::Result<(VPath, Entry)> {
+/// goes up from the folder the link is really in, as Unix resolves it. Every failure is
+/// `Stage::Read`: more than [`MAX_LINKS`] links fail like a loop of links (`TooManyLinks`), and
+/// an absolute target in a location that is not local cannot be followed (`AbsoluteLink`).
+fn resolve_links(provider: &dyn Provider, path: &VPath) -> Result<(VPath, Entry), Failed> {
     let mut steps = Vec::new();
     let mut at = path.clone();
     while let (Some(parent), Some(name)) = (at.parent(), at.file_name()) {
@@ -518,17 +539,24 @@ fn resolve_links(provider: &dyn Provider, path: &VPath) -> rf_core::Result<(VPat
             }
             Step::Name(name) => name,
         };
-        let next = at.join(&name)?;
-        if provider.stat(&next)?.kind != EntryKind::Symlink {
+        let next = at
+            .join(&name)
+            .map_err(|e| Failed::new(Stage::Read, e.into()))?;
+        if provider.stat(&next).at(Stage::Read)?.kind != EntryKind::Symlink {
             at = next;
             continue;
         }
         links += 1;
         if links > MAX_LINKS {
             let error = io::Error::other("too many levels of links");
-            return Err(Error::io("stat", path.clone(), error));
+            let error = Error::io("stat", path.clone(), error);
+            return Err(Failed::refused(
+                Stage::Read,
+                error,
+                FailureReason::TooManyLinks,
+            ));
         }
-        let target = provider.read_link(&next)?.target;
+        let target = provider.read_link(&next).at(Stage::Read)?.target;
         let root: PathBuf = target
             .components()
             .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
@@ -538,9 +566,13 @@ fn resolve_links(provider: &dyn Provider, path: &VPath) -> rf_core::Result<(VPat
             // means.
             if at.as_local().is_none() {
                 let what = format!("following an absolute link: {next}");
-                return Err(Error::Unsupported(what));
+                return Err(Failed::refused(
+                    Stage::Read,
+                    Error::Unsupported(what),
+                    FailureReason::AbsoluteLink,
+                ));
             }
-            at = VPath::local(&root)?;
+            at = VPath::local(&root).map_err(|e| Failed::new(Stage::Read, e.into()))?;
         }
         for component in target.components().rev() {
             match component {
@@ -550,7 +582,7 @@ fn resolve_links(provider: &dyn Provider, path: &VPath) -> rf_core::Result<(VPat
             }
         }
     }
-    let entry = provider.stat(&at)?;
+    let entry = provider.stat(&at).at(Stage::Read)?;
     Ok((at, entry))
 }
 

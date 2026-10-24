@@ -8,9 +8,9 @@ use std::ops::Range;
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
 use rf_vfs::{DataRanges, MetadataPatch, Provider, ReadStream, RenameMode, WriteMode, WriteStream};
 
-use super::{At, COPY_CHUNK, Ctx, Failed};
+use super::{At, COPY_CHUNK, Ctx, Failed, TempGuard};
 use crate::preflight::check_path_len;
-use crate::report::Stage;
+use crate::report::{FailureReason, Stage};
 
 /// One item a transfer reads: where it is and what it is.
 #[derive(Clone, Copy, Debug)]
@@ -33,10 +33,11 @@ pub(crate) struct Source<'a> {
 /// renamed to `target` with `commit`. The holes of a sparse source stay holes where the target
 /// can make them and are written as zeros where it cannot (XFER-11); either way they count as
 /// copied bytes, and the content is the same. On an error, a cancel or a panic the temporary
-/// file is removed; a file that was at the temporary path before is not ours and is never
-/// touched. The attributes (read-only among them) are put on `target` only after the commit,
-/// because Windows cannot remove a read-only temporary file. A metadata failure is a warning;
-/// the copy itself has worked.
+/// file is removed (see `TempGuard`); one that cannot be removed is a `Stage::Write` warning
+/// that names it (`TempLeftBehind`), and a file that was at the temporary path before is not
+/// ours and is never touched. The attributes (read-only among them) are put on `target` only
+/// after the commit, because Windows cannot remove a read-only temporary file. A metadata
+/// failure is a warning (see `Ctx::warn_metadata`); the copy itself has worked.
 ///
 /// A link is copied as a link: a new link at the temporary path stores what the source link
 /// stores, and is committed like a file. It gets no metadata, because on Unix changing its
@@ -44,10 +45,12 @@ pub(crate) struct Source<'a> {
 /// that a failure leaves is removed itself, never what it leads to.
 ///
 /// A source that is neither a regular file nor a link is refused before anything is opened
-/// or created: a FIFO blocks a reader until a writer comes, and a device can be read without
-/// end. A temporary path longer than the OS allows is refused the same way, as
-/// `Stage::Preflight`: its name is longer than a short final name, so the final path alone may
-/// fit where it does not.
+/// or created (`NotARegularFile`): a FIFO blocks a reader until a writer comes, and a device
+/// can be read without end. One that turns into such an item after it was found is refused by
+/// the provider's open (`Provider::open_read` of the local provider never blocks on it). A
+/// temporary path longer than the OS allows is refused the same way, as `Stage::Preflight`:
+/// its name is longer than a short final name, so the final path alone may fit where it does
+/// not.
 ///
 /// `own_folder` is for a move, which cannot tell for sure by identity whether the target
 /// folder is the source's own folder under another path (a link to it, or a second mount of
@@ -72,11 +75,15 @@ pub(crate) fn copy_file(
         EntryKind::File | EntryKind::Symlink => {}
         EntryKind::Dir | EntryKind::Other => {
             let error = Error::Unsupported(format!("not a regular file: {source}"));
-            return Err(Failed::new(Stage::Plan, error));
+            return Err(Failed::refused(
+                Stage::Plan,
+                error,
+                FailureReason::NotARegularFile,
+            ));
         }
     }
     ctx.working_on(source);
-    let tmp = ctx.temp_for(target).at(Stage::Write)?;
+    let tmp = ctx.temp_for(target)?;
     // The temporary name is at least 29 units, longer than a short final name, so the final
     // path can fit where this one does not.
     if let Some(issue) = check_path_len(&tmp, ctx.env.naming_os) {
@@ -86,29 +93,31 @@ pub(crate) fn copy_file(
         let link = src.read_link(source).at(Stage::Read)?;
         dst.create_symlink(&tmp, &link).at(Stage::Write)?;
         // As for a file: only a link this call made is removed, and only the link.
-        let mut guard = TempGuard {
-            provider: dst,
-            path: &tmp,
-            armed: true,
-        };
+        let mut guard = TempGuard::new(ctx, dst, &tmp, Some(source));
         if let Some(folder) = own_folder {
             refuse_own_folder(src, folder, &tmp, source)?;
         }
         dst.rename(&tmp, target, commit).at(Stage::Commit)?;
-        guard.armed = false;
+        guard.disarm();
         return Ok(());
     }
-    let mut reader = src.open_read(source).at(Stage::Read)?;
+    // An item that is no regular file by now (a FIFO put in the file's place) is refused by
+    // the open itself, with `Unsupported` (`Provider::open_read`).
+    let mut reader = src.open_read(source).map_err(|error| {
+        let not_a_file = error.kind() == ErrorKind::Unsupported;
+        let failed = Failed::new(Stage::Read, error);
+        if not_a_file {
+            failed.because(FailureReason::NotARegularFile)
+        } else {
+            failed
+        }
+    })?;
     let writer = dst
         .open_write(&tmp, WriteMode::CreateNew)
         .at(Stage::Write)?;
     // Only now is there a file of ours at `tmp`. If `CreateNew` failed, whatever is at that
     // path is not ours and stays.
-    let mut guard = TempGuard {
-        provider: dst,
-        path: &tmp,
-        armed: true,
-    };
+    let mut guard = TempGuard::new(ctx, dst, &tmp, Some(source));
     // `write_content` owns the writer, so the handle is closed before the guard removes the
     // file (Windows does not remove an open file).
     write_content(ctx, from, &mut *reader, writer, &tmp)?;
@@ -116,40 +125,28 @@ pub(crate) fn copy_file(
 
     if src.scheme() == dst.scheme() {
         if let Err(error) = dst.copy_extras(source, &tmp) {
-            ctx.warn(
-                Failed::new(Stage::Metadata, error),
-                Some(source),
-                Some(target),
-            );
+            ctx.warn_metadata(error, Some(source), Some(target));
         }
     }
     if let Err(error) = dst.set_metadata(&tmp, &MetadataPatch::times_of(entry)) {
-        ctx.warn(
-            Failed::new(Stage::Metadata, error),
-            Some(source),
-            Some(target),
-        );
+        ctx.warn_metadata(error, Some(source), Some(target));
     }
 
     if let Some(folder) = own_folder {
         refuse_own_folder(src, folder, &tmp, source)?;
     }
     dst.rename(&tmp, target, commit).at(Stage::Commit)?;
-    guard.armed = false;
+    guard.disarm();
 
     if let Err(error) = dst.set_metadata(target, &MetadataPatch::attributes_of(entry)) {
-        ctx.warn(
-            Failed::new(Stage::Metadata, error),
-            Some(source),
-            Some(target),
-        );
+        ctx.warn_metadata(error, Some(source), Some(target));
     }
     Ok(())
 }
 
-/// Fails as `Stage::Commit` when the temporary file `tmp` of the copy of `source` is in the
-/// folder `folder` of `src` too: the target folder and `folder` are then one folder under two
-/// paths. A `stat` error other than `NotFound` cannot tell, and fails too.
+/// Fails as `Stage::Commit` (`OntoItself`) when the temporary file `tmp` of the copy of
+/// `source` is in the folder `folder` of `src` too: the target folder and `folder` are then one
+/// folder under two paths. A `stat` error other than `NotFound` cannot tell, and fails too.
 fn refuse_own_folder(
     src: &dyn Provider,
     folder: &VPath,
@@ -167,7 +164,11 @@ fn refuse_own_folder(
             let error = Error::Unsupported(format!(
                 "cannot move {source} onto itself: its target folder is its own folder"
             ));
-            Err(Failed::new(Stage::Commit, error))
+            Err(Failed::refused(
+                Stage::Commit,
+                error,
+                FailureReason::OntoItself,
+            ))
         }
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(Failed::new(Stage::Commit, error)),
@@ -301,7 +302,7 @@ impl Content<'_, '_> {
             .seek(SeekFrom::End(0))
             .map_err(|e| self.read_error(e))?;
         if now < layout.len {
-            return Err(self.read_error(io::ErrorKind::UnexpectedEof.into()));
+            return Err(self.cut_short());
         }
         self.seek(layout.len)?;
         self.rest()
@@ -314,7 +315,7 @@ impl Content<'_, '_> {
             self.ctx.check().at(Stage::Write)?;
             let want = usize::try_from(n).map_or(self.buf.len(), |n| n.min(self.buf.len()));
             let got = match self.reader.read(&mut self.buf[..want]) {
-                Ok(0) => return Err(self.read_error(io::ErrorKind::UnexpectedEof.into())),
+                Ok(0) => return Err(self.cut_short()),
                 Ok(got) => got,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(self.read_error(e)),
@@ -376,29 +377,18 @@ impl Content<'_, '_> {
     fn read_error(&self, e: io::Error) -> Failed {
         Failed::new(Stage::Read, Error::io("read", self.source.clone(), e))
     }
+
+    /// The failure of a source that ended before the data it was found with: an
+    /// `UnexpectedEof` read error with the reason `SourceCutShort`.
+    fn cut_short(&self) -> Failed {
+        self.read_error(io::ErrorKind::UnexpectedEof.into())
+            .because(FailureReason::SourceCutShort)
+    }
 }
 
 /// A byte count as a `u64`; no `usize` this code sees is larger.
 fn bytes(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
-}
-
-/// Removes the temporary file at `path` when it goes out of scope still armed: after an
-/// error, a cancel, or while a panic unwinds. It goes with `Provider::delete_leaf`, so a folder
-/// that took its name meanwhile is never removed with it. The removal is best effort; a file
-/// it cannot remove keeps its temporary name, which crash recovery looks for.
-struct TempGuard<'a> {
-    provider: &'a dyn Provider,
-    path: &'a VPath,
-    armed: bool,
-}
-
-impl Drop for TempGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.provider.delete_leaf(self.path);
-        }
-    }
 }
 
 #[cfg(test)]

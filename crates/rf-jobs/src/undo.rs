@@ -81,6 +81,19 @@ pub enum UndoRecord {
         created_dirs: Vec<VPath>,
         /// Source folders the job removed once they were empty, children first.
         removed_dirs: Vec<VPath>,
+        /// How many existing files the job replaced, under an overwrite policy. Their old
+        /// content is gone, so undo cannot bring it back; it says so once for each. `0` in a
+        /// record written before this was kept.
+        #[serde(default)]
+        overwritten: u64,
+        /// Each folder of `created_dirs` (`to`) with the source folder it was made for
+        /// (`from`), parents first: a folder moved across volumes, whose children were copied
+        /// into a new folder that took the source folder's times and attributes. An undo that
+        /// makes such a source folder again gives it those of `to` before it removes `to`.
+        /// Empty in a record written before this was kept, and an undo then makes the source
+        /// folders again with new times.
+        #[serde(default)]
+        copied_dirs: Vec<MovedItem>,
     },
     Renamed {
         from: VPath,

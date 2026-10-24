@@ -24,6 +24,9 @@ pub(super) enum When {
     /// Right before `stat` number `nth` (from 0) of the item `of`, counting only those made
     /// once the provider is armed (see [`Swapping::arm`]).
     Stat { of: PathBuf, nth: usize },
+    /// Right before the first `sync_dir` of the folder `of` is passed on, as a move syncs the
+    /// folder of a copy just before it looks at the copied source and deletes it.
+    SyncDir { of: PathBuf },
 }
 
 /// An inner provider for every call, but the folder `dir` is moved away to `dir.moved` with
@@ -184,6 +187,11 @@ impl Provider for Swapping {
         self.inner.delete_leaf(path)
     }
     fn sync_dir(&self, path: &VPath) -> Result<()> {
+        if let When::SyncDir { of } = &self.when {
+            if path.as_local() == Some(of.as_path()) {
+                self.swap();
+            }
+        }
         self.inner.sync_dir(path)
     }
     fn fs_name(&self, path: &VPath) -> Option<String> {

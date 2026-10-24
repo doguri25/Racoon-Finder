@@ -238,3 +238,120 @@ fn windows_hidden_attribute_and_streams_are_copied() {
         0
     );
 }
+
+/// A target that keeps no metadata at all (a provider without `set_metadata`) is nothing to do
+/// for each file: the copy says so once, for the first file, and copies every file.
+#[test]
+fn metadata_the_target_cannot_keep_is_one_warning_per_job() {
+    use rf_jobs::testkit::{Fault, FaultyProvider};
+
+    let f = fx();
+    let sources: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|name| {
+            let path = f.src.join(name);
+            std::fs::write(&path, name).unwrap();
+            path
+        })
+        .collect();
+    let p = FaultyProvider::local(vec![Fault::NoMetadata]);
+    let r = run_on(&copy(&sources, &f.dst), &p.vfs(), &NonInteractive);
+    assert_eq!(r.outcome, Outcome::Completed, "{:?}", r.failures);
+    assert_eq!(r.done.files, 3);
+    let warned: Vec<_> = r.warnings.iter().map(|w| (w.stage, w.kind)).collect();
+    assert_eq!(warned, [(Stage::Metadata, ErrorKind::Unsupported)]);
+}
+
+/// A file that another program replaces with a FIFO after the plan found it is refused when it
+/// is opened, at once: a FIFO without a writer would block a plain open for good.
+#[cfg(unix)]
+#[test]
+fn a_fifo_put_in_the_place_of_a_file_is_refused_at_once() {
+    let f = fx();
+    let a = f.src.join("a.txt");
+    std::fs::write(&a, "A").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (job, fifo) = (copy(std::slice::from_ref(&a), &f.dst), a.clone());
+    std::thread::spawn(move || {
+        let vfs = Vfs::with_local();
+        let on = |event: ExecEvent| {
+            if matches!(event, ExecEvent::Planned { .. }) {
+                std::fs::remove_file(&fifo).unwrap();
+                let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+                assert!(made.unwrap().success(), "mkfifo failed");
+            }
+        };
+        let env = ExecEnv::new(&vfs, &NonInteractive).on_event(&on);
+        let _ = tx.send(execute(JobId::generate(), &job, &env));
+    });
+    let Ok(r) = rx.recv_timeout(Duration::from_secs(20)) else {
+        // Opening the other end lets a blocked open go on, so the thread ends.
+        let _ = std::fs::OpenOptions::new().write(true).open(&a);
+        panic!("the copy blocked on a FIFO");
+    };
+    assert_eq!(r.failures.len(), 1, "{:?}", r.failures);
+    assert_eq!(
+        (r.failures[0].stage, r.failures[0].kind),
+        (Stage::Read, ErrorKind::Unsupported)
+    );
+    assert!(
+        r.failures[0].message.ends_with("not a regular file"),
+        "{}",
+        r.failures[0].message
+    );
+    assert_eq!(
+        r.failures[0].reason,
+        Some(rf_jobs::FailureReason::NotARegularFile)
+    );
+    assert_eq!(tree(&f.dst), BTreeMap::new());
+}
+
+/// A link inside a copied folder that is pointed elsewhere after the copy is a change, caught by
+/// the link's own time, even when the folder's own time says nothing: the undo leaves the
+/// folder where it is.
+#[cfg(unix)]
+#[test]
+fn a_link_pointed_elsewhere_after_a_copy_keeps_its_folder_from_the_undo() {
+    use rf_jobs::{FailureReason, JobSpec, UndoRecord};
+
+    let f = fx();
+    std::fs::create_dir(f.src.join("dir")).unwrap();
+    std::fs::write(f.src.join("dir").join("a.txt"), "A").unwrap();
+    std::os::unix::fs::symlink("a.txt", f.src.join("dir").join("link")).unwrap();
+    let r = run(&copy(&[f.src.join("dir")], &f.dst));
+    assert_eq!(r.outcome, Outcome::Completed, "{:?}", r.failures);
+    let Some(UndoRecord::Copied { created, .. }) = r.undo.clone() else {
+        panic!("{:?}", r.undo)
+    };
+    let recorded = created[0].modified.expect("the folder has a time");
+    // Past the job's time `at`, also on a clock that ticks coarsely.
+    std::thread::sleep(Duration::from_millis(50));
+    let link = f.dst.join("dir").join("link");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("elsewhere", &link).unwrap();
+    // The folder's own time is put back, so only the link can tell.
+    rf_platform::set_times(&v(f.dst.join("dir")), Some(recorded), None, None).unwrap();
+    let undo = run(&JobSpec::Undo(r.undo.unwrap()));
+    assert_eq!(undo.failures.len(), 1, "{:?}", undo.failures);
+    let failure = &undo.failures[0];
+    assert_eq!(
+        (
+            failure.stage,
+            failure.source.clone(),
+            failure.reason.clone()
+        ),
+        (
+            Stage::Undo,
+            Some(v(f.dst.join("dir"))),
+            Some(FailureReason::ChangedSinceCopy)
+        )
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::Path::new("elsewhere")
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.dst.join("dir").join("a.txt")).unwrap(),
+        "A"
+    );
+}

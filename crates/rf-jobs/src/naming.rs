@@ -14,8 +14,9 @@ pub const TEMP_SUFFIX: &str = ".rfpart";
 /// The highest number given to a numbered name.
 pub const MAX_NUMBERED: u32 = 9_999;
 
-/// The start of every temporary file name.
-const TEMP_PREFIX: &str = ".rf-";
+/// The start of every temporary file name. It is not `rf_core::identity::TEMP_PREFIX`, the
+/// start of the names of the app's own temporary folders.
+const TEMP_NAME_START: &str = ".rf-";
 
 /// `name` with the number `n` added, for an item whose own name is taken.
 ///
@@ -28,6 +29,11 @@ const TEMP_PREFIX: &str = ".rf-";
 ///
 /// The name is assembled as an [`OsString`], so a name that is not valid UTF-8 keeps every byte.
 /// A `name` that is not a single path component (it holds a separator) is not split at all.
+///
+/// The number makes the name longer, by up to seven units (` (9999)`), and nothing here keeps
+/// it within a length limit: a numbered name can be longer than the file system allows
+/// (`NAME_LIMIT`) or put its path over the OS limit even where `name` fit. The caller checks
+/// each one (`check_name`, `check_path_len`) before it touches the file system.
 pub fn numbered_name(name: &OsStr, n: u32, is_dir: bool, os: Os) -> OsString {
     let (stem, extension) = split_name(name, is_dir);
     let mut numbered = OsString::from(stem);
@@ -60,7 +66,7 @@ fn split_name(name: &OsStr, is_dir: bool) -> (&OsStr, Option<&OsStr>) {
 /// `.rf-{job:016x}-{seq}.rfpart`. It holds no character of the user's names, so every file
 /// system accepts it and it stays far below the 255-unit name limit.
 pub fn temp_name(job: JobId, seq: u64) -> OsString {
-    OsString::from(format!("{TEMP_PREFIX}{job}-{seq}{TEMP_SUFFIX}"))
+    OsString::from(format!("{TEMP_NAME_START}{job}-{seq}{TEMP_SUFFIX}"))
 }
 
 /// The job a temporary file name belongs to, or `None` for any name [`temp_name`] cannot have
@@ -70,7 +76,7 @@ pub fn temp_name(job: JobId, seq: u64) -> OsString {
 pub fn temp_job(name: &OsStr) -> Option<JobId> {
     let body = name
         .to_str()?
-        .strip_prefix(TEMP_PREFIX)?
+        .strip_prefix(TEMP_NAME_START)?
         .strip_suffix(TEMP_SUFFIX)?;
     let (id, seq) = body.split_once('-')?;
     let job = JobId::from_hex(id)?;

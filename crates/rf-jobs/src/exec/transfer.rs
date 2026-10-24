@@ -14,13 +14,13 @@ use rf_vfs::{MetadataPatch, Provider, RenameMode};
 use super::file::{Source, copy_file};
 use super::scan::{Planned, follow_link, follows_links, scan_transfer};
 use super::{
-    At, Attempt, Cause, Ctx, Failed, Identity, Level, fold_path, folder_identity, link_loop,
-    replaced, too_deep,
+    At, Attempt, Ctx, Failed, Identity, Level, Parent, TempGuard, Walking, check_parent, fold_path,
+    folder_identity, link_loop, on_another_volume, other_volume, restat, too_deep,
 };
 use crate::conflict::{Conflict, ConflictAction, Decision, decide};
 use crate::naming::{MAX_NUMBERED, numbered_name};
 use crate::preflight::{FsKind, IssueKind, check_name, check_path_len, fold_name};
-use crate::report::Stage;
+use crate::report::{FailureReason, Stage};
 use crate::spec::{ConflictPolicy, ErrorPolicy, TransferMode, TransferSpec};
 use crate::undo::{CreatedItem, MovedItem, UndoRecord};
 
@@ -37,8 +37,9 @@ use crate::undo::{CreatedItem, MovedItem, UndoRecord};
 /// it is never replaced.
 ///
 /// At the end, also when the job stopped early, the report gets the record that undoes what
-/// the job did (`report.undo`): for a move what it moved and the folders it made and removed,
-/// for a copy what it made and how many files it replaced. `None` when it changed nothing.
+/// the job did (`report.undo`): for a move what it moved, the folders it made and removed and
+/// how many files it replaced, for a copy what it made and how many files it replaced. `None`
+/// when it changed nothing.
 pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
     let Some(plan) = scan_transfer(ctx, spec) else {
         return;
@@ -67,7 +68,8 @@ pub(crate) fn run_transfer(ctx: &mut Ctx<'_>, spec: &TransferSpec) {
             folder: Folder::Existing,
         };
         let stopped = if moving {
-            move_entry(ctx, &walk, source, &planned.entry, to, Level::TOP, &mut log).is_break()
+            let entry = &planned.entry;
+            move_entry(ctx, &walk, source, entry, to, Level::TOP, None, &mut log).is_break()
         } else {
             let entry = planned.entry.clone();
             transfer_entry(ctx, &walk, source, entry, to, Level::TOP, &mut log).is_break()
@@ -144,12 +146,15 @@ enum Folder {
 struct Log {
     /// The items a copy made, as `UndoRecord::Copied` lists them.
     created: Vec<CreatedItem>,
-    /// How many files a copy replaced.
+    /// How many files a copy or a move replaced.
     overwritten: u64,
     /// The items a move put at their targets, each with everything in it.
     moves: Vec<MovedItem>,
     /// The folders a move made at the target, in the order it made them: parents first.
     created_dirs: Vec<VPath>,
+    /// Each folder of `created_dirs` (`to`) with the source folder it was made for (`from`), in
+    /// the same order.
+    copied_dirs: Vec<MovedItem>,
     /// The source folders a move removed, in the order it removed them: children first.
     removed_dirs: Vec<VPath>,
 }
@@ -185,6 +190,7 @@ impl Log {
             overwritten,
             moves,
             created_dirs,
+            copied_dirs,
             removed_dirs,
         } = self;
         if moving {
@@ -193,6 +199,8 @@ impl Log {
                 moves,
                 created_dirs,
                 removed_dirs,
+                overwritten,
+                copied_dirs,
             })
         } else {
             let changed = !created.is_empty() || overwritten > 0;
@@ -279,7 +287,7 @@ fn transfer_entry(
         let followed = ctx.attempt(walk.errors, Some(source), Some(target), |ctx| {
             ctx.check().at(Stage::Read)?;
             let src = ctx.provider(source).at(Stage::Read)?;
-            follow_link(&*src, source).at(Stage::Read)
+            follow_link(&*src, source)
         });
         match followed {
             Attempt::Done(followed) => (Some(source), followed),
@@ -293,7 +301,7 @@ fn transfer_entry(
     }
     if let Some(link) = link.filter(|_| level.leads_back(entry.identity())) {
         let looped = ctx.attempt(walk.errors, Some(link), Some(target), |_| {
-            Err::<(), _>(Failed::new(Stage::Plan, link_loop(link)))
+            Err::<(), _>(link_loop(link))
         });
         return flow(&looped);
     }
@@ -329,7 +337,7 @@ fn transfer_file(
                 Place::Skip => return Ok(None),
                 Place::At { path, commit } => (path, commit),
                 // Only two folders merge; a file is never written into one.
-                Place::Merge => return Err(Failed::new(Stage::Conflict, taken(target))),
+                Place::Merge => return Err(kind_taken(target, EntryKind::Dir)),
             }
         } else {
             (target.clone(), RenameMode::NoReplace)
@@ -504,9 +512,12 @@ fn open_dir(
     }))
 }
 
-/// Gives the folder `to`, which this job made, what the source folder `source` has besides its
-/// children: its extras when both are of one provider, then its times and attributes.
-fn finish_dir(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, to: &VPath) {
+/// Gives the folder `to`, which this job made, what the folder `source`, which `entry`
+/// describes, has besides its children: its extras when both are of one provider, then the
+/// times and attributes of `entry`. A failure is a `Stage::Metadata` warning (see
+/// `Ctx::warn_metadata`). A copy and a move give a folder they made what its source has; an
+/// undo of a move gives a source folder it made again what the folder made for it had.
+pub(crate) fn finish_dir(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, to: &VPath) {
     let (src, dst) = match (ctx.provider(source), ctx.provider(to)) {
         (Ok(src), Ok(dst)) => (src, dst),
         (Err(error), _) | (_, Err(error)) => {
@@ -516,26 +527,43 @@ fn finish_dir(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, to: &VPath) {
     };
     if src.scheme() == dst.scheme() {
         if let Err(error) = dst.copy_extras(source, to) {
-            ctx.warn(Failed::new(Stage::Metadata, error), Some(source), Some(to));
+            ctx.warn_metadata(error, Some(source), Some(to));
         }
     }
     let mut patch = MetadataPatch::times_of(entry);
     patch.attributes = MetadataPatch::attributes_of(entry).attributes;
     if let Err(error) = dst.set_metadata(to, &patch) {
-        ctx.warn(Failed::new(Stage::Metadata, error), Some(source), Some(to));
+        ctx.warn_metadata(error, Some(source), Some(to));
     }
 }
 
 /// Moves `source`, which `entry` describes, to `to`; `level` says how far below an item of the
-/// job it is. What the move does goes to `log`.
+/// job it is, and `parent` is the folder it is in, as the walk found it when it opened it
+/// (`None` for an item of the job). What the move does goes to `log`.
 ///
 /// A move never follows a link, whatever the link mode says: a link is moved as the link
 /// itself, by a rename or by a copy of the link, and only the link is ever deleted.
+///
+/// Against another program changing the tree while it is moved, the move walk checks as the
+/// delete walk does: each step looks at its item again (`stat`, which gives an identity where
+/// the file system has one, also on Windows, where a listing gives none) and checks that the
+/// folder the item is in is still the folder the walk listed, and only then acts. An item that
+/// is no longer what was found, or whose folder was replaced (a swap of it for a link makes it
+/// a link, another kind, on every system), fails as "changed while it was moved"
+/// (`ChangedWhileMoved`) and stays where it is, with every folder above it. On a file system
+/// without identities only the kind is left to tell, so a swap of a folder further above can
+/// make a path lead to another folder unseen, as for the delete walk; and the race between the
+/// last check of a step and its act remains, until the walk works relative to open folder
+/// handles.
 ///
 /// - First the checks of every item (see [`refused`]): too deep, or left out by the pre-flight
 ///   review. Such an item stays where it is.
 /// - A folder: see [`move_dir`]. A file, a link and anything else: see [`move_file`]. Both
 ///   settle where the item goes with [`settle_move`], which renames it there when it can.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one walk step: the item, where it goes and where it is in the walk"
+)]
 fn move_entry(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
@@ -543,31 +571,66 @@ fn move_entry(
     entry: &Entry,
     to: To<'_>,
     level: Level<'_>,
+    parent: Option<Parent<'_>>,
     log: &mut Log,
 ) -> MoveFlow {
     if let Some(flow) = refused(ctx, walk, source, to, level) {
         return flow.map_continue(|()| false);
     }
     if entry.kind == EntryKind::Dir {
-        move_dir(ctx, walk, source, entry, to, level, log)
+        move_dir(ctx, walk, source, entry, to, level, parent, log)
     } else {
-        move_file(ctx, walk, source, entry, to, level.depth() == 0, log)
+        move_file(
+            ctx,
+            walk,
+            source,
+            entry,
+            to,
+            level.depth() == 0,
+            parent,
+            log,
+        )
     }
 }
 
-/// Moves the file or link `source`, which `entry` describes, to `to`: with one rename where it
-/// can (see [`settle_move`]), else by a copy (see `copy_file`) and a delete of the source once
-/// the copy is committed and its name durable (see [`delete_source`]). A `top` item that
-/// reaches its target goes to the outputs. A copy is refused when the target folder turns out
-/// to be the source's own folder under another path (`own_folder` of `copy_file`): without
-/// identities nothing else would tell, and through a second mount of the folder the same item
-/// has another identity.
+/// Where the first step of moving a file put it.
+#[derive(Debug)]
+struct Placed {
+    /// Where it is now.
+    path: VPath,
+    /// How it was committed there: `Replace` when it replaced a file.
+    commit: RenameMode,
+    /// Whether it was copied there, so that its source is still to be deleted; `false` when it
+    /// was renamed there.
+    copied: bool,
+    /// The source as the step found it, right before it acted on it.
+    fresh: Entry,
+}
+
+/// Moves the file or link `source`, which `entry` describes and which is in `parent` (`None`
+/// for an item of the job), to `to`: with one rename where it can (see [`settle_move`]), else
+/// by a copy (see `copy_file`) and a delete of the source once the copy is committed and its
+/// name durable (see [`delete_source`]). A `top` item that reaches its target goes to the
+/// outputs, and one that replaced a file under an overwrite policy is counted in the record.
+/// A copy is refused when the target folder turns out to be the source's own folder under
+/// another path (`own_folder` of `copy_file`): without identities nothing else would tell, and
+/// through a second mount of the folder the same item has another identity.
+///
+/// Before anything is done with it, the source is `stat`ed again and its folder checked (see
+/// [`move_entry`]): one that changed since it was listed fails as `Stage::Read`
+/// (`ChangedWhileMoved`) and stays. What that `stat` found is what is copied and what the
+/// delete checks against, so on Windows, where a listing has no identities, the delete still
+/// knows the file it copied by its identity.
 ///
 /// The delete is a step of its own, so that trying it again after a failure does not copy the
 /// file again. It comes right after the commit, with no checkpoint between them: a pause or a
 /// cancel there would leave the file in two places. A failed delete keeps both the source and
 /// its copy. A FIFO, socket or device that cannot be renamed goes to `copy_file`, which
 /// refuses it, and stays.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one walk step: the item, where it goes and where it is in the walk"
+)]
 fn move_file(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
@@ -575,6 +638,7 @@ fn move_file(
     entry: &Entry,
     to: To<'_>,
     top: bool,
+    parent: Option<Parent<'_>>,
     log: &mut Log,
 ) -> MoveFlow {
     let target = to.path;
@@ -583,17 +647,26 @@ fn move_file(
         ctx.check().at(Stage::Write)?;
         let src = ctx.provider(source).at(Stage::Read)?;
         let dst = ctx.provider(target).at(Stage::Write)?;
+        let fresh = restat(&*src, source, entry, Stage::Read, Walking::Moving)?;
+        check_parent(&*src, parent, Stage::Read, Walking::Moving)?;
         let from = Source {
             provider: &*src,
             path: source,
-            entry,
+            entry: &fresh,
         };
         let (path, commit) = match settle_move(ctx, walk, from, &*dst, to)? {
             Way::Stay => return Ok(None),
-            Way::Renamed(path) => return Ok(Some((path, false))),
+            Way::Renamed { path, commit } => {
+                return Ok(Some(Placed {
+                    path,
+                    commit,
+                    copied: false,
+                    fresh,
+                }));
+            }
             Way::Copy { path, commit } => (path, commit),
             // Only two folders merge; a file is never written into one.
-            Way::Merge(_) => return Err(Failed::new(Stage::Conflict, taken(target))),
+            Way::Merge(_) => return Err(kind_taken(target, EntryKind::Dir)),
         };
         // Nothing else tells for sure whether the target folder is the source's own folder
         // under another path: without identities nothing does, and through a second mount the
@@ -601,9 +674,14 @@ fn move_file(
         let own_folder = source.parent();
         copy_file(ctx, from, &*dst, &path, commit, own_folder.as_ref())
             .map_err(|failed| failed.writing(&path))?;
-        Ok(Some((path, true)))
+        Ok(Some(Placed {
+            path,
+            commit,
+            copied: true,
+            fresh,
+        }))
     });
-    let (path, copied) = match placed {
+    let placed = match placed {
         Attempt::Done(Some(placed)) => placed,
         Attempt::Done(None) => {
             ctx.report.skipped += 1;
@@ -613,11 +691,14 @@ fn move_file(
         Attempt::Stop => return ControlFlow::Break(()),
     };
     if top {
-        ctx.report.outputs.push(path.clone());
+        ctx.report.outputs.push(placed.path.clone());
     }
-    let deleted = if copied {
-        ctx.attempt(walk.errors, Some(source), Some(&path), |ctx| {
-            delete_source(ctx, source, entry, &path)
+    if placed.commit == RenameMode::Replace {
+        log.overwritten += 1;
+    }
+    let deleted = if placed.copied {
+        ctx.attempt(walk.errors, Some(source), Some(&placed.path), |ctx| {
+            delete_source(ctx, source, &placed.fresh, &placed.path, parent)
         })
     } else {
         Attempt::Done(())
@@ -626,7 +707,7 @@ fn move_file(
     if gone {
         log.moves.push(MovedItem {
             from: source.clone(),
-            to: path,
+            to: placed.path,
         });
     }
     // The file is at its target, whether or not the delete of its source worked.
@@ -635,31 +716,35 @@ fn move_file(
     ControlFlow::Continue(gone)
 }
 
-/// Deletes `source`, which a move has copied and committed to `copy` and `entry` describes,
-/// for good. Every failure is a `Stage::DeleteSource` failure that leaves the source.
+/// Deletes `source`, which a move has copied and committed to `copy`, which `fresh` described
+/// right before it was copied, and which is in `parent` (`None` for an item of the job), for
+/// good. Every failure is a `Stage::DeleteSource` failure that leaves the source.
 ///
 /// First the folder of the copy is synced (`Provider::sync_dir`), so that the commit that gave
 /// the copy its name is durable before the source goes: after a power loss the delete could
 /// otherwise be on disk while the copy is still only a temporary file, which crash recovery
-/// removes. Then the source is `stat`ed, and left when it is no longer what was copied (see
-/// [`replaced`]): of another kind or, when both identities are known, another file, as when a
-/// program replaced it while it was copied. It is deleted with `Provider::delete_leaf`, which
-/// removes a link itself, never what it leads to, and never removes a folder: an item that
-/// turned into one after that `stat`, or a path that leads into another folder by then, fails
-/// and stays with everything in it.
-fn delete_source(ctx: &Ctx<'_>, source: &VPath, entry: &Entry, copy: &VPath) -> Result<(), Failed> {
+/// removes. Then the source is `stat`ed and left when it is no longer what was copied (see
+/// `super::replaced`): of another kind or, when both identities are known, another file, as
+/// when a program replaced it while it was copied or a folder above it was swapped for a link.
+/// The folder it is in is checked too (see [`move_entry`]): one swapped for a link is a link
+/// now. Either fails as "changed while it was moved" (`ChangedWhileMoved`). The source goes
+/// with `Provider::delete_leaf`, which removes a link itself, never what it leads to, and never
+/// removes a folder: an item that turned into one after those checks, or a path that leads
+/// into another folder by then, fails and stays with everything in it.
+fn delete_source(
+    ctx: &Ctx<'_>,
+    source: &VPath,
+    fresh: &Entry,
+    copy: &VPath,
+    parent: Option<Parent<'_>>,
+) -> Result<(), Failed> {
     if let Some(folder) = copy.parent() {
         let dst = ctx.provider(copy).at(Stage::DeleteSource)?;
         dst.sync_dir(&folder).at(Stage::DeleteSource)?;
     }
     let src = ctx.provider(source).at(Stage::DeleteSource)?;
-    let now = src.stat(source).at(Stage::DeleteSource)?;
-    if replaced(entry, &now) {
-        let error = Error::Unsupported(format!(
-            "{source} changed while it was moved; left in place"
-        ));
-        return Err(Failed::new(Stage::DeleteSource, error));
-    }
+    restat(&*src, source, fresh, Stage::DeleteSource, Walking::Moving)?;
+    check_parent(&*src, parent, Stage::DeleteSource, Walking::Moving)?;
     src.delete_leaf(source).at(Stage::DeleteSource)
 }
 
@@ -670,28 +755,37 @@ enum MovedDir {
     Stayed,
     /// It is at this path, renamed there with everything in it.
     Renamed(VPath),
-    /// It is listed, and its children go into the folder made or merged into at `path`.
-    Opened(Opened),
+    /// It is listed, and its children go into the folder made or merged into at the path of
+    /// the `Opened`; the `Entry` is what `stat` found for the source folder right before it
+    /// was listed. Boxed, since the others are small.
+    Opened(Box<(Opened, Entry)>),
 }
 
-/// Moves the folder `source`, which `entry` describes, to `to`.
+/// Moves the folder `source`, which `entry` describes and which is in `parent` (`None` for an
+/// item of the job), to `to`.
 ///
-/// One step settles where it goes (see [`settle_move`]). Renamed there, it is moved with
+/// One step settles where it goes (see [`open_moved_dir`]). Renamed there, it is moved with
 /// everything in it. Otherwise the same step lists its children and, unless it merges into the
 /// folder at the target, makes a folder there whose name is durable (see
 /// [`make_durable_dir`]), which its children are copied into. Each child is then moved as its
-/// own step.
+/// own step, in this folder as the step found it.
 ///
 /// The source folder is removed after its children, with `remove_dir`, and only once each of
 /// them has gone with everything in it: nothing failed, was skipped, was left out by the
 /// pre-flight review or was too deep. A file that another program put in it meanwhile keeps
 /// it, since `remove_dir` removes only an empty folder; that and any other failed removal is a
-/// `Stage::DeleteSource` warning. A folder merged into an existing one is removed only once
-/// it is known to be a folder of its own, by its identity and, across volumes, by a marker
-/// (see [`merged_from_elsewhere`]); a folder made at the target cannot be the source. A folder this job made gets the extras, times and
-/// attributes of the source before that, while the source is still there to give them. Only a
+/// `Stage::DeleteSource` warning (see [`remove_source_dir`]). A folder merged into an existing
+/// one is removed only once it is known to be a folder of its own, by its identity and, across
+/// volumes, by a marker (see [`merged_from_elsewhere`]); a folder made at the target cannot be
+/// the source. A folder this job made gets the extras, times and attributes of the source
+/// before that, while the source is still there to give them, and is noted with the source
+/// folder it was made for (`copied_dirs`), so that an undo can give them back. Only a
 /// top-level folder that was renamed or made goes to the outputs; one merged into was there
 /// before.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one walk step: the item, where it goes and where it is in the walk"
+)]
 fn move_dir(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
@@ -699,14 +793,15 @@ fn move_dir(
     entry: &Entry,
     to: To<'_>,
     level: Level<'_>,
+    parent: Option<Parent<'_>>,
     log: &mut Log,
 ) -> MoveFlow {
     let top = level.depth() == 0;
     let opened = ctx.attempt(walk.errors, Some(source), Some(to.path), |ctx| {
-        open_moved_dir(ctx, walk, source, entry, to)
+        open_moved_dir(ctx, walk, source, entry, to, parent)
     });
-    let opened = match opened {
-        Attempt::Done(MovedDir::Opened(opened)) => opened,
+    let (opened, before) = match opened {
+        Attempt::Done(MovedDir::Opened(opened)) => *opened,
         Attempt::Done(MovedDir::Renamed(path)) => {
             if top {
                 ctx.report.outputs.push(path.clone());
@@ -730,9 +825,17 @@ fn move_dir(
             ctx.report.outputs.push(opened.path.clone());
         }
         log.created_dirs.push(opened.path.clone());
+        log.copied_dirs.push(MovedItem {
+            from: source.clone(),
+            to: opened.path.clone(),
+        });
     }
     let folder = if opened.made { Folder::Made } else { to.folder };
     let here = level.enter(None);
+    let this = Parent {
+        path: source,
+        entry: &before,
+    };
     let mut all_gone = true;
     for child in opened.children {
         let Some((child_source, child_target, child_planned)) = child_paths(
@@ -759,15 +862,16 @@ fn move_dir(
             &child,
             child_to,
             here.below(),
+            Some(this),
             log,
         )?;
     }
     if opened.made {
-        finish_dir(ctx, source, entry, &opened.path);
+        finish_dir(ctx, source, &before, &opened.path);
     }
     let gone = all_gone
-        && (opened.made || merged_from_elsewhere(ctx, source, entry, &opened.path))
-        && remove_source_dir(ctx, source, &opened.path, log);
+        && (opened.made || merged_from_elsewhere(ctx, source, &before, &opened.path))
+        && remove_source_dir(ctx, source, &before, parent, &opened.path, log);
     ctx.item_done(false, true);
     ControlFlow::Continue(gone)
 }
@@ -777,14 +881,16 @@ fn move_dir(
 /// it is empty removes nothing that was not moved. If `target` were `source` under another
 /// path, every child would have merged into itself, and an empty folder in it would look moved
 /// when nothing was. A folder that is not known to be its own is kept, with a
-/// `Stage::DeleteSource` warning that says why (see [`check_own_folder`]).
+/// `Stage::DeleteSource` warning that says why (see [`check_own_folder`]): it is the target
+/// folder under another path (`KeptAsTargetFolder`), or that cannot be told
+/// (`CannotTellOwnFolder`).
 fn merged_from_elsewhere(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, target: &VPath) -> bool {
-    let Err(why) = check_own_folder(ctx, source, entry, target) else {
+    let Err((why, reason)) = check_own_folder(ctx, source, entry, target) else {
         return true;
     };
     let error = Error::Unsupported(format!("kept {source}: {why}"));
     ctx.warn(
-        Failed::new(Stage::DeleteSource, error),
+        Failed::refused(Stage::DeleteSource, error, reason),
         Some(source),
         Some(target),
     );
@@ -792,10 +898,12 @@ fn merged_from_elsewhere(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, targe
 }
 
 /// Checks that the merged source folder `source`, which `entry` describes, is not the folder
-/// `target` it was merged into under another path, or says why that cannot be told.
+/// `target` it was merged into under another path, or says why that cannot be told, and the
+/// reason of the warning that keeps it.
 ///
-/// 1. Its identity must be known: the listed entry's, else the one `stat` gives (a Windows
-///    listing has none). Without one, a link to the folder could not have been told from it.
+/// 1. Its identity must be known: the one `stat` gave when the walk opened it, which a listing
+///    on Windows does not give; else the one `stat` gives now. Without one, a link to the
+///    folder could not have been told from it.
 /// 2. When `target` is on the source's volume of the same provider (their volume IDs are
 ///    equal), the identity has told already: on one file system the same folder through a
 ///    link has the same identity, and the move took it for the source itself instead of
@@ -809,17 +917,18 @@ fn check_own_folder(
     source: &VPath,
     entry: &Entry,
     target: &VPath,
-) -> Result<(), String> {
+) -> Result<(), (String, FailureReason)> {
     const UNKNOWN: &str = "cannot tell whether it is the target folder";
+    let unknown = |why: String| (why, FailureReason::CannotTellOwnFolder);
     let (src, dst) = match (ctx.provider(source), ctx.provider(target)) {
         (Ok(src), Ok(dst)) => (src, dst),
-        (Err(error), _) | (_, Err(error)) => return Err(format!("{UNKNOWN}: {error}")),
+        (Err(error), _) | (_, Err(error)) => return Err(unknown(format!("{UNKNOWN}: {error}"))),
     };
     let identity = entry
         .identity()
         .or_else(|| src.stat(source).ok()?.identity());
     let Some((volume, _)) = identity else {
-        return Err(UNKNOWN.to_owned());
+        return Err(unknown(UNKNOWN.to_owned()));
     };
     let same_volume = src.scheme() == dst.scheme()
         && dst
@@ -830,17 +939,21 @@ fn check_own_folder(
     }
     match shows_through(ctx, &*src, &*dst, source, target) {
         Ok(false) => Ok(()),
-        Ok(true) => Err("it is the target folder under another path".to_owned()),
-        Err(error) => Err(format!("{UNKNOWN}: {error}")),
+        Ok(true) => Err((
+            "it is the target folder under another path".to_owned(),
+            FailureReason::KeptAsTargetFolder,
+        )),
+        Err(error) => Err(unknown(format!("{UNKNOWN}: {error}"))),
     }
 }
 
 /// Whether the folder `target` of `dst` shows through as the folder `source` of `src`: an empty
-/// marker under a temporary name of the job (which crash recovery removes too) is made in
-/// `target` without replacing anything, looked for in `source`, and removed again with
-/// `Provider::delete_leaf`, which never removes a folder. A marker that cannot be removed is a
-/// `Stage::Write` warning. An error that leaves it unknown, from the making or from the look
-/// (any but `NotFound`), is returned.
+/// marker under a temporary name of the job is made in `target` without replacing anything,
+/// looked for in `source`, and removed again by a [`TempGuard`], also when a panic unwinds,
+/// with `Provider::delete_leaf`, which never removes a folder. A marker that cannot be removed
+/// keeps its temporary name and is a `Stage::Write` warning that names it
+/// (`TempLeftBehind`). An error that leaves it unknown, from the making or from the look (any
+/// but `NotFound`), is returned.
 fn shows_through(
     ctx: &mut Ctx<'_>,
     src: &dyn Provider,
@@ -854,54 +967,68 @@ fn shows_through(
         .ok_or_else(|| Error::Unsupported(format!("no name for a marker in {target}")))?;
     let there = source.join(name)?;
     dst.create_file(&marker)?;
-    let seen = match src.stat(&there) {
+    // Only now is there a marker of ours to remove.
+    let _marker = TempGuard::new(ctx, dst, &marker, Some(source));
+    match src.stat(&there) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
-    };
-    if let Err(error) = dst.delete_leaf(&marker) {
-        ctx.warn(
-            Failed::new(Stage::Write, error),
-            Some(source),
-            Some(&marker),
-        );
     }
-    seen
 }
 
-/// The first step of moving the folder `source`, which `entry` describes, to `to`: where it
-/// goes, and unless it stays or was renamed, its children and the folder they go into.
+/// The first step of moving the folder `source`, which `entry` describes and which is in
+/// `parent` (`None` for an item of the job), to `to`: where it goes, and unless it stays or was
+/// renamed, its children and the folder they go into.
+///
+/// It is looked at again first and its folder checked (see [`move_entry`]); one that changed
+/// fails as `Stage::Read` (`ChangedWhileMoved`) and is neither entered nor moved. A folder on
+/// another volume than the folder it is in (a mount point; both volume IDs known) is never
+/// entered either: it fails as `Stage::Read` with `Unsupported` ("is on another volume",
+/// `OtherVolume`), and so the folders above it stay. After the listing it is checked once more
+/// against what that look found, and its folder too: if it, or a folder above it, was swapped
+/// for a link while it was listed, the listing came from somewhere else, and the step fails
+/// before anything is made at the target or any child is touched.
 fn open_moved_dir(
     ctx: &mut Ctx<'_>,
     walk: &Walk<'_>,
     source: &VPath,
     entry: &Entry,
     to: To<'_>,
+    parent: Option<Parent<'_>>,
 ) -> Result<MovedDir, Failed> {
     ctx.check().at(Stage::Write)?;
     let src = ctx.provider(source).at(Stage::Read)?;
     let dst = ctx.provider(to.path).at(Stage::Write)?;
+    let before = restat(&*src, source, entry, Stage::Read, Walking::Moving)?;
+    check_parent(&*src, parent, Stage::Read, Walking::Moving)?;
+    let above = parent.and_then(|parent| parent.entry.volume_id);
+    if on_another_volume(above, before.volume_id) {
+        return Err(other_volume(Stage::Read, source));
+    }
     let from = Source {
         provider: &*src,
         path: source,
-        entry,
+        entry: &before,
     };
     let (path, made) = match settle_move(ctx, walk, from, &*dst, to)? {
         Way::Stay => return Ok(MovedDir::Stayed),
-        Way::Renamed(path) => return Ok(MovedDir::Renamed(path)),
+        Way::Renamed { path, .. } => return Ok(MovedDir::Renamed(path)),
         Way::Merge(path) => (path, false),
         Way::Copy { path, .. } => (path, true),
     };
     let children = ctx.list(&*src, source).at(Stage::Read)?;
+    restat(&*src, source, &before, Stage::Read, Walking::Moving)?;
+    check_parent(&*src, parent, Stage::Read, Walking::Moving)?;
     if made {
         make_durable_dir(ctx, &*dst, source, &path)?;
     }
-    Ok(MovedDir::Opened(Opened {
+    let opened = Opened {
         path,
         children,
         made,
         identity: None,
-    }))
+    };
+    Ok(MovedDir::Opened(Box::new((opened, before))))
 }
 
 /// Makes the folder `path` of `dst` for the move of the folder `source` to copy into, and
@@ -930,20 +1057,35 @@ fn make_durable_dir(
 }
 
 /// Removes the folder `source`, whose children a move has all taken to `target`, with
-/// `remove_dir`, and says whether it is gone. A failure is a `Stage::DeleteSource` warning:
-/// the folder stays, with whatever is still in it.
-fn remove_source_dir(ctx: &mut Ctx<'_>, source: &VPath, target: &VPath, log: &mut Log) -> bool {
-    match ctx.provider(source).and_then(|src| src.remove_dir(source)) {
+/// `remove_dir`, and says whether it is gone. Right before, it is looked at again against
+/// `before`, what `stat` found when the walk opened it, and the folder it is in, `parent`
+/// (`None` for an item of the job), is checked (see [`move_entry`]): a folder that was swapped
+/// for a link, or whose path leads elsewhere by then, is not removed, so the empty folder of
+/// the same name the path leads to stays. A failure, that one and any of the removal, is a
+/// `Stage::DeleteSource` warning: the folder stays, with whatever is still in it.
+fn remove_source_dir(
+    ctx: &mut Ctx<'_>,
+    source: &VPath,
+    before: &Entry,
+    parent: Option<Parent<'_>>,
+    target: &VPath,
+    log: &mut Log,
+) -> bool {
+    let removed = ctx
+        .provider(source)
+        .at(Stage::DeleteSource)
+        .and_then(|src| {
+            restat(&*src, source, before, Stage::DeleteSource, Walking::Moving)?;
+            check_parent(&*src, parent, Stage::DeleteSource, Walking::Moving)?;
+            src.remove_dir(source).at(Stage::DeleteSource)
+        });
+    match removed {
         Ok(()) => {
             log.removed_dirs.push(source.clone());
             true
         }
-        Err(error) => {
-            ctx.warn(
-                Failed::new(Stage::DeleteSource, error),
-                Some(source),
-                Some(target),
-            );
+        Err(failed) => {
+            ctx.warn(failed, Some(source), Some(target));
             false
         }
     }
@@ -954,8 +1096,9 @@ fn remove_source_dir(ctx: &mut Ctx<'_>, source: &VPath, target: &VPath, log: &mu
 enum Way {
     /// Nowhere: it is at its target already, or the conflict policy leaves it.
     Stay,
-    /// It is at this path, renamed there in one step with everything in it.
-    Renamed(VPath),
+    /// It is at `path`, renamed there in one step with everything in it, with `commit`:
+    /// `Replace` when it replaced a file there.
+    Renamed { path: VPath, commit: RenameMode },
     /// A folder goes into the existing folder at this path, one child at a time.
     Merge(VPath),
     /// It is copied to `path` and committed with `commit` (a folder is made there), since it
@@ -1006,9 +1149,13 @@ fn settle_move(
             },
             Same::Itself => return Ok(Way::Stay),
             Same::Spelling(renamed) => {
-                dst.rename(from.path, &renamed, RenameMode::NoReplace)
+                let commit = RenameMode::NoReplace;
+                dst.rename(from.path, &renamed, commit)
                     .map_err(|error| Failed::new(Stage::Commit, error).writing(&renamed))?;
-                return Ok(Way::Renamed(renamed));
+                return Ok(Way::Renamed {
+                    path: renamed,
+                    commit,
+                });
             }
         },
     };
@@ -1017,7 +1164,7 @@ fn settle_move(
     }
     match dst.rename(from.path, &path, commit) {
         Ok(()) if renamed_onto_itself(from) => Ok(Way::Stay),
-        Ok(()) => Ok(Way::Renamed(path)),
+        Ok(()) => Ok(Way::Renamed { path, commit }),
         Err(error) if error.kind() == ErrorKind::CrossesDevices => Ok(Way::Copy { path, commit }),
         Err(error)
             if error.kind() == ErrorKind::AlreadyExists && both_folders(from, dst, &path) =>
@@ -1145,7 +1292,8 @@ fn existing_at(dst: &dyn Provider, target: &VPath) -> Result<Option<Entry>, Fail
 /// 2. Otherwise the policy decides. [`Decision::Ask`] goes to the resolver, and its
 ///    `Overwrite` answer is refused when either side is a folder, as it would be for the
 ///    overwrite policies: a file and a folder never replace each other. A refused conflict
-///    fails the item as `Stage::Conflict` with `AlreadyExists` and touches neither side.
+///    fails the item as `Stage::Conflict` with `AlreadyExists` (`KindMismatch`, see
+///    [`kind_taken`]) and touches neither side.
 fn settle(
     ctx: &mut Ctx<'_>,
     policy: ConflictPolicy,
@@ -1188,7 +1336,7 @@ fn settle(
         Decision::Skip => Ok(Place::Skip),
         Decision::Rename => numbered(dst, target, is_dir, ctx.env.naming_os),
         // An `Ask` is answered by now; one that is not fails closed like a refusal.
-        Decision::Refuse | Decision::Ask => Err(Failed::new(Stage::Conflict, taken(target))),
+        Decision::Refuse | Decision::Ask => Err(kind_taken(target, existing.kind)),
     }
 }
 
@@ -1216,58 +1364,83 @@ fn is_same_item(from: Source<'_>, target: &VPath, existing: &Entry, fs: FsKind) 
 /// A free numbered name next to `target`, to commit a file to or make a folder at without
 /// replacing anything.
 fn numbered(dst: &dyn Provider, target: &VPath, is_dir: bool, os: Os) -> Result<Place, Failed> {
-    let path = free_name(dst, target, is_dir, os).at(Stage::Conflict)?;
+    let path = free_name(dst, target, is_dir, os)?;
     Ok(Place::At {
         path,
         commit: RenameMode::NoReplace,
     })
 }
 
-/// The error of an item whose target name is taken and may not be replaced.
-fn taken(target: &VPath) -> Error {
-    Error::io(
-        "rename",
-        target.clone(),
-        io::ErrorKind::AlreadyExists.into(),
+/// The failure of an item whose target name is taken by an item of the kind `existing` that
+/// it may not replace, nor be written into: a file and a folder never replace each other.
+/// `Stage::Conflict` with `AlreadyExists` and the reason `KindMismatch` (see [`taken`]).
+fn kind_taken(target: &VPath, existing: EntryKind) -> Failed {
+    let what = match existing {
+        EntryKind::Dir => "a folder",
+        EntryKind::File => "a file",
+        EntryKind::Symlink => "a link",
+        EntryKind::Other => "an item that is no file",
+    };
+    let why = format!("the name is taken by {what}; a file and a folder never replace each other");
+    Failed::refused(
+        Stage::Conflict,
+        taken(target, why),
+        FailureReason::KindMismatch,
     )
+}
+
+/// The `AlreadyExists` error of an item whose target name `target` is taken and is not
+/// replaced, with the words `why`. Nothing was renamed or written for it, so its op is
+/// `"place"`: the item was not put at its target.
+fn taken(target: &VPath, why: String) -> Error {
+    let error = io::Error::new(io::ErrorKind::AlreadyExists, why);
+    Error::io("place", target.clone(), error)
 }
 
 /// The first of `target`'s numbered names (`name (2)`, `name (3)`, ..., up to
 /// [`MAX_NUMBERED`]; `name 2` on macOS) that `provider` has nothing at. `is_dir` is whether
 /// the item to name is a folder, which keeps its whole name as the stem.
 ///
-/// Only `NotFound` from `stat` makes a name free; any other error is returned. A name that
-/// would be too long for the file system or the OS (a number adds up to seven units) fails
-/// with that issue ([`ErrorKind::InvalidPath`]) before the file system is asked, since every
-/// later number is at least as long. When all the names are taken, fails with `AlreadyExists`
-/// for `target`.
+/// Every failure is `Stage::Conflict`. Only `NotFound` from `stat` makes a name free; any other
+/// error is returned. A name that would be too long for the file system or the OS (a number
+/// adds up to seven units) fails with that issue ([`ErrorKind::InvalidPath`]) before the file
+/// system is asked, since every later number is at least as long. When all the names are
+/// taken, fails with `AlreadyExists` for `target` (`NoFreeName`).
 pub(crate) fn free_name(
     provider: &dyn Provider,
     target: &VPath,
     is_dir: bool,
     os: Os,
-) -> Result<VPath, Cause> {
+) -> Result<VPath, Failed> {
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
-        return Err(Error::Unsupported(format!("no name to number: {target}")).into());
+        let error = Error::Unsupported(format!("no name to number: {target}"));
+        return Err(Failed::new(Stage::Conflict, error));
     };
     let fs = FsKind::from_fs_name(provider.fs_name(&parent).as_deref());
     for n in 2..=MAX_NUMBERED {
         let numbered = numbered_name(name, n, is_dir, os);
-        let candidate = parent.join(&numbered)?;
+        let candidate = parent
+            .join(&numbered)
+            .map_err(|error| Failed::new(Stage::Conflict, error.into()))?;
         let too_long = check_name(&numbered, fs)
             .into_iter()
             .find(|issue| matches!(issue, IssueKind::NameTooLong { .. }))
             .or_else(|| check_path_len(&candidate, os));
         if let Some(issue) = too_long {
-            return Err(Cause::Issue(issue));
+            return Err(Failed::issue(Stage::Conflict, issue));
         }
         match provider.stat(&candidate) {
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(candidate),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(Failed::new(Stage::Conflict, error)),
         }
     }
-    Err(taken(target).into())
+    let why = format!("every numbered name up to {MAX_NUMBERED} is taken");
+    Err(Failed::refused(
+        Stage::Conflict,
+        taken(target, why),
+        FailureReason::NoFreeName,
+    ))
 }
 
 #[cfg(test)]
@@ -1387,9 +1560,47 @@ mod tests {
             std::fs::write(dir.path().join(format!("a ({n})")), "").unwrap();
         }
         let target = v(&dir.path().join("a"));
-        let error = free_name(&LocalProvider::new(), &target, false, Os::Other).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
-        assert!(error.to_string().contains(&target.to_string()), "{error}");
+        let failed = free_name(&LocalProvider::new(), &target, false, Os::Other).unwrap_err();
+        let error = failed.record(None, None);
+        assert_eq!(
+            (error.stage, error.kind, error.reason),
+            (
+                Stage::Conflict,
+                ErrorKind::AlreadyExists,
+                Some(FailureReason::NoFreeName)
+            )
+        );
+        assert!(
+            error.message.contains(&target.to_string()),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.starts_with("place failed for "),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A numbered name that cannot be examined may well be taken: it is never given out as
+    /// free, and the search stops there with that error.
+    #[test]
+    fn free_name_never_takes_a_name_it_cannot_examine_for_free() {
+        use crate::testkit::{Fault, FaultyProvider};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        let target = v(&dir.path().join("a.txt"));
+        let p = FaultyProvider::local(vec![Fault::FailStat {
+            name: "a (2).txt".into(),
+        }]);
+        let error = free_name(&*p, &target, false, Os::Windows).unwrap_err();
+        let error = error.record(None, None);
+        assert_eq!(
+            (error.stage, error.kind, error.reason),
+            (Stage::Conflict, ErrorKind::PermissionDenied, None)
+        );
+        assert!(error.message.contains("a (2).txt"), "{}", error.message);
     }
 
     #[test]
@@ -1399,10 +1610,12 @@ mod tests {
         let local = LocalProvider::new();
         // ` (2)` takes the name to 257 units and ` 2` to 255.
         let error = free_name(&local, &target, false, Os::Windows).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidPath);
-        // The issue's own text, with no prefix.
+        let error = error.record(None, None);
+        assert_eq!(error.kind, ErrorKind::InvalidPath);
+        // The issue's own text, with no prefix, and the issue as the reason.
         let issue = IssueKind::NameTooLong { len: 257, max: 255 };
-        assert_eq!(error.to_string(), issue.to_string());
+        assert_eq!(error.message, issue.to_string());
+        assert_eq!(error.reason, Some(FailureReason::Issue(issue)));
         assert!(free_name(&local, &target, false, Os::MacOs).is_ok());
     }
 
@@ -1447,5 +1660,137 @@ mod tests {
             (report.failures[0].stage, report.failures[0].kind),
             (Stage::DeleteSource, ErrorKind::IsADirectory)
         );
+    }
+
+    /// Moves `root/dir` into `root/dst` across volumes while `root/dir` is swapped for a link to
+    /// `root/outside` at `when`. The swapping provider is armed once the plan is made, and lists
+    /// entries without identities, as the local provider does on Windows, if `no_ids`.
+    #[cfg(unix)]
+    fn move_while_swapping(
+        root: &Path,
+        when: crate::exec::swapping::When,
+        no_ids: bool,
+    ) -> crate::report::JobReport {
+        use crate::exec::swapping::Swapping;
+        use crate::exec::{ExecEnv, ExecEvent, execute};
+        use crate::id::JobId;
+        use crate::resolver::NonInteractive;
+        use crate::spec::{JobSpec, TransferOptions};
+        use crate::testkit::{Fault, FaultyProvider};
+
+        let dir = root.join("dir");
+        let faulty = FaultyProvider::local(vec![Fault::CrossDevice]);
+        let mut swapping = Swapping::new(faulty, &dir, &root.join("outside"), when);
+        if no_ids {
+            swapping = swapping.without_listed_ids();
+        }
+        let swapping = std::sync::Arc::new(swapping);
+        let vfs = swapping.vfs();
+        let on = |event: ExecEvent| {
+            if matches!(event, ExecEvent::Planned { .. }) {
+                swapping.arm();
+            }
+        };
+        let (sources, options) = ([v(&dir)], TransferOptions::default());
+        let dst = v(&root.join("dst"));
+        let spec = TransferSpec::into_dir(TransferMode::Move, &sources, &dst, options).unwrap();
+        let env = ExecEnv::new(&vfs, &NonInteractive).on_event(&on);
+        let report = execute(JobId(1), &JobSpec::Transfer(spec), &env);
+        assert!(dir.is_symlink(), "the swap did not happen");
+        report
+    }
+
+    /// The one failure of `report` is at `stage`, for `source`, which changed while it was
+    /// moved.
+    #[cfg(unix)]
+    fn changed_while_moved(report: &crate::report::JobReport, stage: Stage, source: &Path) {
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        let failure = &report.failures[0];
+        assert_eq!(
+            (failure.stage, failure.kind, failure.source.clone()),
+            (stage, ErrorKind::Unsupported, Some(v(source)))
+        );
+        assert!(
+            failure.message.contains("changed while it was moved"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.reason, Some(FailureReason::ChangedWhileMoved));
+    }
+
+    /// The folder of a moved child is swapped for a link right after the child's copy was
+    /// committed, just before its source is looked at and deleted: the path now leads to the
+    /// file of the same name in `outside`, which exists nowhere else. It is never deleted, also
+    /// when listings carry no identities (Windows).
+    #[cfg(unix)]
+    #[test]
+    fn a_swap_before_a_moved_childs_delete_deletes_nothing_it_leads_to() {
+        use crate::exec::swapping::{Swapping, When};
+        use crate::testkit::{tree, write_tree};
+
+        for no_ids in [false, true] {
+            let t = tempfile::tempdir().unwrap();
+            write_tree(
+                t.path(),
+                &[
+                    ("dir/x", "X"),
+                    ("outside/x", "only here"),
+                    ("outside/keep.txt", "K"),
+                    ("dst/", ""),
+                ],
+            );
+            let outside = t.path().join("outside");
+            let before = tree(&outside);
+            let when = When::SyncDir {
+                of: t.path().join("dst").join("dir"),
+            };
+            let report = move_while_swapping(t.path(), when, no_ids);
+            assert_eq!(tree(&outside), before, "no_ids: {no_ids}");
+            changed_while_moved(
+                &report,
+                Stage::DeleteSource,
+                &t.path().join("dir").join("x"),
+            );
+            // The copy was made before the swap, and its source is kept where it went.
+            let moved = Swapping::moved(&t.path().join("dir"));
+            let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+            assert_eq!(read(&moved.join("x")), "X");
+            assert_eq!(read(&t.path().join("dst").join("dir").join("x")), "X");
+        }
+    }
+
+    /// The moved folder is swapped for a link as the run lists it, so the listing is that of
+    /// `outside`: nothing of it is moved, also when listings carry no identities (Windows).
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_link_as_it_is_listed_moves_nothing() {
+        use std::collections::BTreeMap;
+
+        use crate::exec::swapping::When;
+        use crate::testkit::{tree, write_tree};
+
+        for no_ids in [false, true] {
+            let t = tempfile::tempdir().unwrap();
+            write_tree(
+                t.path(),
+                &[
+                    ("dir/x", "X"),
+                    ("outside/keep.txt", "K"),
+                    ("outside/sub/deep.txt", "D"),
+                    ("dst/", ""),
+                ],
+            );
+            let outside = t.path().join("outside");
+            let before = tree(&outside);
+            // The plan expects one rename, so the run's listing is the first.
+            let report = move_while_swapping(t.path(), When::Listing(0), no_ids);
+            assert_eq!(tree(&outside), before, "no_ids: {no_ids}");
+            assert_eq!(
+                tree(&t.path().join("dst")),
+                BTreeMap::new(),
+                "no_ids: {no_ids}"
+            );
+            changed_while_moved(&report, Stage::Read, &t.path().join("dir"));
+        }
     }
 }

@@ -85,13 +85,16 @@ fn newer_skips_when_a_time_is_missing_or_cannot_be_compared() {
         Decision::Skip
     );
 
-    // `existing + MTIME_TOLERANCE` overflows `SystemTime`: no verdict, so no overwrite.
+    // `existing + MTIME_TOLERANCE` overflows `SystemTime`: no verdict, so no overwrite, though
+    // the incoming file is the later of the two.
     let last = latest_time();
-    assert_eq!(last.checked_add(MTIME_TOLERANCE), None);
-    let mut existing = file(5, 0);
-    existing.modified = Some(last);
+    let before_last = last.checked_sub(Duration::from_secs(1)).unwrap();
+    assert_eq!(before_last.checked_add(MTIME_TOLERANCE), None);
+    let (mut incoming, mut existing) = (file(5, 0), file(5, 0));
+    incoming.modified = Some(last);
+    existing.modified = Some(before_last);
     assert_eq!(
-        decide(ConflictPolicy::OverwriteIfNewer, &existing, &existing),
+        decide(ConflictPolicy::OverwriteIfNewer, &incoming, &existing),
         Decision::Skip
     );
 }

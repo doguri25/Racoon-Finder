@@ -11,14 +11,16 @@
 //!
 //! The report's undo record reverses what the undo did, so that a redo runs it.
 
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
-use rf_vfs::{DeleteMode, Deleted, Provider};
+use rf_vfs::{Deleted, Provider};
 
+use super::delete::{deleted_not_trashed, trash_one};
 use super::{At, Attempt, Ctx, Failed, MAX_DEPTH, Stopped, simple, transfer};
-use crate::report::{Stage, Totals};
+use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{
     ConflictPolicy, CreateKind, ErrorPolicy, SymlinkMode, TransferItem, TransferMode,
     TransferOptions, TransferSpec,
@@ -55,7 +57,12 @@ pub(crate) fn run_undo(ctx: &mut Ctx<'_>, record: &UndoRecord) {
             moves,
             created_dirs,
             removed_dirs,
-        } => undo_move(ctx, moves, created_dirs, removed_dirs),
+            overwritten,
+            copied_dirs,
+        } => {
+            warn_overwritten(ctx, *overwritten, "move");
+            undo_move(ctx, moves, created_dirs, removed_dirs, copied_dirs);
+        }
         UndoRecord::Renamed { from, to } => simple::run_rename(ctx, to, from),
         UndoRecord::Created { path, kind } => remove_created(ctx, path, *kind),
         UndoRecord::Removed { path, kind } => make_again(ctx, path, *kind),
@@ -80,10 +87,23 @@ fn is_dir_at(ctx: &Ctx<'_>, path: Option<&VPath>) -> bool {
 }
 
 /// The failure of an item that an undo leaves where it is, because it is not as the job left
-/// it: `Stage::Undo` with `Unsupported` and the text "{path} {why}; left in place".
-fn left(path: &VPath, why: &str) -> Failed {
+/// it: `Stage::Undo` with `Unsupported`, the text "{path} {why}; left in place" and `reason`.
+fn left(path: &VPath, why: &str, reason: FailureReason) -> Failed {
     let error = Error::Unsupported(format!("{path} {why}; left in place"));
-    Failed::new(Stage::Undo, error)
+    Failed::refused(Stage::Undo, error, reason)
+}
+
+/// One `Stage::Undo` warning (`Overwritten`) for each of the `overwritten` files that the
+/// `job` (a "copy" or a "move") replaced: their old content is gone, and each stays as the job
+/// left it.
+fn warn_overwritten(ctx: &mut Ctx<'_>, overwritten: u64, job: &str) {
+    for _ in 0..overwritten {
+        let error = Error::Unsupported(format!(
+            "a file was overwritten by the {job}; its old content cannot be brought back"
+        ));
+        let failed = Failed::refused(Stage::Undo, error, FailureReason::Overwritten);
+        ctx.warn(failed, None, None);
+    }
 }
 
 /// Undoes a copy. Each file it replaced (`overwritten`) is a `Stage::Undo` warning: its old
@@ -101,12 +121,7 @@ fn undo_copy(ctx: &mut Ctx<'_>, created: &[CreatedItem], overwritten: u64, at: O
         count(&mut totals, item.is_dir);
     }
     ctx.planned(totals);
-    for _ in 0..overwritten {
-        let error = Error::Unsupported(
-            "a file was overwritten by the copy; its old content cannot be brought back".to_owned(),
-        );
-        ctx.warn(Failed::new(Stage::Undo, error), None, None);
-    }
+    warn_overwritten(ctx, overwritten, "copy");
     let mut trashed = Vec::new();
     for item in created {
         let check = |ctx: &Ctx<'_>, provider: &dyn Provider, now: &Entry| {
@@ -123,7 +138,7 @@ fn undo_copy(ctx: &mut Ctx<'_>, created: &[CreatedItem], overwritten: u64, at: O
 
 /// Checks that `item`, which a copy made and `stat` now finds as `now`, is still as the copy
 /// left it. Anything else, or anything that cannot be told, fails as [`left`] with "changed
-/// after it was copied".
+/// after it was copied" (`ChangedSinceCopy`).
 ///
 /// Its identity must be the recorded one when both are known, and its modification time must
 /// be known and the recorded one (a time before 1970 is not recorded, so such an item always
@@ -162,7 +177,8 @@ fn check_copied(
     if unchanged {
         Ok(())
     } else {
-        Err(left(&item.path, "changed after it was copied"))
+        let reason = FailureReason::ChangedSinceCopy;
+        Err(left(&item.path, "changed after it was copied", reason))
     }
 }
 
@@ -215,9 +231,10 @@ fn untouched_since(
 /// Sends the item at `path` to the trash, as one step under [`ERRORS`], once `check` has passed
 /// for what `stat` finds there; it goes to `trashed` with where the trash holds it. An item
 /// that is gone is skipped; a `stat` error and a refused `check` fail as `Stage::Undo`, and the
-/// trash's error (`Unsupported` where there is none) as `Stage::Delete`, and the item stays: a
-/// trash never turns into a permanent delete. A provider that deleted it for good instead is a
-/// `Stage::Delete` warning. `Break` once the job is cancelled.
+/// trash's error (`Unsupported`, `TrashRefused`, where there is none) as `Stage::Delete`, and
+/// the item stays: a trash never turns into a permanent delete. A provider that deleted it for
+/// good instead is a `Stage::Delete` warning (`DeletedNotTrashed`). `Break` once the job is
+/// cancelled.
 fn trash_item<'e>(
     ctx: &mut Ctx<'e>,
     path: &VPath,
@@ -234,7 +251,7 @@ fn trash_item<'e>(
         };
         check(ctx, &*provider, &now)?;
         ctx.working_on(path);
-        let deleted = provider.delete(path, DeleteMode::Trash).at(Stage::Delete)?;
+        let deleted = trash_one(&*provider, path)?;
         Ok(Some((deleted, now.kind == EntryKind::Dir)))
     });
     match sent {
@@ -247,8 +264,7 @@ fn trash_item<'e>(
         }
         // A provider that breaks its promise: the item is gone, but no redo brings it back.
         Attempt::Done(Some((Deleted::Permanently, is_dir))) => {
-            let error = Error::Unsupported(format!("{path} was deleted for good, not trashed"));
-            ctx.warn(Failed::new(Stage::Delete, error), Some(path), None);
+            ctx.warn(deleted_not_trashed(path), Some(path), None);
             ctx.item_done(!is_dir, is_dir);
         }
         Attempt::Done(None) => ctx.report.skipped += 1,
@@ -267,20 +283,27 @@ fn trash_item<'e>(
 ///    under [`MOVE_BACK`], with every rule of a move. An item whose old place is taken stays
 ///    where it is (skipped), never replacing what is there now, and a source is deleted only
 ///    after its copy is committed.
-/// 3. Unless the job was cancelled or aborted, each folder the move made at the target
-///    (`created_dirs`, from the last: children first) is removed with `remove_dir`, which
-///    removes only an empty folder. One that is gone already is passed over; any other failure,
-///    as for a folder with something in it, is a `Stage::Undo` warning, and the folder stays.
+/// 3. Unless the job was cancelled or aborted, each source folder step 1 made again that the
+///    move had made a folder at the target for (`copied_dirs`, a folder moved across volumes)
+///    gets that folder's extras, times and attributes, as they were before step 2 moved its
+///    items out of it (see `transfer::finish_dir`; a failure is a `Stage::Metadata` warning).
+///    Then each folder the move made at the target (`created_dirs`, from the last: children
+///    first) is removed with `remove_dir`, which removes only an empty folder. One that is gone
+///    already is passed over; any other failure, as for a folder with something in it, is a
+///    `Stage::Undo` warning, and the folder stays.
 ///
 /// The undo's record moves the items forth again: what step 2 moved, the folders steps 1 and 2
-/// made, and those steps 2 and 3 removed. A move back that the plan turned into a copy (DND-06:
-/// the folder the items are in now cannot be written to) leaves them in both places; its
-/// copies are in no record.
+/// made, those steps 2 and 3 removed, and for each folder step 1 made again the folder at the
+/// target it took its metadata from, so that a redo gives it back. A move back that the plan
+/// turned into a copy (DND-06: the folder the items are in now cannot be written to) leaves
+/// them in both places; its copies are in no record. Each file the move replaced is a
+/// `Stage::Undo` warning, given before this runs.
 fn undo_move(
     ctx: &mut Ctx<'_>,
     moves: &[MovedItem],
     created_dirs: &[VPath],
     removed_dirs: &[VPath],
+    copied_dirs: &[MovedItem],
 ) {
     let mut made = Vec::new();
     for dir in removed_dirs.iter().rev() {
@@ -288,11 +311,18 @@ fn undo_move(
             Attempt::Done(true) => made.push(dir.clone()),
             Attempt::Done(false) | Attempt::Skipped => {}
             Attempt::Stop => {
-                ctx.report.undo = moved_record(Vec::new(), made, Vec::new());
+                ctx.report.undo = moved_record(Vec::new(), made, Vec::new(), Vec::new());
                 return;
             }
         }
     }
+    // Moving the items out of a folder changes its times, so they are taken now.
+    let made_again: HashSet<&VPath> = made.iter().collect();
+    let remade: Vec<(&MovedItem, Option<Entry>)> = copied_dirs
+        .iter()
+        .filter(|pair| made_again.contains(&pair.from))
+        .map(|pair| (pair, folder_as_it_is(ctx, &pair.to, &pair.from)))
+        .collect();
     let back = TransferSpec {
         mode: TransferMode::Move,
         items: moves
@@ -306,19 +336,49 @@ fn undo_move(
         options: MOVE_BACK,
     };
     transfer::run_transfer(ctx, &back);
-    let (moved, mut made_back, mut removed) = match ctx.report.undo.take() {
+    let (moved, mut made_back, mut removed, copied_back) = match ctx.report.undo.take() {
         Some(UndoRecord::Moved {
             moves,
             created_dirs,
             removed_dirs,
-        }) => (moves, created_dirs, removed_dirs),
-        _ => (Vec::new(), Vec::new(), Vec::new()),
+            copied_dirs,
+            ..
+        }) => (moves, created_dirs, removed_dirs, copied_dirs),
+        _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
     if ctx.stopped == Stopped::No {
+        // Children first, as a copy finishes its folders.
+        for (pair, entry) in remade.iter().rev() {
+            if let Some(entry) = entry {
+                transfer::finish_dir(ctx, &pair.to, entry, &pair.from);
+            }
+        }
         removed.extend(remove_made_dirs(ctx, created_dirs));
     }
     made.append(&mut made_back);
-    ctx.report.undo = moved_record(moved, made, removed);
+    let mut copied: Vec<MovedItem> = remade
+        .iter()
+        .map(|(pair, _)| MovedItem {
+            from: pair.to.clone(),
+            to: pair.from.clone(),
+        })
+        .collect();
+    copied.extend(copied_back);
+    ctx.report.undo = moved_record(moved, made, removed, copied);
+}
+
+/// What `stat` finds for the folder `made`, which a move made at the target for the source
+/// folder `source`; `None` when it cannot be told. One that is gone gives nothing to say; any
+/// other error is a `Stage::Metadata` warning.
+fn folder_as_it_is(ctx: &mut Ctx<'_>, made: &VPath, source: &VPath) -> Option<Entry> {
+    match ctx.provider(made).and_then(|provider| provider.stat(made)) {
+        Ok(entry) => Some(entry),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            ctx.warn_metadata(error, Some(made), Some(source));
+            None
+        }
+    }
 }
 
 /// Makes the folder `dir` again for [`undo_move`]: `true` when it was made, `false` when
@@ -354,17 +414,21 @@ fn remove_made_dirs(ctx: &mut Ctx<'_>, dirs: &[VPath]) -> Vec<VPath> {
     removed
 }
 
-/// The record of a move that did this, or `None` when it did nothing.
+/// The record of a move that did this, or `None` when it did nothing. An undo of a move
+/// replaces nothing (`MOVE_BACK` skips a taken name), so its record has nothing overwritten.
 fn moved_record(
     moves: Vec<MovedItem>,
     created_dirs: Vec<VPath>,
     removed_dirs: Vec<VPath>,
+    copied_dirs: Vec<MovedItem>,
 ) -> Option<UndoRecord> {
     let changed = !(moves.is_empty() && created_dirs.is_empty() && removed_dirs.is_empty());
     changed.then_some(UndoRecord::Moved {
         moves,
         created_dirs,
         removed_dirs,
+        overwritten: 0,
+        copied_dirs,
     })
 }
 
@@ -372,9 +436,9 @@ fn moved_record(
 /// is still that: a folder with `remove_dir`, which removes only an empty one, and a file of no
 /// bytes with `delete_leaf`, which never removes a folder. An item that is gone is skipped. A
 /// folder with something in it fails as `Stage::Undo` with `DirectoryNotEmpty`, a file with
-/// something in it as [`left`] ("is not empty"), and an item of another kind (a link, say) as
-/// [`left`] ("changed after it was created"); each stays. The undo's record makes it again
-/// (`UndoRecord::Removed`).
+/// something in it as [`left`] ("is not empty", `NotEmpty`), and an item of another kind (a
+/// link, say) as [`left`] ("changed after it was created", `ChangedSinceCreated`); each stays.
+/// The undo's record makes it again (`UndoRecord::Removed`).
 fn remove_created(ctx: &mut Ctx<'_>, path: &VPath, kind: CreateKind) {
     let is_dir = kind == CreateKind::Dir;
     let mut totals = Totals::default();
@@ -394,8 +458,13 @@ fn remove_created(ctx: &mut Ctx<'_>, path: &VPath, kind: CreateKind) {
             (CreateKind::File, EntryKind::File) if now.size == 0 => {
                 provider.delete_leaf(path).at(Stage::Undo)?;
             }
-            (CreateKind::File, EntryKind::File) => return Err(left(path, "is not empty")),
-            _ => return Err(left(path, "changed after it was created")),
+            (CreateKind::File, EntryKind::File) => {
+                return Err(left(path, "is not empty", FailureReason::NotEmpty));
+            }
+            _ => {
+                let reason = FailureReason::ChangedSinceCreated;
+                return Err(left(path, "changed after it was created", reason));
+            }
         }
         Ok(true)
     });
@@ -443,7 +512,8 @@ fn make_again(ctx: &mut Ctx<'_>, path: &VPath, kind: CreateKind) {
 /// Puts each of `items` back from the trash, at its own original place, with
 /// `Provider::restore_trashed`, each as one step under [`ERRORS`]. Every failure is
 /// `Stage::Undo` and leaves the item where it is: an item whose trash location is not known
-/// fails with `Unsupported`, and the restore's error is passed on as it is, its path being the
+/// fails with `Unsupported` (`TrashLocationUnknown`), and the restore's error is passed on as
+/// it is, its path being the
 /// trash location: `AlreadyExists` when the original place is taken (nothing is replaced),
 /// `NotFound` when the trash no longer holds the item or the original folder is gone, and
 /// `CrossesDevices` when the trash is on another volume. The plan counts each item by what is
@@ -466,7 +536,8 @@ fn restore(ctx: &mut Ctx<'_>, items: &[TrashedItem]) {
             ctx.check().at(Stage::Undo)?;
             let Some(location) = &item.location else {
                 let error = Error::Unsupported(format!("trash location of {original} is unknown"));
-                return Err(Failed::new(Stage::Undo, error));
+                let reason = FailureReason::TrashLocationUnknown;
+                return Err(Failed::refused(Stage::Undo, error, reason));
             };
             let provider = ctx.provider(original).at(Stage::Undo)?;
             ctx.working_on(original);

@@ -19,7 +19,10 @@ pub struct Conflict {
     pub source: VPath,
     /// The path both items want.
     pub target: VPath,
+    /// The item that would go to `target`, as the job found it: a link itself, or in Follow
+    /// mode what it leads to under the link's name.
     pub incoming: Entry,
+    /// What is at `target` now, as `stat` sees it (a link itself, never what it leads to).
     pub existing: Entry,
 }
 
@@ -29,6 +32,8 @@ pub enum ConflictAction {
     /// Replace the existing item. The executor still refuses this when either side is a
     /// folder, so a file and a folder never replace each other.
     Overwrite,
+    /// Leave the existing item as it is and do not transfer the incoming one; the job counts it
+    /// as skipped, and a move keeps its source where it is.
     Skip,
     /// Keep both: the incoming item gets a numbered name.
     Rename,

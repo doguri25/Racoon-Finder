@@ -555,6 +555,9 @@ mod unix {
                 stage: Stage::Preflight,
                 kind: ErrorKind::InvalidPath,
                 message: IssueKind::InvalidCharacter('?').to_string(),
+                reason: Some(rf_jobs::FailureReason::Issue(IssueKind::InvalidCharacter(
+                    '?'
+                ))),
             }]
         );
         assert_eq!(tree(&f.dst), BTreeMap::new());
@@ -755,6 +758,10 @@ fn copying_a_folder_into_itself_ignores_case_on_case_insensitive_targets() {
         rep.failures
     );
     assert_eq!(
+        rep.failures[0].reason,
+        Some(rf_jobs::FailureReason::IntoItself)
+    );
+    assert_eq!(
         tree(&f.src.join("work")).into_keys().collect::<Vec<_>>(),
         ["a", "a/sub"]
     );
@@ -785,11 +792,13 @@ fn retrying_a_folder_counts_its_children_once() {
     use rf_jobs::testkit::ResolverCall;
     use rf_jobs::{ErrorAction, ErrorAnswer, ErrorPolicy, Totals};
     let f = fx();
-    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/sub/b.txt", "B")]);
-    // The first try of `dir` fails, and so does the first try of `sub`.
+    write_tree(&f.src, &[("dir/x/a.txt", "A"), ("dir/y/b.txt", "B")]);
+    // The first try of `dir` fails, and so does the first try of the second of its folders,
+    // whichever of `x` and `y` the listing gives second: by then the first one is copied with
+    // its file, and the retry must not count that again.
     let p = FaultyProvider::local(vec![
         Fault::FailCreateDir { call: 0 },
-        Fault::FailCreateDir { call: 2 },
+        Fault::FailCreateDir { call: 3 },
     ]);
     let retry = ErrorAnswer {
         action: ErrorAction::Retry,
@@ -812,7 +821,7 @@ fn retrying_a_folder_counts_its_children_once() {
     assert_eq!(r.calls(), [write_failed.clone(), write_failed]);
     let all = Totals {
         files: 2,
-        dirs: 2,
+        dirs: 3,
         bytes: 2,
     };
     assert_eq!((rep.planned, rep.done), (all, all));

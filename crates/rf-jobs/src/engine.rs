@@ -343,6 +343,7 @@ impl JobEngine {
                 stage: Stage::Internal,
                 kind: ErrorKind::Other,
                 message: format!("the worker thread could not be started: {error}"),
+                reason: None,
             });
             let report = Arc::new(report);
             state.broadcast(&JobEvent::Finished { id, report });

@@ -116,6 +116,8 @@ fn undo_records_roundtrip_and_count_items() {
         }],
         created_dirs: vec![p("d")],
         removed_dirs: vec![],
+        overwritten: 0,
+        copied_dirs: vec![],
     };
     assert_eq!(rec.item_count(), 1);
     let json = serde_json::to_string(&rec).unwrap();

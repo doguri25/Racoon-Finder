@@ -327,6 +327,15 @@ pub enum Fault {
     /// `stat`, `stat_target` and `list` give entries without a volume or file ID, as a file
     /// system that has none (FAT) or reports zeros.
     NoIdentity,
+    /// `list` gives entries without a volume or file ID, as the local provider lists them on
+    /// Windows, while `stat` and `stat_target` still give them: a Windows listing on any OS.
+    NoListedIdentity,
+    /// `delete` with `DeleteMode::Trash` removes the item for good instead and says so
+    /// (`Deleted::Permanently`), as a provider that breaks its promise would.
+    TrashDeletesForGood,
+    /// `set_metadata` fails with `Unsupported` and `copy_extras` copies nothing, as for a
+    /// provider that keeps no metadata (the default implementations of both).
+    NoMetadata,
     /// Every `sync_dir` fails with `injected sync_dir failure`.
     FailSyncDir,
     /// Every `remove_dir` fails with `injected remove_dir failure` and removes nothing.
@@ -570,10 +579,17 @@ impl Provider for FaultyProvider {
         cancel: &CancelToken,
         sink: &mut dyn FnMut(Vec<Entry>),
     ) -> Result<()> {
+        let unlisted = self.faults.contains(&Fault::NoListedIdentity);
         self.inner.list(dir, cancel, &mut |batch: Vec<Entry>| {
-            let batch = batch.into_iter().map(|entry| match dir.join(&entry.name) {
-                Ok(path) => self.identity_of(&path, entry),
-                Err(_) => entry,
+            let batch = batch.into_iter().map(|entry| {
+                let mut entry = match dir.join(&entry.name) {
+                    Ok(path) => self.identity_of(&path, entry),
+                    Err(_) => entry,
+                };
+                if unlisted {
+                    (entry.volume_id, entry.file_id) = (None, None);
+                }
+                entry
             });
             sink(batch.collect());
         })
@@ -629,6 +645,9 @@ impl Provider for FaultyProvider {
         self.refuse_delete(path)?;
         if mode == DeleteMode::Permanent {
             self.make_late_file(path)?;
+        }
+        if mode == DeleteMode::Trash && self.faults.contains(&Fault::TrashDeletesForGood) {
+            return self.inner.delete(path, DeleteMode::Permanent);
         }
         self.inner.delete(path, mode)
     }
@@ -713,10 +732,17 @@ impl Provider for FaultyProvider {
     }
 
     fn set_metadata(&self, path: &VPath, patch: &MetadataPatch) -> Result<()> {
+        if self.faults.contains(&Fault::NoMetadata) {
+            let what = format!("set_metadata is not supported for {path}");
+            return Err(Error::Unsupported(what));
+        }
         self.inner.set_metadata(path, patch)
     }
 
     fn copy_extras(&self, from: &VPath, to: &VPath) -> Result<()> {
+        if self.faults.contains(&Fault::NoMetadata) {
+            return Ok(());
+        }
         self.inner.copy_extras(from, to)
     }
 
@@ -780,8 +806,15 @@ impl Seek for FaultyReader {
 }
 
 impl ReadStream for FaultyReader {
-    /// The injected ranges come with the length the file has now, which the inner stream
-    /// tells; it is put back where it was. Without a [`Fault::DataRanges`] the call is passed on.
+    /// The injected ranges come with the length the file has now, which the inner stream tells
+    /// by a seek to its end; then it is put back where it was. Without a [`Fault::DataRanges`]
+    /// the call is passed on.
+    ///
+    /// It keeps the promise of `ReadStream::data_ranges` in every case: an error comes only
+    /// before the stream has moved (a failed seek does not move it). Once it has moved, the
+    /// ranges are given even when the seek back fails, since after `Ok(Some(_))` the position
+    /// is unspecified and a reader seeks before it reads; the stream is never left moved behind
+    /// an error that says it was not.
     fn data_ranges(&mut self) -> Result<Option<DataRanges>> {
         let Some(ranges) = &self.ranges else {
             return self.inner.data_ranges();
@@ -789,7 +822,8 @@ impl ReadStream for FaultyReader {
         let fail = |e| Error::io("data_ranges", self.path.clone(), e);
         let at = self.inner.stream_position().map_err(fail)?;
         let len = self.inner.seek(SeekFrom::End(0)).map_err(fail)?;
-        self.inner.seek(SeekFrom::Start(at)).map_err(fail)?;
+        // A reader seeks after `Ok(Some(_))` anyway (see above).
+        let _ = self.inner.seek(SeekFrom::Start(at));
         Ok(Some(DataRanges {
             len,
             ranges: ranges.clone(),
@@ -1310,5 +1344,89 @@ mod tests {
         })
         .unwrap();
         assert_eq!(listed, [None, None]);
+
+        // A Windows listing: none in the listing, but `stat` still tells.
+        let p = FaultyProvider::local(vec![Fault::NoListedIdentity]);
+        let mut listed = Vec::new();
+        p.list(&local(dir.path()), &CancelToken::new(), &mut |batch| {
+            listed.extend(batch.into_iter().map(|e| e.identity()));
+        })
+        .unwrap();
+        assert_eq!(listed, [None, None]);
+        let real = LocalProvider::new();
+        assert_eq!(
+            p.stat(&a).unwrap().identity(),
+            real.stat(&a).unwrap().identity()
+        );
+        assert_eq!(
+            p.stat_target(&b).unwrap().identity(),
+            real.stat_target(&b).unwrap().identity()
+        );
+    }
+
+    #[test]
+    fn a_trash_that_deletes_for_good_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "a").unwrap();
+        let p = FaultyProvider::local(vec![Fault::TrashDeletesForGood]);
+        let a = local(&dir.path().join("a"));
+        assert_eq!(
+            p.delete(&a, DeleteMode::Trash).unwrap(),
+            Deleted::Permanently
+        );
+        assert!(!dir.path().join("a").exists());
+    }
+
+    /// A stream that can seek to its end but fails every seek back to a position from its
+    /// start once it has moved.
+    #[derive(Debug)]
+    struct OneWay {
+        inner: io::Cursor<Vec<u8>>,
+        moved: bool,
+    }
+
+    impl Read for OneWay {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for OneWay {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            match pos {
+                SeekFrom::Start(_) if self.moved => Err(io::Error::other("no way back")),
+                SeekFrom::End(_) => {
+                    self.moved = true;
+                    self.inner.seek(pos)
+                }
+                _ => self.inner.seek(pos),
+            }
+        }
+    }
+
+    impl ReadStream for OneWay {}
+
+    /// Injected ranges never come with an error once the stream has moved: a failed seek back
+    /// gives the ranges, after which a reader seeks anyway.
+    #[test]
+    fn injected_ranges_are_given_when_the_stream_cannot_get_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = FaultyReader {
+            inner: Box::new(OneWay {
+                inner: io::Cursor::new(b"12345".to_vec()),
+                moved: false,
+            }),
+            path: local(dir.path()),
+            ranges: Some(vec![1..2, 3..4]),
+            fail_seek: false,
+        };
+        let found = reader.data_ranges().unwrap();
+        assert_eq!(
+            found,
+            Some(DataRanges {
+                len: 5,
+                ranges: vec![1..2, 3..4],
+            })
+        );
     }
 }

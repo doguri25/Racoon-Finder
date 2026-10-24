@@ -12,8 +12,9 @@ use rf_core::{ErrorKind, Os};
 use rf_jobs::testkit::{ResolverCall, ScriptedResolver, temp_files, tree, write_tree};
 use rf_jobs::{
     Conflict, ConflictAction, ConflictAnswer, ConflictPolicy, ErrorAction, ErrorAnswer,
-    ErrorPolicy, ExecEnv, Issue, ItemFailure, JobId, JobReport, JobSpec, NonInteractive, Outcome,
-    PreflightAnswer, Resolver, Stage, TransferMode, TransferOptions, execute,
+    ErrorPolicy, ExecEnv, ExecEvent, FailureReason, Issue, ItemFailure, JobId, JobReport, JobSpec,
+    NonInteractive, Outcome, PreflightAnswer, Resolver, Stage, TransferMode, TransferOptions,
+    execute,
 };
 use rf_vfs::Vfs;
 
@@ -183,6 +184,11 @@ fn a_file_never_replaces_a_folder() {
             .message
             .contains(&v(f.dst.join("x")).to_string())
     );
+    // Nothing was renamed or written, and the message says why: the name is taken.
+    let message = &rep.failures[0].message;
+    assert!(message.starts_with("place failed for "), "{message}");
+    assert!(message.contains("taken by a folder"), "{message}");
+    assert_eq!(rep.failures[0].reason, Some(FailureReason::KindMismatch));
     assert_eq!(read(&f.dst.join("x").join("inner.txt")), "keep");
     assert_eq!(temp_files(&f.dst), Vec::<String>::new());
 }
@@ -509,7 +515,8 @@ fn a_target_that_cannot_be_examined_is_not_taken_for_missing() {
 }
 
 /// Two names for one file are one item: the copy gets a new name and nothing is replaced.
-#[cfg(unix)]
+/// NTFS has hard links too, and there the listing has no identities, so the source is
+/// `stat`ed for its own.
 #[test]
 fn a_hard_link_to_the_source_counts_as_the_source() {
     let f = fx();
@@ -554,4 +561,41 @@ fn a_failure_names_the_numbered_path_it_was_writing() {
     assert_eq!(rep.failures[0].source, Some(v(f.src.join("a.txt"))));
     assert_eq!(read(&f.dst.join("a.txt")), "old");
     assert_eq!(temp_files(&f.dst), Vec::<String>::new());
+}
+
+/// A conflict question is asked between `Waiting(true)` and `Waiting(false)`, once the plan is
+/// announced, so the UI shows the job as waiting for exactly as long as the question is open.
+#[test]
+fn a_conflict_question_is_framed_by_waiting() {
+    use std::sync::Mutex;
+
+    let f = fx();
+    both(&f, "a.txt", "new", "old");
+    let r = ScriptedResolver::new().on_conflict(ConflictAnswer::once(ConflictAction::Skip));
+    let events = Mutex::new(Vec::new());
+    // No exhaustive match: more kinds of event may come.
+    let on = |event: ExecEvent| {
+        let seen = if matches!(event, ExecEvent::Planned { .. }) {
+            "planned"
+        } else if let ExecEvent::Waiting(waiting) = event {
+            if waiting { "waiting" } else { "answered" }
+        } else {
+            return;
+        };
+        events.lock().unwrap().push(seen);
+    };
+    let vfs = Vfs::with_local();
+    let job = copy(&[f.src.join("a.txt")], &f.dst);
+    let rep = execute(
+        JobId::generate(),
+        &job,
+        &ExecEnv::new(&vfs, &r).on_event(&on),
+    );
+    assert_eq!((rep.outcome, rep.skipped), (Outcome::Completed, 1));
+    assert_eq!(r.calls().len(), 1);
+    assert_eq!(
+        events.into_inner().unwrap(),
+        ["planned", "waiting", "answered"]
+    );
+    assert_eq!(read(&f.dst.join("a.txt")), "old");
 }

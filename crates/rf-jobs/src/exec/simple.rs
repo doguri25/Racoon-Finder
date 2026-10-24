@@ -10,7 +10,7 @@ use rf_vfs::RenameMode;
 use super::{At, Attempt, Ctx, Failed};
 use crate::naming::{MAX_NUMBERED, numbered_name};
 use crate::preflight::{FsKind, IssueKind, check_name, check_path_len};
-use crate::report::{Stage, Totals};
+use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{CreateKind, ErrorPolicy};
 use crate::undo::UndoRecord;
 
@@ -44,7 +44,8 @@ fn one(is_dir: bool) -> Totals {
 ///
 /// The plan `stat`s `from` (`Stage::Plan`, a link itself) and counts it as one folder or one
 /// file by its kind; no file is read. Two paths of different schemes are served by different
-/// providers, which no rename joins: that fails as `Stage::Rename` with `Unsupported`. The new
+/// providers, which no rename joins: that fails as `Stage::Rename` with `Unsupported`
+/// (`AcrossLocations`). The new
 /// name is checked against the file system of its folder first (see [`name_issue`]): any issue
 /// fails as `Stage::Rename` with it (`ErrorKind::InvalidPath`), and nothing is renamed. Then
 /// the provider renames with `RenameMode::NoReplace` (`Stage::Rename`), so a taken `to` fails
@@ -76,7 +77,11 @@ pub(crate) fn run_rename(ctx: &mut Ctx<'_>, from: &VPath, to: &VPath) {
         if from.scheme() != to.scheme() {
             let error =
                 Error::Unsupported(format!("cannot rename across locations: {from} -> {to}"));
-            return Err(Failed::new(Stage::Rename, error));
+            return Err(Failed::refused(
+                Stage::Rename,
+                error,
+                FailureReason::AcrossLocations,
+            ));
         }
         let provider = ctx.provider(from).at(Stage::Rename)?;
         if let (Some(folder), Some(name)) = (to.parent(), to.file_name()) {
@@ -132,7 +137,7 @@ pub(crate) fn run_create(ctx: &mut Ctx<'_>, parent: &VPath, name: &OsStr, kind: 
 /// error fails, since a name that cannot be examined may well be taken. A name that turns out
 /// taken when the item is made (`AlreadyExists`, another program made one since the `stat`)
 /// moves on to the next number. When every name is taken, fails with `AlreadyExists` for
-/// `name`.
+/// `name` (`NoFreeName`).
 fn make_new(
     ctx: &mut Ctx<'_>,
     parent: &VPath,
@@ -172,7 +177,7 @@ fn make_new(
         .map_err(|error| Failed::new(Stage::Create, error.into()))?;
     let op = if is_dir { "create_dir" } else { "create_file" };
     let taken = Error::io(op, wanted.clone(), io::ErrorKind::AlreadyExists.into());
-    Err(Failed::new(Stage::Create, taken).writing(&wanted))
+    Err(Failed::refused(Stage::Create, taken, FailureReason::NoFreeName).writing(&wanted))
 }
 
 #[cfg(test)]
