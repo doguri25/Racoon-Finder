@@ -134,6 +134,17 @@ export component FileList inherits Rectangle {
         list.content-y = y;
     }
 
+    // Scrolls a step sideways (← and →), as far as the columns reach.
+    public function scroll-sideways(right: bool) {
+        let most = max(0px, head.content-width - list.visible-width);
+        list.content-x = max(-most, min(0px, list.content-x + (right ? -80px : 80px)));
+    }
+
+    // Fits every column to its texts in the rows on screen (모든 열 너비 맞추기).
+    public function fit-columns() {
+        head.fit-all();
+    }
+
     settle := ListSettle { }
 
     // The room before a row's name: its icon.

@@ -347,6 +347,24 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Scrolls 자세히 of pane `side` a step sideways (← and →).
+    public function scroll-sideways(side: int, right-ward: bool) {
+        if (side == 0) {
+            left.scroll-sideways(right-ward);
+        } else {
+            right.scroll-sideways(right-ward);
+        }
+    }
+
+    // Fits the columns of 자세히 of pane `side` to their texts on screen (모든 열 너비 맞추기).
+    public function fit-columns(side: int) {
+        if (side == 0) {
+            left.fit-columns();
+        } else {
+            right.fit-columns();
+        }
+    }
+
     // The place under a drag (`place`, of pane `side`) does not take it, for the reason `text`;
     // an empty one says it does. The reason shows by the place while the drag hovers there, the
     // pointer moving or not, and goes when the drag moves where nothing takes drops (the
@@ -675,6 +693,9 @@ export component MainWindow inherits Window {
                             }
                             column-toggled(column) => {
                                 root.column-toggled(root.active-side, column);
+                            }
+                            column-moved(from, slot) => {
+                                root.column-moved(root.active-side, from, slot);
                             }
                             view-command(name) => {
                                 root.view-command(root.active-side, name);

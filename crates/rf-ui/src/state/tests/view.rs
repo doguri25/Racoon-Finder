@@ -127,6 +127,15 @@ fn the_view_keys_and_the_menu_change_the_mode_and_the_columns() {
         Some(3)
     );
 
+    // 모든 열 너비 맞추기: the screen fits 자세히's columns; the other views have none.
+    assert_eq!(
+        press(&mut state, "+", CTRL),
+        Some(vec![Effect::FitColumns(LEFT)])
+    );
+    state.set_view_mode(LEFT, ViewMode::List);
+    assert_eq!(press(&mut state, "+", CTRL), Some(vec![]));
+    state.set_view_mode(LEFT, ViewMode::Details);
+
     // Folders mixed in, a second key from the menu.
     state.toggle_folders_first(LEFT);
     state.sort_then(LEFT, Some(SortKey::Modified));
@@ -144,8 +153,21 @@ fn the_keys_move_as_the_view_lays_the_rows_out() {
         let command = keys::command_for(&special(k), mods, Os::Windows).expect("a key");
         state.key(command, mods, grid, Instant::now())
     };
-    // 자세히: ← and → do nothing, and nothing changes.
-    assert_eq!(key(&mut state, Key::RightArrow, NONE), Some(vec![]));
+    // 자세히: ← and → scroll the columns sideways; the cursor and the selection stay.
+    assert_eq!(
+        key(&mut state, Key::RightArrow, NONE),
+        Some(vec![Effect::ScrollSideways {
+            side: LEFT,
+            right: true
+        }])
+    );
+    assert_eq!(
+        key(&mut state, Key::LeftArrow, SHIFT),
+        Some(vec![Effect::ScrollSideways {
+            side: LEFT,
+            right: false
+        }])
+    );
     assert_eq!(cursor(&state, LEFT), Some(0));
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
 

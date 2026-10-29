@@ -810,6 +810,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_view_small_icons(key(Command::ViewSmallIcons));
     shown.set_view_medium_icons(key(Command::ViewMediumIcons));
     shown.set_view_large_icons(key(Command::ViewLargeIcons));
+    shown.set_fit_columns(key(Command::FitColumns));
 }
 
 /// A row of the job panel.

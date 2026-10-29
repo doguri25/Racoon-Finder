@@ -1061,6 +1061,7 @@ impl Controller {
             "view-small-icons" => Command::ViewSmallIcons,
             "view-medium-icons" => Command::ViewMediumIcons,
             "view-large-icons" => Command::ViewLargeIcons,
+            "fit-columns" => Command::FitColumns,
             _ => return,
         };
         self.update(|state| {
@@ -1168,6 +1169,8 @@ impl Controller {
                 | Effect::FocusTree
                 | Effect::FocusPanes
                 | Effect::ScrollTo { .. }
+                | Effect::ScrollSideways { .. }
+                | Effect::FitColumns(_)
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
                 | Effect::Toast { .. }
@@ -1276,6 +1279,8 @@ impl Controller {
             | Effect::FocusTree
             | Effect::FocusPanes
             | Effect::ScrollTo { .. }
+            | Effect::ScrollSideways { .. }
+            | Effect::FitColumns(_)
             | Effect::ScrollTree(_)
             | Effect::ScrollPickTree(_)
             | Effect::Job(_)
@@ -1321,6 +1326,16 @@ impl Controller {
                 }
             }
             Effect::ScrollTo { side, row } => self.scroll_to(side, row),
+            Effect::ScrollSideways { side, right } => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_scroll_sideways(side_number(side), right);
+                }
+            }
+            Effect::FitColumns(side) => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_fit_columns(side_number(side));
+                }
+            }
             Effect::ScrollTree(row) => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));

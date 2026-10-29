@@ -387,7 +387,8 @@ impl Paging {
 /// in 자세히) or an empty list.
 ///
 /// - 자세히: ↑ and ↓ one row, the page keys a page of rows, Home and End the first and the last
-///   row, and nothing for ← and →. Without a cursor, ↓ lands on the first row, and so does ↑.
+///   row, and no row for ← and → (they scroll the columns sideways, [`Effect::ScrollSideways`]).
+///   Without a cursor, ↓ lands on the first row, and so does ↑.
 /// - Icons (row-major): ← and → the item before and after (from the end of a row to the next
 ///   one), ↑ and ↓ the item a row up and down (from a last row that is not full, ↓ goes to the
 ///   last item; at the first and the last row they stay), the page keys a page of rows up and
@@ -556,6 +557,17 @@ impl AppState {
         Vec::new()
     }
 
+    /// 모든 열 너비 맞추기 in pane `side`: in 자세히 the screen fits every column to its texts
+    /// ([`Effect::FitColumns`]); the other views have no columns.
+    pub fn fit_columns(&mut self, side: usize) -> Vec<Effect> {
+        self.activate(side);
+        if self.tab(side).view().mode == ViewMode::Details {
+            vec![Effect::FitColumns(side)]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// A click on a head of pane `side` that sorts by `key` (`then` with Shift: the second
     /// key), as [`FolderView::sort_by`] says.
     pub fn sort_by(&mut self, side: usize, key: SortKey, then: bool) -> Vec<Effect> {
@@ -637,6 +649,11 @@ impl AppState {
     ) -> Vec<Effect> {
         let tab = self.tab_mut(side);
         let mode = tab.view().mode;
+        // ← and → in 자세히 scroll it sideways, as far as its columns reach.
+        if mode == ViewMode::Details && matches!(step, KeyMove::Left | KeyMove::Right) {
+            let right = step == KeyMove::Right;
+            return vec![Effect::ScrollSideways { side, right }];
+        }
         let (selection, rows) = tab.selection_mut();
         let Some(to) = target(mode, selection.cursor(), rows.len(), step, paging) else {
             return Vec::new();

@@ -36,6 +36,8 @@ export component ViewMenu inherits ContextMenuArea {
     callback sort(column: int, then: bool);
     callback sort-then(column: int);
     callback column-toggled(column: int);
+    // The column at `from` among those after the name goes to `slot` (as a head dragged).
+    callback column-moved(from: int, slot: int);
     callback view-command(name: string);
     // An item of the 탭 sub-menu for the tab the active pane shows (`MainWindow.tab-command`).
     callback tab-command(name: string);
@@ -450,6 +452,42 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.mark-col-6;
                 activated => {
                     root.column-toggled(6);
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The order of the columns after the name: each moves a place left or right, as
+            // its head dragged.
+            Menu {
+                title: "열 순서";
+                enabled: root.view.columns.length > 1;
+
+                for column[i] in root.view.columns: Menu {
+                    title: column.title;
+
+                    MenuItem {
+                        title: "왼쪽으로";
+                        enabled: i > 0;
+                        activated => {
+                            root.column-moved(i, i - 1);
+                            root.done();
+                        }
+                    }
+                    MenuItem {
+                        title: "오른쪽으로";
+                        enabled: i < root.view.columns.length - 1;
+                        activated => {
+                            root.column-moved(i, i + 2);
+                            root.done();
+                        }
+                    }
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("모든 열 너비 맞추기", Shortcuts.fit-columns);
+                enabled: root.view.columns.length > 0;
+                activated => {
+                    root.command("fit-columns");
                     root.done();
                 }
             }

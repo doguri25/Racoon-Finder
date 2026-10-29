@@ -662,6 +662,16 @@ export component Pane inherits Rectangle {
         }
     }
 
+    // 자세히 scrolls a step sideways (← and →), as far as its columns reach.
+    public function scroll-sideways(right: bool) {
+        files.scroll-sideways(right);
+    }
+
+    // 자세히's columns fit their texts on screen (모든 열 너비 맞추기).
+    public function fit-columns() {
+        files.fit-columns();
+    }
+
     // The path field closes (a click on a row of the window's completion list).
     public function end-edit() {
         root.editing = false;

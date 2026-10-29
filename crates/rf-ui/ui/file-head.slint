@@ -15,6 +15,7 @@
 
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { Shortcuts } from "shortcuts.slint";
 
 // A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
 // 5 extension, 6 attributes), what its head says, how wide it is, whether its text lines up on
@@ -232,6 +233,28 @@ export component FileHead inherits Rectangle {
         }
     }
 
+    // Fits every column after the name, one after the other (모든 열 너비 맞추기).
+    public function fit-all() {
+        if (root.columns.length > 0) {
+            root.fit(0);
+        }
+        if (root.columns.length > 1) {
+            root.fit(1);
+        }
+        if (root.columns.length > 2) {
+            root.fit(2);
+        }
+        if (root.columns.length > 3) {
+            root.fit(3);
+        }
+        if (root.columns.length > 4) {
+            root.fit(4);
+        }
+        if (root.columns.length > 5) {
+            root.fit(5);
+        }
+    }
+
     // Fits column `i` after the name to its texts in the rows on screen, and to its head.
     function fit(i: int) {
         let column = root.columns[i];
@@ -332,6 +355,38 @@ export component FileHead inherits Rectangle {
                     checked <=> root.mark-attributes;
                     activated => {
                         root.column-toggled(6);
+                    }
+                }
+                MenuSeparator { }
+                // The order and the widths from the keys, as a head or a border dragged.
+                Menu {
+                    title: "열 순서";
+                    enabled: root.columns.length > 1;
+
+                    for column[i] in root.columns: Menu {
+                        title: column.title;
+
+                        MenuItem {
+                            title: "왼쪽으로";
+                            enabled: i > 0;
+                            activated => {
+                                root.column-moved(i, i - 1);
+                            }
+                        }
+                        MenuItem {
+                            title: "오른쪽으로";
+                            enabled: i < root.columns.length - 1;
+                            activated => {
+                                root.column-moved(i, i + 2);
+                            }
+                        }
+                    }
+                }
+                MenuItem {
+                    title: Shortcuts.titled("모든 열 너비 맞추기", Shortcuts.fit-columns);
+                    enabled: root.columns.length > 0;
+                    activated => {
+                        root.fit-all();
                     }
                 }
             }

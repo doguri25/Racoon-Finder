@@ -1174,6 +1174,110 @@ fn every_column_chosen_shows_and_the_list_scrolls_sideways_when_they_overflow() 
 }
 
 #[test]
+fn the_columns_order_and_widths_come_from_the_menus_and_the_keys() {
+    use slint::platform::PointerEventButton;
+    let (window, _models, calls) = header_window();
+    let taken = || calls.borrow_mut().drain(..).collect::<Vec<_>>();
+    // The sub-menus open after the menu they are in: of two items of one title (a column's,
+    // to show or hide it and to move it), the last is the sub-menu's (the heads are buttons).
+    let choose_last = |title: &str| {
+        labelled(&window, title, AccessibleRole::Text)
+            .pop()
+            .unwrap_or_else(|| panic!("the menu shows {title}"))
+            .mock_single_click(PointerEventButton::Left);
+    };
+    let open_head_menu = |path: &[&str]| {
+        labelled(&window, "크기", AccessibleRole::Button)[0]
+            .mock_single_click(PointerEventButton::Right);
+        for item in path {
+            choose_last(item);
+        }
+    };
+    // The head's menu: 열 순서 ▸ a column ▸ 왼쪽으로 or 오른쪽으로 (크기, 수정한 날짜, 종류).
+    for (column, item, call) in [
+        ("크기", "오른쪽으로", "move 0 0 2"),
+        ("종류", "왼쪽으로", "move 0 2 1"),
+        ("수정한 날짜", "왼쪽으로", "move 0 1 0"),
+    ] {
+        open_head_menu(&["열 순서", column]);
+        choose_item(&window, item);
+        assert_eq!(taken(), [call], "{column} {item}");
+    }
+    // The first column goes no further left, the last no further right.
+    for (column, item) in [("크기", "왼쪽으로"), ("종류", "오른쪽으로")] {
+        open_head_menu(&["열 순서", column]);
+        choose_item(&window, item);
+        assert_eq!(taken(), Vec::<String>::new(), "{column} {item}");
+        for _ in 0..3 {
+            press(&window, Key::Escape);
+        }
+    }
+    // 모든 열 너비 맞추기 fits each column after the name.
+    open_head_menu(&[]);
+    choose_item(&window, "모든 열 너비 맞추기");
+    let fitted = taken();
+    assert_eq!(fitted.len(), 6, "{fitted:?}");
+    for (pair, column) in fitted.chunks(2).zip([1, 2, 3]) {
+        assert!(
+            pair[0].starts_with(&format!("texts 0 {column} ")),
+            "{fitted:?}"
+        );
+        assert!(
+            pair[1].starts_with(&format!("width 0 {column} ")),
+            "{fitted:?}"
+        );
+    }
+    // The same from Rust (the key) for the pane it names.
+    window.invoke_fit_columns(0);
+    assert_eq!(taken().len(), 6);
+
+    // The 보기 menu's 열 has them too, for the active pane.
+    let record = Rc::clone(&calls);
+    window.on_command(move |name| record.borrow_mut().push(format!("command {name}")));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    button.invoke_accessible_default_action();
+    for item in ["열", "열 순서", "수정한 날짜", "오른쪽으로"] {
+        choose_last(item);
+    }
+    assert_eq!(taken(), ["move 0 1 3"]);
+    button.invoke_accessible_default_action();
+    choose_item(&window, "열");
+    // (The test window has no keys set: the item's title is the name alone.)
+    choose_item(&window, "모든 열 너비 맞추기");
+    assert_eq!(taken(), ["command fit-columns"]);
+}
+
+#[test]
+fn the_arrows_scroll_details_sideways() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let mut pane = listed_pane(vec![entry("a.txt", EntryKind::File, 10)]);
+    pane.active_tab_mut().set_view(FolderView {
+        columns: Column::OPTIONAL.into_iter().map(ShownColumn::new).collect(),
+        ..FolderView::default()
+    });
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let size_x = || head_box(&window, "크기").0.x;
+    let at = size_x();
+    // A step to the right: the heads and the rows go left.
+    window.invoke_scroll_sideways(0, true);
+    assert_eq!(size_x(), at - 80.0);
+    // Back, and no further than the start.
+    window.invoke_scroll_sideways(0, false);
+    window.invoke_scroll_sideways(0, false);
+    assert_eq!(size_x(), at);
+    // As far as the last column, whole.
+    for _ in 0..20 {
+        window.invoke_scroll_sideways(0, true);
+    }
+    let list = labelled(&window, "항목 목록", AccessibleRole::List).remove(0);
+    let right = list.absolute_position().x + list.size().width;
+    let (last_at, last_size) = head_box(&window, "속성");
+    assert_eq!(last_at.x + last_size.width + 12.0, right);
+}
+
+#[test]
 fn a_right_click_beside_the_heads_opens_their_menu_with_its_marks() {
     use slint::platform::PointerEventButton;
     let (window, _models, _calls) = header_window();

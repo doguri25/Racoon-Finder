@@ -116,6 +116,13 @@ pub enum Effect {
     FocusPanes,
     /// Scroll pane `side` so that `row` shows.
     ScrollTo { side: usize, row: usize },
+    /// Scroll 자세히 of pane `side` sideways, a step to the right or to the left, when its
+    /// columns are wider than the pane (← and → there).
+    ScrollSideways { side: usize, right: bool },
+    /// Fit each column of 자세히 of pane `side` to its texts in the rows on screen (모든 열 너비
+    /// 맞추기); the screen measures them, and hands each width back as a column's new width
+    /// ([`AppState::set_column_width`]).
+    FitColumns(usize),
     /// List the folders in a folder of the tree
     /// ([`Loader::list_folders`](crate::loader::Loader::list_folders)); the listing comes
     /// back to [`AppState::loaded`].
@@ -526,6 +533,7 @@ impl AppState {
             Command::ViewSmallIcons => self.set_view_mode(side, ViewMode::SmallIcons),
             Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
+            Command::FitColumns => self.fit_columns(side),
             Command::Refresh
             | Command::Copy
             | Command::Cut

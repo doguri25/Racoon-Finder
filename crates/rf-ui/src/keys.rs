@@ -45,8 +45,8 @@ impl Mods {
 /// The cursor commands come with Shift too: the caller extends the selection from the anchor
 /// when `mods.shift` is set, and moves the cursor alone when `mods.ctrl` is (Windows and Linux;
 /// `Selection::go_to`). The view lays the rows out, and says where each key goes
-/// (`state::target`): ← and → move along a row of icons and across the columns of 목록, and do
-/// nothing in 자세히. Some commands are in the table before
+/// (`state::target`): ← and → move along a row of icons and across the columns of 목록, and
+/// scroll 자세히 sideways when its columns are wider than the pane. Some commands are in the table before
 /// the window can do them (`AppState::key` gives `None` for those, and the key goes on to the
 /// system); `docs/ux/keyboard.md` says which task brings each.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -122,6 +122,8 @@ pub enum Command {
     ViewSmallIcons,
     ViewMediumIcons,
     ViewLargeIcons,
+    /// Fit every column of 자세히 to its texts in the rows on screen (모든 열 너비 맞추기).
+    FitColumns,
     /// Open the 보기 menu.
     ViewMenu,
     /// Open the menu of the selected items, as a right click on them does.
@@ -586,6 +588,10 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('4', CTRL_SHIFT), C::ViewSmallIcons),
     (c('5', CTRL_SHIFT), C::ViewList),
     (c('6', CTRL_SHIFT), C::ViewDetails),
+    // File Explorer's Size all columns to fit: Ctrl with the keypad's +, or a layout's own +
+    // key; on the US layout's main keys + is Shift+=.
+    (c('+', CTRL), C::FitColumns),
+    (c('=', CTRL_SHIFT), C::FitColumns),
     (k(Key::F10, NONE), C::ViewMenu),
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
@@ -668,6 +674,9 @@ static MACOS: &[(Chord, Command)] = &[
     (c('1', CMD), C::ViewMediumIcons),
     (c('2', CMD), C::ViewDetails),
     (c('3', CMD), C::ViewList),
+    // Finder has no key to fit the columns. ⌘= and ⌘- zoom in many apps, ⌥⌘= is Accessibility
+    // Zoom's; ⌃⌘= neither Finder nor macOS takes.
+    (c('=', CTL_CMD), C::FitColumns),
     (c('j', CMD), C::ViewMenu),
     (c('y', CMD), C::QuickLook),
     (c('p', CMD_SHIFT), C::TogglePreview),
@@ -810,6 +819,10 @@ mod tests {
             (text("$"), CTRL_SHIFT, C::ViewSmallIcons),
             (text("%"), CTRL_SHIFT, C::ViewList),
             (text("^"), CTRL_SHIFT, C::ViewDetails),
+            // Explorer's Size all columns to fit: Ctrl and the keypad's +, or Ctrl+Shift+=.
+            (text("+"), CTRL, C::FitColumns),
+            (text("+"), CTRL_SHIFT, C::FitColumns),
+            (text("="), CTRL_SHIFT, C::FitColumns),
             // Explorer's moves of the cursor alone.
             (key(Key::UpArrow), CTRL, C::CursorUp),
             (key(Key::DownArrow), CTRL, C::CursorDown),
@@ -886,6 +899,7 @@ mod tests {
             (text("1"), CMD, C::ViewMediumIcons),
             (text("2"), CMD, C::ViewDetails),
             (text("3"), CMD, C::ViewList),
+            (text("="), CTL_CMD, C::FitColumns),
             (text("y"), CMD, C::QuickLook),
             (text("P"), CMD_SHIFT, C::TogglePreview),
             (text("s"), CTL_CMD, C::ToggleTree),
@@ -1240,6 +1254,7 @@ mod tests {
             (C::ViewSmallIcons, Some("Ctrl+Shift+4"), None),
             (C::ViewList, Some("Ctrl+Shift+5"), Some("⌘3")),
             (C::ViewDetails, Some("Ctrl+Shift+6"), Some("⌘2")),
+            (C::FitColumns, Some("Ctrl++"), Some("⌃⌘=")),
             (C::CursorLeft, Some("←"), Some("←")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
