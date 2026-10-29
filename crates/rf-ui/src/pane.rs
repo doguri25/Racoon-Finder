@@ -29,8 +29,10 @@ use crate::words;
 /// How long after a key the next one still adds to the type-to-select prefix (NAV-14).
 pub const TYPE_TO_SELECT_WINDOW: Duration = Duration::from_secs(1);
 
-/// A generation that no request has had yet.
-fn next_generation() -> u64 {
+/// A generation that no request has had yet: the tabs and the folder tree
+/// ([`crate::tree`]) draw from the same count, so a generation names one request in the
+/// whole process.
+pub(crate) fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, AtomicOrdering::Relaxed)
 }

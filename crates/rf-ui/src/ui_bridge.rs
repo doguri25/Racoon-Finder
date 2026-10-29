@@ -1,11 +1,11 @@
-//! What the Slint screens are given: the row model of a file list, the conversions from the
-//! panes' state to Slint structs, and [`post`], which brings a worker thread's result back to
-//! the UI thread.
+//! What the Slint screens are given: the row models of a file list and of the folder tree,
+//! the conversions from the panes' state to Slint structs, and [`post`], which brings a worker
+//! thread's result back to the UI thread.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fmt;
+use std::hash::Hash;
 use std::rc::Rc;
 
 use jiff::tz::TimeZone;
@@ -18,8 +18,9 @@ use crate::format::{format_size, format_time_in, kind_label};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
+use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
-use crate::{Crumb, FileRow, PaneView, PlaceRow, TabItem};
+use crate::{Crumb, FileRow, PaneView, SectionHead, TabItem, TreeRow};
 
 /// Runs `f` with the controller on the UI thread, from any thread, and returns at once. Once
 /// the window has closed nothing runs and `f` is dropped.
@@ -189,18 +190,7 @@ impl FileRows {
             diff_rows(&old, &new, |row| &row.entry.name)
         };
         *self.rows.borrow_mut() = new;
-        match changes {
-            Some(changes) => {
-                for change in changes {
-                    match change {
-                        RowChange::Removed { at, count } => self.notify.row_removed(at, count),
-                        RowChange::Added { at, count } => self.notify.row_added(at, count),
-                        RowChange::Changed { at } => self.notify.row_changed(at),
-                    }
-                }
-            }
-            None => self.notify.reset(),
-        }
+        tell(&self.notify, changes);
     }
 }
 
@@ -222,6 +212,119 @@ impl Model for FileRows {
     }
 }
 
+/// Tells a list what [`diff_rows`] found: each step, or to start over when it found too many.
+/// The rows have been replaced already, since the list reads them back while it is told.
+fn tell(notify: &ModelNotify, changes: Option<Vec<RowChange>>) {
+    match changes {
+        Some(changes) => {
+            for change in changes {
+                match change {
+                    RowChange::Removed { at, count } => notify.row_removed(at, count),
+                    RowChange::Added { at, count } => notify.row_added(at, count),
+                    RowChange::Changed { at } => notify.row_changed(at),
+                }
+            }
+        }
+        None => notify.reset(),
+    }
+}
+
+/// The rows of the sidebar's folder tree as a Slint model.
+///
+/// [`TreeRows::sync`] makes them the tree's rows and tells the list which rows came, went or
+/// changed (a node opened or closed, the selection moved), so the list keeps its scroll
+/// position and draws only the rows on screen, however many folders are open.
+#[derive(Default)]
+pub struct TreeRows {
+    rows: RefCell<Vec<(NodeId, TreeRow)>>,
+    notify: ModelNotify,
+    /// The [`Tree::revision`] of the rows shown.
+    revision: Cell<Option<u64>>,
+}
+
+impl fmt::Debug for TreeRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TreeRows")
+            .field("rows", &self.rows.borrow().len())
+            .field("revision", &self.revision.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl TreeRows {
+    /// Makes the rows those of `tree`, whose roots are `places` in order, and tells the list
+    /// what changed. Nothing is done while the tree's revision stays the same: the places
+    /// change only with a new tree ([`Tree::set_roots`]).
+    pub fn sync(&self, tree: &Tree, places: &[Place]) {
+        let revision = Some(tree.revision());
+        if self.revision.replace(revision) == revision {
+            return;
+        }
+        let new = tree_rows(&tree.rows(), places);
+        let changes = {
+            let old = self.rows.borrow();
+            diff_rows(&old, &new, |(id, _)| *id)
+        };
+        *self.rows.borrow_mut() = new;
+        tell(&self.notify, changes);
+    }
+}
+
+impl Model for TreeRows {
+    type Data = TreeRow;
+
+    fn row_count(&self) -> usize {
+        self.rows.borrow().len()
+    }
+
+    fn row_data(&self, row: usize) -> Option<TreeRow> {
+        self.rows.borrow().get(row).map(|(_, data)| data.clone())
+    }
+
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.notify
+    }
+}
+
+/// The sidebar rows of the tree rows `rows`, whose roots are `places` in order, each with its
+/// node. A place shows whether it is a drive, and a drive how full it is; the first favorite
+/// carries the head "즐겨찾기" and the first drive after them "이 PC". A row shows a chevron
+/// when it has folders below it, or may have.
+pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow)> {
+    // Whether the last place was a drive.
+    let mut last_drive = None;
+    rows.iter()
+        .map(|row| {
+            let place = row.root.and_then(|root| places.get(root));
+            let is_drive = place.is_some_and(|place| place.kind == PlaceKind::Drive);
+            let head = match place {
+                Some(_) if last_drive == Some(is_drive) => SectionHead::None,
+                Some(_) if is_drive => SectionHead::Drives,
+                Some(_) => SectionHead::Favorites,
+                None => SectionHead::None,
+            };
+            if place.is_some() {
+                last_drive = Some(is_drive);
+            }
+            let (info, fill) = place.map_or_else(|| (String::new(), 0.0), place_space);
+            let expandable = row.has_children_unknown || row.has_children;
+            let shown = TreeRow {
+                label: row.label.as_str().into(),
+                depth: i32::try_from(row.depth).unwrap_or(i32::MAX),
+                head,
+                is_place: place.is_some(),
+                is_drive,
+                info: info.into(),
+                fill,
+                expandable,
+                expanded: expandable && row.expanded,
+                selected: row.selected,
+            };
+            (row.id, shown)
+        })
+        .collect()
+}
+
 /// One step that turns a list into another, as Slint's model notifications take them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowChange {
@@ -233,15 +336,15 @@ pub enum RowChange {
     Changed { at: usize },
 }
 
-/// The steps that turn `old` into `new`, where a row is known by its `name` (unique in a
-/// list): first the removals and additions, each at its position in the list as the steps
-/// before it have left it, then the changes, at positions in `new`. A row that moved is
-/// removed and added. `None` when there are more than 512 steps (`MAX_ROW_CHANGES`), which
-/// a fresh start shows faster.
-pub fn diff_rows<T: PartialEq>(
-    old: &[T],
-    new: &[T],
-    name: impl Fn(&T) -> &OsStr,
+/// The steps that turn `old` into `new`, where a row is known by its `key` (unique in a
+/// list: a file's name, a tree node): first the removals and additions, each at its position
+/// in the list as the steps before it have left it, then the changes, at positions in `new`.
+/// A row that moved is removed and added. `None` when there are more than 512 steps
+/// (`MAX_ROW_CHANGES`), which a fresh start shows faster.
+pub fn diff_rows<'a, T: PartialEq, K: Eq + Hash>(
+    old: &'a [T],
+    new: &'a [T],
+    key: impl Fn(&'a T) -> K,
 ) -> Option<Vec<RowChange>> {
     // The rows that are the same at both ends need no step, and no lookup.
     let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
@@ -253,10 +356,10 @@ pub fn diff_rows<T: PartialEq>(
         .count();
     let (old, new) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
 
-    let position: HashMap<&OsStr, usize> = new
+    let position: HashMap<K, usize> = new
         .iter()
         .enumerate()
-        .map(|(j, row)| (name(row), j))
+        .map(|(j, row)| (key(row), j))
         .collect();
     let mut steps: Vec<RowChange> = Vec::new();
     let mut changed = Vec::new();
@@ -269,7 +372,7 @@ pub fn diff_rows<T: PartialEq>(
         }
         if let Some(row) = old.get(i) {
             // Gone, or met earlier in `new` (it moved up and was added there).
-            let stays = position.get(name(row)).is_some_and(|&p| p >= j);
+            let stays = position.get(&key(row)).is_some_and(|&p| p >= j);
             if !stays {
                 match steps.last_mut() {
                     Some(RowChange::Removed { at: last, count }) if *last == at => *count += 1,
@@ -279,7 +382,7 @@ pub fn diff_rows<T: PartialEq>(
                 continue;
             }
         }
-        let same_name = old.get(i).is_some_and(|row| name(row) == name(&new[j]));
+        let same_name = old.get(i).is_some_and(|row| key(row) == key(&new[j]));
         if !same_name {
             match steps.last_mut() {
                 Some(RowChange::Added { at: first, count }) if *first + *count == at => {
@@ -352,9 +455,10 @@ pub fn crumbs(ancestors: &[VPath]) -> Vec<Crumb> {
         .collect()
 }
 
-/// The sidebar row of `place`: a drive shows how full it is.
-pub fn place_row(place: &Place) -> PlaceRow {
-    let (info, fill) = match (place.kind, place.space) {
+/// The space line of `place` and the used share of its drive (0..1): a drive shows how full
+/// it is when the system tells; a favorite shows nothing.
+pub fn place_space(place: &Place) -> (String, f32) {
+    match (place.kind, place.space) {
         (PlaceKind::Drive, Some(space)) if space.total > 0 => {
             let used = space.total.saturating_sub(space.available);
             #[expect(
@@ -365,12 +469,6 @@ pub fn place_row(place: &Place) -> PlaceRow {
             (words::drive_space(space.available, space.total), fill)
         }
         _ => (String::new(), 0.0),
-    };
-    PlaceRow {
-        label: place.label.as_str().into(),
-        info: info.into(),
-        fill,
-        is_drive: place.kind == PlaceKind::Drive,
     }
 }
 
@@ -410,7 +508,7 @@ pub fn set_rows<T: Clone + PartialEq + 'static>(model: &VecModel<T>, rows: Vec<T
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::time::{Duration, UNIX_EPOCH};
 
     use rf_core::ErrorKind;
@@ -445,7 +543,7 @@ mod tests {
 
     fn check(old: &[&str], new: &[&str]) -> Vec<RowChange> {
         let (old, new) = (names(old), names(new));
-        let steps = diff_rows(&old, &new, |name| name.as_os_str()).expect("a few steps");
+        let steps = diff_rows(&old, &new, OsString::as_os_str).expect("a few steps");
         let applied = apply(&old, &new, &steps);
         let expected: Vec<Option<OsString>> = new.iter().cloned().map(Some).collect();
         assert_eq!(applied, expected, "{steps:?}");
@@ -652,25 +750,143 @@ mod tests {
                 available: 128 * GB,
             }),
         };
-        let row = place_row(&drive);
-        assert_eq!(row.label, "로컬 디스크 (C:)");
-        assert_eq!(row.info, "128 GB 남음 / 512 GB");
-        assert!((row.fill - 0.75).abs() < 1e-6, "{}", row.fill);
-        assert!(row.is_drive);
+        let (info, fill) = place_space(&drive);
+        assert_eq!(info, "128 GB 남음 / 512 GB");
+        assert!((fill - 0.75).abs() < 1e-6, "{fill}");
 
         let unknown = Place {
             space: None,
             ..drive.clone()
         };
-        assert_eq!(place_row(&unknown).info, "");
+        assert_eq!(place_space(&unknown), (String::new(), 0.0));
         let home = Place {
             label: "홈".to_owned(),
             path: root,
             kind: PlaceKind::Favorite(rf_platform::KnownFolder::Home),
+            space: Some(DiskSpace {
+                total: GB,
+                free: GB,
+                available: GB,
+            }),
+        };
+        assert_eq!(place_space(&home), (String::new(), 0.0));
+    }
+
+    /// The places of `tree_rows_show_places_heads_and_chevrons`: two favorites, then two
+    /// drives.
+    fn places() -> Vec<Place> {
+        let root = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+        let place = |label: &str, kind| Place {
+            label: label.to_owned(),
+            path: root.clone(),
+            kind,
             space: None,
         };
-        let row = place_row(&home);
-        assert!(!row.is_drive && row.info.is_empty());
+        let home = PlaceKind::Favorite(rf_platform::KnownFolder::Home);
+        vec![
+            place("홈", home),
+            place("문서", home),
+            place("시스템 디스크", PlaceKind::Drive),
+            place("USB", PlaceKind::Drive),
+        ]
+    }
+
+    fn data(id: NodeId, label: &str, depth: usize, root: Option<usize>) -> TreeRowData {
+        TreeRowData {
+            id,
+            label: label.to_owned(),
+            depth,
+            expanded: false,
+            has_children_unknown: true,
+            has_children: false,
+            selected: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn tree_rows_show_places_heads_and_chevrons() {
+        let rows = vec![
+            TreeRowData {
+                expanded: true,
+                has_children_unknown: false,
+                has_children: true,
+                ..data(0, "홈", 0, Some(0))
+            },
+            TreeRowData {
+                selected: true,
+                ..data(4, "프로젝트", 1, None)
+            },
+            // Listed, and nothing below: no chevron, so no "open" either.
+            TreeRowData {
+                expanded: true,
+                has_children_unknown: false,
+                ..data(5, "빈 폴더", 1, None)
+            },
+            data(1, "문서", 0, Some(1)),
+            data(2, "시스템 디스크", 0, Some(2)),
+            data(3, "USB", 0, Some(3)),
+        ];
+        let shown = tree_rows(&rows, &places());
+        let ids: Vec<NodeId> = shown.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [0, 4, 5, 1, 2, 3]);
+        let heads: Vec<SectionHead> = shown.iter().map(|(_, row)| row.head).collect();
+        assert_eq!(
+            heads,
+            [
+                SectionHead::Favorites,
+                SectionHead::None,
+                SectionHead::None,
+                SectionHead::None,
+                SectionHead::Drives,
+                SectionHead::None,
+            ]
+        );
+        let home = &shown[0].1;
+        assert!(home.is_place && !home.is_drive && home.expandable && home.expanded);
+        let project = &shown[1].1;
+        assert_eq!((project.label.as_str(), project.depth), ("프로젝트", 1));
+        assert!(project.selected && !project.is_place && project.expandable);
+        let empty = &shown[2].1;
+        assert!(!empty.expandable && !empty.expanded);
+        assert!(shown[4].1.is_drive && shown[4].1.is_place);
+    }
+
+    #[test]
+    fn tree_rows_follow_the_tree() {
+        let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
+        let mut tree = Tree::new(false);
+        let place = Place {
+            label: "홈".to_owned(),
+            path: home,
+            kind: PlaceKind::Favorite(rf_platform::KnownFolder::Home),
+            space: None,
+        };
+        tree.set_roots([(place.label.clone(), place.path.clone())]);
+        let model = TreeRows::default();
+        let labels = |model: &TreeRows| -> Vec<String> {
+            (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|row| row.label.to_string())
+                .collect()
+        };
+        model.sync(&tree, std::slice::from_ref(&place));
+        assert_eq!(labels(&model), ["홈"]);
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(
+            request.generation,
+            vec![
+                Entry::new("a", EntryKind::Dir),
+                Entry::new("b", EntryKind::Dir),
+            ],
+        );
+        model.sync(&tree, std::slice::from_ref(&place));
+        assert_eq!(labels(&model), ["홈", "a", "b"]);
+        assert_eq!(model.row_data(1).map(|row| row.depth), Some(1));
+        tree.toggle(0);
+        model.sync(&tree, std::slice::from_ref(&place));
+        assert_eq!(labels(&model), ["홈"]);
+        assert_eq!(model.row_data(3), None);
     }
 
     #[test]

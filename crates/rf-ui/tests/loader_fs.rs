@@ -536,6 +536,53 @@ fn cancel_stops_the_listing_and_the_watch() {
     drop(ticket);
 }
 
+#[test]
+fn a_folder_listing_has_only_folders_and_no_watch() {
+    let t = tempfile::tempdir().unwrap();
+    for dir in ["b10", "b2", "Alpha"] {
+        std::fs::create_dir(t.path().join(dir)).unwrap();
+    }
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(t.path().join("b2"), t.path().join("link")).unwrap();
+    let (gated, log, open) = Gated::loader(Hold::List);
+    // The gate is open from the start.
+    open.send(()).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let ticket = gated.list_folders(request(local(t.path())), sender(&tx));
+    drop((tx, gated));
+
+    let LoadEvent::Listed {
+        generation,
+        entries,
+    } = recv_until(&rx, "the listing", |event| {
+        matches!(event, LoadEvent::Listed { .. })
+    })
+    else {
+        unreachable!("only a listing matches");
+    };
+    assert_eq!(generation, 1);
+    // The folders, in natural order; no file, no link.
+    let names: Vec<&OsStr> = entries.iter().map(|entry| entry.name.as_os_str()).collect();
+    assert_eq!(names, ["Alpha", "b2", "b10"]);
+    // The worker lists and ends: no watch, no free space.
+    let steps = steps_until(&log, "the worker to end", |step| *step == Step::Dropped);
+    assert_eq!(steps, [Step::Listing, Step::Listed(Ok(())), Step::Dropped]);
+    drop(ticket);
+    assert_no_events(&rx);
+
+    // A folder that cannot be listed fails once.
+    let (tx, rx) = mpsc::channel();
+    let _ticket = loader().list_folders(request(local(&t.path().join("missing"))), sender(&tx));
+    assert_eq!(
+        recv_until(&rx, "the failure", |_| true),
+        LoadEvent::Failed {
+            generation: 1,
+            kind: ErrorKind::NotFound,
+        }
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn links_open_by_what_they_lead_to() {

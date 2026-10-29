@@ -1,11 +1,11 @@
 //! The main window's state, and what its keys, clicks and the loader's events do to it.
 //!
-//! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard and
-//! whether hidden items show. Its methods change it and return the [`Effect`]s that need a
-//! worker thread or the screen, which the [`Controller`](crate::controller::Controller)
-//! carries out: a listing to start, a link to follow or a vanished folder's nearest parent to
-//! find, a file to open, a notice, a row to scroll to. Keeping the two apart lets the tests
-//! drive the state without a window.
+//! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
+//! whether hidden items show, and the folder tree of the sidebar. Its methods change it and
+//! return the [`Effect`]s that need a worker thread or the screen, which the
+//! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
+//! follow or a vanished folder's nearest parent to find, a file to open, a notice, a row to
+//! scroll to. Keeping the two apart lets the tests drive the state without a window.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,6 +17,8 @@ use rf_vfs::{SortKey, VisibilityFilter};
 use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest};
 use crate::pane::{Handled, OpenAction, Pane, Tab, ancestors};
+use crate::places::Place;
+use crate::tree::Tree;
 use crate::words;
 
 /// The left pane's position in [`AppState::panes`].
@@ -58,15 +60,24 @@ pub enum Effect {
     EditPath(usize),
     /// Scroll pane `side` so that `row` shows.
     ScrollTo { side: usize, row: usize },
+    /// List the folders in a folder of the tree
+    /// ([`Loader::list_folders`](crate::loader::Loader::list_folders)); the listing comes
+    /// back to [`AppState::loaded`].
+    LoadChildren(LoadRequest),
+    /// Scroll the folder tree so that row `row`, the active pane's folder just found there,
+    /// shows.
+    ScrollTree(usize),
 }
 
-/// The window's state on the UI thread: two panes, the one with the keyboard, and whether
-/// hidden items show.
+/// The window's state on the UI thread: two panes, the one with the keyboard, whether hidden
+/// items show, and the folder tree that follows the active pane.
 #[derive(Debug)]
 pub struct AppState {
     panes: [Pane; 2],
     active: usize,
     show_hidden: bool,
+    /// The sidebar's folder tree, whose roots are the places.
+    tree: Tree,
     /// Where a tab goes when its folder and every parent of it are gone.
     home: Option<VPath>,
     /// When each folder was last reloaded because its watch ended ([`AUTO_RELOAD_GAP`]).
@@ -87,6 +98,7 @@ impl AppState {
             panes: [left_pane, right_pane],
             active: LEFT,
             show_hidden: filter.show_hidden,
+            tree: Tree::new(filter.show_hidden),
             home,
             auto_reloads: HashMap::new(),
             pending_reloads: HashSet::new(),
@@ -110,12 +122,19 @@ impl AppState {
         self.show_hidden
     }
 
-    /// The generation of every tab's last request: the loads still worth running.
+    /// The sidebar's folder tree.
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// The generation of every tab's last request and of every listing the tree waits for:
+    /// the loads still worth running.
     pub fn generations(&self) -> HashSet<u64> {
         self.panes
             .iter()
             .flat_map(Pane::tabs)
             .map(Tab::generation)
+            .chain(self.tree.generations())
             .collect()
     }
 
@@ -176,10 +195,7 @@ impl AppState {
                 let tab = self.panes[side].active();
                 self.close_tab(side, tab)
             }
-            Command::ToggleHidden => {
-                self.toggle_hidden();
-                Vec::new()
-            }
+            Command::ToggleHidden => self.toggle_hidden(),
             Command::TypeToSelect(text) => self
                 .tab_mut(side)
                 .type_to_select(&text, now)
@@ -289,18 +305,63 @@ impl AppState {
         vec![Effect::Load(self.tab_mut(side).reload())]
     }
 
-    /// Shows `folder` in the active pane (a sidebar place).
+    /// Shows `folder` in the active pane.
     pub fn go_to(&mut self, folder: VPath) -> Vec<Effect> {
         let side = self.active;
         vec![Effect::Load(self.tab_mut(side).navigate(folder))]
     }
 
+    /// Makes `places` (the favorites, then the drives) the roots of the folder tree, which
+    /// starts again from them, closed, and finds the folder it follows again.
+    pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
+        let roots = places
+            .iter()
+            .map(|place| (place.label.clone(), place.path.clone()));
+        self.with_tree(|tree| tree.set_roots(roots))
+    }
+
+    /// Shows the folder of row `row` of the tree in the active pane (a click on the row). The
+    /// row is the tree's selection from then on, even when another row shows the same folder.
+    pub fn open_tree_row(&mut self, row: usize) -> Vec<Effect> {
+        let Some(id) = self.tree.node_at(row) else {
+            return Vec::new();
+        };
+        let Some(folder) = self.tree.node(id).map(|node| node.path.clone()) else {
+            return Vec::new();
+        };
+        self.tree.select(id);
+        self.go_to(folder)
+    }
+
+    /// Opens or closes row `row` of the tree (a click on its chevron); the first opening
+    /// lists the folder.
+    pub fn toggle_tree_row(&mut self, row: usize) -> Vec<Effect> {
+        match self.tree.node_at(row) {
+            Some(id) => self.with_tree(|tree| tree.toggle(id).into_iter().collect()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Makes the tree follow the active pane (LAY-03 a): when the folder the active pane
+    /// shows is not the one the tree follows (the pane, its tab or its folder changed), the
+    /// tree opens the folders on the way to it and selects it. The controller calls this
+    /// after every change; it does nothing while the folder stays the same, so a folder the
+    /// user closed in the tree stays closed.
+    pub fn follow_active(&mut self) -> Vec<Effect> {
+        let location = self.tab(self.active).location();
+        if self.tree.target() == Some(location) {
+            return Vec::new();
+        }
+        let location = location.clone();
+        self.with_tree(|tree| tree.reveal(&location))
+    }
+
     /// Takes an event of the loader. A rescan lists the folder again; a vanished folder is
     /// looked for on a worker thread. The ticket of a vanished folder stays: its listing, if
-    /// still running, still comes.
+    /// still running, still comes. An event that no tab asked for goes to the folder tree.
     pub fn loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
         let Some(side) = self.side_of(event.generation()) else {
-            return Vec::new();
+            return self.tree_loaded(event);
         };
         match self.panes[side].handle(event) {
             Handled::Stale | Handled::Applied { .. } => Vec::new(),
@@ -395,6 +456,43 @@ impl AppState {
         }
     }
 
+    /// Takes an event of a listing of the folder tree; one that no node waits for is dropped.
+    /// A listing that failed leaves the node empty, with no notice.
+    fn tree_loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
+        match event {
+            LoadEvent::Listed {
+                generation,
+                entries,
+            } => self.with_tree(|tree| tree.apply_children(generation, entries)),
+            LoadEvent::Failed { generation, .. } => {
+                self.tree.listing_failed(generation);
+                Vec::new()
+            }
+            // A listing of folders sends nothing else.
+            LoadEvent::Changes { .. }
+            | LoadEvent::Rescan { .. }
+            | LoadEvent::Vanished { .. }
+            | LoadEvent::Space { .. } => Vec::new(),
+        }
+    }
+
+    /// Changes the tree with `f` and turns what it asks for into effects: the listings to
+    /// start, and a scroll to the row of the active pane's folder when the tree has just
+    /// found it.
+    fn with_tree(&mut self, f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>) -> Vec<Effect> {
+        let before = self.tree.selected();
+        let mut effects: Vec<Effect> = f(&mut self.tree)
+            .into_iter()
+            .map(Effect::LoadChildren)
+            .collect();
+        if self.tree.selected() != before
+            && let Some(row) = self.tree.selected_row()
+        {
+            effects.push(Effect::ScrollTree(row));
+        }
+        effects
+    }
+
     fn tab(&self, side: usize) -> &Tab {
         self.panes[side].active_tab()
     }
@@ -434,14 +532,17 @@ impl AppState {
             .collect()
     }
 
-    /// Shows or hides the hidden items in every tab of both panes.
-    fn toggle_hidden(&mut self) {
+    /// Shows or hides the hidden items in every tab of both panes, and the hidden folders of
+    /// the tree.
+    fn toggle_hidden(&mut self) -> Vec<Effect> {
         self.show_hidden = !self.show_hidden;
         for pane in &mut self.panes {
             for tab in pane.tabs_mut() {
                 tab.set_show_hidden(self.show_hidden);
             }
         }
+        let show = self.show_hidden;
+        self.with_tree(|tree| tree.set_show_hidden(show))
     }
 }
 
@@ -474,6 +575,7 @@ mod tests {
 
     use super::*;
     use crate::keys;
+    use crate::places::PlaceKind;
 
     fn folder(name: &str) -> VPath {
         VPath::local(std::env::temp_dir().join(name)).expect("a local path")
@@ -987,6 +1089,120 @@ mod tests {
             state.found_existing(request.generation, &folder("a"), None, Instant::now()),
             []
         );
+    }
+
+    fn temp() -> VPath {
+        VPath::local(std::env::temp_dir()).expect("a local path")
+    }
+
+    fn drive(label: &str, path: &VPath) -> Place {
+        Place {
+            label: label.to_owned(),
+            path: path.clone(),
+            kind: PlaceKind::Drive,
+            space: None,
+        }
+    }
+
+    /// The one listing of the folder tree among `effects`.
+    fn the_tree_load(effects: &[Effect]) -> LoadRequest {
+        let requests: Vec<&LoadRequest> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::LoadChildren(request) => Some(request),
+                _ => None,
+            })
+            .collect();
+        match requests.as_slice() {
+            [request] => (*request).clone(),
+            other => panic!("expected one tree listing, got {other:?} in {effects:?}"),
+        }
+    }
+
+    fn tree_labels(state: &AppState) -> Vec<String> {
+        state
+            .tree()
+            .rows()
+            .into_iter()
+            .map(|row| row.label)
+            .collect()
+    }
+
+    #[test]
+    fn the_tree_follows_the_active_pane() {
+        let mut state = ready(vec![], vec![]);
+        // The places come; the tree lists the place that holds the left pane's folder.
+        let mut effects = state.set_places(&[drive("임시", &temp())]);
+        effects.extend(state.follow_active());
+        let request = the_tree_load(&effects);
+        assert_eq!(request.path, temp());
+        assert!(state.generations().contains(&request.generation));
+        assert_eq!(state.tree().selected_row(), None);
+
+        // Its listing selects the pane's folder and scrolls the tree to it.
+        let effects = state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: vec![dir("a"), dir("b"), dir("c"), file("x.txt")],
+        });
+        assert_eq!(effects, [Effect::ScrollTree(1)]);
+        assert_eq!(tree_labels(&state), ["임시", "a", "b", "c"]);
+        assert!(!state.generations().contains(&request.generation));
+        // Nothing to do while the pane stays where it is.
+        assert_eq!(state.follow_active(), []);
+
+        // The right pane gets the keyboard: the tree selects its folder.
+        press(&mut state, &special(Key::Tab), NONE);
+        assert_eq!(state.follow_active(), [Effect::ScrollTree(2)]);
+        // A click on a row shows its folder in the active pane; the row is selected already.
+        let effects = state.open_tree_row(3);
+        assert_eq!(the_load(&effects).path, folder("c"));
+        assert_eq!(state.active(), RIGHT);
+        assert_eq!(state.tree().selected_row(), Some(3));
+        assert_eq!(state.follow_active(), []);
+        // A folder under no place selects nothing and lists nothing.
+        let elsewhere =
+            VPath::new(rf_core::Scheme::Remote, "host", &["share"]).expect("a remote address");
+        state.go_to(elsewhere);
+        assert_eq!(state.follow_active(), []);
+        assert_eq!(state.tree().selected(), None);
+        assert_eq!(state.open_tree_row(99), []);
+    }
+
+    #[test]
+    fn tree_rows_open_once_and_follow_the_hidden_setting() {
+        let mut state = ready(vec![], vec![]);
+        assert_eq!(state.set_places(&[drive("임시", &temp())]), []);
+        let request = the_tree_load(&state.toggle_tree_row(0));
+        assert_eq!(request.path, temp());
+        // Closing and opening again asks for nothing more.
+        assert_eq!(state.toggle_tree_row(0), []);
+        assert_eq!(state.toggle_tree_row(0), []);
+        assert_eq!(state.toggle_tree_row(99), []);
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: vec![
+                {
+                    let mut dot = dir(".h");
+                    dot.attributes |= Attributes::HIDDEN;
+                    dot
+                },
+                dir("a"),
+            ],
+        });
+        assert_eq!(tree_labels(&state), ["임시", "a"]);
+        // Ctrl+H shows the hidden folders in the tree too.
+        assert_eq!(press(&mut state, "h", CTRL), Some(vec![]));
+        assert_eq!(tree_labels(&state), ["임시", ".h", "a"]);
+
+        // A listing that failed leaves the row empty, without a notice.
+        let a = the_tree_load(&state.toggle_tree_row(2));
+        let effects = state.loaded(LoadEvent::Failed {
+            generation: a.generation,
+            kind: ErrorKind::PermissionDenied,
+        });
+        assert_eq!(effects, []);
+        assert!(!state.tree().rows()[2].has_children);
+        assert!(!state.generations().contains(&a.generation));
     }
 
     #[test]

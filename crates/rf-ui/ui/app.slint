@@ -7,9 +7,9 @@ import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast } from "widgets.slint";
 import { FileRow } from "file-list.slint";
 import { Pane, PaneView, TabItem, Crumb } from "pane.slint";
-import { Sidebar, PlaceRow } from "sidebar.slint";
+import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
 
-export { Theme, FileRow, PaneView, TabItem, Crumb, PlaceRow }
+export { Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead }
 
 export component MainWindow inherits Window {
     // Window title and the name beside the logo; Rust passes the product name.
@@ -23,8 +23,9 @@ export component MainWindow inherits Window {
     // The two panes; side 0 is the left one, 1 the right one.
     in property <PaneView> left-pane;
     in property <PaneView> right-pane;
-    // The sidebar's places: the favorites, then the drives.
-    in property <[PlaceRow]> places;
+    // The sidebar's folder tree: the places (the favorites, then the drives) and the folders
+    // open below them.
+    in property <[TreeRow]> tree;
     // Whether the active pane can go back, forward and up.
     in property <bool> can-back;
     in property <bool> can-forward;
@@ -47,7 +48,9 @@ export component MainWindow inherits Window {
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
     callback row-activated(side: int, index: int);
     callback retry(side: int);
-    callback place-clicked(index: int);
+    // A click on row `index` of the tree, or on its chevron.
+    callback tree-clicked(index: int);
+    callback tree-toggled(index: int);
 
     // Shows pane `side`'s path as text to edit.
     public function edit-path(side: int) {
@@ -65,6 +68,11 @@ export component MainWindow inherits Window {
         } else {
             right.scroll-to(index);
         }
+    }
+
+    // Scrolls the tree so that row `index` shows.
+    public function tree-scroll-to(index: int) {
+        sidebar.scroll-to(index);
     }
 
     // A notice in the lower right corner for 5 seconds.
@@ -290,14 +298,18 @@ export component MainWindow inherits Window {
                 spacing: Theme.gap-m;
                 vertical-stretch: 1;
 
-                Sidebar {
+                sidebar := Sidebar {
                     min-width: 220px;
                     preferred-width: 220px;
                     max-width: 280px;
                     horizontal-stretch: 0.1;
-                    places: root.places;
-                    place-clicked(index) => {
-                        root.place-clicked(index);
+                    rows: root.tree;
+                    row-clicked(index) => {
+                        root.tree-clicked(index);
+                        keys.focus();
+                    }
+                    row-toggled(index) => {
+                        root.tree-toggled(index);
                         keys.focus();
                     }
                 }

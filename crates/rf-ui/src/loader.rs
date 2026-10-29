@@ -8,9 +8,10 @@
 //! the generation of its [`LoadRequest`], which is how a tab drops the events of a folder it
 //! has left.
 //!
-//! [`Loader::follow`] works the same way for a link a tab opens, and its result carries the
-//! tab's generation too. [`Loader::nearest_existing_parent`] blocks and is called on a worker
-//! thread.
+//! [`Loader::list_folders`] is the same work without the watch and the free space, for the
+//! folder tree: one listing of the folders in a folder. [`Loader::follow`] works the same way
+//! for a link a tab opens, and its result carries the tab's generation too.
+//! [`Loader::nearest_existing_parent`] blocks and is called on a worker thread.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -109,6 +110,31 @@ impl Loader {
         request: LoadRequest,
         sink: impl FnMut(LoadEvent) + Send + 'static,
     ) -> LoadTicket {
+        self.start(request, Mode::Live, sink)
+    }
+
+    /// Lists the folders in `request.path` once, on a new worker thread, for a node of the
+    /// folder tree; returns at once, so it may be called on the UI thread.
+    ///
+    /// The worker sends one `Listed` with the folders alone (no file, no link), sorted by
+    /// `request.sort`, or one `Failed`, and ends: it starts no watch and reads no free space.
+    /// `sink` is called as for [`Loader::request`], and the ticket stops the listing the same
+    /// way.
+    pub fn list_folders(
+        &self,
+        request: LoadRequest,
+        sink: impl FnMut(LoadEvent) + Send + 'static,
+    ) -> LoadTicket {
+        self.start(request, Mode::Folders, sink)
+    }
+
+    /// Starts the worker of `request`, doing the work `mode` names.
+    fn start(
+        &self,
+        request: LoadRequest,
+        mode: Mode,
+        sink: impl FnMut(LoadEvent) + Send + 'static,
+    ) -> LoadTicket {
         let shared = Arc::new(Mutex::new(Shared {
             sink: Some(Box::new(sink)),
             watch: None,
@@ -120,6 +146,7 @@ impl Loader {
         };
         let worker = Worker {
             vfs: self.vfs.clone(),
+            mode,
             cancel: ticket.cancel.clone(),
             shared,
         };
@@ -297,9 +324,19 @@ fn emit(shared: &Mutex<Shared>, event: LoadEvent) {
     }
 }
 
+/// What a worker does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// A tab's folder ([`Loader::request`]): the watch, the listing and the free space.
+    Live,
+    /// A tree node's folders ([`Loader::list_folders`]): the listing of the folders alone.
+    Folders,
+}
+
 /// The worker thread's part of one request.
 struct Worker {
     vfs: Vfs,
+    mode: Mode,
     cancel: CancelToken,
     shared: Arc<Mutex<Shared>>,
 }
@@ -318,16 +355,29 @@ impl Worker {
                 return emit(&self.shared, LoadEvent::Failed { generation, kind });
             }
         };
-        let watchable = provider.capabilities(&path).contains(Capabilities::WATCH);
-        if self.cancel.is_cancelled() {
-            return;
-        }
-        if watchable {
-            self.start_watch(provider.as_ref(), &path, generation);
+        let live = self.mode == Mode::Live;
+        if live {
+            let watchable = provider.capabilities(&path).contains(Capabilities::WATCH);
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            if watchable {
+                self.start_watch(provider.as_ref(), &path, generation);
+            }
         }
 
         let mut entries = Vec::new();
-        let listed = provider.list(&path, &self.cancel, &mut |batch| entries.extend(batch));
+        let listed = provider.list(&path, &self.cancel, &mut |batch| {
+            if live {
+                entries.extend(batch);
+            } else {
+                entries.extend(
+                    batch
+                        .into_iter()
+                        .filter(|entry| entry.kind == EntryKind::Dir),
+                );
+            }
+        });
         if self.cancel.is_cancelled() {
             return;
         }
@@ -347,7 +397,7 @@ impl Worker {
             },
         );
 
-        if self.cancel.is_cancelled() {
+        if !live || self.cancel.is_cancelled() {
             return;
         }
         if let Ok(Some(space)) = provider.space(&path) {

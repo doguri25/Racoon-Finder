@@ -1,141 +1,234 @@
-// The sidebar: the user's folders under "즐겨찾기", the drives under "이 PC".
+// The sidebar: the shared folder tree. Its roots are the places, the user's folders under
+// "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
+// it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
+// scrolls as freely as one with a few.
 
-import { ScrollView } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 
-// One place. A drive has a space line (`info`) and a bar filled to its used share (`fill`,
-// 0..1); a favorite has neither.
-export struct PlaceRow {
-    label: string,
-    info: string,
-    fill: float,
-    is-drive: bool,
+// The head above a row: the first favorite starts "즐겨찾기", the first drive "이 PC".
+export enum SectionHead {
+    none,
+    favorites,
+    drives,
 }
 
-component SectionHead inherits Rectangle {
-    in property <string> text;
+// One row of the tree, as Rust makes it. A place (a root) is a favorite or a drive; a drive
+// has a space line (`info`) and a bar filled to its used share (`fill`, 0..1).
+export struct TreeRow {
+    label: string,
+    // 0 for a place, one more for each folder below it.
+    depth: int,
+    head: SectionHead,
+    is-place: bool,
+    is-drive: bool,
+    info: string,
+    fill: float,
+    // The row has folders below it, or may have (not listed yet): it shows a chevron.
+    expandable: bool,
+    expanded: bool,
+    // The folder of the active pane.
+    selected: bool,
+}
 
-    accessible-role: AccessibleRole.text;
-    accessible-label: root.text;
+component TreeItem inherits Rectangle {
+    in property <TreeRow> item;
+    in property <int> index;
+    // A click on the row.
+    callback clicked();
+    // A click on the chevron.
+    callback toggled();
 
-    Text {
-        x: 10px;
-        y: parent.height - self.height - 4px;
-        accessible-role: none;
-        text: root.text;
+    // The head takes more room above the drives, which come after the favorites.
+    private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
+    private property <length> indent: root.item.depth * 16px;
+
+    height: root.head-height + (root.item.is-drive ? 56px : Theme.row-height);
+
+    if root.item.head != SectionHead.none: Text {
+        x: 18px;
+        y: root.head-height - self.height - 4px;
+        text: root.item.head == SectionHead.favorites ? "즐겨찾기" : "이 PC";
         font-size: Theme.font-small;
         font-weight: 700;
         color: Theme.muted;
     }
-}
 
-component PlaceButton inherits Rectangle {
-    in property <PlaceRow> place;
-    callback clicked();
-
-    min-height: root.place.is-drive ? 56px : 34px;
-    border-radius: Theme.radius;
-    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
-    accessible-role: button;
-    accessible-label: root.place.label;
-    accessible-description: root.place.info;
-    accessible-action-default => {
-        root.clicked();
-    }
-
-    touch := TouchArea {
-        clicked => {
+    Rectangle {
+        x: 8px;
+        y: root.head-height;
+        width: parent.width - 16px;
+        height: parent.height - root.head-height;
+        border-radius: Theme.radius;
+        background: root.item.selected ? Theme.selection : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+        accessible-role: list-item;
+        accessible-label: root.item.label;
+        accessible-description: root.item.info;
+        accessible-item-index: root.index;
+        accessible-item-selectable: true;
+        accessible-item-selected: root.item.selected;
+        accessible-expandable: root.item.expandable;
+        accessible-expanded: root.item.expanded;
+        accessible-action-default => {
             root.clicked();
         }
-    }
-
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 10px;
-
-        Icon {
-            y: (parent.height - self.height) / 2;
-            width: 18px;
-            height: 18px;
-            name: root.place.is-drive ? "drive" : "folder";
-            color: root.place.is-drive ? Theme.text : Theme.folder;
+        // Opens the row, or closes it when it is open.
+        accessible-action-expand => {
+            root.toggled();
         }
-        VerticalLayout {
-            alignment: center;
-            spacing: 4px;
 
-            Text {
-                accessible-role: none;
-                text: root.place.label;
-                color: Theme.text;
-                overflow: elide;
+        touch := TouchArea {
+            clicked => {
+                root.clicked();
             }
-            if root.place.is-drive: Rectangle {
-                height: 4px;
-                border-radius: 2px;
-                background: Theme.border;
 
-                Rectangle {
-                    x: 0;
-                    width: parent.width * clamp(root.place.fill, 0, 1);
-                    border-radius: 2px;
-                    background: Theme.accent;
+            // The chevron takes its own clicks: it only opens or closes the row. Inside the
+            // row's area, so that the row keeps its hover.
+            TouchArea {
+                x: root.indent;
+                width: 24px;
+                enabled: root.item.expandable;
+                clicked => {
+                    root.toggled();
                 }
             }
-            if root.place.is-drive && root.place.info != "": Text {
-                accessible-role: none;
-                text: root.place.info;
-                font-size: Theme.font-small;
-                color: Theme.muted;
-                overflow: elide;
+        }
+
+        if root.item.expandable: Icon {
+            x: 4px + root.indent;
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            name: root.item.expanded ? "chevron-down" : "chevron-right";
+            color: Theme.muted;
+        }
+
+        HorizontalLayout {
+            x: 24px + root.indent;
+            width: parent.width - self.x;
+            padding-right: 10px;
+            spacing: 10px;
+
+            Icon {
+                y: (parent.height - self.height) / 2;
+                width: 18px;
+                height: 18px;
+                name: root.item.is-drive ? "drive" : "folder";
+                color: root.item.is-drive ? Theme.text : Theme.folder;
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+
+                Text {
+                    accessible-role: none;
+                    text: root.item.label;
+                    color: Theme.text;
+                    font-weight: root.item.selected ? 600 : 400;
+                    overflow: elide;
+                }
+                if root.item.is-drive: Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.border;
+
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * clamp(root.item.fill, 0, 1);
+                        border-radius: 2px;
+                        background: Theme.accent;
+                    }
+                }
+                if root.item.is-drive && root.item.info != "": Text {
+                    accessible-role: none;
+                    text: root.item.info;
+                    font-size: Theme.font-small;
+                    color: Theme.muted;
+                    overflow: elide;
+                }
             }
         }
     }
 }
 
 export component Sidebar inherits Rectangle {
-    // The favorites first, then the drives.
-    in property <[PlaceRow]> places;
-    callback place-clicked(index: int);
+    // The places and the folders open below them, in order.
+    in property <[TreeRow]> rows;
+    // A click on row `index`: show its folder in the active pane.
+    callback row-clicked(index: int);
+    // A click on the chevron of row `index`: open or close it.
+    callback row-toggled(index: int);
+
+    // Scrolls row `index` to the middle of the list, unless it shows already.
+    //
+    // The rows differ in height (a place with a head or a space bar is taller), and the list
+    // places the rows it has not drawn by their average height, which it measures again each
+    // time it lays the rows out: right after rows came, it still has the old average. So the
+    // row stays the one to show until the list has settled (`settle`) or the user scrolls, and
+    // each new measure (`content-height`) brings it into view again. The middle, and a row's
+    // margin at the edges, leave room for the average to be off by a few rows.
+    public function scroll-to(index: int) {
+        root.scroll-target = index;
+        root.bring-into-view();
+        settle.restart();
+    }
+
+    // The row `scroll-to` brings into view while the list settles; -1 for none.
+    private property <int> scroll-target: -1;
+
+    function bring-into-view() {
+        if (root.scroll-target < 0 || root.scroll-target >= root.rows.length) {
+            return;
+        }
+        let row-height = list.content-height / root.rows.length;
+        let top = root.scroll-target * row-height + list.content-y;
+        if (top >= row-height && top + 2 * row-height <= list.visible-height) {
+            return;
+        }
+        let middle = list.visible-height / 2 - root.scroll-target * row-height - row-height / 2;
+        list.content-y = max(min(list.visible-height - list.content-height, 0), min(0, middle));
+    }
 
     background: Theme.panel;
     border-width: 1px;
     border-color: Theme.border;
     border-radius: Theme.radius-large;
+    clip: true;
     accessible-role: groupbox;
-    accessible-label: "장소";
+    accessible-label: "폴더 트리";
 
-    ScrollView {
+    list := ListView {
         x: 1px;
-        y: 1px;
+        y: 8px;
         width: parent.width - 2px;
-        height: parent.height - 2px;
+        height: parent.height - 16px;
+        accessible-label: "폴더 트리";
+        changed content-height => {
+            root.bring-into-view();
+        }
+        scrolled => {
+            root.scroll-target = -1;
+        }
 
-        VerticalLayout {
-            padding-left: 8px;
-            padding-right: 8px;
-            padding-top: 12px;
-            padding-bottom: 12px;
-            spacing: 2px;
-            alignment: start;
-
-            for place[i] in root.places: VerticalLayout {
-                spacing: 2px;
-
-                // A head before the first favorite and before the first drive.
-                if i == 0 || place.is-drive != root.places[i - 1].is-drive: SectionHead {
-                    height: place.is-drive && i > 0 ? 36px : 24px;
-                    text: place.is-drive ? "이 PC" : "즐겨찾기";
-                }
-                PlaceButton {
-                    place: place;
-                    clicked => {
-                        root.place-clicked(i);
-                    }
-                }
+        for row[i] in root.rows: TreeItem {
+            item: row;
+            index: i;
+            clicked => {
+                root.row-clicked(i);
             }
+            toggled => {
+                root.row-toggled(i);
+            }
+        }
+    }
+
+    settle := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            root.scroll-target = -1;
+            self.stop();
         }
     }
 }

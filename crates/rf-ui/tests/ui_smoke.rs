@@ -5,14 +5,17 @@ use std::rc::Rc;
 
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
 use rf_core::{Entry, EntryKind, VPath};
+use rf_platform::{DiskSpace, KnownFolder};
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
+use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::ui_bridge::{FileRows, PaneModels};
-use rf_ui::{MainWindow, PaneView, PlaceRow, Theme};
+use rf_ui::tree::Tree;
+use rf_ui::ui_bridge::{FileRows, PaneModels, TreeRows};
+use rf_ui::{MainWindow, PaneView, Theme};
 use rf_vfs::VisibilityFilter;
 use slint::platform::{Key, WindowEvent};
-use slint::{Color, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
+use slint::{Color, ComponentHandle, LogicalSize, Model, ModelRc};
 
 /// A shown main window at the default size, on the testing backend.
 fn window() -> MainWindow {
@@ -264,31 +267,95 @@ fn sort_header_invokes_callback() {
 }
 
 #[test]
-fn places_show_in_the_sidebar() {
+fn the_tree_shows_places_and_folders() {
+    const GB: u64 = 1 << 30;
     let window = window();
-    let clicked = Rc::new(RefCell::new(None));
-    let record = Rc::clone(&clicked);
-    window.on_place_clicked(move |i| *record.borrow_mut() = Some(i));
-    window.set_places(ModelRc::new(VecModel::from(vec![
-        PlaceRow {
-            label: "홈".into(),
-            ..PlaceRow::default()
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_tree_clicked(move |i| record.borrow_mut().push(("clicked", i)));
+    let record = Rc::clone(&calls);
+    window.on_tree_toggled(move |i| record.borrow_mut().push(("toggled", i)));
+
+    let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
+    let disk = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+    let places = [
+        Place {
+            label: "홈".to_owned(),
+            path: home.clone(),
+            kind: PlaceKind::Favorite(KnownFolder::Home),
+            space: None,
         },
-        PlaceRow {
-            label: "시스템 디스크".into(),
-            info: "128 GB 남음 / 512 GB".into(),
-            fill: 0.75,
-            is_drive: true,
+        Place {
+            label: "시스템 디스크".to_owned(),
+            path: disk,
+            kind: PlaceKind::Drive,
+            space: Some(DiskSpace {
+                total: 512 * GB,
+                free: 130 * GB,
+                available: 128 * GB,
+            }),
         },
-    ])));
+    ];
+    let mut tree = Tree::new(false);
+    tree.set_roots(
+        places
+            .iter()
+            .map(|place| (place.label.clone(), place.path.clone())),
+    );
+    let rows = Rc::new(TreeRows::default());
+    rows.sync(&tree, &places);
+    window.set_tree(ModelRc::from(Rc::clone(&rows)));
 
     assert_eq!(labelled(&window, "즐겨찾기", AccessibleRole::Text).len(), 1);
     assert_eq!(labelled(&window, "이 PC", AccessibleRole::Text).len(), 1);
-    let drive = labelled(&window, "시스템 디스크", AccessibleRole::Button);
+    let drive = labelled(&window, "시스템 디스크", AccessibleRole::ListItem);
     assert_eq!(
         drive[0].accessible_description().as_deref(),
         Some("128 GB 남음 / 512 GB")
     );
+    assert_eq!(drive[0].accessible_expandable(), Some(true));
+    assert_eq!(drive[0].accessible_expanded(), Some(false));
+    // A click shows the row's folder; the chevron (the expand action) opens the row.
     drive[0].invoke_accessible_default_action();
-    assert_eq!(*clicked.borrow(), Some(1));
+    labelled(&window, "홈", AccessibleRole::ListItem)[0].invoke_accessible_expand_action();
+    assert_eq!(calls.borrow().as_slice(), [("clicked", 1), ("toggled", 0)]);
+
+    // Home opens and its folders come into the list, the pane's folder selected, without a
+    // new model.
+    let request = tree.toggle(0).expect("home is listed");
+    tree.apply_children(
+        request.generation,
+        vec![
+            Entry::new("a", EntryKind::Dir),
+            Entry::new("b", EntryKind::Dir),
+        ],
+    );
+    tree.reveal(&home.join("b").expect("a plain name"));
+    rows.sync(&tree, &places);
+    let mut drawn: Vec<(usize, String, bool)> = window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all()
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row.accessible_item_index()?,
+                row.accessible_label()?.into(),
+                row.accessible_item_selected()?,
+            ))
+        })
+        .collect();
+    drawn.sort();
+    assert_eq!(
+        drawn,
+        [
+            (0, "홈".to_owned(), false),
+            (1, "a".to_owned(), false),
+            (2, "b".to_owned(), true),
+            (3, "시스템 디스크".to_owned(), false),
+        ]
+    );
+    let home_row = labelled(&window, "홈", AccessibleRole::ListItem);
+    assert_eq!(home_row[0].accessible_expanded(), Some(true));
 }

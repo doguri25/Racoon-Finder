@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use rf_core::VPath;
 use rf_platform::KnownFolder;
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc};
 
 use crate::keys::{self, Command, Mods};
 use crate::loader::{LoadEvent, LoadTicket, Loader};
 use crate::places::{self, Place};
 use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
-use crate::ui_bridge::{self, PaneModels, post};
-use crate::{MainWindow, PlaceRow, open, words};
+use crate::ui_bridge::{self, PaneModels, TreeRows, post};
+use crate::{MainWindow, open, words};
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -67,7 +67,7 @@ pub fn begin(window: &MainWindow, start: Option<PathBuf>) -> Rc<Controller> {
     spawn_worker("rf-ui-places", || {
         let mut found = places::favorites();
         found.extend(places::drives());
-        post(move |c| c.set_places(found));
+        post(move |c| c.set_places(&found));
     });
     controller
 }
@@ -144,8 +144,11 @@ fn connect(window: &MainWindow) {
     window.on_retry(|s| {
         with(|c| c.update(|state| state.retry(side(s))));
     });
-    window.on_place_clicked(|i| {
-        with(|c| c.open_place(i));
+    window.on_tree_clicked(|i| {
+        with(|c| c.update_at(i, AppState::open_tree_row));
+    });
+    window.on_tree_toggled(|i| {
+        with(|c| c.update_at(i, AppState::toggle_tree_row));
     });
 }
 
@@ -156,10 +159,11 @@ pub struct Controller {
     loader: Loader,
     /// `None` until the folders to start at are known.
     state: RefCell<Option<AppState>>,
-    /// The running loads, by the generation of their request.
+    /// The running loads of the tabs and the tree, by the generation of their request.
     tickets: RefCell<HashMap<u64, LoadTicket>>,
+    /// The sidebar's places, the roots of the tree, once found.
     places: RefCell<Vec<Place>>,
-    place_rows: Rc<VecModel<PlaceRow>>,
+    tree_rows: Rc<TreeRows>,
     panes: [PaneModels; 2],
     /// The tab (its position) and folder each pane showed at the last redraw: a pane that
     /// shows another folder or tab scrolls to its cursor, or its top.
@@ -177,43 +181,41 @@ impl fmt::Debug for Controller {
 
 impl Controller {
     fn new(window: &MainWindow) -> Controller {
-        let place_rows = Rc::new(VecModel::default());
-        window.set_places(ModelRc::from(Rc::clone(&place_rows)));
+        let tree_rows = Rc::new(TreeRows::default());
+        window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
             state: RefCell::new(None),
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
-            place_rows,
+            tree_rows,
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
         }
     }
 
-    /// Shows `left` and `right` in the panes, with dates in `tz`, once they are known.
+    /// Shows `left` and `right` in the panes, with dates in `tz`, once they are known, and the
+    /// tree of the places if they came first.
     fn open(&self, left: VPath, right: VPath, home: Option<VPath>, tz: &jiff::tz::TimeZone) {
         for pane in &self.panes {
             pane.set_time_zone(tz.clone());
         }
-        let (state, effects) = AppState::new(left, right, home);
+        let (mut state, mut effects) = AppState::new(left, right, home);
+        let places = self.places.borrow().clone();
+        if !places.is_empty() {
+            effects.extend(state.set_places(&places));
+        }
+        effects.extend(state.follow_active());
         *self.state.borrow_mut() = Some(state);
         self.apply(effects);
     }
 
-    fn set_places(&self, found: Vec<Place>) {
-        ui_bridge::set_rows(
-            &self.place_rows,
-            found.iter().map(ui_bridge::place_row).collect(),
-        );
-        *self.places.borrow_mut() = found;
-    }
-
-    fn open_place(&self, i: i32) {
-        let folder = index(i).and_then(|i| Some(self.places.borrow().get(i)?.path.clone()));
-        if let Some(folder) = folder {
-            self.update(|state| state.go_to(folder));
-        }
+    /// Makes `found` the places of the sidebar: the roots of the tree, now or once the panes'
+    /// folders are known.
+    fn set_places(&self, found: &[Place]) {
+        found.clone_into(&mut self.places.borrow_mut());
+        self.update(|state| state.set_places(found));
     }
 
     /// A key; `true` when the window used it.
@@ -256,14 +258,17 @@ impl Controller {
         });
     }
 
-    /// Changes the state with `f`, then carries out what it returns and redraws.
+    /// Changes the state with `f`, lets the tree follow the active pane, then carries out what
+    /// both return and redraws.
     fn update(&self, f: impl FnOnce(&mut AppState) -> Vec<Effect>) {
         let effects = {
             let mut state = self.state.borrow_mut();
             let Some(state) = state.as_mut() else {
                 return;
             };
-            f(state)
+            let mut effects = f(state);
+            effects.extend(state.follow_active());
+            effects
         };
         self.apply(effects);
     }
@@ -286,6 +291,13 @@ impl Controller {
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
+                        post(move |c| c.loaded(event));
+                    });
+                    self.tickets.borrow_mut().insert(generation, ticket);
+                }
+                Effect::LoadChildren(request) => {
+                    let generation = request.generation;
+                    let ticket = self.loader.list_folders(request, |event| {
                         post(move |c| c.loaded(event));
                     });
                     self.tickets.borrow_mut().insert(generation, ticket);
@@ -317,7 +329,10 @@ impl Controller {
                 } => slint::Timer::single_shot(after, move || {
                     with(|c| c.update(|state| state.reload_due(generation, &path, Instant::now())));
                 }),
-                Effect::Notice(_) | Effect::EditPath(_) | Effect::ScrollTo { .. } => {
+                Effect::Notice(_)
+                | Effect::EditPath(_)
+                | Effect::ScrollTo { .. }
+                | Effect::ScrollTree(_) => {
                     on_screen.push(effect);
                 }
             }
@@ -334,8 +349,14 @@ impl Controller {
                     }
                 }
                 Effect::ScrollTo { side, row } => self.scroll_to(side, row),
+                Effect::ScrollTree(row) => {
+                    if let Some(window) = self.window.upgrade() {
+                        window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
+                    }
+                }
                 // Carried out above.
                 Effect::Load(_)
+                | Effect::LoadChildren(_)
                 | Effect::FindExisting { .. }
                 | Effect::Follow { .. }
                 | Effect::ReloadLater { .. }
@@ -377,7 +398,7 @@ impl Controller {
         }
     }
 
-    /// Shows the state: both panes, and the toolbar's buttons for the active one.
+    /// Shows the state: both panes, the toolbar's buttons for the active one, and the tree.
     fn redraw(&self) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -408,6 +429,7 @@ impl Controller {
             window.set_can_back(tab.history().can_back());
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
+            self.tree_rows.sync(state.tree(), &self.places.borrow());
         }
         for (side, row) in scrolls {
             self.scroll_to(side, row);
