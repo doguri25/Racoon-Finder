@@ -800,6 +800,7 @@ impl Controller {
             "redo" => Command::Redo,
             "toggle-hidden" => Command::ToggleHidden,
             "toggle-tree" => Command::ToggleTree,
+            "focus-tree" => Command::FocusTree,
             "toggle-preview" => Command::TogglePreview,
             "toggle-dual" => Command::ToggleDualPane,
             "toggle-split" => Command::ToggleSplit,

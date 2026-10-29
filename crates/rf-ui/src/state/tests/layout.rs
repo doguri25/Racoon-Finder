@@ -350,3 +350,224 @@ fn the_layout_comes_from_the_session_and_goes_back_into_it() {
     press(&mut state, &special(Key::F9), SHIFT);
     assert_eq!(state.session().layout, layout);
 }
+
+fn in_c(name: &str) -> VPath {
+    folder("c").join(name).expect("a plain name")
+}
+
+/// A window whose left pane at `a` holds the folders x and y, and whose right pane has just
+/// gone to `c`, whose listing (the returned request) has not come yet. Sync is on.
+fn synced_waiting() -> (AppState, LoadRequest) {
+    let mut state = ready(vec![dir("x"), dir("y")], vec![file("g")]);
+    state.activate(RIGHT);
+    let waiting = the_load(&state.go_to(folder("c")));
+    state.activate(LEFT);
+    press(&mut state, &special(Key::F9), SHIFT);
+    assert!(state.syncing());
+    (state, waiting)
+}
+
+fn notices(effects: &[Effect]) -> Vec<&str> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Notice(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn sync_waits_for_the_other_pane_s_listing_before_it_decides() {
+    let (mut state, waiting) = synced_waiting();
+
+    // Enter on x: the left pane goes into it; the right one has no rows to look in yet.
+    let effects = state.open_row(LEFT, 0);
+    assert_eq!(listed(&effects), [in_a("x")]);
+    assert_eq!(notices(&effects), Vec::<&str>::new());
+    assert!(state.syncing());
+
+    // Its listing comes with x: the right pane goes into it.
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x"), file("h")],
+    });
+    assert_eq!(listed(&effects), [in_c("x")]);
+    assert_eq!(shown(&state, RIGHT), in_c("x"));
+    assert!(state.syncing());
+}
+
+#[test]
+fn folders_entered_while_the_other_pane_lists_are_entered_there_in_turn() {
+    let (mut state, waiting) = synced_waiting();
+    let into_x = the_load(&state.open_row(LEFT, 0));
+    list(&mut state, &into_x, vec![dir("y")]);
+    let into_y = state.open_row(LEFT, 0);
+    assert_eq!(listed(&into_y), [in_a("x").join("y").expect("a name")]);
+
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x")],
+    });
+    let next = the_load(&effects);
+    assert_eq!(next.path, in_c("x"));
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: next.generation,
+        entries: vec![dir("y")],
+    });
+    assert_eq!(listed(&effects), [in_c("x").join("y").expect("a name")]);
+    assert!(state.syncing());
+}
+
+#[test]
+fn sync_turns_off_when_the_listing_it_waited_for_lacks_the_folder() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("other")],
+    });
+
+    assert_eq!(notices(&effects), [words::sync_no_folder("x")]);
+    assert!(!state.syncing());
+    assert_eq!(shown(&state, RIGHT), folder("c"));
+
+    // A listing that fails cannot be followed either.
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let effects = state.loaded(LoadEvent::Failed {
+        generation: waiting.generation,
+        kind: ErrorKind::NotFound,
+    });
+    assert_eq!(notices(&effects), [words::sync_cannot_follow()]);
+    assert!(!state.syncing());
+}
+
+#[test]
+fn a_move_of_the_other_pane_drops_the_decision_sync_waited_to_make() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+
+    // The user takes the right pane to its root before its listing comes.
+    let root = ancestors(&folder("c")).remove(0);
+    let moved = the_load(&state.open_crumb(RIGHT, 0));
+    assert_eq!(moved.path, root);
+
+    // The old listing is late, and the new one is no answer: nothing is entered.
+    assert_eq!(
+        state.loaded(LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("x")],
+        }),
+        []
+    );
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: moved.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(listed(&effects), Vec::<VPath>::new());
+    assert_eq!(notices(&effects), Vec::<&str>::new());
+    assert_eq!(shown(&state, RIGHT), root);
+    assert!(state.syncing());
+}
+
+#[test]
+fn up_or_back_while_the_other_pane_waits_undoes_the_entry_there_too() {
+    for key in [Key::UpArrow, Key::LeftArrow] {
+        let (mut state, waiting) = synced_waiting();
+        let _ = state.open_row(LEFT, 0);
+
+        let effects = press(&mut state, &special(key), ALT).expect("a shortcut");
+
+        assert_eq!(listed(&effects), [folder("a")], "{key:?}");
+        assert_eq!(notices(&effects), Vec::<&str>::new());
+        assert_eq!(
+            state.loaded(LoadEvent::Listed {
+                generation: waiting.generation,
+                entries: vec![dir("x")],
+            }),
+            []
+        );
+        assert_eq!(shown(&state, RIGHT), folder("c"));
+        assert!(state.syncing());
+    }
+}
+
+#[test]
+fn turning_sync_off_drops_the_decision_it_waited_to_make() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    press(&mut state, &special(Key::F9), SHIFT);
+    assert!(!state.syncing());
+    press(&mut state, &special(Key::F9), SHIFT);
+
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x")],
+    });
+
+    assert_eq!(effects, []);
+    assert_eq!(shown(&state, RIGHT), folder("c"));
+}
+
+#[test]
+fn sync_takes_a_folder_that_differs_in_case_alone_where_the_system_ignores_case() {
+    let mut state = ready(vec![dir("Docs")], vec![dir("docs"), dir("other")]);
+    press(&mut state, &special(Key::F9), SHIFT);
+
+    let effects = state.open_row(LEFT, 0);
+
+    if Os::CURRENT == Os::Other {
+        assert_eq!(listed(&effects), [in_a("Docs")]);
+        assert!(!state.syncing());
+    } else {
+        assert_eq!(listed(&effects), [in_a("Docs"), in_b("docs")]);
+        assert!(state.syncing());
+    }
+}
+
+#[test]
+fn the_folder_of_the_same_name_is_the_exact_one_or_the_only_one_in_another_case() {
+    use super::super::layout::same_folder;
+    let entries = vec![dir("Docs"), dir("docs"), dir("Music"), file("notes")];
+    for os in [Os::Windows, Os::MacOs, Os::Other] {
+        // The very name first, whatever the system.
+        assert_eq!(
+            same_folder(&entries, "docs".as_ref(), os),
+            Some("docs".as_ref())
+        );
+        assert_eq!(
+            same_folder(&entries, "Docs".as_ref(), os),
+            Some("Docs".as_ref())
+        );
+        // A file is no folder.
+        assert_eq!(same_folder(&entries, "notes".as_ref(), os), None);
+    }
+    for os in [Os::Windows, Os::MacOs] {
+        assert_eq!(
+            same_folder(&entries, "music".as_ref(), os),
+            Some("Music".as_ref())
+        );
+        // Two that differ in case alone: neither is taken.
+        assert_eq!(same_folder(&entries, "DOCS".as_ref(), os), None);
+    }
+    assert_eq!(same_folder(&entries, "music".as_ref(), Os::Other), None);
+}
+
+#[test]
+fn with_one_pane_the_commands_for_the_hidden_one_only_say_so() {
+    let mut state = ready(vec![dir("x")], vec![file("z")]);
+    press(&mut state, &special(Key::F9), SHIFT);
+
+    // One pane: sync goes off, as the other pane does not show.
+    let effects = press(&mut state, &special(Key::F12), NONE).expect("a shortcut");
+    assert_eq!(effects, [Effect::Notice(words::sync_off().to_owned())]);
+    assert!(!state.syncing());
+
+    let one_pane = Some(vec![Effect::Notice(words::one_pane_only().to_owned())]);
+    assert_eq!(press(&mut state, &special(Key::F9), NONE), one_pane);
+    assert_eq!(shown(&state, RIGHT), folder("b"));
+    assert_eq!(press(&mut state, &special(Key::F9), SHIFT), one_pane);
+    assert!(!state.syncing());
+}

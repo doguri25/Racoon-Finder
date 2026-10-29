@@ -5,10 +5,11 @@ use std::ffi::OsStr;
 /// `name` folded for a comparison that ignores case: the lowercase of its lossy text.
 ///
 /// This is the one place where the crate folds names: the case-only rename guard and the watch
-/// check for one file reported under two names both go through it. Unicode normalization (NFC,
+/// check for one file reported under two names both go through it, and so does the UI's
+/// navigation sync when it looks for a folder of the same name. Unicode normalization (NFC,
 /// so that the NFC and NFD spellings APFS treats as one name fold alike) belongs here when
 /// I18N-04 adds it.
-pub(crate) fn fold_name(name: &OsStr) -> String {
+pub fn fold_name(name: &OsStr) -> String {
     name.to_string_lossy().to_lowercase()
 }
 

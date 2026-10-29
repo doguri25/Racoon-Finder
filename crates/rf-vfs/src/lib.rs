@@ -13,6 +13,7 @@ pub mod watch;
 pub use cancel::CancelToken;
 pub use filter::VisibilityFilter;
 pub use local::LocalProvider;
+pub use names::fold_name;
 pub use provider::{
     Capabilities, DeleteMode, Deleted, LIST_BATCH_SIZE, LinkTarget, MetadataPatch, Provider,
     ReadStream, RenameMode, WriteMode, WriteStream,

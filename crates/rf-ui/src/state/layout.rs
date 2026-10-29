@@ -6,25 +6,31 @@
 //! shows (LAY-03 a and c), and the preview panel's place (LAY-06). The settings keep it.
 //!
 //! The commands between the panes (LAY-05): swapping their tab sets, opening the active
-//! pane's folder in the other one, and navigation sync. Sync starts off at every start; while
-//! it is on, four moves of the active pane are made in the tab the other pane shows too:
+//! pane's folder in the other one, and navigation sync. The last two act on the other pane, so
+//! with one pane they only say they cannot be used, and going to one pane turns sync off. Sync
+//! starts off at every start; while it is on, four moves of the active pane are made in the tab
+//! the other pane shows too:
 //!
 //! - opening a folder of the list (Enter, a double click, 열기): the other pane opens the
-//!   folder of the same name (the same spelling) among its rows, hidden ones too;
+//!   folder of the same name among its rows, hidden ones too ([`same_folder`]). While the
+//!   other pane's listing is on its way, the decision waits for it ([`SyncWait`]); further
+//!   folders opened meanwhile are opened there in turn, and Up or Back undoes the last of them;
 //! - Up, Back and Forward: the other pane makes the same move from where it is.
 //!
-//! When the other pane cannot follow (no folder of that name among its rows, a root to go up
-//! from, nothing to go back or forward to), sync turns off and a notice says why; the active
-//! pane moves all the same. Any other move (a piece of the path row, a typed path, the tree, a
-//! link, another tab) moves the active pane alone, and sync stays on.
+//! When the other pane cannot follow (no folder of that name among its rows, a listing that
+//! failed, a root to go up from, nothing to go back or forward to), sync turns off and a notice
+//! says why; the active pane moves all the same. Any other move (a piece of the path row, a
+//! typed path, the tree, a link, another tab) moves the active pane alone, and sync stays on;
+//! a move of the other pane drops a decision that waits for its listing.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 
-use rf_core::EntryKind;
+use rf_core::{Entry, EntryKind, Os};
+use rf_vfs::fold_name;
 
-use super::{AppState, Effect, RIGHT};
+use super::{AppState, Effect, LEFT, RIGHT};
 use crate::loader::LoadRequest;
-use crate::pane::Tab;
+use crate::pane::{LoadStatus, Tab};
 use crate::words;
 
 /// The least share of the room the divider leaves the first pane (the left or top one).
@@ -119,9 +125,13 @@ impl AppState {
         self.layout.set_share(share);
     }
 
-    /// F12: one pane or two. The pane with the keyboard is the one that stays.
+    /// F12: one pane or two. The pane with the keyboard is the one that stays; sync, which
+    /// moves the other one, turns off.
     pub(super) fn toggle_dual(&mut self) -> Vec<Effect> {
         self.layout.dual = !self.layout.dual;
+        if !self.layout.dual && self.sync {
+            return self.stop_sync(words::sync_off().to_owned());
+        }
         Vec::new()
     }
 
@@ -153,63 +163,204 @@ impl AppState {
     /// listing; the keyboard stays on its side, which shows the other set now. With one pane,
     /// it shows the hidden pane's tabs.
     pub(super) fn swap_panes(&mut self) -> Vec<Effect> {
-        self.panes.swap(super::LEFT, RIGHT);
+        self.panes.swap(LEFT, RIGHT);
         // A press waiting for its release names a row of the pane it was on.
         self.pending_click = None;
         Vec::new()
     }
 
-    /// The tab the other pane shows goes to the active pane's folder.
+    /// The tab the other pane shows goes to the active pane's folder. With one pane, a notice
+    /// says it cannot be used.
     pub(super) fn same_folder_in_other(&mut self, side: usize) -> Vec<Effect> {
+        if !self.layout.dual {
+            return one_pane_only();
+        }
         let here = self.tab(side).location().clone();
         vec![Effect::Load(self.tab_mut(RIGHT - side).navigate(here))]
     }
 
-    /// Shift+F9: navigation sync on or off, and a notice that says which.
+    /// Shift+F9: navigation sync on or off, and a notice that says which. With one pane, a
+    /// notice says it cannot be used.
     pub(super) fn toggle_sync(&mut self) -> Vec<Effect> {
-        self.sync = !self.sync;
-        let text = if self.sync {
-            words::sync_on()
-        } else {
-            words::sync_off()
-        };
-        vec![Effect::Notice(text.to_owned())]
+        if self.sync {
+            return self.stop_sync(words::sync_off().to_owned());
+        }
+        if !self.layout.dual {
+            return one_pane_only();
+        }
+        self.sync = true;
+        vec![Effect::Notice(words::sync_on().to_owned())]
+    }
+
+    /// Turns sync off, dropping what it waits to do, with the notice `text`.
+    fn stop_sync(&mut self, text: String) -> Vec<Effect> {
+        self.sync = false;
+        self.sync_wait = None;
+        vec![Effect::Notice(text)]
     }
 
     /// Pane `side` has just opened its folder `name`: with sync on, the other pane opens its
-    /// folder of that name, or sync turns off when its rows have none.
+    /// folder of that name, or sync turns off when its rows have none. While the other pane's
+    /// listing is on its way, that waits for it ([`AppState::sync_listed`]).
     pub(super) fn sync_open(&mut self, side: usize, name: &OsStr) -> Vec<Effect> {
         if !self.sync {
             return Vec::new();
         }
-        let other = self.tab_mut(RIGHT - side);
-        let has = other
-            .all()
-            .iter()
-            .any(|entry| entry.kind == EntryKind::Dir && entry.name == name);
-        if let (true, Ok(folder)) = (has, other.location().join(name)) {
-            return vec![Effect::Load(other.navigate(folder))];
+        let other = RIGHT - side;
+        let (generation, status) = {
+            let tab = self.tab(other);
+            (tab.generation(), tab.status())
+        };
+        if let Some(wait) = self
+            .sync_wait
+            .as_mut()
+            .filter(|wait| wait.generation == generation)
+        {
+            wait.names.push(name.to_os_string());
+            return Vec::new();
         }
-        self.sync = false;
-        vec![Effect::Notice(words::sync_no_folder(
-            &name.to_string_lossy(),
-        ))]
+        if status == LoadStatus::Loading {
+            self.sync_wait = Some(SyncWait {
+                generation,
+                names: vec![name.to_os_string()],
+            });
+            return Vec::new();
+        }
+        self.sync_enter(other, name, Vec::new())
     }
 
-    /// Pane `side` has just made the move `step` (Up, Back, Forward): with sync on, the other
-    /// pane makes it too, or sync turns off when it cannot.
-    pub(super) fn sync_step(
-        &mut self,
-        side: usize,
-        step: fn(&mut Tab) -> Option<LoadRequest>,
-    ) -> Vec<Effect> {
+    /// The listing of request `generation` has come, or failed: when sync waits for it in the
+    /// tab a pane shows, that pane opens the folders sync waited to open there, the first now
+    /// and the others as their listings come; or sync turns off when it cannot. A tab that no
+    /// longer shows, or has moved on, has its wait dropped.
+    pub(super) fn sync_listed(&mut self, generation: u64) -> Vec<Effect> {
+        let Some(wait) = self.sync_wait.take_if(|wait| wait.generation == generation) else {
+            return Vec::new();
+        };
+        let Some(other) = [LEFT, RIGHT]
+            .into_iter()
+            .find(|&side| self.tab(side).generation() == generation)
+        else {
+            return Vec::new();
+        };
+        let mut names = wait.names.into_iter();
+        match names.next() {
+            Some(first) if self.sync => self.sync_enter(other, &first, names.collect()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The tab a pane listed again (a rescan) under `generation`, having waited under `old`:
+    /// sync's wait for it goes on under the new listing.
+    pub(super) fn sync_relisted(&mut self, old: u64, generation: u64) {
+        if let Some(wait) = self
+            .sync_wait
+            .as_mut()
+            .filter(|wait| wait.generation == old)
+        {
+            wait.generation = generation;
+        }
+    }
+
+    /// Pane `other`, whose rows are in, opens its folder `name`, and waits to open `then` in
+    /// turn; or sync turns off when its rows have no such folder, or its listing failed.
+    fn sync_enter(&mut self, other: usize, name: &OsStr, then: Vec<OsString>) -> Vec<Effect> {
+        let tab = self.tab_mut(other);
+        if let LoadStatus::Failed(_) = tab.status() {
+            return self.stop_sync(words::sync_cannot_follow().to_owned());
+        }
+        let folder = same_folder(tab.all(), name, Os::CURRENT)
+            .and_then(|found| tab.location().join(found).ok());
+        let Some(folder) = folder else {
+            return self.stop_sync(words::sync_no_folder(&name.to_string_lossy()));
+        };
+        let request = tab.navigate(folder);
+        if !then.is_empty() {
+            self.sync_wait = Some(SyncWait {
+                generation: request.generation,
+                names: then,
+            });
+        }
+        vec![Effect::Load(request)]
+    }
+
+    /// Pane `side` has just made the move `step`: with sync on, the other pane makes it too, or
+    /// sync turns off when it cannot. While the other pane waits to open folders, Up or Back
+    /// undoes the last of them there instead, which leaves it where it is.
+    pub(super) fn sync_step(&mut self, side: usize, step: Step) -> Vec<Effect> {
         if !self.sync {
             return Vec::new();
         }
-        if let Some(request) = step(self.tab_mut(RIGHT - side)) {
-            return vec![Effect::Load(request)];
+        let other = RIGHT - side;
+        let generation = self.tab(other).generation();
+        // A wait for another listing is stale: that tab has moved on.
+        if let Some(wait) = self.sync_wait.take()
+            && wait.generation == generation
+        {
+            let mut names = wait.names;
+            if step == Step::Forward || names.pop().is_none() {
+                return self.stop_sync(words::sync_cannot_follow().to_owned());
+            }
+            if !names.is_empty() {
+                self.sync_wait = Some(SyncWait { generation, names });
+            }
+            return Vec::new();
         }
-        self.sync = false;
-        vec![Effect::Notice(words::sync_cannot_follow().to_owned())]
+        match step.run(self.tab_mut(other)) {
+            Some(request) => vec![Effect::Load(request)],
+            None => self.stop_sync(words::sync_cannot_follow().to_owned()),
+        }
+    }
+}
+
+/// A move of a tab that navigation sync makes in the other pane too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Step {
+    Up,
+    Back,
+    Forward,
+}
+
+impl Step {
+    /// Makes the move in `tab`, if it can go; the request for the listing.
+    pub(super) fn run(self, tab: &mut Tab) -> Option<LoadRequest> {
+        match self {
+            Step::Up => tab.go_up(),
+            Step::Back => tab.go_back(),
+            Step::Forward => tab.go_forward(),
+        }
+    }
+}
+
+/// The folders navigation sync is to open, in turn, in the tab whose listing `generation` is
+/// on its way (the other pane's): the decision waits for its rows.
+#[derive(Debug)]
+pub(super) struct SyncWait {
+    generation: u64,
+    names: Vec<OsString>,
+}
+
+/// The notice for a command for the other pane while one pane shows.
+fn one_pane_only() -> Vec<Effect> {
+    vec![Effect::Notice(words::one_pane_only().to_owned())]
+}
+
+/// The folder among `entries` that navigation sync takes for `name` on `os`: the one of that
+/// very name; or else, on Windows and macOS, whose file systems mostly ignore case, the only
+/// one whose name differs from it in case alone (folded as `rf_vfs` folds names). `None` when
+/// there is none, or several.
+pub(super) fn same_folder<'a>(entries: &'a [Entry], name: &OsStr, os: Os) -> Option<&'a OsStr> {
+    let folders = entries.iter().filter(|entry| entry.kind == EntryKind::Dir);
+    if let Some(exact) = folders.clone().find(|entry| entry.name == name) {
+        return Some(&exact.name);
+    }
+    if os == Os::Other {
+        return None;
+    }
+    let wanted = fold_name(name);
+    let mut alike = folders.filter(|entry| fold_name(&entry.name) == wanted);
+    match (alike.next(), alike.next()) {
+        (Some(only), None) => Some(&only.name),
+        _ => None,
     }
 }

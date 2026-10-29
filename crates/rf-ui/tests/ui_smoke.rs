@@ -2437,7 +2437,7 @@ fn the_divider_shares_the_room_and_a_double_click_evens_it() {
     let (_, right) = shown_pane(&window, "오른쪽 패널");
     assert!((left.width / (left.width + right.width) - 0.3).abs() < 0.01);
 
-    // Past the edge, the first pane keeps a tenth.
+    // Past the edge, the first pane keeps 200px (more than a tenth of this room).
     let grip = LogicalPosition::new(left_at.x + left.width + gap / 2.0, middle_y);
     pointer(&window, "press", grip);
     pointer(
@@ -2448,7 +2448,7 @@ fn the_divider_shares_the_room_and_a_double_click_evens_it() {
     pointer(&window, "move", LogicalPosition::new(0.0, middle_y));
     pointer(&window, "release", LogicalPosition::new(0.0, middle_y));
     let last = *shares.borrow().last().expect("told");
-    assert!((last - 0.1).abs() < 1e-6, "{last}");
+    assert!((last * room - 200.0).abs() < 1.0, "{last} of {room}");
 
     // A double click asks for an even split.
     window.set_split_share(0.3);
@@ -2500,6 +2500,39 @@ fn panes_one_above_the_other_fit_the_smallest_window() {
 }
 
 #[test]
+fn each_pane_keeps_200px_however_far_the_divider_goes() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    window.set_show_preview(true);
+    let shares = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&shares);
+    window.on_split_changed(move |share| record.borrow_mut().push(share));
+    let (left_at, left) = shown_pane(&window, "왼쪽 패널");
+    let (right_at, right) = shown_pane(&window, "오른쪽 패널");
+    let room = left.width + right.width;
+    let least = (room * 0.1).max(200.0_f32.min(room / 2.0));
+    let middle_y = left_at.y + left.height / 2.0;
+    let grip = LogicalPosition::new((left_at.x + left.width + right_at.x) / 2.0, middle_y);
+
+    // Dragged to the window's left edge: the left pane keeps its least room.
+    drag_to(&window, grip, LogicalPosition::new(0.0, middle_y));
+    let (_, dragged) = shown_pane(&window, "왼쪽 패널");
+    assert!(dragged.width >= least - 1.0, "{} of {room}", dragged.width);
+    pointer(&window, "release", LogicalPosition::new(0.0, middle_y));
+    // A share Rust keeps (from 10%) shows no narrower either, on both sides.
+    for share in [0.1, 0.9] {
+        window.set_split_share(share);
+        let (_, left) = shown_pane(&window, "왼쪽 패널");
+        let (_, right) = shown_pane(&window, "오른쪽 패널");
+        assert!(
+            left.width >= least - 1.0 && right.width >= least - 1.0,
+            "{share}"
+        );
+    }
+    assert_eq!(shares.borrow().len(), 1);
+}
+
+#[test]
 fn one_pane_shows_only_the_active_one_with_the_whole_room() {
     let window = window();
     let (left_at, _) = shown_pane(&window, "왼쪽 패널");
@@ -2548,6 +2581,16 @@ fn the_tree_and_the_preview_panel_come_and_go() {
     assert!(preview_at.x + preview.width <= 1280.0);
 }
 
+/// The default layout, as Rust sets it back after a checkable item of the 보기 menu flipped
+/// its own mark.
+fn default_layout(window: &MainWindow) {
+    window.set_show_tree(true);
+    window.set_show_preview(false);
+    window.set_dual_pane(true);
+    window.set_stacked(false);
+    window.set_sync_navigation(false);
+}
+
 #[test]
 fn the_view_menu_switches_the_layout() {
     let window = window();
@@ -2555,25 +2598,63 @@ fn the_view_menu_switches_the_layout() {
     let record = calls.clone();
     window.on_command(move |name| record.note(name.to_string()));
     let record = calls.clone();
-    window.on_split_changed(move |share| record.note(format!("split {share}")));
+    window.on_split_changed(move |share| record.note(format!("split {share:.2}")));
     let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
-    for (item, call) in [
-        ("폴더 트리", "toggle-tree"),
-        ("미리 보기 패널", "toggle-preview"),
-        ("듀얼 패널", "toggle-dual"),
-        ("위아래로 나누기", "toggle-split"),
-        ("두 패널을 같은 크기로", "split 0.5"),
-        ("패널 바꾸기", "swap-panes"),
-        ("같은 폴더를 반대편에", "same-folder"),
-        ("탐색 동기화", "toggle-sync"),
-    ] {
+    let choose = |item: &str| {
         button.invoke_accessible_default_action();
         ElementHandle::find_by_accessible_label(&window, item)
             .next()
             .unwrap_or_else(|| panic!("the menu shows {item}"))
             .mock_single_click(slint::platform::PointerEventButton::Left);
+        default_layout(&window);
+    };
+    for (item, call) in [
+        ("폴더 트리", "toggle-tree"),
+        ("폴더 트리로 가기", "focus-tree"),
+        ("미리 보기 패널", "toggle-preview"),
+        ("듀얼 패널", "toggle-dual"),
+        ("위아래로 나누기", "toggle-split"),
+        ("두 패널을 같은 크기로", "split 0.50"),
+        ("분할선을 왼쪽으로", "split 0.40"),
+        ("분할선을 오른쪽으로", "split 0.60"),
+        ("패널 바꾸기", "swap-panes"),
+        ("같은 폴더를 반대편에", "same-folder"),
+        ("탐색 동기화", "toggle-sync"),
+    ] {
+        choose(item);
         assert_eq!(calls.take(), [call]);
     }
+    // One above the other, the divider goes up and down.
+    window.set_stacked(true);
+    button.invoke_accessible_default_action();
+    for item in ["분할선을 위로", "분할선을 아래로"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&window, item)
+                .next()
+                .is_some(),
+            "{item}"
+        );
+    }
+    choose("밝게");
+    calls.take();
+    // With one pane, the items for the divider and the other pane do nothing.
+    for item in [
+        "두 패널을 같은 크기로",
+        "분할선을 왼쪽으로",
+        "같은 폴더를 반대편에",
+        "탐색 동기화",
+    ] {
+        window.set_dual_pane(false);
+        button.invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&window, item)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {item}"))
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(calls.take(), Vec::<String>::new(), "{item}");
+        // A disabled item leaves the menu open: Esc closes it.
+        press(&window, Key::Escape);
+    }
+    default_layout(&window);
     // The marks show the layout as Rust sets it back after each toggle.
     let marks = || {
         button.invoke_accessible_default_action();
@@ -2628,4 +2709,42 @@ fn the_tree_takes_the_keys_until_it_gives_them_back() {
     window.invoke_focus_panes();
     press(&window, Key::DownArrow);
     assert_eq!(calls.take(), ["key"]);
+}
+
+#[test]
+fn the_view_menu_gives_the_tree_the_keys() {
+    let window = window();
+    let calls = Calls::default();
+    // As the controller does: the command gives the tree the keys.
+    let weak = window.as_weak();
+    window.on_command(move |name| {
+        if name == "focus-tree"
+            && let Some(window) = weak.upgrade()
+        {
+            window.invoke_focus_tree();
+        }
+    });
+    let record = calls.clone();
+    window.on_tree_key(move |_, _, _, _, _| {
+        record.note("tree");
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _| {
+        record.note("key");
+        true
+    });
+
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    button.invoke_accessible_default_action();
+    ElementHandle::find_by_accessible_label(&window, "폴더 트리로 가기")
+        .next()
+        .expect("the menu shows it")
+        .mock_single_click(slint::platform::PointerEventButton::Left);
+    // The menu has closed, giving the keys back to what had them; the tree takes them then.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    slint::platform::update_timers_and_animations();
+
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["tree"]);
 }

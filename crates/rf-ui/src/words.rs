@@ -195,6 +195,12 @@ pub fn sync_cannot_follow() -> &'static str {
     "반대편 패널이 따라갈 수 없어 탐색 동기화를 껐습니다"
 }
 
+/// The notice when a command for the other pane (the same folder there, navigation sync) is
+/// asked for while one pane shows.
+pub fn one_pane_only() -> &'static str {
+    "한 패널 보기에서는 쓸 수 없습니다"
+}
+
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {

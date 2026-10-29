@@ -42,6 +42,7 @@ mod sidebar;
 
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
+use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 
 /// The left pane's position in [`AppState::panes`].
@@ -177,6 +178,8 @@ pub struct AppState {
     layout: Layout,
     /// Navigation sync is on ([`layout`]).
     sync: bool,
+    /// What navigation sync waits for the other pane's listing to decide.
+    sync_wait: Option<layout::SyncWait>,
     /// The sidebar's folder tree, whose roots are the places.
     tree: Tree,
     /// The node of the tree's keyboard cursor ([`sidebar`]), once the tree had the keys.
@@ -271,6 +274,7 @@ impl AppState {
             show_hidden: filter.show_hidden,
             layout: session.layout,
             sync: false,
+            sync_wait: None,
             tree: Tree::new(filter),
             tree_cursor: None,
             pick_tree: Tree::new(filter),
@@ -397,9 +401,9 @@ impl AppState {
             Command::FocusFilter => vec![Effect::FocusFilter],
             Command::ViewMenu => vec![Effect::ShowViewMenu],
             Command::Open => self.open_cursor(side),
-            Command::Up => self.go(side, Tab::go_up),
-            Command::Back => self.go(side, Tab::go_back),
-            Command::Forward => self.go(side, Tab::go_forward),
+            Command::Up => self.go(side, Step::Up),
+            Command::Back => self.go(side, Step::Back),
+            Command::Forward => self.go(side, Step::Forward),
             Command::CursorUp => self.move_cursor(side, -1, mods.shift),
             Command::CursorDown => self.move_cursor(side, 1, mods.shift),
             Command::CursorHome => self.move_cursor(side, isize::MIN, mods.shift),
@@ -724,6 +728,8 @@ impl AppState {
             return self.tree_loaded(event);
         };
         let new_rows = matches!(event, LoadEvent::Listed { .. } | LoadEvent::Changes { .. });
+        let generation = event.generation();
+        let finished = matches!(event, LoadEvent::Listed { .. } | LoadEvent::Failed { .. });
         match self.panes[side].handle(event) {
             Handled::Stale => Vec::new(),
             // A row a job made may have come: it was selected, and shows.
@@ -747,9 +753,16 @@ impl AppState {
                         .filter(|_| shows)
                         .map(|row| Effect::ScrollTo { side, row }),
                 );
+                // Navigation sync may wait for this listing.
+                if finished {
+                    effects.extend(self.sync_listed(generation));
+                }
                 effects
             }
-            Handled::Reload { request, .. } => vec![Effect::Load(request)],
+            Handled::Reload { request, .. } => {
+                self.sync_relisted(generation, request.generation);
+                vec![Effect::Load(request)]
+            }
             Handled::Vanished {
                 generation, path, ..
             } => vec![Effect::FindExisting { generation, path }],
@@ -964,8 +977,8 @@ impl AppState {
 
     /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go;
     /// with navigation sync, the other pane makes the same move.
-    fn go(&mut self, side: usize, step: fn(&mut Tab) -> Option<LoadRequest>) -> Vec<Effect> {
-        let Some(request) = step(self.tab_mut(side)) else {
+    fn go(&mut self, side: usize, step: Step) -> Vec<Effect> {
+        let Some(request) = step.run(self.tab_mut(side)) else {
             return Vec::new();
         };
         let mut effects = vec![Effect::Load(request)];

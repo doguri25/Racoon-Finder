@@ -208,9 +208,8 @@ component CrumbButton inherits Rectangle {
     }
 }
 
-// The bar between the two panes (LAY-02). Dragged, it shares the room between them, the first
-// pane (the left or top one) keeping from a tenth to nine tenths of it; double-clicked, it
-// shares the room evenly. While it is dragged it moves on its own (`dragging`, `live-share`),
+// The bar between the two panes (LAY-02). Dragged, it shares the room between them, each pane
+// keeping `least` of it at least; double-clicked, it shares the room evenly. While it is dragged it moves on its own (`dragging`, `live-share`),
 // and tells the share once, as it is let go.
 export component PaneDivider inherits Rectangle {
     // Upright between panes side by side, lying between panes one above the other.
@@ -219,6 +218,8 @@ export component PaneDivider inherits Rectangle {
     // share of it, as Rust last set it.
     in property <length> room;
     in property <float> share;
+    // The least room either pane keeps.
+    in property <length> least;
     out property <bool> dragging;
     out property <float> live-share;
     // The divider was let go at `share`, or double-clicked (0.5).
@@ -245,7 +246,7 @@ export component PaneDivider inherits Rectangle {
                 return;
             }
             let first = root.upright ? root.x + self.mouse-x - self.pressed-x : root.y + self.mouse-y - self.pressed-y;
-            root.live-share = clamp(first / root.room, 0.1, 0.9);
+            root.live-share = clamp(first, root.least, root.room - root.least) / root.room;
             root.dragging = true;
         }
         double-clicked => {
