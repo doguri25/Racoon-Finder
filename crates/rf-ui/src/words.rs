@@ -193,6 +193,18 @@ pub fn folder_vanished(name: &str, to_parent: bool) -> String {
     format!("‘{name}’ 폴더가 없어져 {to}로 옮겼습니다")
 }
 
+/// The notice when the folder `name` a pane showed is gone, the pane went to the nearest folder
+/// above it that is left (`to_parent`) or home, and navigation sync, which waited to open
+/// folders there, turned off: one notice for both, as the window shows one at a time.
+pub fn folder_vanished_sync_off(name: &str, to_parent: bool) -> String {
+    let to = if to_parent {
+        "상위 폴더"
+    } else {
+        "홈 폴더"
+    };
+    format!("‘{name}’ 폴더가 없어져 {to}로 옮겼고 탐색 동기화를 껐습니다")
+}
+
 /// The notice when navigation sync is turned on: a move into a folder, up, back or forward in
 /// one pane is made in the other one too.
 pub fn sync_on() -> &'static str {

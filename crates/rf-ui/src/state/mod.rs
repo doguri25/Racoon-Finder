@@ -818,7 +818,8 @@ impl AppState {
     /// its last automatic reload, that waits for the gap to pass ([`Effect::ReloadLater`]),
     /// so a watch that keeps failing cannot reload it in a loop and a folder replaced twice
     /// in quick succession still shows the second one. Otherwise the tab goes to `found`, and
-    /// when its pane shows it, a notice says why.
+    /// when its pane shows it, a notice says why; when navigation sync waited to open folders
+    /// in it, sync turns off, and the same notice says so.
     pub fn found_existing(
         &mut self,
         generation: u64,
@@ -859,13 +860,24 @@ impl AppState {
         };
         let to_parent = path.starts_with(&target);
         let mut effects = vec![Effect::Load(tab.navigate(target))];
-        // The pane that shows it moves: the user is told why.
+        // Navigation sync cannot open in it the folders it waited to open there: it turns off
+        // when the tab shows.
+        let sync_lost = self.sync_wait_vanished(generation) && shown;
+        if sync_lost {
+            self.sync = false;
+        }
+        // The pane that shows it moves: the user is told why, in one notice.
         if shown {
             let name = path.file_name().map_or_else(
                 || path.to_string(),
                 |name| name.to_string_lossy().into_owned(),
             );
-            effects.push(Effect::Notice(words::folder_vanished(&name, to_parent)));
+            let text = if sync_lost {
+                words::folder_vanished_sync_off(&name, to_parent)
+            } else {
+                words::folder_vanished(&name, to_parent)
+            };
+            effects.push(Effect::Notice(text));
         }
         effects
     }

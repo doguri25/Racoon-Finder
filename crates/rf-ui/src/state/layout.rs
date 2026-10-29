@@ -16,9 +16,12 @@
 //!   other pane's listing is on its way, the decision waits for it ([`SyncWait`]), through a
 //!   reload of that listing too; further folders opened meanwhile are opened there in turn;
 //! - Up, Back and Forward: the other pane makes the same move from where it is. While folders
-//!   wait to be opened there, Up or Back takes the last of them off instead, and Forward puts
-//!   back the last one Back took off; Back past the first of them turns sync off, as the
-//!   other pane's history is not in step there.
+//!   wait to be opened there, Back takes the last of them off instead, and Forward puts back the
+//!   last one Back took off; Back past the first of them, and Up (a move to the parent, which
+//!   the history keeps as one), turn sync off, as the other pane's history is not in step there.
+//!   So does the waiting tab's folder vanishing, when folders still waited to be opened there.
+//!   Any other move of the active pane while a decision waits leaves the waiting folders as they
+//!   are, as it would leave the other pane where it is.
 //!
 //! When the other pane cannot follow (no folder of that name among its rows, a listing that
 //! failed, a root to go up from, nothing to go back or forward to), sync turns off and a notice
@@ -272,6 +275,15 @@ impl AppState {
         self.sync_wait.take_if(|wait| wait.generation == generation);
     }
 
+    /// The folder of the tab whose request is `generation` is gone, and the tab goes elsewhere:
+    /// sync waits for it no more. `true` when folders still waited to be opened there (not only
+    /// ones Back took off), which the other pane cannot follow any more.
+    pub(super) fn sync_wait_vanished(&mut self, generation: u64) -> bool {
+        self.sync_wait
+            .take_if(|wait| wait.generation == generation)
+            .is_some_and(|wait| self.sync && !wait.names.is_empty())
+    }
+
     /// The tab a pane listed again under `generation`, having waited under `old` (a rescan, or
     /// a reload after its watch ended): sync's wait for it goes on under the new listing.
     pub(super) fn sync_relisted(&mut self, old: u64, generation: u64) {
@@ -325,11 +337,12 @@ impl AppState {
     }
 
     /// Pane `side` has just made the move `step`: with sync on, the other pane makes it too, or
-    /// sync turns off when it cannot. While folders wait to be opened in the other pane, Up or
-    /// Back takes the last of them off instead (Back keeps it for Forward), which leaves that
-    /// pane where it is, and Forward puts back the last one Back took off. Back past the
-    /// first of them, or a Forward with nothing to put back, turns sync off: the other pane's
-    /// history is not in step there.
+    /// sync turns off when it cannot. While folders wait to be opened in the other pane, Back
+    /// takes the last of them off instead and keeps it for Forward, which leaves that pane where
+    /// it is, and Forward puts back the last one Back took off. Up while folders wait, Back past
+    /// the first of them, or a Forward with nothing to put back, turns sync off: the other
+    /// pane's history is not in step there (Up is a move of its own in the active pane's
+    /// history, which the other pane, short of the folders it waits to open, cannot make).
     pub(super) fn sync_step(&mut self, side: usize, step: Step) -> Vec<Effect> {
         if !self.sync {
             return Vec::new();
@@ -341,16 +354,13 @@ impl AppState {
             && wait.generation == generation
         {
             match step {
-                Step::Back | Step::Up if !wait.names.is_empty() => {
-                    let last = wait.names.pop();
-                    if step == Step::Back {
-                        wait.undone.extend(last);
-                    } else {
-                        // Up ends the active pane's way forward.
-                        wait.undone.clear();
-                    }
+                Step::Back if !wait.names.is_empty() => {
+                    wait.undone.extend(wait.names.pop());
                     self.sync_wait = Some(wait);
                     return self.sync_due(other);
+                }
+                Step::Up if !wait.names.is_empty() => {
+                    return self.stop_sync(words::sync_cannot_follow().to_owned());
                 }
                 Step::Forward if !wait.undone.is_empty() => {
                     wait.names.extend(wait.undone.pop());

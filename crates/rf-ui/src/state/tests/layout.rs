@@ -473,25 +473,100 @@ fn a_move_of_the_other_pane_drops_the_decision_sync_waited_to_make() {
 }
 
 #[test]
-fn up_or_back_while_the_other_pane_waits_undoes_the_entry_there_too() {
-    for key in [Key::UpArrow, Key::LeftArrow] {
+fn back_while_the_other_pane_waits_undoes_the_entry_there_too() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+
+    let effects = press(&mut state, &special(Key::LeftArrow), ALT).expect("a shortcut");
+
+    assert_eq!(listed(&effects), [folder("a")]);
+    assert_eq!(notices(&effects), Vec::<&str>::new());
+    assert_eq!(
+        state.loaded(LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("x")],
+        }),
+        []
+    );
+    assert_eq!(shown(&state, RIGHT), folder("c"));
+    assert!(state.syncing());
+}
+
+#[test]
+fn up_while_the_other_pane_waits_turns_sync_off() {
+    // Up leaves x for a as Back would, but as a move of its own: the left pane's Back goes to x
+    // from there, where the right pane, which never went into x, cannot follow.
+    for listing_first in [false, true] {
         let (mut state, waiting) = synced_waiting();
         let _ = state.open_row(LEFT, 0);
 
-        let effects = press(&mut state, &special(key), ALT).expect("a shortcut");
+        let effects = press(&mut state, &special(Key::UpArrow), ALT).expect("a shortcut");
 
-        assert_eq!(listed(&effects), [folder("a")], "{key:?}");
-        assert_eq!(notices(&effects), Vec::<&str>::new());
+        assert_eq!(listed(&effects), [folder("a")]);
+        assert_eq!(notices(&effects), [words::sync_cannot_follow()]);
+        assert!(!state.syncing());
+        let listing = || LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("x")],
+        };
+        if listing_first {
+            assert_eq!(state.loaded(listing()), []);
+            assert_eq!(shown(&state, RIGHT), folder("c"));
+        }
+        // Back moves the left pane alone.
+        let effects = press(&mut state, &special(Key::LeftArrow), ALT).expect("a shortcut");
         assert_eq!(
-            state.loaded(LoadEvent::Listed {
-                generation: waiting.generation,
-                entries: vec![dir("x")],
-            }),
-            []
+            listed(&effects),
+            [in_a("x")],
+            "listing first: {listing_first}"
         );
+        if !listing_first {
+            assert_eq!(state.loaded(listing()), []);
+        }
         assert_eq!(shown(&state, RIGHT), folder("c"));
-        assert!(state.syncing());
+        assert!(!state.syncing());
     }
+}
+
+#[test]
+fn a_vanished_folder_sync_waits_in_turns_it_off_with_the_same_notice() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let parent = folder("c").parent().expect("the temp folder");
+    let _ = state.loaded(LoadEvent::Vanished {
+        generation: waiting.generation,
+    });
+
+    // c is gone: the right pane goes to its parent, and cannot open x as it waited to.
+    let effects = state.found_existing(
+        waiting.generation,
+        &folder("c"),
+        Some(parent.clone()),
+        Instant::now(),
+    );
+
+    assert_eq!(listed(&effects), std::slice::from_ref(&parent));
+    assert_eq!(
+        notices(&effects),
+        [words::folder_vanished_sync_off("c", true)]
+    );
+    assert!(!state.syncing());
+
+    // A wait that kept only the folders Back took off goes quietly: sync stays on.
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let _ = press(&mut state, &special(Key::LeftArrow), ALT);
+    let _ = state.loaded(LoadEvent::Vanished {
+        generation: waiting.generation,
+    });
+    let effects = state.found_existing(
+        waiting.generation,
+        &folder("c"),
+        Some(parent.clone()),
+        Instant::now(),
+    );
+    assert_eq!(notices(&effects), [words::folder_vanished("c", true)]);
+    assert!(state.syncing());
 }
 
 #[test]
