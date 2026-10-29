@@ -68,29 +68,12 @@ impl AppState {
     /// folder of the other pane chosen when it can take them (PICK-05). A worker looks at the
     /// target, and the picker's tree opens on the way to it.
     pub(super) fn open_picker(&mut self, side: usize, mode: TransferMode) -> Vec<Effect> {
-        let items = self.target_entries(side);
-        if items.is_empty() || self.quitting {
+        if self.quitting {
             return Vec::new();
         }
-        let mut request = PickRequest {
-            mode,
-            sources: Vec::with_capacity(items.len()),
-            file_bytes: 0,
-            folder_count: 0,
-            other_count: 0,
-            from_dir: self.tab(side).location().clone(),
+        let Some(request) = self.pick_request(side, mode) else {
+            return Vec::new();
         };
-        for (path, entry) in items {
-            match entry.kind {
-                EntryKind::Dir => request.folder_count += 1,
-                EntryKind::File => {
-                    request.file_bytes = request.file_bytes.saturating_add(entry.size);
-                }
-                // A link moves as a link, and something else as it is: no size to add.
-                EntryKind::Symlink | EntryKind::Other => request.other_count += 1,
-            }
-            request.sources.push(path);
-        }
         let opposite = self.tab(RIGHT - side).location().clone();
         let tabs: Vec<VPath> = self
             .panes
@@ -386,6 +369,35 @@ impl AppState {
             effects.push(Effect::ScrollPickTree(row));
         }
         effects
+    }
+
+    /// The request to copy or move (`mode`) the items of pane `side`: the selected rows, or
+    /// the cursor's row; `None` without either.
+    pub(super) fn pick_request(&self, side: usize, mode: TransferMode) -> Option<PickRequest> {
+        let items = self.target_entries(side);
+        if items.is_empty() {
+            return None;
+        }
+        let mut request = PickRequest {
+            mode,
+            sources: Vec::with_capacity(items.len()),
+            file_bytes: 0,
+            folder_count: 0,
+            other_count: 0,
+            from_dir: self.tab(side).location().clone(),
+        };
+        for (path, entry) in items {
+            match entry.kind {
+                EntryKind::Dir => request.folder_count += 1,
+                EntryKind::File => {
+                    request.file_bytes = request.file_bytes.saturating_add(entry.size);
+                }
+                // A link moves as a link, and something else as it is: no size to add.
+                EntryKind::Symlink | EntryKind::Other => request.other_count += 1,
+            }
+            request.sources.push(path);
+        }
+        Some(request)
     }
 
     /// The items a command acts on in pane `side`, with their rows: the selected rows, or

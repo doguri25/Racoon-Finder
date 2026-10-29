@@ -1,6 +1,7 @@
 //! What the Slint screens are given: the row models of a file list and of the folder trees,
 //! the conversions from the panes' state, the dialogs and the destination picker to Slint
-//! structs, and [`post`], which brings a worker thread's result back to the UI thread.
+//! structs, the payload of a drag of rows, and [`post`], which brings a worker thread's result
+//! back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -10,8 +11,10 @@ use std::rc::Rc;
 
 use jiff::tz::TimeZone;
 use rf_core::{Attributes, Entry, EntryKind, VPath};
+use rf_jobs::TransferMode;
 use rf_vfs::{SortKey, SortOrder};
-use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
+use slint::language::DragAction;
+use slint::{DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::controller::{self, Controller};
 use crate::dialogs::{
@@ -540,6 +543,37 @@ pub fn sort_key(column: i32) -> Option<SortKey> {
     })
 }
 
+/// What the payload of a drag of rows holds: the id under which the state noted the items
+/// ([`AppState::drag_id`](crate::state::AppState::drag_id)). It stays in this app: no path
+/// goes through the system's drag and drop.
+#[derive(Debug)]
+struct DragToken(u64);
+
+/// The payload of a drag whose items the state noted under `id`.
+pub fn drag_payload(id: u64) -> DataTransfer {
+    let mut data = DataTransfer::default();
+    data.set_user_data(Rc::new(DragToken(id)));
+    data
+}
+
+/// The id a drag's payload carries; 0, which no drag has, for a payload not made by
+/// [`drag_payload`].
+pub fn drag_id(data: &DataTransfer) -> u64 {
+    data.user_data()
+        .and_then(|value| value.downcast::<DragToken>().ok())
+        .map_or(0, |token| token.0)
+}
+
+/// What a drop with `action` does with the items; `None` for an action this app does not
+/// take (none, link).
+pub fn drag_mode(action: DragAction) -> Option<TransferMode> {
+    match action {
+        DragAction::Move => Some(TransferMode::Move),
+        DragAction::Copy => Some(TransferMode::Copy),
+        _ => None,
+    }
+}
+
 /// A row of the job panel.
 pub fn job_row_view(row: &JobRow) -> JobRowView {
     JobRowView {
@@ -637,7 +671,7 @@ impl PickModels {
             } else {
                 SharedString::new()
             },
-            is_move: request.mode == rf_jobs::TransferMode::Move,
+            is_move: request.mode == TransferMode::Move,
             target_path: picker
                 .target
                 .as_ref()
@@ -1304,7 +1338,7 @@ mod tests {
         let temp = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("local");
         let a = temp("a");
         let pick = crate::pick::PickRequest {
-            mode: rf_jobs::TransferMode::Move,
+            mode: TransferMode::Move,
             sources: vec![
                 a.join("docs").expect("a name"),
                 a.join("x.txt").expect("a name"),
@@ -1414,5 +1448,21 @@ mod tests {
         let looking = view(&picker);
         assert_eq!(looking.hint, "입력한 경로를 확인하는 중…");
         assert!(!looking.can_confirm);
+    }
+
+    #[test]
+    fn a_drags_payload_carries_its_id_and_nothing_else() {
+        let payload = drag_payload(7);
+        assert_eq!(drag_id(&payload), 7);
+        // Nothing for the system's drag and drop: no text, no paths.
+        assert!(!payload.has_plain_text() && !payload.has_file_paths() && !payload.is_empty());
+        // A payload from elsewhere (text another drag carries) is no drag of this app's.
+        assert_eq!(drag_id(&DataTransfer::from(SharedString::from("/etc"))), 0);
+        assert_eq!(drag_id(&DataTransfer::default()), 0);
+
+        assert_eq!(drag_mode(DragAction::Move), Some(TransferMode::Move));
+        assert_eq!(drag_mode(DragAction::Copy), Some(TransferMode::Copy));
+        assert_eq!(drag_mode(DragAction::Link), None);
+        assert_eq!(drag_mode(DragAction::None), None);
     }
 }

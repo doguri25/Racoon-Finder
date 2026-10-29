@@ -1,7 +1,8 @@
 // The sidebar: the shared folder tree. Its roots are the places, the user's folders under
 // "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
 // it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
-// scrolls as freely as one with a few.
+// scrolls as freely as one with a few. The main window's tree takes dragged rows into the
+// folder of the row under the pointer (`accepts-drops`); the picker's takes none.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -39,10 +40,16 @@ export struct TreeRow {
 component TreeItem inherits Rectangle {
     in property <TreeRow> item;
     in property <int> index;
+    // Whether the row takes dragged rows into its folder.
+    in property <bool> accepts-drops;
     // A click on the row.
     callback clicked();
     // A click on the chevron.
     callback toggled();
+    // A drag with the payload `data` over the row asks for `action`: what the row's folder
+    // takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, action: DragAction) -> DragAction;
 
     // The head takes more room above the drives, which come after the favorites.
     private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
@@ -87,6 +94,16 @@ component TreeItem inherits Rectangle {
         // Opens the row, or closes it when it is open.
         accessible-action-expand => {
             root.toggled();
+        }
+
+        drop := DropArea {
+            enabled: root.accepts-drops;
+            can-drop(event) => {
+                return root.drop-check(event.data, event.proposed-action);
+            }
+            dropped(event) => {
+                return root.dropped(event.data, event.proposed-action);
+            }
         }
 
         touch := TouchArea {
@@ -173,6 +190,13 @@ component TreeItem inherits Rectangle {
                 overflow: elide;
             }
         }
+
+        // The row's folder takes the drag.
+        if drop.has-drag: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 2px;
+            border-color: Theme.accent;
+        }
     }
 }
 
@@ -181,10 +205,15 @@ export component Sidebar inherits Rectangle {
     in property <[TreeRow]> rows;
     // The list's name for screen readers.
     in property <string> label: "폴더 트리";
+    // Whether the rows take dragged rows into their folders.
+    in property <bool> accepts-drops;
     // A click on row `index`: show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
     callback row-toggled(index: int);
+    // A drag over row `index`, and its drop (`accepts-drops` only): what its folder takes.
+    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
 
     // Scrolls row `index` to the middle of the list, unless it shows already.
     //
@@ -238,11 +267,18 @@ export component Sidebar inherits Rectangle {
         for row[i] in root.rows: TreeItem {
             item: row;
             index: i;
+            accepts-drops: root.accepts-drops;
             clicked => {
                 root.row-clicked(i);
             }
             toggled => {
                 root.row-toggled(i);
+            }
+            drop-check(data, action) => {
+                return root.drop-check(data, i, action);
+            }
+            dropped(data, action) => {
+                return root.dropped(data, i, action);
             }
         }
     }

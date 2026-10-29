@@ -13,14 +13,15 @@ use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
-use rf_ui::ui_bridge::{FileRows, PaneModels, TreeRows};
+use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, JobRowView, MainWindow, NameView, PaneView, PickTarget,
-    PickView, Theme,
+    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, NameView, PaneView,
+    PickTarget, PickView, Theme,
 };
 use rf_vfs::VisibilityFilter;
+use slint::language::DragAction;
 use slint::platform::{Key, WindowEvent};
-use slint::{Color, ComponentHandle, LogicalSize, Model, ModelRc};
+use slint::{Color, ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc};
 
 /// A shown main window at the default size, on the testing backend.
 fn window() -> MainWindow {
@@ -690,7 +691,7 @@ fn the_picker_takes_the_keys_until_it_closes() {
     );
     assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
     // A click between its parts leaves the keys with the filter: the letters still go there.
-    let position = slint::LogicalPosition::new(640.0, 184.0);
+    let position = LogicalPosition::new(640.0, 184.0);
     let button = slint::platform::PointerEventButton::Left;
     let shown = window.window();
     shown.dispatch_event(WindowEvent::PointerPressed { position, button });
@@ -1014,4 +1015,203 @@ fn a_folder_the_picker_cannot_take_is_not_offered_to_screen_readers() {
     assert_eq!(row("보관함").accessible_item_selectable(), Some(true));
     assert_eq!(row("assets").accessible_enabled(), Some(false));
     assert_eq!(row("assets").accessible_item_selectable(), Some(false));
+}
+
+/// What a drag's callbacks told: the payload's id, where, which pane, which row or tab, and
+/// the action asked for.
+type DropCall = (u64, DropPlace, i32, i32, DragAction);
+
+/// The centre of the one element labelled `label` with role `role`.
+fn centre_of(window: &MainWindow, label: &str, role: AccessibleRole) -> LogicalPosition {
+    let found = labelled(window, label, role);
+    assert_eq!(found.len(), 1, "one {label}");
+    centre(&found[0])
+}
+
+fn centre(element: &ElementHandle) -> LogicalPosition {
+    let (at, size) = (element.absolute_position(), element.size());
+    LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0)
+}
+
+fn pointer(window: &MainWindow, event: &str, position: LogicalPosition) {
+    let button = slint::platform::PointerEventButton::Left;
+    window.window().dispatch_event(match event {
+        "press" => WindowEvent::PointerPressed { position, button },
+        "release" => WindowEvent::PointerReleased { position, button },
+        _ => WindowEvent::PointerMoved { position },
+    });
+}
+
+/// A press at `from` and a drag past the threshold toward `to`, where it stays.
+fn drag_to(window: &MainWindow, from: LogicalPosition, to: LogicalPosition) {
+    pointer(window, "press", from);
+    for step in [10.0, 20.0, 30.0] {
+        pointer(window, "move", LogicalPosition::new(from.x + step, from.y));
+    }
+    pointer(window, "move", to);
+}
+
+/// What the window's drag callbacks were called with.
+#[derive(Default)]
+struct DragCalls {
+    /// Presses and releases of rows: which, pane and row.
+    rows: RefCell<Vec<(&'static str, i32, i32)>>,
+    checks: RefCell<Vec<DropCall>>,
+    drops: RefCell<Vec<DropCall>>,
+}
+
+/// A window whose left pane lists the folder `docs` and the file `x.txt`, whose right pane
+/// lists the folder `백업` and the file `y.txt`, and whose tree has the place `홈`, with the
+/// payload of drag 42. Its callbacks answer as the controller does when the items are in the
+/// left pane's folder: the left pane's list takes nothing, every other place takes them,
+/// and the label names the place.
+fn drag_window() -> (MainWindow, Rc<DragCalls>, [PaneModels; 2], Rc<TreeRows>) {
+    let window = window();
+    let left = listed_pane(vec![
+        entry("docs", EntryKind::Dir, 0),
+        entry("x.txt", EntryKind::File, 10),
+    ]);
+    let right = listed_pane(vec![
+        entry("백업", EntryKind::Dir, 0),
+        entry("y.txt", EntryKind::File, 10),
+    ]);
+    let models = [PaneModels::default(), PaneModels::default()];
+    window.set_left_pane(models[0].view(&left, true));
+    window.set_right_pane(models[1].view(&right, false));
+    let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
+    let mut tree = Tree::new(VisibilityFilter::default());
+    tree.set_roots([("홈".to_owned(), home.clone())]);
+    let places = [Place {
+        label: "홈".to_owned(),
+        path: home,
+        kind: PlaceKind::Favorite(KnownFolder::Home),
+        space: None,
+    }];
+    let tree_rows = Rc::new(TreeRows::default());
+    tree_rows.sync(&tree, &places);
+    window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
+    window.set_drag_data(ui_bridge::drag_payload(42));
+
+    let calls = Rc::new(DragCalls::default());
+    let record = Rc::clone(&calls);
+    window.on_row_clicked(move |side, i, _, _| record.rows.borrow_mut().push(("press", side, i)));
+    let record = Rc::clone(&calls);
+    window.on_row_released(move |side, i| record.rows.borrow_mut().push(("release", side, i)));
+    let record = Rc::clone(&calls);
+    let weak = window.as_weak();
+    window.on_drop_check(move |data, place, side, i, action| {
+        let call = (ui_bridge::drag_id(&data), place, side, i, action);
+        record.checks.borrow_mut().push(call);
+        if side == 0 && place == DropPlace::List {
+            return DragAction::None;
+        }
+        if let Some(window) = weak.upgrade() {
+            window.set_drag_label(format!("{place:?} {i}").into());
+        }
+        action
+    });
+    let record = Rc::clone(&calls);
+    window.on_drop_items(move |data, place, side, i, action| {
+        let call = (ui_bridge::drag_id(&data), place, side, i, action);
+        record.drops.borrow_mut().push(call);
+        action
+    });
+    (window, calls, models, tree_rows)
+}
+
+#[test]
+fn a_row_dragged_onto_the_other_pane_drops_there() {
+    let (window, calls, _models, _tree) = drag_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let y_txt = centre_of(&window, "y.txt", AccessibleRole::ListItem);
+    // Below the right pane's rows.
+    let right_empty = LogicalPosition::new(y_txt.x, y_txt.y + 200.0);
+    let last_check = || calls.checks.borrow().last().copied();
+
+    // A click (no drag) presses and releases the row.
+    pointer(&window, "move", x_txt);
+    pointer(&window, "press", x_txt);
+    pointer(&window, "release", x_txt);
+    assert_eq!(
+        calls.rows.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [("press", 0, 1), ("release", 0, 1)]
+    );
+
+    // A drag over the other pane: its folder row, then its list below the rows. The payload
+    // is the one Rust made; no modifier asks for a move.
+    drag_to(&window, x_txt, backup);
+    assert_eq!(
+        last_check(),
+        Some((42, DropPlace::List, 1, 0, DragAction::Move))
+    );
+    // While a place takes it, the label says what the drop would do.
+    assert_eq!(labelled(&window, "List 0", AccessibleRole::Text).len(), 1);
+    pointer(&window, "move", right_empty);
+    assert_eq!(
+        last_check(),
+        Some((42, DropPlace::List, 1, -1, DragAction::Move))
+    );
+    // Ctrl asks for a copy, from the moment it is pressed.
+    let control = char::from(Key::Control).to_string();
+    window.window().dispatch_event(WindowEvent::KeyPressed {
+        text: control.clone().into(),
+    });
+    assert_eq!(
+        last_check(),
+        Some((42, DropPlace::List, 1, -1, DragAction::Copy))
+    );
+    window.window().dispatch_event(WindowEvent::KeyReleased {
+        text: control.into(),
+    });
+    assert_eq!(
+        last_check(),
+        Some((42, DropPlace::List, 1, -1, DragAction::Move))
+    );
+    pointer(&window, "release", right_empty);
+    assert_eq!(
+        calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [(42, DropPlace::List, 1, -1, DragAction::Move)]
+    );
+    // The drag took the release: no click of the row, and the label is gone.
+    assert_eq!(
+        calls.rows.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [("press", 0, 1)]
+    );
+    assert_eq!(labelled(&window, "List -1", AccessibleRole::Text).len(), 0);
+}
+
+#[test]
+fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
+    let (window, calls, _models, _tree) = drag_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+
+    // Over the pane the items are in nothing takes them, and a release there drops nothing.
+    drag_to(&window, x_txt, docs);
+    assert_eq!(
+        calls.checks.borrow().last().copied(),
+        Some((42, DropPlace::List, 0, 0, DragAction::Move))
+    );
+    pointer(&window, "release", docs);
+    assert_eq!(calls.drops.borrow().as_slice(), []);
+
+    // A tab of the other pane (both show the folder `listed`: it is the one further right),
+    // and a row of the tree.
+    let tabs = labelled(&window, "listed", AccessibleRole::Tab);
+    assert_eq!(tabs.len(), 2, "a tab in each pane");
+    let right_tab = tabs
+        .iter()
+        .map(centre)
+        .max_by(|a, b| a.x.total_cmp(&b.x))
+        .expect("two tabs");
+    let home = centre_of(&window, "홈", AccessibleRole::ListItem);
+    for (target, place, side) in [(right_tab, DropPlace::Tab, 1), (home, DropPlace::Tree, 0)] {
+        drag_to(&window, x_txt, target);
+        pointer(&window, "release", target);
+        assert_eq!(
+            calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
+            [(42, place, side, 0, DragAction::Move)]
+        );
+    }
 }

@@ -1,5 +1,6 @@
-//! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), and
-//! the file commands, the jobs and the dialogs ([`jobs`]), with the helpers they share.
+//! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), the
+//! file commands, the jobs and the dialogs ([`jobs`]), and dragging rows ([`drag`]), with the
+//! helpers they share.
 
 use super::*;
 use crate::keys;
@@ -10,6 +11,7 @@ use rf_vfs::SortOrder;
 use slint::platform::Key;
 use std::sync::Arc;
 
+mod drag;
 mod jobs;
 mod nav;
 mod pick;

@@ -1005,6 +1005,17 @@ pub fn pick_no_match() -> &'static str {
     "펼쳐 본 폴더 중에 맞는 이름이 없습니다"
 }
 
+/// What a drop of `count` dragged items on the list under the pointer would do, shown at the
+/// foot of that list while the drag hovers (DND-03): `항목 3개 이동 → 백업`, with `folder`, the
+/// name of the folder they would go into.
+pub fn drag_label(count: usize, mode: TransferMode, folder: &str) -> String {
+    let what = match mode {
+        TransferMode::Copy => "복사",
+        TransferMode::Move => "이동",
+    };
+    format!("{} {what} → {folder}", item_count(count))
+}
+
 /// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
 /// Hangul is read by its last syllable, digits and Latin letters by their Korean names
 /// (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else takes `가`.
@@ -1696,5 +1707,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_drag_says_what_its_drop_would_do() {
+        assert_eq!(
+            drag_label(3, TransferMode::Move, "백업"),
+            "항목 3개 이동 → 백업"
+        );
+        assert_eq!(
+            drag_label(1, TransferMode::Copy, "Downloads"),
+            "항목 1개 복사 → Downloads"
+        );
     }
 }

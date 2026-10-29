@@ -2,9 +2,10 @@
 //!
 //! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
 //! whether hidden items show, the folder tree of the sidebar, the jobs of the job panel, the
-//! window that shows over the main window (a [`Modal`]), and the destination picker's folder
-//! tree and recent targets ([`AppState::shown_picker`]). Its methods change it and return
-//! the [`Effect`]s that need a worker thread, the job engine or the screen, which the
+//! window that shows over the main window (a [`Modal`]), the destination picker's folder
+//! tree and recent targets ([`AppState::shown_picker`]), and the items a drag of rows carries
+//! ([`AppState::drag`]). Its methods change it and return the [`Effect`]s that need a worker
+//! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
 //! follow or a vanished folder's nearest parent to find, a file to open, a job to submit or a
 //! question to answer, a notice, a row to scroll to. Keeping the two apart lets the tests
@@ -31,8 +32,11 @@ use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::Tree;
 use crate::words;
 
+mod drag;
 mod jobs;
 mod pick;
+
+pub use drag::{Drag, DropOffer, DropSpot};
 
 /// The left pane's position in [`AppState::panes`].
 pub const LEFT: usize = 0;
@@ -159,6 +163,10 @@ pub struct AppState {
     quitting: bool,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
+    /// The items the last press on a row readied a drag of, under the id its payload carries.
+    drag: Option<Drag>,
+    /// The click a press on a selected row left for its release.
+    pending_click: Option<drag::PendingClick>,
 }
 
 impl AppState {
@@ -224,6 +232,8 @@ impl AppState {
             toast_token: 0,
             quitting: false,
             journal_error_told: false,
+            drag: None,
+            pending_click: None,
         };
         (state, effects)
     }

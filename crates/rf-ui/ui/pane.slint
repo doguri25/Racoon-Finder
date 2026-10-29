@@ -1,4 +1,6 @@
-// One folder pane: the tab strip, the path row, the file list and the status bar.
+// One folder pane: the tab strip, the path row, the file list and the status bar. The list and
+// the tabs take dragged rows: the list into the folder of the row under the pointer or of the
+// pane, a tab into its folder.
 
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
@@ -72,6 +74,10 @@ component TabButton inherits Rectangle {
     in property <bool> closable;
     callback selected();
     callback closed();
+    // A drag with the payload `data` over the tab asks for `action`: what the tab's folder
+    // takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, action: DragAction) -> DragAction;
 
     height: 34px;
     min-width: 72px;
@@ -134,6 +140,23 @@ component TabButton inherits Rectangle {
             }
         }
     }
+
+    drop := DropArea {
+        can-drop(event) => {
+            return root.drop-check(event.data, event.proposed-action);
+        }
+        dropped(event) => {
+            return root.dropped(event.data, event.proposed-action);
+        }
+    }
+
+    // The tab's folder takes the drag.
+    if drop.has-drag: Rectangle {
+        border-top-left-radius: Theme.radius;
+        border-top-right-radius: Theme.radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+    }
 }
 
 component CrumbButton inherits Rectangle {
@@ -175,6 +198,9 @@ export component Pane inherits Rectangle {
     in property <PaneView> view;
     // The pane's name for screen readers.
     in property <string> label;
+    // The payload of a drag of the rows, and what a drop on the list would do (`FileList`).
+    in property <data-transfer> drag-data;
+    in property <string> drag-label;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     out property <int> page-rows: files.page-rows;
@@ -191,12 +217,20 @@ export component Pane inherits Rectangle {
     // where the click put it.)
     callback edit-ended();
     callback sort(column: int);
+    // A left press on row `index`, and its release when no drag came of it.
     callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-released(index: int);
     callback row-activated(index: int);
     // A right click on row `index`, before its menu opens; a command of the list's menus.
     callback row-menu(index: int);
     callback menu-command(name: string);
     callback retry();
+    // A drag over row `index` of the list (-1 below the rows) or over tab `index`, and its
+    // drop: what each takes (`FileList.drop-check`).
+    callback list-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback list-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback tab-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback tab-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
 
     // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs).
     public function edit-path() {
@@ -256,6 +290,12 @@ export component Pane inherits Rectangle {
                     }
                     closed => {
                         root.tab-closed(i);
+                    }
+                    drop-check(data, action) => {
+                        return root.tab-drop-check(data, i, action);
+                    }
+                    dropped(data, action) => {
+                        return root.tab-dropped(data, i, action);
                     }
                 }
                 VerticalLayout {
@@ -400,11 +440,22 @@ export component Pane inherits Rectangle {
                 sort-key: root.view.sort-key;
                 sort-ascending: root.view.sort-ascending;
                 active: root.view.active;
+                drag-data: root.drag-data;
+                drag-label: root.drag-label;
                 sort(column) => {
                     root.sort(column);
                 }
                 row-clicked(index, ctrl, shift) => {
                     root.row-clicked(index, ctrl, shift);
+                }
+                row-released(index) => {
+                    root.row-released(index);
+                }
+                drop-check(data, index, action) => {
+                    return root.list-drop-check(data, index, action);
+                }
+                dropped(data, index, action) => {
+                    return root.list-dropped(data, index, action);
                 }
                 row-activated(index) => {
                     root.row-activated(index);

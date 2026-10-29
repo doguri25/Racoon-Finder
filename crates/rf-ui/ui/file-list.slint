@@ -2,6 +2,13 @@
 // only the rows on screen exist as elements, so a folder of 100,000 items scrolls as freely
 // as one of ten. A right click opens the menu of the row (move and copy first, OPS-05), or of
 // the empty part of the list.
+//
+// A row can be dragged (DND): its payload is what Rust readied when the row was pressed
+// (`drag-data`, the id of the items it noted). The whole list is one place to drop on, which
+// asks Rust about the row under the pointer: a folder's row takes the items into that folder,
+// any other row and the part below the rows into the pane's folder. A place that takes them
+// shows an accent frame, and what the drop would do; one that does not shows nothing, and the
+// pointer says so.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -73,15 +80,26 @@ export component FileList inherits Rectangle {
     in property <bool> active;
     // How many whole rows fit on screen, for PageUp and PageDown.
     out property <int> page-rows: max(1, floor(list.visible-height / Theme.row-height));
+    // The payload of a drag of the rows: the id of the items the last press readied.
+    in property <data-transfer> drag-data;
+    // What a drop here would do ("항목 3개 이동 → 백업"), as Rust last said while the drag
+    // hovered; shown while this list takes the drag.
+    in property <string> drag-label;
 
     callback sort(column: int);
+    // A left press on row `index`, and its release when no drag came of it (a click).
     callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-released(index: int);
     callback row-activated(index: int);
     // A right click on row `index`, just before its menu opens.
     callback row-menu(index: int);
     // A menu item: the name of the toolbar command it runs (move, copy, open, rename, delete,
     // delete-permanently, new-folder).
     callback menu-command(name: string);
+    // A drag with the payload `data` is over row `index` (-1 below the rows) and asks for
+    // `action`: the action this list takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
 
     // Scrolls as little as needed to show row `index` whole.
     public function scroll-to(index: int) {
@@ -94,6 +112,12 @@ export component FileList inherits Rectangle {
         } else if (top + Theme.row-height + list.content-y > list.visible-height) {
             list.content-y = list.visible-height - top - Theme.row-height;
         }
+    }
+
+    // The row at `y` in the list (the rows are all `Theme.row-height` tall), or -1 below them.
+    function row-at(y: length) -> int {
+        let row = floor((y - list.content-y) / Theme.row-height);
+        return row >= 0 && row < root.rows.length ? row : -1;
     }
 
     // Column geometry, shared by the heads and the rows. The columns are placed by hand, not
@@ -172,156 +196,218 @@ export component FileList inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
 
-            // The menu of the part of the list below the rows.
-            ContextMenuArea {
-                width: parent.width;
-                height: parent.height;
+            drop := DropArea {
+                // The folder row the drag would go into; -1 for the pane's folder.
+                property <int> target-row: -1;
+                can-drop(event) => {
+                    let row = root.row-at(event.position.y);
+                    self.target-row = row >= 0 && root.rows[row].is-dir ? row : -1;
+                    return root.drop-check(event.data, row, event.proposed-action);
+                }
+                dropped(event) => {
+                    return root.dropped(event.data, root.row-at(event.position.y), event.proposed-action);
+                }
 
-                Menu {
-                    MenuItem {
-                        title: "새 폴더";
-                        activated => {
-                            root.menu-command("new-folder");
+                // The menu of the part of the list below the rows.
+                ContextMenuArea {
+                    width: parent.width;
+                    height: parent.height;
+
+                    Menu {
+                        MenuItem {
+                            title: "새 폴더";
+                            activated => {
+                                root.menu-command("new-folder");
+                            }
+                        }
+                    }
+
+                    list := ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        accessible-label: "항목 목록";
+
+                        for row[i] in root.rows: Rectangle {
+                            height: Theme.row-height;
+                            background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                            accessible-role: list-item;
+                            accessible-label: row.name;
+                            accessible-item-index: i;
+                            accessible-item-selectable: true;
+                            accessible-item-selected: row.selected;
+                            accessible-action-default => {
+                                root.row-activated(i);
+                            }
+
+                            // A press readies a drag of what it selects, or keeps selected.
+                            DragArea {
+                                data: root.drag-data;
+                                allow-move: true;
+                                allow-copy: true;
+
+                                row-menu := ContextMenuArea {
+                                    Menu {
+                                        MenuItem {
+                                            title: "이동…";
+                                            activated => {
+                                                root.menu-command("move");
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "복사…";
+                                            activated => {
+                                                root.menu-command("copy");
+                                            }
+                                        }
+                                        MenuSeparator { }
+                                        MenuItem {
+                                            title: "열기";
+                                            activated => {
+                                                root.menu-command("open");
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "이름 바꾸기";
+                                            activated => {
+                                                root.menu-command("rename");
+                                            }
+                                        }
+                                        MenuSeparator { }
+                                        MenuItem {
+                                            title: "휴지통으로 보내기";
+                                            activated => {
+                                                root.menu-command("delete");
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "영구 삭제";
+                                            activated => {
+                                                root.menu-command("delete-permanently");
+                                            }
+                                        }
+                                    }
+
+                                    // It takes the right click itself, so the row is selected before its
+                                    // menu opens.
+                                    touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                                root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                                            }
+                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                                root.row-menu(i);
+                                                row-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                            }
+                                        }
+                                        // Not after a drag: the drag takes the pointer from the row.
+                                        clicked => {
+                                            root.row-released(i);
+                                        }
+                                        double-clicked => {
+                                            root.row-activated(i);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Hidden items show at half strength.
+                            Rectangle {
+                                opacity: row.hidden ? 0.5 : 1;
+
+                                Icon {
+                                    x: root.pad;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 18px;
+                                    height: 18px;
+                                    name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
+                                    color: row.is-dir ? Theme.folder : Theme.muted;
+                                }
+                                Text {
+                                    x: root.pad + root.icon-room;
+                                    width: root.name-end - self.x;
+                                    height: parent.height;
+                                    text: row.name;
+                                    color: Theme.text;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                if root.show-size: Text {
+                                    x: root.size-x;
+                                    width: root.size-w;
+                                    height: parent.height;
+                                    text: row.size;
+                                    color: Theme.muted;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                if root.show-date: Text {
+                                    x: root.date-x;
+                                    width: root.date-w;
+                                    height: parent.height;
+                                    text: row.modified;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                if root.show-kind: Text {
+                                    x: root.kind-x;
+                                    width: root.kind-w;
+                                    height: parent.height;
+                                    text: row.kind;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+
+                            if root.active && i == root.cursor: Rectangle {
+                                x: 2px;
+                                width: parent.width - 4px;
+                                border-width: 1px;
+                                border-color: Theme.accent;
+                                border-radius: 4px;
+                            }
+                            // The folder a drag over this row would go into.
+                            if drop.has-drag && i == drop.target-row: Rectangle {
+                                x: 2px;
+                                width: parent.width - 4px;
+                                border-width: 2px;
+                                border-color: Theme.accent;
+                                border-radius: 4px;
+                            }
                         }
                     }
                 }
+            }
 
-                list := ListView {
-                    width: parent.width;
-                    height: parent.height;
-                    accessible-label: "항목 목록";
+            // The pane's folder takes the drag: a frame around the list.
+            if drop.has-drag && drop.target-row < 0: Rectangle {
+                x: 2px;
+                y: 2px;
+                width: parent.width - 4px;
+                height: parent.height - 4px;
+                border-width: 2px;
+                border-color: Theme.accent;
+                border-radius: Theme.radius;
+            }
+            // What the drop would do.
+            if drop.has-drag && root.drag-label != "": Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 14px;
+                width: min(label.preferred-width + 28px, parent.width - 24px);
+                height: 30px;
+                border-radius: 15px;
+                background: Theme.accent;
 
-                    for row[i] in root.rows: Rectangle {
-                        height: Theme.row-height;
-                        background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
-                        accessible-role: list-item;
-                        accessible-label: row.name;
-                        accessible-item-index: i;
-                        accessible-item-selectable: true;
-                        accessible-item-selected: row.selected;
-                        accessible-action-default => {
-                            root.row-activated(i);
-                        }
-
-                        row-menu := ContextMenuArea {
-                            Menu {
-                                MenuItem {
-                                    title: "이동…";
-                                    activated => {
-                                        root.menu-command("move");
-                                    }
-                                }
-                                MenuItem {
-                                    title: "복사…";
-                                    activated => {
-                                        root.menu-command("copy");
-                                    }
-                                }
-                                MenuSeparator { }
-                                MenuItem {
-                                    title: "열기";
-                                    activated => {
-                                        root.menu-command("open");
-                                    }
-                                }
-                                MenuItem {
-                                    title: "이름 바꾸기";
-                                    activated => {
-                                        root.menu-command("rename");
-                                    }
-                                }
-                                MenuSeparator { }
-                                MenuItem {
-                                    title: "휴지통으로 보내기";
-                                    activated => {
-                                        root.menu-command("delete");
-                                    }
-                                }
-                                MenuItem {
-                                    title: "영구 삭제";
-                                    activated => {
-                                        root.menu-command("delete-permanently");
-                                    }
-                                }
-                            }
-
-                            // It takes the right click itself, so the row is selected before its
-                            // menu opens.
-                            touch := TouchArea {
-                                pointer-event(event) => {
-                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                        root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
-                                    }
-                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                                        root.row-menu(i);
-                                        row-menu.show({ x: self.mouse-x, y: self.mouse-y });
-                                    }
-                                }
-                                double-clicked => {
-                                    root.row-activated(i);
-                                }
-                            }
-                        }
-
-                        // Hidden items show at half strength.
-                        Rectangle {
-                            opacity: row.hidden ? 0.5 : 1;
-
-                            Icon {
-                                x: root.pad;
-                                y: (parent.height - self.height) / 2;
-                                width: 18px;
-                                height: 18px;
-                                name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
-                                color: row.is-dir ? Theme.folder : Theme.muted;
-                            }
-                            Text {
-                                x: root.pad + root.icon-room;
-                                width: root.name-end - self.x;
-                                height: parent.height;
-                                text: row.name;
-                                color: Theme.text;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            if root.show-size: Text {
-                                x: root.size-x;
-                                width: root.size-w;
-                                height: parent.height;
-                                text: row.size;
-                                color: Theme.muted;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            if root.show-date: Text {
-                                x: root.date-x;
-                                width: root.date-w;
-                                height: parent.height;
-                                text: row.modified;
-                                color: Theme.muted;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            if root.show-kind: Text {
-                                x: root.kind-x;
-                                width: root.kind-w;
-                                height: parent.height;
-                                text: row.kind;
-                                color: Theme.muted;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                        }
-
-                        if root.active && i == root.cursor: Rectangle {
-                            x: 2px;
-                            width: parent.width - 4px;
-                            border-width: 1px;
-                            border-color: Theme.accent;
-                            border-radius: 4px;
-                        }
-                    }
+                label := Text {
+                    width: parent.width - 28px;
+                    text: root.drag-label;
+                    color: Theme.on-accent;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }

@@ -20,9 +20,11 @@ use jiff::tz::TimeZone;
 use rf_core::VPath;
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use slint::{CloseRequestResponse, ComponentHandle, ModelRc, VecModel};
+use slint::language::DragAction;
+use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
+use crate::format::folder_label;
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{LoadEvent, LoadTicket, Loader};
@@ -30,9 +32,9 @@ use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
-use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
+use crate::state::{AppState, DropSpot, Effect, LEFT, RIGHT, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
-use crate::{DialogKind, JobRowView, MainWindow, open, words};
+use crate::{DialogKind, DropPlace, JobRowView, MainWindow, open, words};
 
 mod persist;
 
@@ -219,7 +221,10 @@ fn connect(window: &MainWindow) {
         }
     });
     window.on_row_clicked(|s, i, ctrl, shift| {
-        with(|c| c.update_at(i, |state, i| state.click_row(side(s), i, ctrl, shift)));
+        with(|c| c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift)));
+    });
+    window.on_row_released(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.release_row(side(s), i)));
     });
     window.on_row_activated(|s, i| {
         with(|c| c.update_at(i, |state, i| state.open_row(side(s), i)));
@@ -233,8 +238,30 @@ fn connect(window: &MainWindow) {
     window.on_tree_toggled(|i| {
         with(|c| c.update_at(i, AppState::toggle_tree_row));
     });
+    window.on_drop_check(|data, place, s, i, action| {
+        with(|c| c.drop_check(&data, place, s, i, action)).unwrap_or(DragAction::None)
+    });
+    window.on_drop_items(|data, place, s, i, action| {
+        with(|c| c.drop_items(&data, place, s, i, action)).unwrap_or(DragAction::None)
+    });
     connect_jobs(window);
     connect_pick(window);
+}
+
+/// The place of the state that a drag over `place` names, with the pane `side` and the row or
+/// tab `index` of the callback; `None` for a negative tab or tree row.
+fn drop_spot(place: DropPlace, side_number: i32, i: i32) -> Option<DropSpot> {
+    Some(match place {
+        DropPlace::List => DropSpot::Pane {
+            side: side(side_number),
+            row: index(i),
+        },
+        DropPlace::Tab => DropSpot::Tab {
+            side: side(side_number),
+            index: index(i)?,
+        },
+        DropPlace::Tree => DropSpot::Tree(index(i)?),
+    })
 }
 
 /// The callbacks of the destination picker.
@@ -409,6 +436,8 @@ pub struct Controller {
     save_timer: slint::Timer,
     /// Whether a failed save has been told (once is enough).
     save_failure_told: Cell<bool>,
+    /// The id of the drag whose payload the window holds.
+    shown_drag: Cell<u64>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
 }
@@ -435,6 +464,9 @@ impl Controller {
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
         let job_rows = Rc::new(VecModel::default());
         window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
+        // A payload from the start: a drag only begins on a press whose area has one, and the
+        // press readies the drag's own.
+        window.set_drag_data(ui_bridge::drag_payload(0));
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
@@ -459,6 +491,7 @@ impl Controller {
             saver,
             save_timer: slint::Timer::default(),
             save_failure_told: Cell::new(false),
+            shown_drag: Cell::new(0),
         }
     }
 
@@ -608,6 +641,64 @@ impl Controller {
             effects.unwrap_or_default()
         });
         used
+    }
+
+    /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`)
+    /// and asks for `action`: the action the place takes, or `none`. What a drop there would
+    /// do goes to the label beside it. Called at every move of the pointer, it changes nothing
+    /// else and redraws nothing.
+    fn drop_check(
+        &self,
+        data: &DataTransfer,
+        place: DropPlace,
+        side: i32,
+        i: i32,
+        action: DragAction,
+    ) -> DragAction {
+        let (Some(spot), Some(mode)) = (drop_spot(place, side, i), ui_bridge::drag_mode(action))
+        else {
+            return DragAction::None;
+        };
+        let id = ui_bridge::drag_id(data);
+        let offer = self
+            .state
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.drop_offer(id, spot));
+        let Some(offer) = offer else {
+            return DragAction::None;
+        };
+        if let Some(window) = self.window.upgrade() {
+            let label = words::drag_label(offer.count, mode, &folder_label(&offer.folder));
+            if window.get_drag_label() != label.as_str() {
+                window.set_drag_label(label.into());
+            }
+        }
+        action
+    }
+
+    /// The drag with the payload `data` was dropped on `place` with `action`: the place's
+    /// folder gets the transfer of its items, when it takes them; the action done, or `none`.
+    fn drop_items(
+        &self,
+        data: &DataTransfer,
+        place: DropPlace,
+        side: i32,
+        i: i32,
+        action: DragAction,
+    ) -> DragAction {
+        let (Some(spot), Some(mode)) = (drop_spot(place, side, i), ui_bridge::drag_mode(action))
+        else {
+            return DragAction::None;
+        };
+        let id = ui_bridge::drag_id(data);
+        let mut taken = false;
+        self.update(|state| {
+            let effects = state.drop_items(id, spot, mode);
+            taken = !effects.is_empty();
+            effects
+        });
+        if taken { action } else { DragAction::None }
     }
 
     /// A toolbar button or a menu item: the same command as its key.
@@ -873,6 +964,11 @@ impl Controller {
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
+            // The next drag carries the items the last press readied.
+            let drag = state.drag_id();
+            if self.shown_drag.replace(drag) != drag {
+                window.set_drag_data(ui_bridge::drag_payload(drag));
+            }
             self.tree_rows.sync(state.tree(), &self.places.borrow());
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);

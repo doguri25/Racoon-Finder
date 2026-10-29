@@ -1,7 +1,8 @@
 // Main window: toolbar on top, the sidebar and the two panes below, the job panel under them
 // while a job runs, notices in the lower right corner, and a dialog over all of it when one
 // is open. Every key goes to Rust first (`key`), except while a text field or a dialog has
-// focus.
+// focus. Rows dragged from a pane drop on the other pane, a tab or the tree (DND): Rust says
+// at every move of the pointer whether the place under it takes them (`drop-check`).
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -22,6 +23,13 @@ export {
     Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow
+}
+
+// What a drag is over: a pane's list, a pane's tab, or a row of the tree.
+export enum DropPlace {
+    list,
+    tab,
+    tree,
 }
 
 // Which dialog is open over the main window.
@@ -84,6 +92,10 @@ export component MainWindow inherits Window {
     // items show, for the menu's check marks.
     in property <int> theme-choice;
     in-out property <bool> show-hidden;
+    // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
+    // readied. And what a drop on the list under the pointer would do ("항목 3개 이동 → 백업").
+    in property <data-transfer> drag-data;
+    in property <string> drag-label;
     // The size the window opens at: the one of the last run, from the settings.
     in property <length> start-width: 1280px;
     in property <length> start-height: 800px;
@@ -105,7 +117,9 @@ export component MainWindow inherits Window {
     callback crumb-clicked(side: int, index: int);
     callback path-entered(side: int, text: string);
     callback sort(side: int, column: int);
+    // A left press on row `index` of pane `side`, and its release when no drag came of it.
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
+    callback row-released(side: int, index: int);
     callback row-activated(side: int, index: int);
     // A right click on row `index` of pane `side`, before its menu opens.
     callback row-menu(side: int, index: int);
@@ -147,6 +161,12 @@ export component MainWindow inherits Window {
     // A click on row `index` of the tree, or on its chevron.
     callback tree-clicked(index: int);
     callback tree-toggled(index: int);
+    // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
+    // below the rows), tab `index` of pane `side`, or row `index` of the tree (`side` 0), and
+    // asks for `action` (Slint's rule: none or Shift moves, Ctrl copies). Rust gives the
+    // action the place takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+    callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
 
     // Shows pane `side`'s path as text to edit.
     public function edit-path(side: int) {
@@ -507,9 +527,16 @@ export component MainWindow inherits Window {
                     max-width: 280px;
                     horizontal-stretch: 0.1;
                     rows: root.tree;
+                    accepts-drops: true;
                     row-clicked(index) => {
                         root.tree-clicked(index);
                         keys.focus();
+                    }
+                    drop-check(data, index, action) => {
+                        return root.drop-check(data, DropPlace.tree, 0, index, action);
+                    }
+                    dropped(data, index, action) => {
+                        return root.drop-items(data, DropPlace.tree, 0, index, action);
                     }
                     row-toggled(index) => {
                         root.tree-toggled(index);
@@ -522,6 +549,8 @@ export component MainWindow inherits Window {
                     min-width: 300px;
                     label: "왼쪽 패널";
                     view: root.left-pane;
+                    drag-data: root.drag-data;
+                    drag-label: root.drag-label;
                     activated => {
                         root.pane-activated(0);
                         keys.focus();
@@ -557,6 +586,9 @@ export component MainWindow inherits Window {
                         root.row-clicked(0, index, ctrl, shift);
                         keys.focus();
                     }
+                    row-released(index) => {
+                        root.row-released(0, index);
+                    }
                     row-activated(index) => {
                         root.row-activated(0, index);
                     }
@@ -573,6 +605,18 @@ export component MainWindow inherits Window {
                         root.retry(0);
                         keys.focus();
                     }
+                    list-drop-check(data, index, action) => {
+                        return root.drop-check(data, DropPlace.list, 0, index, action);
+                    }
+                    list-dropped(data, index, action) => {
+                        return root.drop-items(data, DropPlace.list, 0, index, action);
+                    }
+                    tab-drop-check(data, index, action) => {
+                        return root.drop-check(data, DropPlace.tab, 0, index, action);
+                    }
+                    tab-dropped(data, index, action) => {
+                        return root.drop-items(data, DropPlace.tab, 0, index, action);
+                    }
                 }
 
                 right := Pane {
@@ -580,6 +624,8 @@ export component MainWindow inherits Window {
                     min-width: 300px;
                     label: "오른쪽 패널";
                     view: root.right-pane;
+                    drag-data: root.drag-data;
+                    drag-label: root.drag-label;
                     activated => {
                         root.pane-activated(1);
                         keys.focus();
@@ -615,6 +661,9 @@ export component MainWindow inherits Window {
                         root.row-clicked(1, index, ctrl, shift);
                         keys.focus();
                     }
+                    row-released(index) => {
+                        root.row-released(1, index);
+                    }
                     row-activated(index) => {
                         root.row-activated(1, index);
                     }
@@ -630,6 +679,18 @@ export component MainWindow inherits Window {
                     retry => {
                         root.retry(1);
                         keys.focus();
+                    }
+                    list-drop-check(data, index, action) => {
+                        return root.drop-check(data, DropPlace.list, 1, index, action);
+                    }
+                    list-dropped(data, index, action) => {
+                        return root.drop-items(data, DropPlace.list, 1, index, action);
+                    }
+                    tab-drop-check(data, index, action) => {
+                        return root.drop-check(data, DropPlace.tab, 1, index, action);
+                    }
+                    tab-dropped(data, index, action) => {
+                        return root.drop-items(data, DropPlace.tab, 1, index, action);
                     }
                 }
             }
