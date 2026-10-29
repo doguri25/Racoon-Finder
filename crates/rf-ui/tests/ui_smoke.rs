@@ -248,23 +248,29 @@ fn keys_go_to_the_path_field_while_it_is_open() {
 #[test]
 fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
     let window = window();
+    // Names that together are too wide for a pane in any font, each narrow enough to show
+    // beside the last one (a CI runner may have no font for Hangul, which would draw Korean
+    // names narrow or not at all).
     let mut path = std::env::temp_dir();
     for name in [
-        "프로젝트 자료 모음",
-        "2026년 상반기 보고서 초안",
-        "부서별 정리본",
-        "최종 검토용 사본",
-        "마지막",
+        "project papers of the team",
+        "first half of the year 2026",
+        "drafts of the yearly report",
+        "notes sorted by department",
+        "copies for the final review",
+        "the folder before the last",
+        "last",
     ] {
         path.push(name);
     }
     let folder = VPath::local(&path).expect("a local path");
+    let crumbs = ui_bridge::crumbs(&rf_ui::pane::ancestors(&folder));
     let (pane, _) = Pane::new(folder, VisibilityFilter::default());
     let models = PaneModels::default();
     window.set_left_pane(models.view(&pane, true));
     // As the event loop does before it draws: the pieces are made (a look at the window makes
     // them here), then their change handlers run.
-    assert!(!labelled(&window, "마지막", AccessibleRole::Button).is_empty());
+    assert!(!labelled(&window, "last", AccessibleRole::Button).is_empty());
     for _ in 0..3 {
         slint::platform::update_timers_and_animations();
     }
@@ -287,17 +293,26 @@ fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
         )
     };
     let shown: Vec<_> = pieces.iter().map(place).collect();
-    // The "…" piece (named for the nearest folder out of view) starts the row, and the first
-    // folder shown follows it after the `›`, with no gap.
     let [ellipsis, first, .., last] = shown.as_slice() else {
         panic!("a cut path: {shown:?}");
     };
+    // The path is cut: the root and the folders after it up to the "…" piece's (the nearest
+    // folder out of view, which it is named for) are hidden, and the folders after it show.
+    // A path that is not cut starts with the root's piece instead, named as the "…" would be
+    // with the root alone out of view: here more than the root is.
+    let at = |label: &str| crumbs.iter().position(|crumb| crumb.label == label);
+    let hidden = at(&ellipsis.0).expect("the … piece is named for a folder of the path");
+    assert!(hidden >= 1, "the path is cut after the root: {shown:?}");
+    assert_eq!(at(&first.0), Some(hidden + 1), "{shown:?}");
+    assert_eq!(shown.len(), crumbs.len() - hidden, "{shown:?}");
+    // The "…" piece starts the row, and the first folder shown follows it after the `›`,
+    // with no gap.
     assert!(ellipsis.1 <= 8.0, "the … piece starts the row: {shown:?}");
     assert!(
         first.1 - ellipsis.2 <= 12.0,
         "the first folder shown follows the … piece: {shown:?}"
     );
-    assert_eq!(last.0, "마지막");
+    assert_eq!(last.0, "last");
     assert!(
         last.2 <= row_width,
         "the last folder shows whole: {shown:?}"
