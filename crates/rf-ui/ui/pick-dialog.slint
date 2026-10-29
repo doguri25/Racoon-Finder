@@ -8,7 +8,7 @@
 // turns the button off until it is entered (or another folder is chosen): the button never
 // sends the items anywhere else than where the field says. Nor does a path being composed with
 // an input method (a Korean syllable not yet complete): the field's text and Rust do not have it
-// until it is committed, so the button and 새 폴더 are off meanwhile.
+// until it is committed, so the button and 새 폴더 are off meanwhile, and Enter does nothing.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -130,6 +130,7 @@ component Field inherits Rectangle {
     in-out property <string> text <=> input.text;
     // An input method is composing text in the field (a Korean syllable not yet complete): it
     // shows at the cursor but is not in `text`, and `edited` comes only once it is committed.
+    // Enter meanwhile is not `accepted`: it would take the text without the syllable.
     out property <bool> composing: input.preedit-text != "";
     // A key the field does not take itself; return `accept` to stop it there.
     callback key(event: KeyEvent) -> EventResult;
@@ -209,7 +210,9 @@ component Field inherits Rectangle {
                     root.edited(self.text);
                 }
                 accepted => {
-                    root.accepted(self.text);
+                    if (!root.composing) {
+                        root.accepted(self.text);
+                    }
                 }
             }
         }

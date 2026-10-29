@@ -593,6 +593,60 @@ fn the_name_dialog_replaces_the_stem() {
     assert_eq!(ok[0].accessible_enabled(), Some(false));
 }
 
+#[test]
+fn a_name_being_composed_holds_the_name_dialog() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_name_edited(move |text| record.borrow_mut().push(format!("edited {text}")));
+    let record = Rc::clone(&calls);
+    window.on_name_accepted(move |text| record.borrow_mut().push(format!("accepted {text}")));
+    window.set_name_view(NameView {
+        title: "새 폴더".into(),
+        initial: "보고서".into(),
+        select_end: 0,
+        warning: "".into(),
+        ok_enabled: true,
+    });
+    window.set_dialog(DialogKind::Name);
+    slint::platform::update_timers_and_animations();
+    let field = || labelled(&window, "새 폴더", AccessibleRole::TextInput).remove(0);
+    let ok = || labelled(&window, "확인", AccessibleRole::Button).remove(0);
+    let enter = char::from(Key::Return).to_string();
+    // Typed at the end of the name, as the cursor is after a click there.
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    chord(&window, &[&char::from(Key::End).to_string()]);
+    assert_eq!(ok().accessible_enabled(), Some(true));
+
+    // While a syllable is composed the name is still the one before it, and Rust has heard of
+    // no edit: neither the button nor Enter makes a folder with the syllable missing.
+    compose(&window, "ㅅ");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(field().accessible_value().as_deref(), Some("보고서"));
+    assert_eq!(ok().accessible_enabled(), Some(false));
+    ok().invoke_accessible_default_action();
+    chord(&window, &[&enter]);
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+
+    // The input method cancels the composition: the name is as it was, and can be used again.
+    compose(&window, "");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(field().accessible_value().as_deref(), Some("보고서"));
+    assert_eq!(ok().accessible_enabled(), Some(true));
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+
+    // A committed syllable is part of the name, which Enter hands over.
+    compose(&window, "ㅅ");
+    commit_composition(&window, "서");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(ok().accessible_enabled(), Some(true));
+    chord(&window, &[&enter]);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        ["edited 보고서서", "accepted 보고서서"]
+    );
+}
+
 fn conflict_view() -> ConflictView {
     ConflictView {
         serial: 1,
@@ -998,6 +1052,10 @@ fn a_name_being_composed_holds_the_button() {
     window.on_pick_new_folder(move || record.borrow_mut().push("new folder".to_owned()));
     let record = Rc::clone(&calls);
     window.on_pick_path_edited(move |text| record.borrow_mut().push(format!("edited {text}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_path_entered(move |text| record.borrow_mut().push(format!("entered {text}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_enter(move || record.borrow_mut().push("enter".to_owned()));
     window.set_pick_view(PickView {
         unentered_hint: "Enter로 경로를 먼저 확인하세요".into(),
         ..pick_view()
@@ -1024,7 +1082,8 @@ fn a_name_being_composed_holds_the_button() {
     assert_eq!(confirm().accessible_enabled(), Some(true));
 
     // While a syllable is composed the field's text is still the old target's path, and Rust
-    // has heard of no edit: the buttons are off, so a click cannot send the items there.
+    // has heard of no edit: the buttons are off, so a click cannot send the items there, nor
+    // can Enter (on the target's path it confirms).
     compose(&window, "ㄷ");
     slint::platform::update_timers_and_animations();
     assert_eq!(
@@ -1036,10 +1095,34 @@ fn a_name_being_composed_holds_the_button() {
     assert_eq!(hint(), 1);
     confirm().invoke_accessible_default_action();
     new_folder().invoke_accessible_default_action();
+    chord(&window, &[&char::from(Key::Return).to_string()]);
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+    // Nor in the filter field, where Enter confirms too.
+    let filter = labelled(&window, "폴더 이름으로 거르기", AccessibleRole::TextInput).remove(0);
+    filter.mock_single_click(slint::platform::PointerEventButton::Left);
+    compose(&window, "ㅂ");
+    chord(&window, &[&char::from(Key::Return).to_string()]);
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+    compose(&window, "");
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    compose(&window, "ㄷ");
+    slint::platform::update_timers_and_animations();
+
+    // The input method cancels the composition: the path is the target's again, as Rust has it.
+    compose(&window, "");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        field().accessible_value().as_deref(),
+        Some("/home/me/작업/백업")
+    );
+    assert_eq!(confirm().accessible_enabled(), Some(true));
+    assert_eq!(new_folder().accessible_enabled(), Some(true));
+    assert_eq!(hint(), 0);
     assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
 
-    // Once the syllable is committed, the edit reaches Rust, which holds the button from then
+    // Once a syllable is committed, the edit reaches Rust, which holds the button from then
     // on (`a_path_typed_and_not_entered_holds_the_button`).
+    compose(&window, "ㄷ");
     commit_composition(&window, "다");
     slint::platform::update_timers_and_animations();
     assert_eq!(calls.borrow().as_slice(), ["edited /home/me/작업/백업다"]);

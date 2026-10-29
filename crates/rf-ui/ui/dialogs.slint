@@ -60,12 +60,17 @@ component Body inherits Text {
 }
 
 // Asks for the name of a new folder or a rename. The field starts with `view.initial`, the
-// part before the extension selected; Rust checks each edit and sends the warning back.
+// part before the extension selected; Rust checks each edit and sends the warning back. While
+// an input method composes a syllable, the field's text and Rust do not have it until it is
+// committed, so neither 확인 nor Enter takes the name meanwhile: either would leave the
+// syllable out.
 export component NameDialog inherits DialogFrame {
     in property <NameView> view;
     callback edited(text: string);
     callback accepted(text: string);
     callback cancelled();
+
+    property <bool> composing: input.preedit-text != "";
 
     width: 440px;
     height: layout.preferred-height;
@@ -107,7 +112,9 @@ export component NameDialog inherits DialogFrame {
                 }
                 // Rust decides: a name that cannot be used keeps the dialog open.
                 accepted => {
-                    root.accepted(self.text);
+                    if (!root.composing) {
+                        root.accepted(self.text);
+                    }
                 }
                 key-pressed(event) => {
                     if (event.text == Key.Escape) {
@@ -136,7 +143,7 @@ export component NameDialog inherits DialogFrame {
             PrimaryButton {
                 button-height: 36px;
                 text: "확인";
-                enabled: root.view.ok-enabled;
+                enabled: root.view.ok-enabled && !root.composing;
                 clicked => {
                     root.accepted(input.text);
                 }
