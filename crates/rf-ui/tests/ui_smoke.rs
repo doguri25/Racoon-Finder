@@ -575,6 +575,8 @@ fn the_failures_window_shows_whole_paths_wrapped() {
         .match_accessible_role(AccessibleRole::List)
         .find_all()
         .into_iter()
+        // The one on top: the dialog's, over the panes' lists.
+        .rev()
         .find(|list| {
             let (at, size) = (list.absolute_position(), list.size());
             let line = long_line.absolute_position();
@@ -605,6 +607,8 @@ fn list_around(window: &MainWindow, line: &ElementHandle) -> ElementHandle {
         .match_accessible_role(AccessibleRole::List)
         .find_all()
         .into_iter()
+        // The one on top: the dialog's, over the panes' lists.
+        .rev()
         .find(|list| {
             let (at, size) = (list.absolute_position(), list.size());
             let line = line.absolute_position();
@@ -1566,4 +1570,100 @@ fn a_double_click_on_a_row_opens_it() {
         ]
     );
     assert!(calls.drops.borrow().is_empty());
+}
+
+#[test]
+fn panes_stay_as_wide_as_each_other_whatever_their_tabs() {
+    let window = window();
+    let tabs = |count: usize| {
+        let tabs: Vec<rf_ui::TabItem> = (0..count)
+            .map(|i| rf_ui::TabItem {
+                title: format!("폴더 {i}").into(),
+                active: i + 1 == count,
+            })
+            .collect();
+        ModelRc::new(slint::VecModel::from(tabs))
+    };
+    let width = |label: &str| {
+        labelled(&window, label, AccessibleRole::Groupbox)
+            .first()
+            .map_or_else(|| panic!("the {label}"), |pane| pane.size().width)
+    };
+    for (left, right) in [(1, 1), (3, 2), (12, 1)] {
+        window.set_left_pane(PaneView {
+            tabs: tabs(left),
+            active_tab: i32::try_from(left - 1).expect("a few tabs"),
+            ..PaneView::default()
+        });
+        window.set_right_pane(PaneView {
+            tabs: tabs(right),
+            active_tab: i32::try_from(right - 1).expect("a few tabs"),
+            ..PaneView::default()
+        });
+        // The strip follows the tab that shows once the change has been taken in.
+        slint::platform::update_timers_and_animations();
+        let (left_width, right_width) = (width("왼쪽 패널"), width("오른쪽 패널"));
+        assert!(
+            (left_width - right_width).abs() < 1.0,
+            "{left} and {right} tabs: {left_width} and {right_width}"
+        );
+    }
+    // The last of twelve tabs, which shows, is in view in its scrolled strip.
+    let shown = labelled(&window, "폴더 11", AccessibleRole::Tab);
+    let pane = labelled(&window, "왼쪽 패널", AccessibleRole::Groupbox).remove(0);
+    let (tab_x, pane_x) = (shown[0].absolute_position().x, pane.absolute_position().x);
+    assert!(
+        tab_x >= pane_x && tab_x + shown[0].size().width <= pane_x + pane.size().width,
+        "tab at {tab_x}, pane at {pane_x}"
+    );
+}
+
+#[test]
+fn the_filter_box_hands_over_what_is_typed_and_esc_clears_it() {
+    let window = window();
+    let keys = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&keys);
+    window.on_key(move |text, _, _, _| {
+        record.borrow_mut().push(text.to_string());
+        true
+    });
+    let edits = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&edits);
+    window.on_filter_edited(move |text| record.borrow_mut().push(text.to_string()));
+    let field = || labelled(&window, "이 폴더에서 거르기", AccessibleRole::TextInput).remove(0);
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    chord(&window, &["a"]);
+    chord(&window, &["b"]);
+    assert_eq!(edits.borrow().as_slice(), ["a", "ab"]);
+    // The keys it takes are not shortcuts of the panes meanwhile.
+    chord(&window, &[&char::from(Key::Delete).to_string()]);
+    assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
+    // Esc empties it, and the panes have the keys again.
+    chord(&window, &[&char::from(Key::Escape).to_string()]);
+    assert_eq!(edits.borrow().last().map(String::as_str), Some(""));
+    assert_eq!(field().accessible_value().as_deref(), Some(""));
+    chord(&window, &["x"]);
+    assert_eq!(keys.borrow().as_slice(), ["x"]);
+    // It shows the active pane's filter when that is another.
+    window.invoke_show_filter("보고".into());
+    assert_eq!(field().accessible_value().as_deref(), Some("보고"));
+}
+
+#[test]
+fn enter_while_a_syllable_is_composed_does_not_take_the_path() {
+    let window = window();
+    let entered = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&entered);
+    window.on_path_entered(move |side, text| record.borrow_mut().push((side, text.to_string())));
+    let mut view = window.get_left_pane();
+    view.path_text = "/start".into();
+    window.set_left_pane(view);
+    window.invoke_edit_path(0);
+    let enter = char::from(Key::Return).to_string();
+    compose(&window, "ㅅ");
+    chord(&window, &[&enter]);
+    assert_eq!(entered.borrow().as_slice(), Vec::<(i32, String)>::new());
+    commit_composition(&window, "사");
+    chord(&window, &[&enter]);
+    assert_eq!(entered.borrow().as_slice(), [(0, "사".to_owned())]);
 }

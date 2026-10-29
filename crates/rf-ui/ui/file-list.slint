@@ -102,15 +102,38 @@ export component FileList inherits Rectangle {
     callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
 
     // Scrolls as little as needed to show row `index` whole.
+    //
+    // After a jump of more than a screen and a half (End in a long folder), the list makes the
+    // rows of the new place afresh and lines the first of them up with the top of the list, which
+    // rounds the place up by part of a row: the last row would stay cut. So while the list
+    // settles (`settling`), a place it moves to by itself is set back to the one asked for, once;
+    // a scroll of the user's ends that.
     public function scroll-to(index: int) {
         if (index < 0) {
             return;
         }
         let top = index * Theme.row-height;
         if (top + list.content-y < 0) {
-            list.content-y = -top;
+            root.scroll-target = -top;
         } else if (top + Theme.row-height + list.content-y > list.visible-height) {
-            list.content-y = list.visible-height - top - Theme.row-height;
+            root.scroll-target = list.visible-height - top - Theme.row-height;
+        } else {
+            return;
+        }
+        root.settling = true;
+        list.content-y = root.scroll-target;
+        settle.restart();
+    }
+
+    private property <length> scroll-target;
+    private property <bool> settling;
+
+    settle := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.settling = false;
         }
     }
 
@@ -226,6 +249,15 @@ export component FileList inherits Rectangle {
                         width: parent.width;
                         height: parent.height;
                         accessible-label: "항목 목록";
+                        changed content-y => {
+                            if (root.settling && self.content-y != root.scroll-target) {
+                                root.settling = false;
+                                self.content-y = root.scroll-target;
+                            }
+                        }
+                        scrolled => {
+                            root.settling = false;
+                        }
 
                         for row[i] in root.rows: Rectangle {
                             height: Theme.row-height;

@@ -496,6 +496,22 @@ impl AppState {
         Vec::new()
     }
 
+    /// The toolbar's filter box (이 폴더에서 거르기) changed to `text`: the active pane shows
+    /// only the rows whose names hold it (all of them for an empty one), and scrolls to its
+    /// cursor.
+    pub fn filter_edited(&mut self, text: &str) -> Vec<Effect> {
+        let side = self.active;
+        let tab = self.tab_mut(side);
+        tab.set_name_filter(text);
+        let row = tab.selection().cursor().unwrap_or(0);
+        vec![Effect::ScrollTo { side, row }]
+    }
+
+    /// What the filter box shows: the filter of the active pane's tab.
+    pub fn filter_text(&self) -> &str {
+        self.tab(self.active).name_filter()
+    }
+
     /// Lists the folder of pane `side` again ("다시 시도").
     pub fn retry(&mut self, side: usize) -> Vec<Effect> {
         self.activate(side);

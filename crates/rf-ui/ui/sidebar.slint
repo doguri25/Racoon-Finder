@@ -35,6 +35,8 @@ export struct TreeRow {
     // The folder of the active pane.
     selected: bool,
     dimmed: bool,
+    // A hidden folder, which shows at half strength, as in the file list.
+    hidden: bool,
 }
 
 component TreeItem inherits Rectangle {
@@ -125,69 +127,74 @@ component TreeItem inherits Rectangle {
             }
         }
 
-        if root.item.expandable: Icon {
-            x: 4px + root.indent;
-            y: (parent.height - self.height) / 2;
-            width: 16px;
-            height: 16px;
-            name: root.item.expanded ? "chevron-down" : "chevron-right";
-            color: Theme.muted;
-        }
+        // A hidden folder shows at half strength, as in the file list.
+        Rectangle {
+            opacity: root.item.hidden ? 0.5 : 1;
 
-        HorizontalLayout {
-            x: 24px + root.indent;
-            width: parent.width - self.x;
-            padding-right: 10px;
-            spacing: 10px;
-
-            Icon {
+            if root.item.expandable: Icon {
+                x: 4px + root.indent;
                 y: (parent.height - self.height) / 2;
-                width: 18px;
-                height: 18px;
-                name: root.item.is-drive ? "drive" : "folder";
-                color: root.item.dimmed ? Theme.faint : root.item.is-drive ? Theme.text : Theme.folder;
+                width: 16px;
+                height: 16px;
+                name: root.item.expanded ? "chevron-down" : "chevron-right";
+                color: Theme.muted;
             }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                alignment: center;
-                spacing: 4px;
 
-                Text {
-                    accessible-role: none;
-                    text: root.item.label;
-                    color: root.item.dimmed ? Theme.faint : Theme.text;
-                    font-weight: root.item.selected ? 600 : 400;
-                    overflow: elide;
+            HorizontalLayout {
+                x: 24px + root.indent;
+                width: parent.width - self.x;
+                padding-right: 10px;
+                spacing: 10px;
+
+                Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 18px;
+                    height: 18px;
+                    name: root.item.is-drive ? "drive" : "folder";
+                    color: root.item.dimmed ? Theme.faint : root.item.is-drive ? Theme.text : Theme.folder;
                 }
-                if root.item.is-drive: Rectangle {
-                    height: 4px;
-                    border-radius: 2px;
-                    background: Theme.border;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 4px;
 
-                    Rectangle {
-                        x: 0;
-                        width: parent.width * clamp(root.item.fill, 0, 1);
+                    Text {
+                        accessible-role: none;
+                        text: root.item.label;
+                        color: root.item.dimmed ? Theme.faint : Theme.text;
+                        font-weight: root.item.selected ? 600 : 400;
+                        overflow: elide;
+                    }
+                    if root.item.is-drive: Rectangle {
+                        height: 4px;
                         border-radius: 2px;
-                        background: Theme.accent;
+                        background: Theme.border;
+
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * clamp(root.item.fill, 0, 1);
+                            border-radius: 2px;
+                            background: Theme.accent;
+                        }
+                    }
+                    if root.item.is-drive && root.item.info != "": Text {
+                        accessible-role: none;
+                        text: root.item.info;
+                        font-size: Theme.font-small;
+                        color: Theme.muted;
+                        overflow: elide;
                     }
                 }
-                if root.item.is-drive && root.item.info != "": Text {
+                if !root.item.is-drive && root.item.info != "": Text {
+                    horizontal-stretch: 1;
                     accessible-role: none;
                     text: root.item.info;
                     font-size: Theme.font-small;
-                    color: Theme.muted;
+                    color: Theme.faint;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
                     overflow: elide;
                 }
-            }
-            if !root.item.is-drive && root.item.info != "": Text {
-                horizontal-stretch: 1;
-                accessible-role: none;
-                text: root.item.info;
-                font-size: Theme.font-small;
-                color: Theme.faint;
-                horizontal-alignment: right;
-                vertical-alignment: center;
-                overflow: elide;
             }
         }
 

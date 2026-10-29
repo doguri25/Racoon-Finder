@@ -212,7 +212,38 @@ pub fn status_line(
     selected_bytes: Option<u64>,
     free: Option<u64>,
 ) -> String {
-    let mut parts = vec![format!("항목 {items}개")];
+    status_parts(
+        vec![format!("항목 {items}개")],
+        selected,
+        selected_bytes,
+        free,
+    )
+}
+
+/// The status bar of a folder while the toolbar's filter shows only the rows whose names hold
+/// `filter`: `거르는 중: ‘보고’ · 항목 2개 / 9개 · 선택 1개 · 남은 공간 212 GB`, where `shown` is
+/// how many rows show and of how many there are (`(2, 9)`); the rest as in [`status_line`].
+pub fn filtered_status_line(
+    filter: &str,
+    (shown, of): (usize, usize),
+    selected: usize,
+    selected_bytes: Option<u64>,
+    free: Option<u64>,
+) -> String {
+    let parts = vec![
+        format!("거르는 중: ‘{filter}’"),
+        format!("항목 {shown}개 / {of}개"),
+    ];
+    status_parts(parts, selected, selected_bytes, free)
+}
+
+/// `parts`, then the selection and the free space of [`status_line`], joined.
+fn status_parts(
+    mut parts: Vec<String>,
+    selected: usize,
+    selected_bytes: Option<u64>,
+    free: Option<u64>,
+) -> String {
     match (selected, selected_bytes) {
         (0, _) => {}
         (count, Some(bytes)) => parts.push(format!("선택 {count}개 ({})", format_size(bytes))),
@@ -1179,6 +1210,11 @@ mod tests {
         assert_eq!(
             status_line(3, 3, Some(0), None),
             "항목 3개 · 선택 3개 (0 바이트)"
+        );
+        // While a filter hides rows, the line says so and counts both.
+        assert_eq!(
+            filtered_status_line("보고", (2, 9), 1, None, Some(212 * GB)),
+            "거르는 중: ‘보고’ · 항목 2개 / 9개 · 선택 1개 · 남은 공간 212 GB"
         );
     }
 

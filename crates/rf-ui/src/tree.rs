@@ -80,6 +80,8 @@ pub struct TreeRowData {
     pub has_children: bool,
     /// The node is the folder of the active pane.
     pub selected: bool,
+    /// The folder is hidden (it shows only while hidden items do).
+    pub hidden: bool,
     /// For a root, its position among the roots.
     pub root: Option<usize>,
 }
@@ -189,6 +191,7 @@ impl Tree {
                         .as_ref()
                         .is_some_and(|children| children.iter().any(|&child| self.shows(child))),
                     selected: self.selected == Some(id),
+                    hidden: node.attributes.contains(Attributes::HIDDEN),
                     root: node.root,
                 }
             })

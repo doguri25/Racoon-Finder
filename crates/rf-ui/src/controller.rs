@@ -226,6 +226,9 @@ fn connect(window: &MainWindow) {
     window.on_path_entered(|s, text| {
         with(|c| c.update(|state| state.enter_path(side(s), &text)));
     });
+    window.on_filter_edited(|text| {
+        with(|c| c.update(|state| state.filter_edited(&text)));
+    });
     window.on_sort(|s, column| {
         if let Some(key) = ui_bridge::sort_key(column) {
             with(|c| c.update(|state| state.sort(side(s), key)));
@@ -1001,6 +1004,8 @@ impl Controller {
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
+            // The active pane's own filter (another pane's, or none once the tab moved on).
+            window.invoke_show_filter(state.filter_text().into());
             // The next drag carries the items the last press readied.
             let drag = state.drag_id();
             if self.shown_drag.replace(drag) != drag {

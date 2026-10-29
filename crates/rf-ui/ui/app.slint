@@ -7,7 +7,7 @@
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { ToolButton, TextButton, Toast } from "widgets.slint";
+import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { FileRow } from "file-list.slint";
 import { Pane, PaneView, TabItem, Crumb } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
@@ -116,6 +116,8 @@ export component MainWindow inherits Window {
     callback tab-added(side: int);
     callback crumb-clicked(side: int, index: int);
     callback path-entered(side: int, text: string);
+    // The filter box changed: the active pane shows the rows whose names hold `text`.
+    callback filter-edited(text: string);
     callback sort(side: int, column: int);
     // A left press on row `index` of pane `side`, and its release when no drag came of it.
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
@@ -167,6 +169,13 @@ export component MainWindow inherits Window {
     // action the place takes, or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
     callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+
+    // The filter box shows `text`, the filter of the active pane, when it does not already.
+    public function show-filter(text: string) {
+        if (filter-box.text != text) {
+            filter-box.text = text;
+        }
+    }
 
     // Shows pane `side`'s path as text to edit.
     public function edit-path(side: int) {
@@ -286,7 +295,7 @@ export component MainWindow inherits Window {
         key-pressed(event) => {
             // A text field that has focus passes up the keys it does not use; they are not
             // shortcuts while it is open, nor while a dialog is.
-            if (left.editing || right.editing || root.dialog != DialogKind.none) {
+            if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none) {
                 return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt)) {
@@ -477,34 +486,35 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Place of the filter box.
-                    Rectangle {
+                    // The active pane shows only the rows whose names hold what is typed here.
+                    // Esc clears it, Enter and ↓ go back to the list.
+                    filter-box := Field {
                         min-width: 120px;
                         preferred-width: 260px;
                         max-width: 260px;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        border-radius: Theme.radius;
-                        background: Theme.bg;
-
-                        HorizontalLayout {
-                            padding-left: Theme.gap-m;
-                            padding-right: Theme.gap-m;
-                            spacing: Theme.gap-s;
-
-                            Icon {
-                                y: (parent.height - self.height) / 2;
-                                width: 18px;
-                                height: 18px;
-                                name: "search";
-                                color: Theme.muted;
+                        height: 32px;
+                        horizontal-stretch: 0;
+                        icon: "search";
+                        hint: "이 폴더에서 거르기";
+                        label: "이 폴더에서 거르기";
+                        edited(text) => {
+                            root.filter-edited(text);
+                        }
+                        accepted => {
+                            keys.focus();
+                        }
+                        key(event) => {
+                            if (event.text == Key.Escape) {
+                                self.text = "";
+                                root.filter-edited("");
+                                keys.focus();
+                                return accept;
                             }
-                            Text {
-                                text: "이 폴더에서 거르기";
-                                color: Theme.faint;
-                                vertical-alignment: center;
-                                overflow: elide;
+                            if (event.text == Key.DownArrow) {
+                                keys.focus();
+                                return accept;
                             }
+                            reject
                         }
                     }
                 }
@@ -544,9 +554,12 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Both panes start from one width and share the rest alike: they stay as wide as
+                // each other, whatever they show.
                 left := Pane {
                     horizontal-stretch: 1;
                     min-width: 300px;
+                    preferred-width: 300px;
                     label: "왼쪽 패널";
                     view: root.left-pane;
                     drag-data: root.drag-data;
@@ -622,6 +635,7 @@ export component MainWindow inherits Window {
                 right := Pane {
                     horizontal-stretch: 1;
                     min-width: 300px;
+                    preferred-width: 300px;
                     label: "오른쪽 패널";
                     view: root.right-pane;
                     drag-data: root.drag-data;

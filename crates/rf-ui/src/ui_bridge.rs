@@ -99,6 +99,7 @@ impl PaneModels {
         let sort = tab.sort().primary;
         PaneView {
             tabs: ModelRc::from(Rc::clone(&self.tabs)),
+            active_tab: i32::try_from(pane.active()).unwrap_or(0),
             crumbs: ModelRc::from(Rc::clone(&self.crumbs)),
             path_text: tab.location().to_string().into(),
             rows: ModelRc::from(Rc::clone(&self.rows)),
@@ -357,6 +358,7 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
                 expanded: expandable && row.expanded,
                 selected: row.selected,
                 dimmed: false,
+                hidden: row.hidden,
             };
             (row.id, shown)
         })
@@ -387,6 +389,7 @@ pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
                 expanded: false,
                 selected: tree.target() == Some(&node.path),
                 dimmed: false,
+                hidden: node.attributes.contains(Attributes::HIDDEN),
             };
             Some((id, row))
         })
@@ -1284,6 +1287,7 @@ mod tests {
             has_children_unknown: true,
             has_children: false,
             selected: false,
+            hidden: false,
             root,
         }
     }
@@ -1311,7 +1315,12 @@ mod tests {
             data(2, "시스템 디스크", 0, Some(2)),
             data(3, "USB", 0, Some(3)),
         ];
+        let mut rows = rows;
+        rows[2].hidden = true;
         let shown = tree_rows(&rows, &places());
+        // A hidden folder shows at half strength, as in the list.
+        let hidden: Vec<bool> = shown.iter().map(|(_, row)| row.hidden).collect();
+        assert_eq!(hidden, [false, false, true, false, false, false]);
         let ids: Vec<NodeId> = shown.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [0, 4, 5, 1, 2, 3]);
         let heads: Vec<SectionHead> = shown.iter().map(|(_, row)| row.head).collect();

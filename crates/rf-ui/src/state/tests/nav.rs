@@ -524,9 +524,11 @@ fn tree_rows_open_once_and_follow_the_hidden_setting() {
         ],
     });
     assert_eq!(tree_labels(&state), ["임시", "a"]);
-    // Ctrl+H shows the hidden folders in the tree too.
+    // Ctrl+H shows the hidden folders in the tree too, dimmed as in the list.
     assert_eq!(press(&mut state, "h", CTRL), Some(vec![]));
     assert_eq!(tree_labels(&state), ["임시", ".h", "a"]);
+    let hidden: Vec<bool> = state.tree().rows().iter().map(|row| row.hidden).collect();
+    assert_eq!(hidden, [false, true, false]);
 
     // A listing that failed leaves the row empty, without a notice.
     let a = the_tree_load(&state.toggle_tree_row(2));
@@ -665,4 +667,30 @@ fn start_folders_fall_back_to_home() {
         Some((root.clone(), root))
     );
     assert_eq!(start_folders(None, None, None, None, None), None);
+}
+
+#[test]
+fn the_filter_box_filters_the_active_pane() {
+    let mut state = ready(
+        vec![file("보고서.txt"), file("메모.txt"), file("보고-2.md")],
+        vec![file("보고서.txt")],
+    );
+    state.click_row(LEFT, 1, false, false);
+    let effects = state.filter_edited("보고");
+    assert_eq!(rows(&state, LEFT), ["보고서.txt", "보고-2.md"]);
+    // The other pane is left alone.
+    assert_eq!(rows(&state, RIGHT), ["보고서.txt"]);
+    assert_eq!(state.filter_text(), "보고");
+    // The cursor stays where its row was, on the nearest row left, and shows.
+    assert_eq!(cursor(&state, LEFT), Some(1));
+    assert_eq!(effects, [Effect::ScrollTo { side: LEFT, row: 1 }]);
+    // The box shows the active pane's own filter.
+    state.activate(RIGHT);
+    assert_eq!(state.filter_text(), "");
+    state.activate(LEFT);
+    assert_eq!(state.filter_text(), "보고");
+    // Esc in the box clears it.
+    state.filter_edited("");
+    assert_eq!(rows(&state, LEFT).len(), 3);
+    assert_eq!(state.filter_text(), "");
 }

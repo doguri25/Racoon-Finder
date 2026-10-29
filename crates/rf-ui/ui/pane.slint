@@ -21,6 +21,8 @@ export struct Crumb {
 // whole.
 export struct PaneView {
     tabs: [TabItem],
+    // The position of the tab that shows.
+    active-tab: int,
     crumbs: [Crumb],
     path-text: string,
     rows: [FileRow],
@@ -161,6 +163,8 @@ component TabButton inherits Rectangle {
 
 component CrumbButton inherits Rectangle {
     in property <string> text;
+    // The name for screen readers, when it is not the text (the "…" piece's folder).
+    in property <string> label: root.text;
     in property <bool> current;
     callback clicked();
 
@@ -169,7 +173,7 @@ component CrumbButton inherits Rectangle {
     border-radius: 6px;
     background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
-    accessible-label: root.text;
+    accessible-label: root.label;
     accessible-action-default => {
         root.clicked();
     }
@@ -232,12 +236,13 @@ export component Pane inherits Rectangle {
     callback tab-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
     callback tab-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
 
-    // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs).
+    // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs), all of it
+    // selected and the cursor at its end, which shows: that is where a path is edited.
     public function edit-path() {
         root.editing = true;
         path-input.text = root.view.path-text;
         path-input.focus();
-        path-input.select-all();
+        path-input.set-selection-offsets(0, 2147483647);
     }
 
     public function scroll-to(index: int) {
@@ -257,6 +262,37 @@ export component Pane inherits Rectangle {
     accessible-role: groupbox;
     accessible-label: root.label;
 
+    // The tabs share the strip, each between 120 and 168px wide; when they need more room
+    // than the pane has, the strip scrolls sideways and keeps the tab that shows in view. So
+    // the pane is as wide as the other one, however many tabs either has.
+    private property <int> tab-count: root.view.tabs.length;
+    private property <length> tab-gap: 2px;
+    private property <length> tab-room: tab-strip.width - 16px - 30px;
+    private property <length> tab-width: min(168px, max(120px, (root.tab-room - (root.tab-count - 1) * root.tab-gap) / max(1, root.tab-count)));
+    private property <length> tabs-width: root.tab-count * root.tab-width + max(0, root.tab-count - 1) * root.tab-gap;
+    private property <int> active-tab: root.view.active-tab;
+    changed active-tab => {
+        root.show-active-tab();
+    }
+    changed tabs-width => {
+        root.show-active-tab();
+    }
+    changed tab-room => {
+        root.show-active-tab();
+    }
+
+    // Scrolls the strip as little as needed to show the tab that shows whole.
+    function show-active-tab() {
+        let shown = min(root.tab-room, root.tabs-width);
+        tabs-view.content-x = max(min(0px, shown - root.tabs-width), min(0px, tabs-view.content-x));
+        let left = root.active-tab * (root.tab-width + root.tab-gap);
+        if (left + tabs-view.content-x < 0) {
+            tabs-view.content-x = -left;
+        } else if (left + root.tab-width + tabs-view.content-x > shown) {
+            tabs-view.content-x = shown - left - root.tab-width;
+        }
+    }
+
     Timer {
         interval: 300ms;
         running: root.loading && !root.loading-shown;
@@ -273,16 +309,21 @@ export component Pane inherits Rectangle {
 
     VerticalLayout {
         // Tab strip.
-        Rectangle {
+        tab-strip := Rectangle {
+            height: 40px;
             background: Theme.raised;
 
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                padding-top: 6px;
-                spacing: 2px;
+            tabs-view := Flickable {
+                x: 8px;
+                y: 6px;
+                width: min(root.tab-room, root.tabs-width);
+                height: 34px;
+                content-width: root.tabs-width;
+                interactive: root.tabs-width > root.tab-room;
 
                 for tab[i] in root.view.tabs: TabButton {
+                    x: i * (root.tab-width + root.tab-gap);
+                    width: root.tab-width;
                     tab: tab;
                     closable: root.view.tabs.length > 1;
                     selected => {
@@ -298,19 +339,14 @@ export component Pane inherits Rectangle {
                         return root.tab-dropped(data, i, action);
                     }
                 }
-                VerticalLayout {
-                    alignment: center;
-
-                    StripButton {
-                        icon: "plus";
-                        label: "새 탭";
-                        clicked => {
-                            root.tab-added();
-                        }
-                    }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
+            }
+            StripButton {
+                x: tabs-view.x + tabs-view.width + 2px;
+                y: tabs-view.y + (tabs-view.height - self.height) / 2;
+                icon: "plus";
+                label: "새 탭";
+                clicked => {
+                    root.tab-added();
                 }
             }
 
@@ -342,40 +378,61 @@ export component Pane inherits Rectangle {
                 visible: !root.editing;
                 clip: true;
 
-                // Too long for the row, the path keeps its last folders in view.
+                // Too long for the row, the path keeps its last folders in view. A folder that
+                // does not fit whole is not shown cut: the folders left of the first one that
+                // fits are hidden, and the last of them gives its place to a "…" piece that
+                // goes to it (the nearest folder out of view).
                 crumb-strip := HorizontalLayout {
                     x: min(0px, crumb-view.width - self.preferred-width);
                     width: self.preferred-width;
                     alignment: start;
                     spacing: 0px;
 
-                    for crumb[i] in root.view.crumbs: HorizontalLayout {
-                        spacing: 0px;
+                    for crumb[i] in root.view.crumbs: Rectangle {
+                        // Where the piece is in the row, and whether the row is cut on the left.
+                        property <length> left: crumb-strip.x + self.x;
+                        property <bool> cut: crumb-strip.x < 0;
+                        property <length> room: 30px;
+                        property <bool> hidden: self.cut && self.left < self.room;
+                        property <bool> stands-for-hidden: self.hidden && self.left + self.width >= self.room;
 
-                        if i > 0: Text {
-                            text: "›";
-                            color: Theme.muted;
-                            vertical-alignment: center;
-                        }
-                        VerticalLayout {
-                            alignment: center;
+                        // Hidden, it keeps its place in the row, which tells where each
+                        // piece is.
+                        Rectangle {
+                            visible: !parent.hidden;
 
-                            CrumbButton {
-                                text: crumb.label;
-                                current: i == root.view.crumbs.length - 1;
-                                clicked => {
-                                    root.crumb-clicked(crumb.index);
+                            HorizontalLayout {
+                                spacing: 0px;
+
+                                if i > 0: Text {
+                                    text: "›";
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+
+                                    CrumbButton {
+                                        text: crumb.label;
+                                        current: i == root.view.crumbs.length - 1;
+                                        clicked => {
+                                            root.crumb-clicked(crumb.index);
+                                        }
+                                    }
                                 }
                             }
                         }
+                        if self.stands-for-hidden: CrumbButton {
+                            x: parent.width - self.width;
+                            y: (parent.height - self.height) / 2;
+                            width: 26px;
+                            text: "…";
+                            label: crumb.label;
+                            clicked => {
+                                root.crumb-clicked(crumb.index);
+                            }
+                        }
                     }
-                }
-
-                // Fades out the folders cut off on the left.
-                if crumb-strip.x < 0: Rectangle {
-                    x: 0;
-                    width: 28px;
-                    background: @linear-gradient(90deg, Theme.panel 30%, Theme.panel.transparentize(1) 100%);
                 }
             }
 
@@ -390,33 +447,56 @@ export component Pane inherits Rectangle {
                 border-radius: 6px;
                 background: Theme.bg;
 
-                path-input := TextInput {
+                // A long path scrolls sideways inside, to keep the cursor in view.
+                Rectangle {
                     x: 8px;
                     width: parent.width - 16px;
-                    color: Theme.text;
-                    selection-background-color: Theme.selection;
-                    selection-foreground-color: Theme.text;
-                    vertical-alignment: center;
-                    single-line: true;
-                    accessible-role: text-input;
-                    accessible-label: "경로";
-                    accepted => {
-                        root.editing = false;
-                        root.path-entered(self.text);
-                    }
-                    key-pressed(event) => {
-                        if (event.text == Key.Escape) {
-                            root.editing = false;
-                            root.edit-ended();
-                            return accept;
+                    clip: true;
+
+                    path-input := TextInput {
+                        property <length> computed-x;
+                        // An input method composing a syllable: it is not in the text until it is
+                        // committed, so Enter meanwhile does not take the path.
+                        property <bool> composing: self.preedit-text != "";
+
+                        x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+                        width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                        height: parent.height;
+                        color: Theme.text;
+                        selection-background-color: Theme.selection;
+                        selection-foreground-color: Theme.text;
+                        vertical-alignment: center;
+                        single-line: true;
+                        accessible-role: text-input;
+                        accessible-label: "경로";
+                        cursor-position-changed(cursor-position) => {
+                            if (cursor-position.x + self.computed-x < 0px) {
+                                self.computed-x = -cursor-position.x;
+                            } else if (cursor-position.x + self.computed-x > parent.width - self.text-cursor-width) {
+                                self.computed-x = parent.width - cursor-position.x - self.text-cursor-width;
+                            }
                         }
-                        reject
-                    }
-                    // Focus went elsewhere (a click on the other pane's path, a row, a
-                    // tab): the field closes and leaves the focus where it went.
-                    changed has-focus => {
-                        if (!self.has-focus && root.editing) {
+                        accepted => {
+                            if (self.composing) {
+                                return;
+                            }
                             root.editing = false;
+                            root.path-entered(self.text);
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.editing = false;
+                                root.edit-ended();
+                                return accept;
+                            }
+                            reject
+                        }
+                        // Focus went elsewhere (a click on the other pane's path, a row, a
+                        // tab): the field closes and leaves the focus where it went.
+                        changed has-focus => {
+                            if (!self.has-focus && root.editing) {
+                                root.editing = false;
+                            }
                         }
                     }
                 }

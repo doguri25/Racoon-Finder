@@ -79,10 +79,16 @@ pub struct Tab {
     history: History,
     /// Every item of the folder, sorted by `sort`.
     all: Vec<Entry>,
-    /// The items of `all` that `filter` shows, in the same order: the rows on screen.
+    /// The items of `all` that `filter` shows and whose names hold `name_filter`, in the same
+    /// order: the rows on screen.
     visible: Vec<Entry>,
+    /// How many items of `all` `filter` shows, whatever their names.
+    unfiltered: usize,
     sort: SortSpec,
     filter: VisibilityFilter,
+    /// What the rows' names must hold, ignoring case, while it is not empty (the toolbar's
+    /// "이 폴더에서 거르기"): it filters this folder, and goes when the tab goes elsewhere.
+    name_filter: String,
     selection: Selection,
     generation: u64,
     status: LoadStatus,
@@ -113,8 +119,10 @@ impl Tab {
             history: History::default(),
             all: Vec::new(),
             visible: Vec::new(),
+            unfiltered: 0,
             sort,
             filter,
+            name_filter: String::new(),
             selection: Selection::default(),
             generation: 0,
             status: LoadStatus::Loading,
@@ -159,6 +167,20 @@ impl Tab {
     /// Which hidden and system items show.
     pub fn filter(&self) -> VisibilityFilter {
         self.filter
+    }
+
+    /// What the rows' names must hold, ignoring case; empty for no filter.
+    pub fn name_filter(&self) -> &str {
+        &self.name_filter
+    }
+
+    /// Shows only the rows whose names hold `text`, ignoring case, or every row for an empty
+    /// one. The selection keeps the rows that still show.
+    pub fn set_name_filter(&mut self, text: &str) {
+        if self.name_filter != text {
+            text.clone_into(&mut self.name_filter);
+            self.refresh_visible();
+        }
     }
 
     /// The selected rows, the cursor and the anchor, as positions in [`Tab::visible`].
@@ -354,7 +376,12 @@ impl Tab {
             .filter(|entry| entry.kind == EntryKind::File)
             .collect();
         let bytes = (!files.is_empty()).then(|| files.iter().map(|entry| entry.size).sum());
-        words::status_line(self.visible.len(), selected.len(), bytes, self.free)
+        if self.name_filter.is_empty() {
+            words::status_line(self.visible.len(), selected.len(), bytes, self.free)
+        } else {
+            let shown = (self.visible.len(), self.unfiltered);
+            words::filtered_status_line(&self.name_filter, shown, selected.len(), bytes, self.free)
+        }
     }
 
     /// Moves the cursor to the first row whose name starts with what was typed, ignoring
@@ -433,6 +460,8 @@ impl Tab {
         self.stands_in_for = None;
         self.all.clear();
         self.visible.clear();
+        self.unfiltered = 0;
+        self.name_filter.clear();
         self.selection = Selection::default();
         self.free = None;
         self.pending_select = None;
@@ -468,13 +497,25 @@ impl Tab {
     /// Filters `all` into `visible` again and carries the selection over.
     fn refresh_visible(&mut self) {
         let filter = self.filter;
+        let wanted = self.name_filter.to_lowercase();
         let old = std::mem::take(&mut self.visible);
+        let mut unfiltered = 0;
         self.visible = self
             .all
             .iter()
             .filter(|entry| filter.is_visible(entry))
+            .inspect(|_| unfiltered += 1)
+            .filter(|entry| {
+                wanted.is_empty()
+                    || entry
+                        .name
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&wanted)
+            })
             .cloned()
             .collect();
+        self.unfiltered = unfiltered;
         self.selection.reconcile(&old, &self.visible);
         let waited = self
             .pending_select
@@ -1143,6 +1184,63 @@ mod tests {
             selection.click(docs, rows);
         }
         assert_eq!(tab.status_line(), "항목 9개 · 선택 1개 · 남은 공간 212 GB");
+    }
+
+    #[test]
+    fn a_name_filter_keeps_the_rows_that_match_and_says_so() {
+        let mut tab = ready_tab(
+            "a",
+            vec![
+                dir("docs"),
+                file("Alpha.txt", 1),
+                file("beta.TXT", 2),
+                file("gamma.md", 3),
+                hidden(file(".notes.txt", 4)),
+            ],
+        );
+        {
+            let (selection, rows) = tab.selection_mut();
+            selection.click(1, rows);
+            selection.toggle(3, rows);
+        }
+        // Any part of the name, in any case; hidden items stay hidden.
+        tab.set_name_filter("TxT");
+        assert_eq!(tab.name_filter(), "TxT");
+        assert_eq!(names(tab.visible()), ["Alpha.txt", "beta.TXT"]);
+        assert_eq!(names(tab.all()).len(), 5);
+        // The selection keeps the rows that still show.
+        assert_eq!(selected(&tab), ["Alpha.txt"]);
+        let generation = tab.generation();
+        assert!(tab.apply_space(generation, 212 * 1024 * 1024 * 1024));
+        assert_eq!(
+            tab.status_line(),
+            "거르는 중: ‘TxT’ · 항목 2개 / 4개 · 선택 1개 (1 바이트) · 남은 공간 212 GB"
+        );
+        // A row that comes is filtered too.
+        assert!(tab.apply_changes(
+            generation,
+            vec![
+                Change::Upsert(file("delta.txt", 1)),
+                Change::Upsert(file("epsilon", 1))
+            ]
+        ));
+        assert_eq!(names(tab.visible()), ["Alpha.txt", "beta.TXT", "delta.txt"]);
+        // A reload keeps it; nothing matches: no rows, and the count says why.
+        tab.reload();
+        tab.set_name_filter("zzz");
+        assert_eq!(names(tab.visible()), NONE);
+        assert!(
+            tab.status_line()
+                .starts_with("거르는 중: ‘zzz’ · 항목 0개 / 6개")
+        );
+        // Cleared, every row shows again, and the line is as before.
+        tab.set_name_filter("");
+        assert_eq!(tab.visible().len(), 6);
+        assert!(tab.status_line().starts_with("항목 6개"));
+        // It filters this folder only: another folder starts without it.
+        tab.set_name_filter("txt");
+        tab.navigate(folder("b"));
+        assert_eq!(tab.name_filter(), "");
     }
 
     #[test]
