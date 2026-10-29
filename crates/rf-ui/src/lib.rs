@@ -13,6 +13,7 @@ pub mod open;
 pub mod pane;
 pub mod places;
 pub mod selection;
+pub mod state;
 pub mod ui_bridge;
 pub mod words;
 

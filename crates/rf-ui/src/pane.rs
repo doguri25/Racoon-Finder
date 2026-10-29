@@ -648,6 +648,16 @@ impl Pane {
     }
 }
 
+/// `path` and the folders above it, the root first: the pieces of a tab's path row.
+pub fn ancestors(path: &VPath) -> Vec<VPath> {
+    let mut chain = vec![path.clone()];
+    while let Some(parent) = chain.last().and_then(VPath::parent) {
+        chain.push(parent);
+    }
+    chain.reverse();
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};

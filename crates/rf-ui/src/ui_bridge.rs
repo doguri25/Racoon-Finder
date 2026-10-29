@@ -13,9 +13,9 @@ use rf_core::{Attributes, Entry, EntryKind, VPath};
 use rf_vfs::{SortKey, SortOrder};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
-use crate::controller::{self, Controller, ancestors};
+use crate::controller::{self, Controller};
 use crate::format::{format_size, format_time_in, kind_label};
-use crate::pane::{LoadStatus, Pane};
+use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
 use crate::words;
