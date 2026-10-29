@@ -85,7 +85,7 @@ pub enum Effect {
     FocusFilter,
     /// Open the 보기 menu.
     ShowViewMenu,
-    /// Give the sidebar's folder tree the keys ([`sidebar`]).
+    /// Give the sidebar's folder tree the keys (module `state::sidebar`).
     FocusTree,
     /// Give the keys back to the panes (from the tree, or from a part of the window that is
     /// gone).

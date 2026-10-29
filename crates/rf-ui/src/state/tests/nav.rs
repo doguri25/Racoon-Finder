@@ -172,12 +172,29 @@ fn open_follows_the_row_kind() {
     let request = the_load(&effects);
     assert_eq!(request.path, folder("a").join("sub").expect("a name"));
     assert_ne!(request.generation, generation);
-    // Back and Up go to `a` again.
+    // Back goes to `a` again, and Up to its parent.
     let effects = press(&mut state, &special(Key::LeftArrow), ALT).expect("used");
     assert_eq!(the_load(&effects).path, folder("a"));
-    let effects = press(&mut state, &special(Key::Backspace), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::UpArrow), ALT).expect("used");
     let temp = VPath::local(std::env::temp_dir()).expect("a local path");
     assert_eq!(the_load(&effects).path, temp);
+}
+
+#[test]
+fn backspace_goes_back_through_the_history_as_in_explorer() {
+    let mut state = ready(vec![dir("sub")], vec![]);
+    let sub = folder("a").join("sub").expect("a name");
+    assert_eq!(the_load(&state.open_row(LEFT, 0)).path, sub);
+    assert_eq!(the_load(&state.go_to(folder("b"))).path, folder("b"));
+    // Backspace is Back on Windows: the folder before `b`, not its parent; then the one
+    // before that.
+    let effects = press(&mut state, &special(Key::Backspace), NONE).expect("used");
+    assert_eq!(the_load(&effects).path, sub);
+    let effects = press(&mut state, &special(Key::Backspace), NONE).expect("used");
+    assert_eq!(the_load(&effects).path, folder("a"));
+    // And Forward comes back.
+    let effects = press(&mut state, &special(Key::RightArrow), ALT).expect("used");
+    assert_eq!(the_load(&effects).path, sub);
 }
 
 #[test]
@@ -849,14 +866,14 @@ fn up_puts_the_cursor_on_the_folder_it_came_from_and_a_new_folder_starts_at_its_
     });
     assert_eq!(cursor(&state, LEFT), None);
 
-    // Backspace twice: back in `a`, the cursor is on `y`, which shows.
-    let request = the_load(&press(&mut state, &special(Key::Backspace), NONE).expect("used"));
+    // Up twice: back in `a`, the cursor is on `y`, which shows.
+    let request = the_load(&press(&mut state, &special(Key::UpArrow), ALT).expect("used"));
     state.loaded(LoadEvent::Listed {
         generation: request.generation,
         entries: vec![dir("p"), file("q")],
     });
     assert_eq!(selected(&state, LEFT), [0], "back in `y`, on `p`");
-    let request = the_load(&press(&mut state, &special(Key::Backspace), NONE).expect("used"));
+    let request = the_load(&press(&mut state, &special(Key::UpArrow), ALT).expect("used"));
     assert_eq!(request.path, folder("a"));
     let effects = state.loaded(LoadEvent::Listed {
         generation: request.generation,

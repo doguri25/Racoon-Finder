@@ -86,8 +86,8 @@ Windows에서 어느 쪽인지 모르겠으면 설정 → 시스템 → 정보�
 | 하는 일 | Windows·Linux | macOS |
 | --- | --- | --- |
 | 왼쪽·오른쪽 패널 바꾸기 | Tab | Tab |
-| 열기 / 상위 폴더 | Enter / Alt+↑, Backspace | ⌘↓ / ⌘↑ |
-| 뒤로 / 앞으로 | Alt+← / Alt+→ | ⌘[ / ⌘] |
+| 열기 / 상위 폴더 | Enter / Alt+↑ | ⌘↓ / ⌘↑ |
+| 뒤로 / 앞으로 | Alt+←, Backspace / Alt+→ | ⌘[ / ⌘] |
 | 범위 선택, 하나씩 선택, 모두 선택, 선택 해제 | Shift+↑↓, Ctrl+Space, Ctrl+A, Esc | ⇧↑↓, ⌘-클릭, ⌘A, Esc |
 | 이름 바꾸기 | F2 | Return(↩) |
 | 휴지통으로 / 영구 삭제 | Delete / Shift+Delete | ⌘delete / ⌥⌘delete |

@@ -102,7 +102,10 @@ export component NameDialog inherits DialogFrame {
     function go(step: int) {
         root.on-button = DialogKeys.cycle(root.on-button + 1, step, 3) - 1;
         if (root.on-button < 0) {
+            // Back in the field, the name is all selected, as in the system's dialogs: what is
+            // typed replaces it.
             input.focus();
+            input.select-all();
         } else {
             keys.focus();
         }
@@ -767,7 +770,8 @@ export component ClosingNote inherits DialogFrame {
 }
 
 // A small window of its own with one message and an OK button: for a second instance of the
-// app, or an app that could not start.
+// app, or an app that could not start. The keys are on 확인, its one button, which shows a ring:
+// Space, Enter and Esc close it.
 export component NoticeWindow inherits Window {
     in property <string> app-title;
     in property <string> heading;
@@ -805,8 +809,12 @@ export component NoticeWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (event.text == Key.Escape || event.text == Key.Return) {
+            if (event.text == Key.Escape || DialogKeys.presses(event)) {
                 root.closed();
+                return accept;
+            }
+            // One button: Tab keeps the keys on it.
+            if (DialogKeys.tab-step(event) != 0) {
                 return accept;
             }
             reject
@@ -835,6 +843,7 @@ export component NoticeWindow inherits Window {
                 PrimaryButton {
                     button-height: 36px;
                     text: "확인";
+                    focused: true;
                     clicked => {
                         root.closed();
                     }

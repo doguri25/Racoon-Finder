@@ -410,6 +410,11 @@ const CMD_OPT: Mods = Mods {
     ..NONE
 };
 const CTL: Mods = Mods { meta: true, ..NONE };
+const CTL_CMD: Mods = Mods {
+    ctrl: true,
+    meta: true,
+    ..NONE
+};
 const CTL_SHIFT: Mods = Mods {
     meta: true,
     shift: true,
@@ -444,8 +449,9 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('t', CTRL_SHIFT), C::ReopenTab),
     (k(Key::Return, NONE), C::Open),
     (k(Key::UpArrow, ALT), C::Up),
-    (k(Key::Backspace, NONE), C::Up),
     (k(Key::LeftArrow, ALT), C::Back),
+    // File Explorer's Back since Windows 7.
+    (k(Key::Backspace, NONE), C::Back),
     (k(Key::RightArrow, ALT), C::Forward),
     (c('l', CTRL), C::EditPath),
     (c('d', ALT), C::EditPath),
@@ -553,6 +559,8 @@ static MACOS: &[(Chord, Command)] = &[
     (c('j', CMD), C::ViewMenu),
     (c('y', CMD), C::QuickLook),
     (c('p', CMD_SHIFT), C::TogglePreview),
+    // AppKit's Show/Hide Sidebar, then Finder's own.
+    (c('s', CTL_CMD), C::ToggleTree),
     (c('s', CMD_OPT), C::ToggleTree),
     (k(Key::F6, NONE), C::FocusTree),
     (k(Key::F9, NONE), C::SameFolderInOther),
@@ -595,6 +603,7 @@ mod tests {
         shift: true,
         ..NONE
     };
+    const CTL_CMD: Mods = Mods { meta: true, ..CMD };
 
     fn key(k: Key) -> String {
         char::from(k).to_string()
@@ -646,7 +655,7 @@ mod tests {
             (text("T"), CTRL_SHIFT, C::ReopenTab),
             (key(Key::Return), NONE, C::Open),
             (key(Key::UpArrow), ALT, C::Up),
-            (key(Key::Backspace), NONE, C::Up),
+            (key(Key::Backspace), NONE, C::Back),
             (key(Key::LeftArrow), ALT, C::Back),
             (key(Key::RightArrow), ALT, C::Forward),
             (text("l"), CTRL, C::EditPath),
@@ -740,6 +749,7 @@ mod tests {
             (text("j"), CMD, C::ViewMenu),
             (text("y"), CMD, C::QuickLook),
             (text("P"), CMD_SHIFT, C::TogglePreview),
+            (text("s"), CTL_CMD, C::ToggleTree),
             (text("s"), CMD_OPT, C::ToggleTree),
             (key(Key::F9), NONE, C::SameFolderInOther),
             (key(Key::F9), SHIFT, C::SyncNavigation),
@@ -767,7 +777,7 @@ mod tests {
             (text("h"), CMD),
             (key(Key::Space), CMD),
             (key(Key::Tab), CMD),
-            // ⌘L makes an alias in Finder, ⌘D duplicates, ⌘E ejects.
+            // Finder edits the path with ⇧⌘G, not a browser's ⌘L; ⌘D duplicates, ⌘E ejects.
             (text("l"), CMD),
             (text("d"), CMD),
             (text("e"), CMD),
@@ -918,8 +928,11 @@ mod tests {
             letter('`', CMD),
         ];
         // ⌘ with a letter: new window, duplicate, eject, find, info, view options, connect,
-        // alias, show original, open, hide, minimize, quit, Quick Look and the editing keys.
-        keys.extend("acdefhijklmnoqrtvwxyz".chars().map(|c| letter(c, CMD)));
+        // show original, open, hide, minimize, quit, Quick Look and the editing keys.
+        keys.extend("acdefhijkmnoqrtvwxyz".chars().map(|c| letter(c, CMD)));
+        // ⌃⌘: make alias, full screen, lock screen, new folder with the selection, add to the
+        // sidebar, and AppKit's show or hide the sidebar.
+        keys.extend("afnqst".chars().map(|c| letter(c, CTL_CMD)));
         // ⇧⌘: the folders of the Go menu, new folder, preview, tab bar, log out, screenshots.
         keys.extend("acdfghikmnopqrtuz345".chars().map(|c| letter(c, CMD_SHIFT)));
         // ⌥⌘: hide the others, the Dock, force quit, the inspector, downloads, path bar,
@@ -998,6 +1011,7 @@ mod tests {
             (C::NewFolder, Some("Ctrl+Shift+N"), Some("⇧⌘N")),
             (C::Back, Some("Alt+←"), Some("⌘[")),
             (C::Up, Some("Alt+↑"), Some("⌘↑")),
+            (C::ToggleTree, Some("Ctrl+B"), Some("⌃⌘S")),
             (C::Open, Some("Enter"), Some("⌘↓")),
             (C::Rename, Some("F2"), Some("↩")),
             (C::Trash, Some("Delete"), Some("⌘⌫")),

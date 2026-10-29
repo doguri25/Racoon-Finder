@@ -2168,27 +2168,53 @@ fn the_name_window_tabs_between_its_field_and_its_buttons() {
     press(&window, Key::Tab);
     press(&window, Key::Space);
     assert_eq!(calls.take(), ["cancelled"]);
-    // Once more: 확인, which Enter presses with the name; once more: the field, which types.
+    // Once more: 확인, which Enter presses with the name; once more: the field, with the name
+    // all selected, so that what is typed replaces it.
     press(&window, Key::Tab);
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["accepted 보고서"]);
     press(&window, Key::Tab);
     chord(&window, &["x"]);
-    assert_eq!(calls.take(), ["edited x보고서"]);
+    assert_eq!(calls.take(), ["edited x"]);
     // Shift+Tab from the field goes to 확인; letters there type nothing.
     press_shifted(&window, Key::Tab);
     chord(&window, &["y"]);
     press(&window, Key::Space);
-    assert_eq!(calls.take(), ["accepted x보고서"]);
+    assert_eq!(calls.take(), ["accepted x"]);
 
     // While a syllable is composed in the field, Tab leaves it alone: the syllable is not in
     // the name yet.
     press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
     compose(&window, "ㅅ");
     press(&window, Key::Tab);
     commit_composition(&window, "서");
     press(&window, Key::Return);
-    assert_eq!(calls.take(), ["edited x서보고서", "accepted x서보고서"]);
+    assert_eq!(calls.take(), ["edited x서", "accepted x서"]);
+}
+
+#[test]
+fn the_notice_window_closes_from_the_keys_on_its_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let notice = NoticeWindow::new().expect("NoticeWindow builds");
+    let closed = Rc::new(RefCell::new(0));
+    let count = Rc::clone(&closed);
+    notice.on_closed(move || *count.borrow_mut() += 1);
+    notice.show().expect("the notice shows");
+    let press = |key: &str| {
+        notice
+            .window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        notice
+            .window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    };
+    // Space, Enter and Esc press 확인; Tab keeps the keys on it.
+    press(" ");
+    press(&special(Key::Tab));
+    press(&special(Key::Return));
+    press(&special(Key::Escape));
+    assert_eq!(*closed.borrow(), 3);
 }
 
 fn preflight_view(has_blocked: bool) -> PreflightView {
