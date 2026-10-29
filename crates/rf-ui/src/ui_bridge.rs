@@ -204,6 +204,8 @@ impl PaneModels {
     ) {
         let list = completion.map(|completion| (completion.names(), completion.cursor()));
         view.completion = folder_menu(&self.completions, list, false);
+        // A Tab waits whenever a request for the text is out, rows or not.
+        view.completion.pending = completion.is_some_and(Completion::waiting);
         view.chevron = chevron
             .and_then(|index| i32::try_from(index).ok())
             .unwrap_or(-1);
@@ -1856,5 +1858,46 @@ mod tests {
         assert_eq!(drag_mode(DragAction::Copy), Some(TransferMode::Copy));
         assert_eq!(drag_mode(DragAction::Link), None);
         assert_eq!(drag_mode(DragAction::None), None);
+    }
+
+    #[test]
+    fn the_completion_list_is_pending_while_a_request_for_its_text_is_out() {
+        use crate::loader::{FolderName, LoadEvent};
+        use crate::state::{AppState, Effect, LEFT};
+
+        let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+        let (mut state, _) = AppState::new(at("a"), at("b"), None);
+        let models = PaneModels::default();
+        let typed = format!("{}{}d", at("a"), std::path::MAIN_SEPARATOR);
+        let request = |effects: &[Effect]| {
+            effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::ListNames(request) => Some(request.generation),
+                    _ => None,
+                })
+                .expect("a listing of names")
+        };
+        // Whether the list shows, and whether a Tab waits.
+        let shown = |state: &AppState| {
+            let mut view = models.view(&state.panes()[LEFT], true);
+            models.show_address(&mut view, state.completion(LEFT), None);
+            (view.completion.open, view.completion.pending)
+        };
+        let first = request(&state.path_edited(LEFT, &typed));
+        assert_eq!(shown(&state), (false, true));
+        state.loaded(LoadEvent::Names {
+            generation: first,
+            names: vec![FolderName::folder("docs")],
+            more: 3,
+            links_left: false,
+        });
+        assert_eq!(shown(&state), (true, false));
+        // A longer text: the rows that still fit show while the request for it is out.
+        let _ = request(&state.path_edited(LEFT, &format!("{typed}o")));
+        assert_eq!(shown(&state), (true, true));
+        // None fits: the list hides, and a Tab still waits.
+        let _ = request(&state.path_edited(LEFT, &format!("{typed}z")));
+        assert_eq!(shown(&state), (false, true));
     }
 }

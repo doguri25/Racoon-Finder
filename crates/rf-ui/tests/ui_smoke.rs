@@ -469,16 +469,17 @@ fn the_path_field_asks_for_completions_and_takes_the_lists_keys() {
         labelled(&window, "downloads", AccessibleRole::ListItem).len(),
         1
     );
-    // It is as wide as the field, and right under it (the field takes the path row less 8px on
-    // either side, and 4px above and below).
+    // It is as wide as the field and 6px more on either side, as far as the pane's frame, and
+    // right under the field (the field takes the path row less 8px on either side, and 4px
+    // above and below).
     let list = labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).remove(0);
     let row = path_row_of(&window, "오른쪽 패널");
     let (list_at, row_at) = (list.absolute_position(), row.absolute_position());
     assert!(
-        (list_at.x - (row_at.x + 8.0)).abs() < 0.5,
+        (list_at.x - (row_at.x + 2.0)).abs() < 0.5,
         "{list_at:?} {row_at:?}"
     );
-    assert!((list.size().width - (row.size().width - 16.0)).abs() < 0.5);
+    assert!((list.size().width - (row.size().width - 4.0)).abs() < 0.5);
     let under = row_at.y + row.size().height - 4.0 + 2.0;
     assert!((list_at.y - under).abs() < 0.5, "{list_at:?} {row_at:?}");
     chord(&window, &[&down]);
@@ -639,12 +640,15 @@ fn the_completion_list_fits_a_short_pane_and_shows_its_cursor() {
         };
         set(-1);
         window.invoke_edit_path(side);
-        // The list shows (as the window draws it), then the keys go down it to its last row.
-        assert_eq!(
-            labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).len(),
-            1,
-            "{pane}"
-        );
+        // In the lower pane the list shows (as the window draws it), then the keys go down it to
+        // its last row; in the upper one it is made with its cursor on that row already.
+        if side == 1 {
+            assert_eq!(
+                labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).len(),
+                1,
+                "{pane}"
+            );
+        }
         set(19);
         for _ in 0..3 {
             slint::platform::update_timers_and_animations();
@@ -699,6 +703,50 @@ fn the_completion_list_fits_a_short_pane_and_shows_its_cursor() {
         }
         chord(&window, &[&char::from(Key::Escape).to_string()]);
     }
+}
+
+#[test]
+fn the_subfolder_list_opens_above_its_chevron_when_only_there_it_fits_whole() {
+    let window = window();
+    window.set_stacked(true);
+    window.set_split_share(0.9);
+    let pane = listed_pane(vec![]);
+    let models = PaneModels::default();
+    window.set_right_pane(models.view(&pane, true));
+    pointer(&window, "move", LogicalPosition::new(1.0, 1.0));
+    let chevron = path_row_of(&window, "오른쪽 패널")
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::Button)
+        .find_all()
+        .into_iter()
+        .rfind(|button| {
+            button
+                .accessible_label()
+                .is_some_and(|label| label.ends_with(SUBFOLDERS))
+        })
+        .expect("the last piece's chevron");
+    chevron.mock_single_click(slint::platform::PointerEventButton::Left);
+    let (top, bottom) = (
+        chevron.absolute_position().y,
+        chevron.absolute_position().y + chevron.size().height,
+    );
+    let place = |count: usize| {
+        let names: Vec<String> = (1..=count).map(|n| format!("여행 {n}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        window.set_subfolders(folder_menu(&names, -1, ""));
+        let list = labelled(&window, "하위 폴더", AccessibleRole::Groupbox).remove(0);
+        (
+            list.absolute_position().y,
+            list.absolute_position().y + list.size().height,
+        )
+    };
+    // Three rows fit under the `›` of the short lower pane: the list goes there.
+    let (list_top, _) = place(3);
+    assert!(list_top >= bottom, "{list_top} {bottom}");
+    // Eight do not, and fit above it: the list goes above, whole.
+    let (_, list_bottom) = place(8);
+    assert!(list_bottom <= top, "{list_bottom} {top}");
+    assert_eq!(window.get_subfolders_page(), 8);
 }
 
 #[test]

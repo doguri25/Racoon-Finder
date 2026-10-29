@@ -143,19 +143,23 @@ export component MainWindow inherits Window {
     private property <length> subfolders-bottom;
     // How many rows PageUp and PageDown move in that list: the rows it shows.
     out property <int> subfolders-page: max(1, min(root.subfolders.rows.length, root.subfolders-rows));
-    // The list goes under the `›`, or above it when its first rows do not fit under it and
-    // there is more room above, and shows the rows that fit there.
+    // The list goes under the `›`, or above it as a system's drop-down list goes: when the whole
+    // list fits there and not under the `›`, or when not even its first three rows fit under it
+    // and there is more room above. It shows the rows that fit where it goes.
     private property <length> subfolders-below: root.height - root.subfolders-bottom - 2px - 8px;
     private property <length> subfolders-above: root.subfolders-top - 2px - 8px;
-    private property <bool> subfolders-up: MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < min(root.subfolders.rows.length, 3) && root.subfolders-above > root.subfolders-below;
+    private property <int> subfolders-wanted: min(root.subfolders.rows.length, 10);
+    private property <bool> subfolders-up: MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < root.subfolders-wanted && (MenuRoom.rows(root.subfolders-above, root.subfolders.note != "") >= root.subfolders-wanted || (MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < min(root.subfolders.rows.length, 3) && root.subfolders-above > root.subfolders-below));
     private property <int> subfolders-rows: MenuRoom.rows(root.subfolders-up ? root.subfolders-above : root.subfolders-below, root.subfolders.note != "");
     // The completion list of the path field being edited: the pane whose list shows (0 or 1;
-    // -1 for none), the list, and where that pane's field is. It goes under the field, as wide
-    // as it, or above it as the list of subfolders goes above its `›`.
+    // -1 for none), the list, and where that pane's field is. It goes under the field, or above
+    // it when not even its first three rows fit under it and there is more room above.
     private property <int> completing: left.editing && root.left-pane.completion.open ? 0 : right.editing && root.right-pane.completion.open ? 1 : -1;
     private property <FolderMenuView> completion: root.completing == 1 ? root.right-pane.completion : root.left-pane.completion;
-    private property <length> completion-x: root.completing == 1 ? right.field-x : left.field-x;
-    private property <length> completion-width: root.completing == 1 ? right.field-width : left.field-width;
+    // The field's width and 6px more on either side, as far as the pane's frame: the file list's
+    // cursor outline under it does not show beside it.
+    private property <length> completion-x: (root.completing == 1 ? right.field-x : left.field-x) - 6px;
+    private property <length> completion-width: (root.completing == 1 ? right.field-width : left.field-width) + 12px;
     private property <length> completion-top: root.completing == 1 ? right.field-top : left.field-top;
     private property <length> completion-bottom: root.completing == 1 ? right.field-bottom : left.field-bottom;
     private property <length> completion-below: root.height - root.completion-bottom - 2px - 8px;

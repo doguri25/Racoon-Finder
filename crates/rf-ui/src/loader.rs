@@ -62,6 +62,10 @@ pub struct NamesRequest {
     pub os: Os,
 }
 
+/// How many links a [`Loader::list_names`] follows at most, for each name it may send: links
+/// that lead elsewhere than to folders do not make it follow links without end.
+pub const MOST_FOLLOWED: usize = 2;
+
 /// A folder a [`Loader::list_names`] found: its name, and whether it is a link (a symbolic link,
 /// or a junction on Windows) that leads to a folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,13 +125,15 @@ pub enum LoadEvent {
     /// only when the provider can tell.
     Space { generation: u64, available: u64 },
     /// The folders a [`Loader::list_names`] found, in the natural order of their names: at most
-    /// its request's `limit` of them, and how many more there are (links past the limit are
-    /// not looked at, so they are not counted). Sent once, in place of `Listed`; a listing that
-    /// fails sends `Failed` instead.
+    /// its request's `limit` of them, how many more folders there are, and whether links were
+    /// left unexamined (past the limit, or past the most links a listing follows), which may
+    /// lead to more folders: with `more` at 0 and no link left, `names` are all there are.
+    /// Sent once, in place of `Listed`; a listing that fails sends `Failed` instead.
     Names {
         generation: u64,
         names: Vec<FolderName>,
         more: usize,
+        links_left: bool,
     },
 }
 
@@ -204,8 +210,9 @@ impl Loader {
     /// folder, sorts them in the natural order of their names, and sends one `Names` with the
     /// first `request.limit` of them and the count of the rest, or one `Failed`, and ends. A
     /// link counts when it leads to a folder: the worker follows the links among the first
-    /// `limit` names, and no other. However large the folder, the UI thread gets at most
-    /// `limit` names, and the ticket stops the listing at its next batch (and between links).
+    /// `limit` names, at most [`MOST_FOLLOWED`] times `limit` of them, and no other; it says when
+    /// it left links unexamined. However large the folder, the UI thread gets at most `limit`
+    /// names, and the ticket stops the listing at its next batch (and between links).
     /// `sink` is called as for [`Loader::request`].
     pub fn list_names(
         &self,
@@ -1092,17 +1099,27 @@ impl Worker {
         }
         sort_by_name(&mut found, |each| each.name.as_os_str());
         let mut names = Vec::with_capacity(found.len().min(rule.limit));
-        let mut more = 0;
+        let (mut more, mut links_left, mut followed) = (0, false, 0);
+        let most_followed = rule.limit.saturating_mul(MOST_FOLLOWED);
         for each in found {
-            if names.len() < rule.limit {
+            if names.len() >= rule.limit {
+                if each.link {
+                    links_left = true;
+                } else {
+                    more += 1;
+                }
+            } else if !each.link {
+                names.push(each);
+            } else if followed == most_followed {
+                links_left = true;
+            } else {
                 if self.cancel.is_cancelled() {
                     return;
                 }
-                if !each.link || leads_to_folder(provider, folder, &each.name) {
+                followed += 1;
+                if leads_to_folder(provider, folder, &each.name) {
                     names.push(each);
                 }
-            } else if !each.link {
-                more += 1;
             }
         }
         if self.cancel.is_cancelled() {
@@ -1114,6 +1131,7 @@ impl Worker {
                 generation,
                 names,
                 more,
+                links_left,
             },
         );
     }

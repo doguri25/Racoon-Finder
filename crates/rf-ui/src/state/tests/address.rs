@@ -7,6 +7,7 @@ use std::path::{MAIN_SEPARATOR, Path};
 use super::*;
 use crate::keys::ListKey;
 use crate::loader::{FolderName, NamesRequest};
+use crate::state::address::encode_url_name;
 
 /// A lookup of the variables `vars`.
 fn vars<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -144,6 +145,17 @@ fn file_urls_name_local_paths_on_each_system() {
     // No drive, or a drive with no root.
     assert_eq!(windows("file:///home/me"), Some(FileUrl::Invalid));
     assert_eq!(windows("file:///C:x"), Some(FileUrl::Invalid));
+    // An encoded separator, in the path or the computer's name, is no path.
+    for url in [
+        "file:///C:/a%2Fb",
+        "file:///C:/a%2fb",
+        "file:///C:/a%5Cb",
+        "file:///C:/a%5cb",
+        "file://ser%2Fver/share",
+        "file://ser%5Cver/share",
+    ] {
+        assert_eq!(windows(url), Some(FileUrl::Invalid), "{url}");
+    }
     for os in [Os::MacOs, Os::Other] {
         let unix = |url: &str| read_file_url(url, os);
         assert_eq!(unix("file:///home/me%20too"), Some(path("/home/me too")));
@@ -156,6 +168,13 @@ fn file_urls_name_local_paths_on_each_system() {
         assert_eq!(unix("file:///home/50%"), Some(path("/home/50%")));
         assert_eq!(unix("file:///home/%zz"), Some(path("/home/%zz")));
         assert_eq!(unix("file:///home/%FF"), Some(FileUrl::Invalid));
+        for url in [
+            "file:///home/a%2Fb",
+            "file:///home/a%5cb",
+            "file://local%2Fhost/x",
+        ] {
+            assert_eq!(unix(url), Some(FileUrl::Invalid), "{url}");
+        }
         // Another computer is remote.
         assert_eq!(unix("file://server/share"), Some(FileUrl::Remote));
         assert_eq!(unix("file:x"), Some(FileUrl::Invalid));
@@ -292,6 +311,7 @@ fn names_come(
         generation: request.generation,
         names: names(list),
         more,
+        links_left: false,
     })
 }
 
@@ -867,6 +887,7 @@ fn a_link_to_a_folder_is_listed_and_opened_as_a_folder() {
         generation: request.generation,
         names: vec![link.clone(), FolderName::folder("etc")],
         more: 0,
+        links_left: false,
     });
     assert_eq!(
         state.subfolders().map(|list| list.names().rows()),
@@ -876,5 +897,90 @@ fn a_link_to_a_folder_is_listed_and_opened_as_a_folder() {
     assert_eq!(
         the_load(&effects).path,
         request.folder.join("bin").expect("a name")
+    );
+}
+
+#[test]
+fn a_name_completed_into_a_file_url_is_encoded() {
+    // What a URL's name cannot hold as it is: `%`, `#`, `?`, spaces and controls.
+    assert_eq!(
+        encode_url_name("C# 50%?\u{1}\u{7f}프로젝트-1.2_x~"),
+        "C%23%2050%25%3F%01%7F프로젝트-1.2_x~"
+    );
+    let mut state = ready(vec![], vec![]);
+    let url = file_url(&std::env::temp_dir().join("a b"));
+    let head = format!("{url}/");
+    let request = the_names_request(&state.path_edited(LEFT, &head));
+    assert_eq!(request.folder, folder("a b"));
+    names_come(&mut state, &request, &["C# 50% 프로젝트"], 0);
+    let (completed, effects) = state
+        .complete_path(LEFT, &head)
+        .expect("a name to complete with");
+    assert_eq!(completed, format!("{head}C%23%2050%25%20프로젝트/"));
+    // It reads back as that folder.
+    let named = std::env::temp_dir().join("a b").join("C# 50% 프로젝트");
+    assert_eq!(
+        read_typed(&completed, Os::CURRENT, &vars(&[])),
+        Typed::Folder(VPath::local(&named).expect("a local path"))
+    );
+    assert_eq!(
+        the_names_request(&effects).folder,
+        VPath::local(&named).expect("a local path")
+    );
+}
+
+#[test]
+fn a_listing_with_links_left_unexamined_is_not_complete() {
+    let mut state = ready(vec![], vec![]);
+    let a = folder("a").to_string();
+    let typed = format!("{a}{MAIN_SEPARATOR}d");
+    let request = the_names_request(&state.path_edited(LEFT, &typed));
+    // No folder was left out, but links past the limit were not looked at.
+    state.loaded(LoadEvent::Names {
+        generation: request.generation,
+        names: names(&["docs"]),
+        more: 0,
+        links_left: true,
+    });
+    // So a longer name lists again.
+    let longer = the_names_request(&state.path_edited(LEFT, &format!("{typed}o")));
+    assert_eq!(longer.prefix, "do");
+}
+
+#[test]
+fn a_tab_waits_while_a_request_for_the_text_is_out() {
+    let mut state = ready(vec![], vec![]);
+    let a = folder("a").to_string();
+    let typed = format!("{a}{MAIN_SEPARATOR}d");
+    let request = the_names_request(&state.path_edited(LEFT, &typed));
+    assert!(state.completion(LEFT).is_some_and(Completion::waiting));
+    // A listing that left folders out.
+    names_come(&mut state, &request, &["docs"], 5);
+    assert!(!state.completion(LEFT).is_some_and(Completion::waiting));
+    // A longer name: no row fits any more, and a request for it is out; Tab waits for it.
+    let longer = format!("{a}{MAIN_SEPARATOR}dz");
+    let request = the_names_request(&state.path_edited(LEFT, &longer));
+    assert_eq!(completion_rows(&state, LEFT), Vec::<&str>::new());
+    assert!(state.completion(LEFT).is_some_and(Completion::waiting));
+    assert_eq!(state.complete_path(LEFT, &longer), None);
+    let effects = names_come(&mut state, &request, &["dzz"], 0);
+    assert!(
+        effects.contains(&Effect::FillPath {
+            side: LEFT,
+            text: format!("{a}{MAIN_SEPARATOR}dzz{MAIN_SEPARATOR}")
+        }),
+        "{effects:?}"
+    );
+    // While rows still fit, Tab completes at once with them.
+    let request = the_names_request(&state.path_edited(LEFT, &typed));
+    names_come(&mut state, &request, &["docs", "dz"], 5);
+    let _ = the_names_request(&state.path_edited(LEFT, &format!("{a}{MAIN_SEPARATOR}do")));
+    assert!(state.completion(LEFT).is_some_and(Completion::waiting));
+    let (completed, _) = state
+        .complete_path(LEFT, &format!("{a}{MAIN_SEPARATOR}do"))
+        .expect("a row to complete with");
+    assert_eq!(
+        completed,
+        format!("{a}{MAIN_SEPARATOR}docs{MAIN_SEPARATOR}")
     );
 }

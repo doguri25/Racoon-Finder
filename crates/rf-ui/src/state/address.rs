@@ -37,6 +37,7 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 
 use rf_core::{ErrorKind, Os, VPath};
 use rf_vfs::VisibilityFilter;
@@ -163,9 +164,12 @@ pub struct Completion {
     prefix: String,
     names: Names,
     /// `names` are all the folder has that start with `prefix`: a listing for it, or for a
-    /// shorter start, came whole (with no folder left out).
+    /// shorter start, came whole (with no folder left out and no link left unexamined).
     complete: bool,
-    /// A Tab came before the first names: the text is completed once they come.
+    /// A request for the names of this text is out: until it comes, a Tab with no row to
+    /// complete with waits for it.
+    waiting: bool,
+    /// A Tab came while the list waited with no row: the text is completed once the names come.
     tab_waiting: bool,
     cursor: Option<usize>,
     generation: u64,
@@ -197,6 +201,11 @@ impl Completion {
     /// The row of the keyboard's cursor; none until ↑ or ↓.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor
+    }
+
+    /// A request for the names of the text is out (a Tab with no row waits for it).
+    pub fn waiting(&self) -> bool {
+        self.waiting
     }
 
     /// The folder of the cursor's row.
@@ -411,8 +420,27 @@ pub fn read_file_url(text: &str, os: Os) -> Option<FileUrl> {
     })
 }
 
-/// `text` with each `%XX` turned into its byte; `None` when the bytes are not UTF-8. A `%` that
-/// two hexadecimal digits do not follow stays as it is.
+/// The folder name `name` as a name of a `file:` URL: `%`, `#`, `?`, spaces and control
+/// characters percent-encoded (each byte of their UTF-8), so that [`read_file_url`] reads it back
+/// as it is; other text, letters of any script among it, stays as it is.
+pub(super) fn encode_url_name(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(c, '%' | '#' | '?' | ' ') || c.is_control() {
+            let mut bytes = [0; 4];
+            for byte in c.encode_utf8(&mut bytes).bytes() {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        } else {
+            encoded.push(c);
+        }
+    }
+    encoded
+}
+
+/// `text` with each `%XX` turned into its byte; `None` when the bytes are not UTF-8, or one of
+/// them is a path separator (`%2F`, `%5C`): an encoded separator would make a name two, so it is
+/// no path, as browsers have it. A `%` that two hexadecimal digits do not follow stays as it is.
 fn percent_decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -425,7 +453,11 @@ fn percent_decode(text: &str) -> Option<String> {
         };
         match (bytes[at], hex(1), hex(2)) {
             (b'%', Some(high), Some(low)) => {
-                decoded.push(u8::try_from(high * 16 + low).unwrap_or(b'%'));
+                let byte = u8::try_from(high * 16 + low).ok()?;
+                if matches!(byte, b'/' | b'\\') {
+                    return None;
+                }
+                decoded.push(byte);
                 at += 3;
             }
             (byte, _, _) => {
@@ -637,6 +669,7 @@ impl AppState {
             prefix: prefix.into_owned(),
             names,
             complete,
+            waiting: kept.is_none(),
             tab_waiting: false,
             cursor: None,
             generation,
@@ -659,15 +692,16 @@ impl AppState {
     /// Tab in the path field of pane `side`, which holds `text`: the text completed with the
     /// name of the cursor's row (the first row's without a cursor) and the separator the text
     /// used last, and the request for that folder's completions; `None`, and nothing done, when
-    /// the list is not for `text` or has no row. Before the first names of the list come, the
-    /// Tab waits for them: the field gets the completed text when they come
-    /// ([`Effect::FillPath`]).
+    /// the list is not for `text` or has no row. With no row while a request for the text is
+    /// out, the Tab waits for its names: the field gets the completed text when they come
+    /// ([`Effect::FillPath`]). In a `file:` URL the name is percent-encoded (`%`, `#`, `?`,
+    /// space and controls), so that the URL reads back as that folder.
     pub fn complete_path(&mut self, side: usize, text: &str) -> Option<(String, Vec<Effect>)> {
         let completion = self
             .completion
             .as_mut()
             .filter(|each| each.side == side && each.text == text)?;
-        if completion.names == Names::Loading {
+        if completion.names.rows().is_empty() && completion.waiting {
             completion.tab_waiting = true;
             return None;
         }
@@ -676,11 +710,13 @@ impl AppState {
             .rows()
             .get(completion.cursor.unwrap_or(0))?;
         let separator = completion.head.chars().next_back()?;
-        let completed = format!(
-            "{}{}{separator}",
-            completion.head,
-            row.name.to_string_lossy()
-        );
+        let name = row.name.to_string_lossy();
+        let name = if read_file_url(completion.head.trim_start(), Os::CURRENT).is_some() {
+            Cow::Owned(encode_url_name(&name))
+        } else {
+            name
+        };
+        let completed = format!("{}{name}{separator}", completion.head);
         let effects = self.path_edited(side, &completed);
         Some((completed, effects))
     }
@@ -790,7 +826,15 @@ impl AppState {
         else {
             return Err(event);
         };
-        completion.complete = matches!(event, LoadEvent::Names { more: 0, .. });
+        completion.complete = matches!(
+            event,
+            LoadEvent::Names {
+                more: 0,
+                links_left: false,
+                ..
+            }
+        );
+        completion.waiting = false;
         take_names(&mut completion.names, &mut completion.cursor, event);
         if !std::mem::take(&mut completion.tab_waiting) {
             return Ok(Vec::new());

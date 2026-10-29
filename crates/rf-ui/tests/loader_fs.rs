@@ -583,8 +583,9 @@ fn a_folder_listing_has_only_folders_and_no_watch() {
     );
 }
 
-/// What a [`Loader::list_names`] of `request` sent: the folders, and how many more there are.
-fn folders_of(loader: &Loader, request: NamesRequest) -> (Vec<FolderName>, usize) {
+/// What a [`Loader::list_names`] of `request` sent: the folders, how many more there are, and
+/// whether links were left unexamined.
+fn folders_of(loader: &Loader, request: NamesRequest) -> (Vec<FolderName>, usize, bool) {
     let generation = request.generation;
     let (tx, rx) = mpsc::channel();
     let _ticket = loader.list_names(request, sender(&tx));
@@ -593,9 +594,10 @@ fn folders_of(loader: &Loader, request: NamesRequest) -> (Vec<FolderName>, usize
             generation: sent,
             names,
             more,
+            links_left,
         } => {
             assert_eq!(sent, generation);
-            (names, more)
+            (names, more, links_left)
         }
         other => panic!("expected names, got {other:?}"),
     }
@@ -603,7 +605,8 @@ fn folders_of(loader: &Loader, request: NamesRequest) -> (Vec<FolderName>, usize
 
 /// What a [`Loader::list_names`] of `request` sent: the names, and how many more there are.
 fn names_of(loader: &Loader, request: NamesRequest) -> (Vec<String>, usize) {
-    let (folders, more) = folders_of(loader, request);
+    let (folders, more, links_left) = folders_of(loader, request);
+    assert!(!links_left, "no link in these folders");
     let names = folders
         .iter()
         .map(|each| each.name.to_string_lossy().into_owned())
@@ -758,17 +761,50 @@ fn a_listing_of_names_keeps_the_links_that_lead_to_folders() {
                 link("docs link"),
                 FolderName::folder("music"),
             ],
-            0
+            0,
+            false
         )
     );
-    // Past the limit a link is neither followed nor counted; a folder is counted.
+    // Past the limit a link is not followed: the listing says links were left unexamined. A
+    // folder past it is counted.
     assert_eq!(
         folders_of(&loader(), request("d", 1)),
-        (vec![FolderName::folder("docs")], 0)
+        (vec![FolderName::folder("docs")], 0, true)
     );
     assert_eq!(
         folders_of(&loader(), request("", 1)),
-        (vec![FolderName::folder("docs")], 1)
+        (vec![FolderName::folder("docs")], 1, true)
+    );
+    assert_eq!(
+        folders_of(&loader(), request("m", 1)),
+        (vec![FolderName::folder("music")], 0, false)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_of_names_follows_at_most_twice_its_limit_of_links() {
+    use std::os::unix::fs::symlink;
+
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    for name in ["a1", "a2", "a3"] {
+        symlink(t.path().join("a.txt"), t.path().join(name)).unwrap();
+    }
+    std::fs::create_dir(t.path().join("b")).unwrap();
+    let request = NamesRequest {
+        generation: 4,
+        folder: local(t.path()),
+        prefix: String::new(),
+        filter: VisibilityFilter::default(),
+        limit: 1,
+        os: Os::Other,
+    };
+    // Two links to files are followed (twice the limit), the third is left; the folder after
+    // them is listed all the same.
+    assert_eq!(
+        folders_of(&loader(), request),
+        (vec![FolderName::folder("b")], 0, true)
     );
 }
 

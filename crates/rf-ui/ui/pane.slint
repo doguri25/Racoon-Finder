@@ -60,9 +60,11 @@ export component FolderMenu inherits Rectangle {
 
     property <int> shown-rows: min(root.view.rows.length, root.max-rows);
     property <int> cursor: root.view.cursor;
-    // Scrolls as little as needed to show the keyboard's row whole.
+    property <length> room: list.visible-height;
+    // Scrolls as little as needed to show the keyboard's row whole (once the list has its
+    // height: as it is made, with a cursor already on a row, and whenever its height changes).
     function show-cursor() {
-        if (root.cursor < 0) {
+        if (root.cursor < 0 || list.visible-height <= 0) {
             return;
         }
         let top = root.cursor * MenuRoom.row;
@@ -76,6 +78,12 @@ export component FolderMenu inherits Rectangle {
         root.show-cursor();
     }
     changed shown-rows => {
+        root.show-cursor();
+    }
+    changed room => {
+        root.show-cursor();
+    }
+    init => {
         root.show-cursor();
     }
 
