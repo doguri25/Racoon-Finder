@@ -292,8 +292,9 @@ component CrumbButton inherits Rectangle {
 }
 
 // The bar between the two panes (LAY-02). Dragged, it shares the room between them, each pane
-// keeping `least` of it at least; double-clicked, it shares the room evenly. While it is dragged it moves on its own (`dragging`, `live-share`),
-// and tells the share once, as it is let go.
+// keeping `least` of it at least; double-clicked, it shares the room evenly. While it is
+// dragged it moves on its own (`dragging`, `live-share`), and tells the share once, as it is let
+// go.
 export component PaneDivider inherits Rectangle {
     // Upright between panes side by side, lying between panes one above the other.
     in property <bool> upright: true;

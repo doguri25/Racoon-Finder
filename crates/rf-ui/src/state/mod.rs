@@ -873,6 +873,8 @@ impl AppState {
             return Vec::new();
         };
         let request = tab.reload();
+        // Navigation sync may wait for its listing.
+        self.sync_relisted(generation, request.generation);
         self.auto_reloads
             .retain(|_, &mut at| now.saturating_duration_since(at) < AUTO_RELOAD_GAP);
         self.auto_reloads.insert(path.clone(), now);

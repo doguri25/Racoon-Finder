@@ -571,3 +571,135 @@ fn with_one_pane_the_commands_for_the_hidden_one_only_say_so() {
     assert_eq!(press(&mut state, &special(Key::F9), SHIFT), one_pane);
     assert!(!state.syncing());
 }
+
+#[test]
+fn back_then_forward_while_the_other_pane_waits_puts_the_entry_back() {
+    // Both before the other pane's listing comes.
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let back = press(&mut state, &special(Key::LeftArrow), ALT).expect("a shortcut");
+    assert_eq!(listed(&back), [folder("a")]);
+    let forward = press(&mut state, &special(Key::RightArrow), ALT).expect("a shortcut");
+    assert_eq!(listed(&forward), [in_a("x")]);
+    assert_eq!(notices(&forward), Vec::<&str>::new());
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(listed(&effects), [in_c("x")]);
+    assert!(state.syncing());
+
+    // Forward after the listing came: the other pane goes in at once.
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let _ = press(&mut state, &special(Key::LeftArrow), ALT);
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(effects, []);
+    assert_eq!(shown(&state, RIGHT), folder("c"));
+    let forward = press(&mut state, &special(Key::RightArrow), ALT).expect("a shortcut");
+    assert_eq!(listed(&forward), [in_a("x"), in_c("x")]);
+    assert!(state.syncing());
+}
+
+#[test]
+fn back_past_where_the_wait_began_turns_sync_off() {
+    // The left pane went into y before: it can go back past the folder the wait began in,
+    // where the other pane's history is not in step.
+    let mut state = ready(vec![dir("x"), dir("y")], vec![file("g")]);
+    let into_y = the_load(&state.open_row(LEFT, 1));
+    list(&mut state, &into_y, vec![dir("z")]);
+    state.activate(RIGHT);
+    let waiting = the_load(&state.go_to(folder("c")));
+    state.activate(LEFT);
+    press(&mut state, &special(Key::F9), SHIFT);
+    let _ = state.open_row(LEFT, 0);
+    let _ = press(&mut state, &special(Key::LeftArrow), ALT);
+
+    let effects = press(&mut state, &special(Key::LeftArrow), ALT).expect("a shortcut");
+
+    assert_eq!(listed(&effects), [folder("a")]);
+    assert_eq!(notices(&effects), [words::sync_cannot_follow()]);
+    assert!(!state.syncing());
+    assert_eq!(
+        state.loaded(LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("z")],
+        }),
+        []
+    );
+}
+
+#[test]
+fn a_wait_goes_on_through_a_reload_after_the_other_pane_s_watch_ended() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let now = Instant::now();
+
+    // Its watch ends before its listing comes; the folder is still there: it is listed again.
+    let effects = state.loaded(LoadEvent::Vanished {
+        generation: waiting.generation,
+    });
+    assert_eq!(
+        effects,
+        [Effect::FindExisting {
+            generation: waiting.generation,
+            path: folder("c"),
+        }]
+    );
+    let again =
+        the_load(&state.found_existing(waiting.generation, &folder("c"), Some(folder("c")), now));
+
+    // Once more within the gap: the reload waits for it, and then lists it.
+    let _ = state.loaded(LoadEvent::Vanished {
+        generation: again.generation,
+    });
+    let later = state.found_existing(again.generation, &folder("c"), Some(folder("c")), now);
+    assert!(
+        matches!(later.as_slice(), [Effect::ReloadLater { .. }]),
+        "{later:?}"
+    );
+    let last = the_load(&state.reload_due(again.generation, &folder("c"), now + AUTO_RELOAD_GAP));
+
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: last.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(listed(&effects), [in_c("x")]);
+    assert!(state.syncing());
+}
+
+#[test]
+fn swapping_the_panes_while_sync_waits_turns_it_off() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+
+    let effects = press(&mut state, "u", CTRL).expect("a shortcut");
+
+    assert_eq!(
+        effects,
+        [Effect::Notice(words::sync_cannot_follow().to_owned())]
+    );
+    assert!(!state.syncing());
+    // The tab that waited now shows on the left, the side with the keyboard: nothing enters it.
+    assert_eq!(
+        state.loaded(LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("x")],
+        }),
+        []
+    );
+    assert_eq!(shown(&state, LEFT), folder("c"));
+    // Without a wait, a swap leaves sync as it is; so it does with a wait for a tab that has
+    // moved on since.
+    let mut state = synced();
+    assert_eq!(press(&mut state, "u", CTRL), Some(vec![]));
+    assert!(state.syncing());
+    let (mut state, _) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    let _ = state.open_crumb(RIGHT, 0);
+    assert_eq!(press(&mut state, "u", CTRL), Some(vec![]));
+    assert!(state.syncing());
+}

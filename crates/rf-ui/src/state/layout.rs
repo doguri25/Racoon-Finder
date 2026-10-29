@@ -13,15 +13,19 @@
 //!
 //! - opening a folder of the list (Enter, a double click, 열기): the other pane opens the
 //!   folder of the same name among its rows, hidden ones too ([`same_folder`]). While the
-//!   other pane's listing is on its way, the decision waits for it ([`SyncWait`]); further
-//!   folders opened meanwhile are opened there in turn, and Up or Back undoes the last of them;
-//! - Up, Back and Forward: the other pane makes the same move from where it is.
+//!   other pane's listing is on its way, the decision waits for it ([`SyncWait`]), through a
+//!   reload of that listing too; further folders opened meanwhile are opened there in turn;
+//! - Up, Back and Forward: the other pane makes the same move from where it is. While folders
+//!   wait to be opened there, Up or Back takes the last of them off instead, and Forward puts
+//!   back the last one Back took off; Back past the first of them turns sync off, as the
+//!   other pane's history is not in step there.
 //!
 //! When the other pane cannot follow (no folder of that name among its rows, a listing that
 //! failed, a root to go up from, nothing to go back or forward to), sync turns off and a notice
 //! says why; the active pane moves all the same. Any other move (a piece of the path row, a
 //! typed path, the tree, a link, another tab) moves the active pane alone, and sync stays on;
-//! a move of the other pane drops a decision that waits for its listing.
+//! a move of the other pane drops a decision that waits for its listing, and a swap of the
+//! panes turns sync off while one waits.
 
 use std::ffi::{OsStr, OsString};
 
@@ -166,6 +170,17 @@ impl AppState {
         self.panes.swap(LEFT, RIGHT);
         // A press waiting for its release names a row of the pane it was on.
         self.pending_click = None;
+        // What sync waited to do in the other pane would now be the active one's. A wait for a
+        // tab that has moved on is no longer anything.
+        let Some(wait) = self.sync_wait.take() else {
+            return Vec::new();
+        };
+        let live = [LEFT, RIGHT]
+            .into_iter()
+            .any(|side| self.tab(side).generation() == wait.generation);
+        if live {
+            return self.stop_sync(words::sync_cannot_follow().to_owned());
+        }
         Vec::new()
     }
 
@@ -214,22 +229,22 @@ impl AppState {
             let tab = self.tab(other);
             (tab.generation(), tab.status())
         };
-        if let Some(wait) = self
+        let mut wait = self
             .sync_wait
-            .as_mut()
-            .filter(|wait| wait.generation == generation)
-        {
-            wait.names.push(name.to_os_string());
-            return Vec::new();
+            .take()
+            .filter(|wait| wait.generation == generation);
+        if wait.is_none() && status != LoadStatus::Loading {
+            return self.sync_enter(other, name, SyncWait::default());
         }
-        if status == LoadStatus::Loading {
-            self.sync_wait = Some(SyncWait {
-                generation,
-                names: vec![name.to_os_string()],
-            });
-            return Vec::new();
-        }
-        self.sync_enter(other, name, Vec::new())
+        let waiting = wait.get_or_insert_with(|| SyncWait {
+            generation,
+            ..SyncWait::default()
+        });
+        waiting.names.push(name.to_os_string());
+        // Opening a folder ends the active pane's way forward.
+        waiting.undone.clear();
+        self.sync_wait = wait;
+        self.sync_due(other)
     }
 
     /// The listing of request `generation` has come, or failed: when sync waits for it in the
@@ -246,11 +261,11 @@ impl AppState {
         else {
             return Vec::new();
         };
-        let mut names = wait.names.into_iter();
-        match names.next() {
-            Some(first) if self.sync => self.sync_enter(other, &first, names.collect()),
-            _ => Vec::new(),
+        if !self.sync {
+            return Vec::new();
         }
+        self.sync_wait = Some(wait);
+        self.sync_due(other)
     }
 
     /// The tab whose request is `generation` has left the pane it was in, or closed: sync waits
@@ -259,8 +274,8 @@ impl AppState {
         self.sync_wait.take_if(|wait| wait.generation == generation);
     }
 
-    /// The tab a pane listed again (a rescan) under `generation`, having waited under `old`:
-    /// sync's wait for it goes on under the new listing.
+    /// The tab a pane listed again under `generation`, having waited under `old` (a rescan, or
+    /// a reload after its watch ended): sync's wait for it goes on under the new listing.
     pub(super) fn sync_relisted(&mut self, old: u64, generation: u64) {
         if let Some(wait) = self
             .sync_wait
@@ -271,9 +286,26 @@ impl AppState {
         }
     }
 
-    /// Pane `other`, whose rows are in, opens its folder `name`, and waits to open `then` in
-    /// turn; or sync turns off when its rows have no such folder, or its listing failed.
-    fn sync_enter(&mut self, other: usize, name: &OsStr, then: Vec<OsString>) -> Vec<Effect> {
+    /// Pane `other` opens the first folder sync waits to open there, once its rows are in
+    /// (they are when its listing is not on its way); nothing while they are not, or while no
+    /// folder waits. The wait stays meanwhile, and so does one that keeps only folders Back
+    /// took off, for Forward.
+    fn sync_due(&mut self, other: usize) -> Vec<Effect> {
+        let Some(mut wait) = self.sync_wait.take() else {
+            return Vec::new();
+        };
+        if wait.names.is_empty() || self.tab(other).status() == LoadStatus::Loading {
+            self.sync_wait = (!wait.names.is_empty() || !wait.undone.is_empty()).then_some(wait);
+            return Vec::new();
+        }
+        let first = wait.names.remove(0);
+        self.sync_enter(other, &first, wait)
+    }
+
+    /// Pane `other`, whose rows are in, opens its folder `name`, and goes on to wait for the
+    /// folders of `then` (any generation it has is replaced by that of the new listing); or
+    /// sync turns off when its rows have no such folder, or its listing failed.
+    fn sync_enter(&mut self, other: usize, name: &OsStr, mut then: SyncWait) -> Vec<Effect> {
         let tab = self.tab(other);
         if let LoadStatus::Failed(_) = tab.status() {
             return self.stop_sync(words::sync_cannot_follow().to_owned());
@@ -287,18 +319,19 @@ impl AppState {
         let Some(request) = self.navigate_shown(other, folder) else {
             return Vec::new();
         };
-        if !then.is_empty() {
-            self.sync_wait = Some(SyncWait {
-                generation: request.generation,
-                names: then,
-            });
+        if !then.names.is_empty() || !then.undone.is_empty() {
+            then.generation = request.generation;
+            self.sync_wait = Some(then);
         }
         vec![Effect::Load(request)]
     }
 
     /// Pane `side` has just made the move `step`: with sync on, the other pane makes it too, or
-    /// sync turns off when it cannot. While the other pane waits to open folders, Up or Back
-    /// undoes the last of them there instead, which leaves it where it is.
+    /// sync turns off when it cannot. While folders wait to be opened in the other pane, Up or
+    /// Back takes the last of them off instead (Back keeps it for Forward), which leaves that
+    /// pane where it is, and Forward puts back the last one Back took off. Back past the
+    /// first of them, or a Forward with nothing to put back, turns sync off: the other pane's
+    /// history is not in step there.
     pub(super) fn sync_step(&mut self, side: usize, step: Step) -> Vec<Effect> {
         if !self.sync {
             return Vec::new();
@@ -306,17 +339,32 @@ impl AppState {
         let other = RIGHT - side;
         let generation = self.tab(other).generation();
         // A wait for another listing is stale: that tab has moved on.
-        if let Some(wait) = self.sync_wait.take()
+        if let Some(mut wait) = self.sync_wait.take()
             && wait.generation == generation
         {
-            let mut names = wait.names;
-            if step == Step::Forward || names.pop().is_none() {
-                return self.stop_sync(words::sync_cannot_follow().to_owned());
+            match step {
+                Step::Back | Step::Up if !wait.names.is_empty() => {
+                    let last = wait.names.pop();
+                    if step == Step::Back {
+                        wait.undone.extend(last);
+                    } else {
+                        // Up ends the active pane's way forward.
+                        wait.undone.clear();
+                    }
+                    self.sync_wait = Some(wait);
+                    return self.sync_due(other);
+                }
+                Step::Forward if !wait.undone.is_empty() => {
+                    wait.names.extend(wait.undone.pop());
+                    self.sync_wait = Some(wait);
+                    return self.sync_due(other);
+                }
+                // Up from where the wait began: the other pane is in step there.
+                Step::Up => {}
+                Step::Back | Step::Forward => {
+                    return self.stop_sync(words::sync_cannot_follow().to_owned());
+                }
             }
-            if !names.is_empty() {
-                self.sync_wait = Some(SyncWait { generation, names });
-            }
-            return Vec::new();
         }
         match self.move_shown(other, |tab| step.run(tab)) {
             Some(request) => vec![Effect::Load(request)],
@@ -344,12 +392,14 @@ impl Step {
     }
 }
 
-/// The folders navigation sync is to open, in turn, in the tab whose listing `generation` is
-/// on its way (the other pane's): the decision waits for its rows.
-#[derive(Debug)]
+/// What navigation sync waits to do in the other pane's tab, whose listing `generation` is on
+/// its way or came last: the folders to open there in turn (the decision waits for its rows),
+/// and those Back took off them, which Forward puts back, the last one last.
+#[derive(Debug, Default)]
 pub(super) struct SyncWait {
     generation: u64,
     names: Vec<OsString>,
+    undone: Vec<OsString>,
 }
 
 /// The notice for a command for the other pane while one pane shows.
