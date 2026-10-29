@@ -1,4 +1,4 @@
-//! Sizes, times and kinds as the file list shows them.
+//! Sizes, times, kinds and folder names as the file list and the other screens show them.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use rf_core::{Entry, EntryKind};
+use rf_core::{Entry, EntryKind, VPath};
 
 /// The units above bytes, each 1024 times the one before.
 const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
@@ -124,6 +124,21 @@ pub fn short_path(path: &str, max: usize) -> String {
     kept.reverse();
     let sep = sep.to_string();
     format!("{head}{sep}{}", kept.join(&sep))
+}
+
+/// The name of a folder in a tab or the path row: its own name, or for a root the path
+/// without its last separator (`/`, `C:`, `\\server\share`).
+pub fn folder_label(path: &VPath) -> String {
+    if let Some(name) = path.file_name() {
+        return name.to_string_lossy().into_owned();
+    }
+    let text = path.to_string();
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        text
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// The kind column of `entry`: what a folder, a link and a special file are, and for a file

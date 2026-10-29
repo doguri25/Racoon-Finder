@@ -459,3 +459,118 @@ fn closing_the_picker_stops_its_tree_listings() {
     // So do late results of its worker.
     assert_eq!(state.target_inspected(1, &folder("b"), folder_facts()), []);
 }
+
+#[test]
+fn the_button_waits_while_the_path_field_says_otherwise() {
+    let mut state = with_items();
+    let effects = press(&mut state, &special(Key::F6), NONE).expect("used");
+    let (look, b) = the_look(&effects);
+    state.target_inspected(look, &b, folder_facts());
+    state.pick_policy(ConflictPolicy::Overwrite);
+    let c = folder("c");
+
+    // A path typed and not entered: neither the button nor Enter elsewhere confirms the
+    // target the field no longer shows.
+    state.pick_path_edited(&c.to_string());
+    assert_eq!(state.pick_confirmed(), []);
+    // Nor is a new folder made in a folder the field does not show.
+    assert_eq!(state.pick_new_folder(), []);
+    state.pick_policy(ConflictPolicy::Ask);
+    assert_eq!(state.pick_enter(), []);
+    assert!(matches!(state.modal(), Some(Modal::Pick(_))));
+    // Entered: not while the worker looks at it.
+    let (typed, path) = the_look(&state.pick_path_entered(&c.to_string()));
+    assert_eq!(path, c);
+    assert_eq!(state.pick_confirmed(), []);
+    // Refused: the field keeps the path, and the button stays off.
+    let gone = TargetFacts {
+        folder: Err(ErrorKind::NotFound),
+        ..folder_facts()
+    };
+    state.target_inspected(typed, &c, gone);
+    assert_eq!(picker(&state).path_error, "찾을 수 없습니다");
+    assert_eq!(picker(&state).target, Some(b.clone()));
+    assert_eq!(state.pick_confirmed(), []);
+    // Typed again and found: the field shows the target, and the button goes there.
+    state.pick_path_edited(&c.to_string());
+    assert_eq!(picker(&state).path_error, "");
+    let (typed, _) = the_look(&state.pick_path_entered(&c.to_string()));
+    state.target_inspected(typed, &c, folder_facts());
+    let (JobSpec::Transfer(transfer), _) = the_submit(&state.pick_confirmed()) else {
+        panic!("a transfer");
+    };
+    assert_eq!(transfer.items[0].target, c.join("docs").expect("a name"));
+
+    // A target chosen elsewhere replaces what was typed.
+    press(&mut state, &special(Key::F6), NONE);
+    state.pick_path_edited("/somewhere/else");
+    assert_eq!(state.pick_confirmed(), []);
+    state.pick_step(1);
+    assert!(!picker(&state).path_edited);
+    assert!(matches!(
+        the_submit(&state.pick_confirmed()).0,
+        JobSpec::Transfer(_)
+    ));
+}
+
+/// A window with the items of `with_items` whose places are `a` itself: the picker's tree
+/// can list the folder the items are in.
+fn with_items_and_their_folder() -> (AppState, LoadRequest) {
+    let mut state = with_items();
+    state.set_recent_targets(vec![folder("c")]);
+    state.set_places(&[Place {
+        label: "작업".to_owned(),
+        path: folder("a"),
+        kind: PlaceKind::Favorite(rf_platform::KnownFolder::Documents),
+        space: None,
+    }]);
+    press(&mut state, &special(Key::F6), NONE);
+    let request = tree_loads(&state.pick_tree_toggled(0)).remove(0);
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("docs"), dir("docs 보관"), dir("사진")],
+    });
+    (state, request)
+}
+
+#[test]
+fn the_filter_takes_a_folder_that_can_take_the_items_and_leaves_a_later_choice() {
+    let (mut state, _) = with_items_and_their_folder();
+    // `docs` moves itself: the first folder found that can take the items is `docs 보관`.
+    state.pick_filter("docs");
+    assert_eq!(state.pick_found().map(|found| found.len()), Some(2));
+    assert_eq!(the_look(&state.pick_enter()).1, in_a("docs 보관"));
+    assert_eq!(
+        the_submit(&state.pick_enter()).1,
+        Some(LEFT),
+        "the second Enter confirms"
+    );
+
+    // A target chosen after the filter changed stays: Enter confirms it.
+    let (mut state, _) = with_items_and_their_folder();
+    state.pick_filter("docs");
+    // From the other pane's `b`, ↓ goes to the next quick target that can take the items.
+    let (look, next) = the_look(&state.pick_step(1));
+    assert_ne!(next, folder("b"));
+    state.target_inspected(look, &next, folder_facts());
+    let (JobSpec::Transfer(transfer), _) = the_submit(&state.pick_enter()) else {
+        panic!("a transfer");
+    };
+    assert_eq!(transfer.items[0].target, next.join("docs").expect("a name"));
+}
+
+#[test]
+fn the_tree_shows_but_does_not_take_a_folder_that_cannot_take_the_items() {
+    let (mut state, _) = with_items_and_their_folder();
+    let rows = state.pick_tree().rows();
+    let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+    assert_eq!(labels, ["작업", "docs", "docs 보관", "사진"]);
+    let target = picker(&state).target.clone();
+    // The items' own folder (a move there does nothing) and an item: no click takes them.
+    assert_eq!(state.pick_tree_clicked(0), []);
+    assert_eq!(state.pick_tree_clicked(1), []);
+    assert_eq!(picker(&state).target, target);
+    assert_eq!(the_look(&state.pick_tree_clicked(2)).1, in_a("docs 보관"));
+    // Its chevron still opens it.
+    assert_eq!(tree_loads(&state.pick_tree_toggled(1)).len(), 1);
+}

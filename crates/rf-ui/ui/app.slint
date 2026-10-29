@@ -123,8 +123,8 @@ export component MainWindow inherits Window {
     callback recovery-chosen(index: int, run-again: bool);
     // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
     // button, the move/copy toggle, a conflict policy (0 ask, 1 overwrite, 2 skip, 3 rename),
-    // the filter changed, a path was entered, a row of its tree or its chevron was clicked,
-    // and 새 폴더. Esc, 취소 and the close button are `dialog-cancelled`.
+    // the filter changed, a path was typed or entered, a row of its tree or its chevron was
+    // clicked, and 새 폴더. Esc, 취소 and the close button are `dialog-cancelled`.
     callback pick-target-clicked(index: int);
     callback pick-step(delta: int);
     callback pick-enter();
@@ -132,6 +132,7 @@ export component MainWindow inherits Window {
     callback pick-mode(is-move: bool);
     callback pick-policy(policy: int);
     callback pick-filter-edited(text: string);
+    callback pick-path-edited(text: string);
     callback pick-path-entered(text: string);
     callback pick-tree-clicked(index: int);
     callback pick-tree-toggled(index: int);
@@ -720,6 +721,9 @@ export component MainWindow inherits Window {
             }
             filter-edited(text) => {
                 root.pick-filter-edited(text);
+            }
+            path-edited(text) => {
+                root.pick-path-edited(text);
             }
             path-entered(text) => {
                 root.pick-path-entered(text);

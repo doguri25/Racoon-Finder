@@ -16,7 +16,9 @@ use super::{AppState, Effect, RIGHT};
 use crate::dialogs::{Modal, NameDialog};
 use crate::loader::LoadRequest;
 use crate::pane::{Pane, Tab};
-use crate::pick::{Looked, PickRequest, Picker, RECENT_TARGETS, TargetFacts, quick_targets};
+use crate::pick::{
+    Looked, PickRequest, Picker, RECENT_TARGETS, TargetFacts, quick_targets, validate,
+};
 use crate::places::Place;
 use crate::tree::{NodeId, Tree};
 use crate::words;
@@ -75,6 +77,7 @@ impl AppState {
             sources: Vec::with_capacity(items.len()),
             file_bytes: 0,
             folder_count: 0,
+            other_count: 0,
             from_dir: self.tab(side).location().clone(),
         };
         for (path, entry) in items {
@@ -84,7 +87,7 @@ impl AppState {
                     request.file_bytes = request.file_bytes.saturating_add(entry.size);
                 }
                 // A link moves as a link, and something else as it is: no size to add.
-                EntryKind::Symlink | EntryKind::Other => {}
+                EntryKind::Symlink | EntryKind::Other => request.other_count += 1,
             }
             request.sources.push(path);
         }
@@ -136,22 +139,32 @@ impl AppState {
         }
     }
 
-    /// Enter in the picker. With a filter, the first folder it finds becomes the target, and
-    /// once it is, the next Enter confirms; a filter that finds nothing does nothing. Without
-    /// one, the picker is confirmed, unless its policy overwrites: only the button confirms
-    /// what destroys files.
+    /// Enter in the picker. After the filter changed, the first folder it finds that can take
+    /// the items becomes the target, and the next Enter confirms; such a filter that finds
+    /// none does nothing. Otherwise (no filter, or a target chosen since it changed) the
+    /// picker is confirmed, unless its policy overwrites: only the button confirms what
+    /// destroys files.
     pub fn pick_enter(&mut self) -> Vec<Effect> {
         let Some(picker) = self.active_picker() else {
             return Vec::new();
         };
-        let target = picker.target.clone();
-        if let Some(found) = self.pick_found() {
-            let Some(&first) = found.first() else {
+        if picker.filter_fresh
+            && let Some(found) = self.pick_found()
+        {
+            let first = found.into_iter().find_map(|id| {
+                let path = &self.pick_tree.node(id)?.path;
+                validate(&picker.request, path, None)
+                    .can_choose()
+                    .then(|| (id, path.clone()))
+            });
+            let Some((id, path)) = first else {
                 return Vec::new();
             };
-            let path = self.pick_tree.node(first).map(|node| node.path.clone());
-            if let Some(path) = path.filter(|path| target.as_ref() != Some(path)) {
-                return self.choose(path, Some(first));
+            if picker.target.as_ref() != Some(&path) {
+                return self.choose(path, Some(id));
+            }
+            if let Some(picker) = self.active_picker_mut() {
+                picker.filter_fresh = false;
             }
         }
         self.confirm_by_enter()
@@ -199,7 +212,7 @@ impl AppState {
         let Some(picker) = self.active_picker_mut() else {
             return Vec::new();
         };
-        text.clone_into(&mut picker.filter);
+        picker.set_filter(text);
         if !text.trim().is_empty() {
             return Vec::new();
         }
@@ -208,6 +221,15 @@ impl AppState {
             .map(Effect::ScrollPickTree)
             .into_iter()
             .collect()
+    }
+
+    /// The path field now holds `text`, typed and not entered yet: unless it is the target's
+    /// path, the picker confirms nothing until it is entered and found to be a folder, or
+    /// another target is chosen (the field then shows that one).
+    pub fn pick_path_edited(&mut self, text: &str) {
+        if let Some(picker) = self.active_picker_mut() {
+            picker.edit_path(text);
+        }
     }
 
     /// Enter in the picker's path field with `text`: a worker looks at the path, which becomes
@@ -226,7 +248,9 @@ impl AppState {
             return Vec::new();
         };
         if picker.target.as_ref() == Some(&path) && picker.typed.is_none() {
+            // The field says the target, perhaps spelled another way: it shows it as it is.
             picker.path_error.clear();
+            picker.path_edited = false;
             return self.confirm_by_enter();
         }
         let generation = picker.type_path(path.clone());
@@ -239,12 +263,12 @@ impl AppState {
     }
 
     /// A click on row `row` of the picker's tree (a row of what its filter finds, while it has
-    /// one): its folder becomes the target. The tree marks no folder that cannot take the
-    /// items; the picker says why below once it is chosen.
+    /// one): its folder becomes the target. A folder that cannot take the items shows dimmed,
+    /// with why, and takes no click, as among the quick targets; its chevron still opens it.
     pub fn pick_tree_clicked(&mut self, row: usize) -> Vec<Effect> {
-        if self.active_picker().is_none() {
+        let Some(picker) = self.active_picker() else {
             return Vec::new();
-        }
+        };
         let id = match self.pick_found() {
             Some(found) => found.get(row).copied(),
             None => self.pick_tree.node_at(row),
@@ -252,6 +276,7 @@ impl AppState {
         let Some(path) = id
             .and_then(|id| self.pick_tree.node(id))
             .map(|node| node.path.clone())
+            .filter(|path| validate(&picker.request, path, None).can_choose())
         else {
             return Vec::new();
         };
@@ -272,9 +297,11 @@ impl AppState {
 
     /// The picker's 새 폴더: the name window for a new folder in the target shows over the
     /// picker, which takes the folder as its target once the job has made it (PICK-03).
+    /// Nothing while the path field says another folder than the target.
     pub fn pick_new_folder(&mut self) -> Vec<Effect> {
         let Some(parent) = self
             .active_picker()
+            .filter(|picker| !picker.path_edited && picker.typed.is_none())
             .and_then(|picker| picker.target.clone())
         else {
             return Vec::new();

@@ -22,10 +22,9 @@ use std::ffi::OsString;
 use rf_core::{ErrorKind, VPath};
 use rf_jobs::{ConflictPolicy, TransferMode, TransferOptions, TransferSpec};
 
-use crate::format::short_path;
+use crate::format::{folder_label, short_path};
 use crate::pane::next_generation;
 use crate::places::{Place, PlaceKind};
-use crate::ui_bridge::folder_label;
 use crate::words;
 
 /// How many recent targets the picker offers and the app keeps.
@@ -54,14 +53,20 @@ pub struct PickRequest {
     pub file_bytes: u64,
     /// How many of the items are folders.
     pub folder_count: usize,
+    /// How many of the items are links or other items that are neither a file nor a folder:
+    /// they have no size to add.
+    pub other_count: usize,
     /// The folder the items are in.
     pub from_dir: VPath,
 }
 
 impl PickRequest {
-    /// How many of the items are no folder.
+    /// How many of the items are files: neither a folder nor a link or the like.
     pub fn file_count(&self) -> usize {
-        self.sources.len().saturating_sub(self.folder_count)
+        self.sources
+            .len()
+            .saturating_sub(self.folder_count)
+            .saturating_sub(self.other_count)
     }
 }
 
@@ -130,7 +135,8 @@ pub struct TargetGroup {
 }
 
 /// The picker's line under its title: `항목 3개 · 1.2 GB`, or with folders, whose size is
-/// not known before the job looks inside them, `항목 3개 · 파일 1.2 MB와 폴더 1개`.
+/// not known before the job looks inside them, `항목 3개 · 파일 1.2 MB와 폴더 1개`. Links
+/// count as items, with no size.
 pub fn summary(req: &PickRequest) -> String {
     words::pick_summary(
         req.sources.len(),
@@ -235,16 +241,25 @@ pub struct Picker {
     pub target: Option<VPath>,
     /// What a worker found at `target`; `None` until it has told.
     pub facts: Option<TargetFacts>,
-    /// The generation of the last look a worker was asked to take: at the target, or at a
-    /// typed path. The result of an earlier one is late, and dropped.
+    /// The generation of the last look a worker was asked to take at the target. The result
+    /// of an earlier one is late, and dropped.
     pub looking: u64,
     /// A path typed into the path field, being looked at: it becomes the target once it is
-    /// known to be a folder.
+    /// known to be a folder. Nothing is confirmed meanwhile.
     pub typed: Option<VPath>,
+    /// The generation of the look at `typed`, apart from the target's: a refused path leaves
+    /// the target's look to come.
+    pub typing: u64,
     /// Why the path typed cannot be the target; empty when nothing is wrong with it.
     pub path_error: String,
+    /// The path field holds text typed into it that is not the target's path: nothing is
+    /// confirmed until it is entered and found to be a folder, or another target is chosen.
+    pub path_edited: bool,
     /// What the filter of the folder tree holds.
     pub filter: String,
+    /// The filter has changed since a target was last chosen: Enter takes the first folder it
+    /// finds that can be chosen, rather than confirming.
+    pub filter_fresh: bool,
     pub policy: ConflictPolicy,
     /// The folder 새 폴더 asked for, by its folder and its name: it becomes the target once
     /// its job has made it.
@@ -282,8 +297,11 @@ impl Picker {
             facts: None,
             looking: 0,
             typed: None,
+            typing: 0,
             path_error: String::new(),
+            path_edited: false,
             filter: String::new(),
+            filter_fresh: false,
             policy: ConflictPolicy::Ask,
             making: None,
         }
@@ -301,9 +319,12 @@ impl Picker {
         Some(validate(&self.request, target, self.facts.as_ref()))
     }
 
-    /// Whether the confirm button works: a target that can be chosen.
+    /// Whether the confirm button works: a target that can be chosen, and the path field
+    /// showing it (no path typed and not entered, or entered and still being looked at).
     pub fn can_confirm(&self) -> bool {
-        self.validity().is_some_and(Validity::can_choose)
+        !self.path_edited
+            && self.typed.is_none()
+            && self.validity().is_some_and(Validity::can_choose)
     }
 
     /// The quick target `delta` steps from the target among those that can be chosen (an
@@ -338,36 +359,59 @@ impl Picker {
     }
 
     /// Makes `path` the target, with nothing known about it yet, and gives the generation of
-    /// the look a worker is to take at it.
+    /// the look a worker is to take at it. The path field shows it from now on, whatever was
+    /// typed there, and the filter's first folder is no longer taken by Enter.
     pub fn choose(&mut self, path: VPath) -> u64 {
         self.target = Some(path);
         self.facts = None;
         self.typed = None;
         self.path_error.clear();
+        self.path_edited = false;
+        self.filter_fresh = false;
         self.looking = next_generation();
         self.looking
     }
 
     /// The path typed into the path field: a worker looks at it before it is chosen. Gives
-    /// the generation of that look.
+    /// the generation of that look; the target's own look goes on.
     pub fn type_path(&mut self, path: VPath) -> u64 {
         self.typed = Some(path);
         self.path_error.clear();
-        self.looking = next_generation();
-        self.looking
+        self.typing = next_generation();
+        self.typing
     }
 
-    /// Takes what a worker found at `path` for the look `generation`.
-    pub fn looked(&mut self, generation: u64, path: &VPath, facts: TargetFacts) -> Looked {
-        if generation != self.looking {
-            return Looked::Stale;
+    /// The path field now holds `text`, typed but not entered: unless it is the target's path,
+    /// nothing is confirmed until it is. A path entered before and still being looked at is
+    /// forgotten, and so is why the last one was refused.
+    pub fn edit_path(&mut self, text: &str) {
+        self.path_edited = self
+            .target
+            .as_ref()
+            .is_none_or(|target| target.to_string() != text);
+        self.typed = None;
+        self.path_error.clear();
+    }
+
+    /// The filter of the tree now holds `text`.
+    pub fn set_filter(&mut self, text: &str) {
+        if self.filter != text {
+            text.clone_into(&mut self.filter);
+            self.filter_fresh = !text.trim().is_empty();
         }
-        if self.typed.as_ref() == Some(path) {
+    }
+
+    /// Takes what a worker found at `path` for the look `generation`: at the target, or at a
+    /// typed path, which becomes the target if it is a folder.
+    pub fn looked(&mut self, generation: u64, path: &VPath, facts: TargetFacts) -> Looked {
+        if generation == self.typing && self.typed.as_ref() == Some(path) {
             self.typed = None;
             return match facts.folder {
                 Ok(()) => {
                     self.target = Some(path.clone());
                     self.facts = Some(facts);
+                    self.path_edited = false;
+                    self.filter_fresh = false;
                     Looked::Chosen
                 }
                 Err(kind) => {
@@ -376,7 +420,7 @@ impl Picker {
                 }
             };
         }
-        if self.target.as_ref() != Some(path) {
+        if generation != self.looking || self.target.as_ref() != Some(path) {
             return Looked::Stale;
         }
         self.facts = Some(facts);
@@ -424,6 +468,7 @@ mod tests {
             sources: vec![under(&a, &["docs"]), under(&a, &["x.txt"])],
             file_bytes: 2 * MB,
             folder_count: 1,
+            other_count: 0,
             from_dir: a,
         }
     }
@@ -675,6 +720,7 @@ mod tests {
             ],
             file_bytes: 1_288_490_189,
             folder_count: 0,
+            other_count: 0,
             from_dir: a.clone(),
         };
         assert_eq!(summary(&files), "항목 3개 · 1.2 GB");
@@ -689,9 +735,27 @@ mod tests {
             sources: vec![under(&a, &["x"]), under(&a, &["y"])],
             file_bytes: 0,
             folder_count: 2,
-            ..files
+            ..files.clone()
         };
         assert_eq!(summary(&folders), "항목 2개 · 폴더 2개");
+        // A link moves as a link: it is an item, with no size of its own.
+        let link = PickRequest {
+            sources: vec![under(&a, &["latest"])],
+            file_bytes: 0,
+            folder_count: 0,
+            other_count: 1,
+            ..folders.clone()
+        };
+        assert_eq!(link.file_count(), 0);
+        assert_eq!(summary(&link), "항목 1개");
+        let with_link = PickRequest {
+            sources: vec![under(&a, &["latest"]), under(&a, &["x"])],
+            file_bytes: 0,
+            folder_count: 1,
+            other_count: 1,
+            ..folders
+        };
+        assert_eq!(summary(&with_link), "항목 2개 · 폴더 1개");
     }
 
     #[test]
@@ -772,6 +836,84 @@ mod tests {
             Looked::Stale
         );
         assert_eq!(picker.target, Some(b));
+    }
+
+    #[test]
+    fn nothing_is_confirmed_while_the_path_field_says_otherwise() {
+        let req = request(TransferMode::Move);
+        let (b, c) = (folder("b"), folder("c"));
+        let groups = quick_targets(&req, &b, &[], &[], &[]);
+        let mut picker = Picker::new(req, 0, groups);
+        assert!(picker.can_confirm());
+        // Text typed into the field and not entered: the button would not go where the field
+        // says.
+        picker.edit_path(&c.to_string());
+        assert!(picker.path_edited);
+        assert!(!picker.can_confirm());
+        // Typed back to the target's own path, it says the target again.
+        picker.edit_path(&b.to_string());
+        assert!(!picker.path_edited && picker.can_confirm());
+        // Entered: nothing is confirmed until the worker has looked.
+        picker.edit_path(&c.to_string());
+        let look = picker.type_path(c.clone());
+        assert!(!picker.can_confirm());
+        assert_eq!(picker.looked(look, &c, facts(None, false)), Looked::Chosen);
+        assert!(!picker.path_edited && picker.can_confirm());
+        assert_eq!(picker.target, Some(c.clone()));
+
+        // A path refused keeps the field's text, and the button off, until another target is
+        // chosen.
+        let file = folder("notes.txt");
+        picker.edit_path(&file.to_string());
+        let look = picker.type_path(file.clone());
+        let not_a_folder = TargetFacts {
+            folder: Err(ErrorKind::NotADirectory),
+            ..facts(None, false)
+        };
+        assert_eq!(picker.looked(look, &file, not_a_folder), Looked::Refused);
+        assert!(picker.path_edited && !picker.can_confirm());
+        picker.choose(b);
+        assert!(!picker.path_edited && picker.can_confirm());
+        // Editing again forgets a look on its way: its result cannot change the target.
+        picker.edit_path(&c.to_string());
+        let look = picker.type_path(c.clone());
+        picker.edit_path("/somewhere/else");
+        assert_eq!(picker.looked(look, &c, facts(None, false)), Looked::Stale);
+        assert_eq!(picker.target, Some(folder("b")));
+        assert!(!picker.can_confirm());
+    }
+
+    #[test]
+    fn a_typed_look_leaves_the_targets_look_alone() {
+        let req = request(TransferMode::Copy);
+        let b = folder("b");
+        let groups = quick_targets(&req, &b, &[], &[], &[]);
+        let mut picker = Picker::new(req, 0, groups);
+        let target_look = picker.choose(b.clone());
+        // A path is typed and refused while the target's look is on its way: the target's
+        // look still tells about the target.
+        let file = folder("notes.txt");
+        picker.edit_path(&file.to_string());
+        let typed_look = picker.type_path(file.clone());
+        let not_a_folder = TargetFacts {
+            folder: Err(ErrorKind::NotADirectory),
+            ..facts(None, false)
+        };
+        assert_eq!(
+            picker.looked(typed_look, &file, not_a_folder),
+            Looked::Refused
+        );
+        assert_eq!(
+            picker.looked(target_look, &b, facts(Some(MB), false)),
+            Looked::Facts
+        );
+        assert_eq!(
+            picker.validity(),
+            Some(Validity::NotEnoughSpace {
+                need: 2 * MB,
+                available: MB
+            })
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
 //! whether hidden items show, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), and the destination picker's folder
-//! tree and recent targets ([`pick`]). Its methods change it and return
+//! tree and recent targets ([`AppState::shown_picker`]). Its methods change it and return
 //! the [`Effect`]s that need a worker thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
 //! follow or a vanished folder's nearest parent to find, a file to open, a job to submit or a

@@ -17,7 +17,7 @@ use crate::controller::{self, Controller};
 use crate::dialogs::{
     Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
 };
-use crate::format::{format_size, format_time_in, kind_label, short_path};
+use crate::format::{folder_label, format_size, format_time_in, kind_label, short_path};
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
 /// the middle of a longer path is left out, so that its end stays in view.
@@ -25,7 +25,7 @@ const CARD_PLACE_CHARS: usize = 36;
 const SENTENCE_PLACE_CHARS: usize = 48;
 use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
-use crate::pick::{POLICIES, Picker};
+use crate::pick::{POLICIES, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
 use crate::tree::{NodeId, Tree, TreeRowData};
@@ -252,7 +252,8 @@ fn tell(notify: &ModelNotify, changes: Option<Vec<RowChange>>) {
 /// [`TreeRows::sync`] makes them the tree's rows and tells the list which rows came, went or
 /// changed (a node opened or closed, the selection moved), so the list keeps its scroll
 /// position and draws only the rows on screen, however many folders are open.
-/// [`TreeRows::sync_found`] shows what a filter found instead, flat.
+/// [`TreeRows::show`] shows rows made elsewhere: the picker's, marked for its items, or what
+/// its filter found, flat.
 #[derive(Default)]
 pub struct TreeRows {
     rows: RefCell<Vec<(NodeId, TreeRow)>>,
@@ -282,12 +283,12 @@ impl TreeRows {
         self.replace(tree_rows(&tree.rows(), places));
     }
 
-    /// Makes the rows the folders `found` of `tree` (a filter's, [`Tree::find`]), flat, and
-    /// tells the list what changed.
-    pub fn sync_found(&self, tree: &Tree, found: &[NodeId]) {
-        // The next `sync` draws the tree again, whatever its revision.
+    /// Makes the rows `rows`, whatever a tree's revision says (the picker's tree, marked for
+    /// its items, or what its filter found), and tells the list what changed.
+    pub fn show(&self, rows: Vec<(NodeId, TreeRow)>) {
+        // The next `sync` draws its tree again, whatever its revision.
         self.revision.set(None);
-        self.replace(found_rows(tree, found));
+        self.replace(rows);
     }
 
     fn replace(&self, new: Vec<(NodeId, TreeRow)>) {
@@ -349,6 +350,7 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
                 expandable,
                 expanded: expandable && row.expanded,
                 selected: row.selected,
+                dimmed: false,
             };
             (row.id, shown)
         })
@@ -378,6 +380,7 @@ pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
                 expandable: false,
                 expanded: false,
                 selected: tree.target() == Some(&node.path),
+                dimmed: false,
             };
             Some((id, row))
         })
@@ -484,21 +487,6 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone) -> FileRow {
         is_link: entry.kind == EntryKind::Symlink,
         selected,
         hidden: entry.attributes.contains(Attributes::HIDDEN),
-    }
-}
-
-/// The name of a folder in a tab or the path row: its own name, or for a root the path
-/// without its last separator (`/`, `C:`, `\\server\share`).
-pub fn folder_label(path: &VPath) -> String {
-    if let Some(name) = path.file_name() {
-        return name.to_string_lossy().into_owned();
-    }
-    let text = path.to_string();
-    let trimmed = text.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        text
-    } else {
-        trimmed.to_owned()
     }
 }
 
@@ -609,10 +597,7 @@ impl PickModels {
         found: Option<&[NodeId]>,
         places: &[Place],
     ) -> PickView {
-        match found {
-            Some(found) => self.tree.sync_found(tree, found),
-            None => self.tree.sync(tree, places),
-        }
+        self.tree.show(pick_tree_rows(picker, tree, found, places));
         set_rows(&self.targets, pick_targets(picker));
         let request = &picker.request;
         set_rows(
@@ -625,18 +610,23 @@ impl PickModels {
                 .collect(),
         );
         let more = request.sources.len().saturating_sub(PICK_CHIPS);
-        let validity = picker.validity();
+        // While the path field says something else, what is known of the target is beside
+        // the point: only what to do about the field shows.
+        let field_pending = picker.path_edited || picker.typed.is_some();
+        let validity = picker.validity().filter(|_| !field_pending);
         let folder_ok = picker
             .facts
             .as_ref()
             .is_none_or(|facts| facts.folder.is_ok());
-        let space = picker
-            .facts
-            .as_ref()
-            .filter(|facts| facts.folder.is_ok())
-            .and_then(|facts| facts.available)
-            .map(words::pick_space)
-            .unwrap_or_default();
+        let space = match &picker.facts {
+            _ if field_pending || picker.target.is_none() => String::new(),
+            None => words::pick_space_pending().to_owned(),
+            Some(facts) => facts
+                .available
+                .filter(|_| facts.folder.is_ok())
+                .map(words::pick_space)
+                .unwrap_or_default(),
+        };
         let (policy_note, policy_danger) = words::pick_policy(picker.policy);
         PickView {
             title: words::pick_title(request.mode).into(),
@@ -655,7 +645,8 @@ impl PickModels {
                 .unwrap_or_default()
                 .into(),
             path_error: picker.path_error.as_str().into(),
-            can_make_folder: picker.target.is_some() && folder_ok,
+            path_edited: picker.path_edited,
+            can_make_folder: picker.target.is_some() && folder_ok && !field_pending,
             filter: picker.filter.as_str().into(),
             tree: ModelRc::from(Rc::clone(&self.tree)),
             tree_note: match found {
@@ -677,10 +668,53 @@ impl PickModels {
                 })
                 .unwrap_or_default()
                 .into(),
+            hint: pick_hint(picker).into(),
             confirm_text: words::pick_confirm(request.mode).into(),
             can_confirm: picker.can_confirm(),
         }
     }
+}
+
+/// What the picker says beside its buttons about how it confirms: that the path typed must be
+/// entered first (the button is off meanwhile), that it is being looked at, or that an
+/// overwrite is confirmed by the button alone; empty for none of these.
+pub fn pick_hint(picker: &Picker) -> &'static str {
+    if picker.typed.is_some() {
+        words::pick_path_pending()
+    } else if picker.path_edited {
+        words::pick_path_unentered()
+    } else if picker.policy == rf_jobs::ConflictPolicy::Overwrite {
+        words::pick_overwrite_by_button()
+    } else {
+        ""
+    }
+}
+
+/// The rows of the picker's tree `tree` (whose roots are `places`), or of the folders `found`
+/// there by its filter: a folder that cannot take the items of `picker` shows dimmed, with why
+/// beside it, as among the quick targets.
+pub fn pick_tree_rows(
+    picker: &Picker,
+    tree: &Tree,
+    found: Option<&[NodeId]>,
+    places: &[Place],
+) -> Vec<(NodeId, TreeRow)> {
+    let mut rows = match found {
+        Some(found) => found_rows(tree, found),
+        None => tree_rows(&tree.rows(), places),
+    };
+    let request = &picker.request;
+    for (id, row) in &mut rows {
+        let Some(node) = tree.node(*id) else {
+            continue;
+        };
+        let validity = validate(request, &node.path, None);
+        if !validity.can_choose() {
+            row.dimmed = true;
+            row.info = words::pick_problem(validity, request.mode, request.folder_count > 0).into();
+        }
+    }
+    rows
 }
 
 /// The quick targets of `picker`, one row each: the head over the first of a group, the
@@ -1261,5 +1295,121 @@ mod tests {
         assert_eq!(model.iter().collect::<Vec<_>>(), [1, 5, 3]);
         set_rows(&model, vec![7]);
         assert_eq!(model.iter().collect::<Vec<_>>(), [7]);
+    }
+
+    /// A picker of a move of `a/docs` and `a/x.txt` into the other pane's `b`, and its tree,
+    /// whose place `a` is listed: `docs`, `docs 보관`.
+    fn picker_over_a() -> (Picker, Tree, Vec<Place>) {
+        let temp = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("local");
+        let a = temp("a");
+        let pick = crate::pick::PickRequest {
+            mode: rf_jobs::TransferMode::Move,
+            sources: vec![
+                a.join("docs").expect("a name"),
+                a.join("x.txt").expect("a name"),
+            ],
+            file_bytes: 10,
+            folder_count: 1,
+            other_count: 0,
+            from_dir: a.clone(),
+        };
+        let groups = crate::pick::quick_targets(&pick, &temp("b"), &[], &[], &[]);
+        let place = Place {
+            label: "작업".to_owned(),
+            path: a,
+            kind: PlaceKind::Favorite(rf_platform::KnownFolder::Documents),
+            space: None,
+        };
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots([(place.label.clone(), place.path.clone())]);
+        let listing = tree.toggle(0).expect("listed");
+        tree.apply_children(
+            listing.generation,
+            vec![
+                Entry::new("docs", EntryKind::Dir),
+                Entry::new("docs 보관", EntryKind::Dir),
+            ],
+        );
+        (Picker::new(pick, 0, groups), tree, vec![place])
+    }
+
+    #[test]
+    fn the_pickers_tree_dims_what_cannot_take_the_items() {
+        let (picker, tree, places) = picker_over_a();
+        let shown = |rows: Vec<(NodeId, TreeRow)>| -> Vec<(String, bool, String)> {
+            rows.into_iter()
+                .map(|(_, row)| (row.label.to_string(), row.dimmed, row.info.to_string()))
+                .collect()
+        };
+        let row =
+            |label: &str, dimmed: bool, info: &str| (label.to_owned(), dimmed, info.to_owned());
+        // The items' own folder and an item show dimmed, with why, as among the quick
+        // targets; the sidebar's rows never are.
+        assert_eq!(
+            shown(pick_tree_rows(&picker, &tree, None, &places)),
+            [
+                row("작업", true, "원래 있던 폴더라 고를 수 없음"),
+                row("docs", true, "옮기는 항목 안이라 고를 수 없음"),
+                row("docs 보관", false, ""),
+            ]
+        );
+        assert!(
+            tree_rows(&tree.rows(), &places)
+                .iter()
+                .all(|(_, row)| !row.dimmed)
+        );
+        // So do the folders a filter finds; the others say where they are.
+        let found = tree.find("docs");
+        let rows = shown(pick_tree_rows(&picker, &tree, Some(&found), &places));
+        assert_eq!(
+            rows[0],
+            row("docs", true, "옮기는 항목 안이라 고를 수 없음")
+        );
+        assert_eq!((rows[1].0.as_str(), rows[1].1), ("docs 보관", false));
+        assert!(rows[1].2.ends_with('a'), "{rows:?}");
+    }
+
+    #[test]
+    fn the_pickers_footer_says_how_it_confirms() {
+        let (mut picker, tree, places) = picker_over_a();
+        let models = PickModels::default();
+        let view = |picker: &Picker| models.view(picker, &tree, None, &places);
+        // The target is being looked at; nothing to beware of in how it confirms.
+        let first = view(&picker);
+        assert_eq!(first.space, "남은 공간을 확인하는 중…");
+        assert_eq!((first.hint.as_str(), first.problem.as_str()), ("", ""));
+        assert!(first.can_confirm && !first.path_edited);
+        let b = picker.target.clone().expect("the other pane's folder");
+        let look = picker.choose(b.clone());
+        picker.looked(
+            look,
+            &b,
+            crate::pick::TargetFacts {
+                folder: Ok(()),
+                writable: true,
+                available: Some(1 << 30),
+                same_volume: false,
+            },
+        );
+        assert_eq!(view(&picker).space, "남은 공간 1 GB");
+
+        // An overwrite says that only the button confirms it, with its warning.
+        picker.policy = rf_jobs::ConflictPolicy::Overwrite;
+        let overwrite = view(&picker);
+        assert_eq!(overwrite.hint, "덮어쓰기는 버튼으로만 확인합니다");
+        assert!(overwrite.policy_danger && overwrite.can_confirm);
+
+        // A path typed and not entered: the button is off, and the footer says what to do,
+        // with nothing about the target the field no longer shows.
+        picker.edit_path("/somewhere/else");
+        let edited = view(&picker);
+        assert_eq!(edited.hint, "Enter로 경로를 먼저 확인하세요");
+        assert!(edited.path_edited && !edited.can_confirm && !edited.can_make_folder);
+        assert_eq!((edited.space.as_str(), edited.problem.as_str()), ("", ""));
+        let somewhere = VPath::parse("/somewhere/else").expect("a path");
+        picker.type_path(somewhere);
+        let looking = view(&picker);
+        assert_eq!(looking.hint, "입력한 경로를 확인하는 중…");
+        assert!(!looking.can_confirm);
     }
 }

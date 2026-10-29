@@ -357,6 +357,14 @@ fn connect_pick(window: &MainWindow) {
     window.on_pick_filter_edited(|text| {
         with(|c| c.update(|state| state.pick_filter(&text)));
     });
+    window.on_pick_path_edited(|text| {
+        with(|c| {
+            c.update(|state| {
+                state.pick_path_edited(&text);
+                Vec::new()
+            });
+        });
+    });
     window.on_pick_path_entered(|text| {
         with(|c| c.update(|state| state.pick_path_entered(&text)));
     });

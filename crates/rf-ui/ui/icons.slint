@@ -6,7 +6,7 @@ import { Theme } from "theme.slint";
 export component Icon inherits Path {
     // One of: logo, back, forward, up, new-folder, copy, move, delete, rename, undo,
     // list-view, search, folder, file, link, drive, star, plus, close, pause, play, check,
-    // sort-up, sort-down, chevron-right, chevron-down. Anything else draws nothing.
+    // sort-up, sort-down, chevron-right, chevron-down, warning. Anything else draws nothing.
     in property <string> name;
     in property <brush> color: Theme.text;
 
@@ -102,6 +102,9 @@ export component Icon inherits Path {
         }
         if (name == "chevron-down") {
             return "M7 10l5 5 5-5";
+        }
+        if (name == "warning") {
+            return "M12 3.5L2.5 20h19z M12 10v4.5 M12 17.3v.2";
         }
         return "";
     }

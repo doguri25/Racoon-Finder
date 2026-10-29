@@ -16,7 +16,9 @@ export enum SectionHead {
 
 // One row of the tree, as Rust makes it. A place (a root) is a favorite or a drive; a drive
 // has a space line (`info`) and a bar filled to its used share (`fill`, 0..1). A folder a
-// filter found shows the folder it is in beside its name (`info` too).
+// filter found shows the folder it is in beside its name (`info` too). In the destination
+// picker's tree a folder that cannot take the items is `dimmed`, says why in `info`, and takes
+// no click (its chevron still opens it).
 export struct TreeRow {
     label: string,
     // 0 for a place, one more for each folder below it.
@@ -31,6 +33,7 @@ export struct TreeRow {
     expanded: bool,
     // The folder of the active pane.
     selected: bool,
+    dimmed: bool,
 }
 
 component TreeItem inherits Rectangle {
@@ -64,7 +67,7 @@ component TreeItem inherits Rectangle {
         width: parent.width - 16px;
         height: parent.height - root.head-height;
         border-radius: Theme.radius;
-        background: root.item.selected ? Theme.selection : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+        background: root.item.selected ? Theme.selection : root.item.dimmed ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
         accessible-role: list-item;
         accessible-label: root.item.label;
         accessible-description: root.item.info;
@@ -74,7 +77,9 @@ component TreeItem inherits Rectangle {
         accessible-expandable: root.item.expandable;
         accessible-expanded: root.item.expanded;
         accessible-action-default => {
-            root.clicked();
+            if (!root.item.dimmed) {
+                root.clicked();
+            }
         }
         // Opens the row, or closes it when it is open.
         accessible-action-expand => {
@@ -83,7 +88,9 @@ component TreeItem inherits Rectangle {
 
         touch := TouchArea {
             clicked => {
-                root.clicked();
+                if (!root.item.dimmed) {
+                    root.clicked();
+                }
             }
 
             // The chevron takes its own clicks: it only opens or closes the row. Inside the
@@ -118,7 +125,7 @@ component TreeItem inherits Rectangle {
                 width: 18px;
                 height: 18px;
                 name: root.item.is-drive ? "drive" : "folder";
-                color: root.item.is-drive ? Theme.text : Theme.folder;
+                color: root.item.dimmed ? Theme.faint : root.item.is-drive ? Theme.text : Theme.folder;
             }
             VerticalLayout {
                 horizontal-stretch: 1;
@@ -128,7 +135,7 @@ component TreeItem inherits Rectangle {
                 Text {
                     accessible-role: none;
                     text: root.item.label;
-                    color: Theme.text;
+                    color: root.item.dimmed ? Theme.faint : Theme.text;
                     font-weight: root.item.selected ? 600 : 400;
                     overflow: elide;
                 }

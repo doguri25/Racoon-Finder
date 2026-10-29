@@ -838,3 +838,64 @@ fn the_theme_follows_the_view_menu() {
     click("숨김 파일 보기");
     assert_eq!(commands.borrow().as_slice(), ["toggle-hidden"]);
 }
+
+#[test]
+fn a_path_typed_and_not_entered_holds_the_button() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_pick_confirmed(move || record.borrow_mut().push("confirmed".to_owned()));
+    // Rust, as the controller does: a path typed and not entered turns the button off.
+    let record = Rc::clone(&calls);
+    let weak = window.as_weak();
+    window.on_pick_path_edited(move |text| {
+        record.borrow_mut().push(format!("edited {text}"));
+        if let Some(window) = weak.upgrade() {
+            window.set_pick_view(PickView {
+                path_edited: true,
+                can_confirm: false,
+                hint: "Enter로 경로를 먼저 확인하세요".into(),
+                ..pick_view()
+            });
+        }
+    });
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+    let field = || labelled(&window, "대상 경로", AccessibleRole::TextInput).remove(0);
+    assert_eq!(
+        field().accessible_value().as_deref(),
+        Some("/home/me/작업/백업")
+    );
+
+    field().set_accessible_value("/home/me/다른 곳");
+    slint::platform::update_timers_and_animations();
+    labelled(&window, "여기로 이동", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.borrow().as_slice(), ["edited /home/me/다른 곳"]);
+    assert_eq!(
+        labelled(
+            &window,
+            "Enter로 경로를 먼저 확인하세요",
+            AccessibleRole::Text
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        field().accessible_value().as_deref(),
+        Some("/home/me/다른 곳")
+    );
+
+    // Another folder chosen (or the path found): the field shows the target again.
+    window.set_pick_view(pick_view());
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        field().accessible_value().as_deref(),
+        Some("/home/me/작업/백업")
+    );
+    labelled(&window, "여기로 이동", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(
+        calls.borrow().as_slice(),
+        ["edited /home/me/다른 곳", "confirmed"]
+    );
+}

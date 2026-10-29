@@ -13,6 +13,8 @@ export global Theme {
     out property <color> faint: root.dark ? #7D848E : #8A919C;
     out property <color> border: root.dark ? #2C3036 : #E1E4E8;
     out property <color> folder: root.dark ? #E0A84A : #B7791F;
+    // What warns (an overwrite): the folder amber of the palette.
+    out property <color> warning: root.folder;
     // Dark mode lifts the accent toward white (35%) so it reads on dark panels.
     out property <color> accent: root.dark ? root.accent-base.mix(#FFFFFF, 0.65) : root.accent-base;
     out property <color> on-accent: root.dark ? #0E1A33 : #FFFFFF;

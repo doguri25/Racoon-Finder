@@ -4,7 +4,9 @@
 // does, the room free at the target and the buttons. It takes the keyboard when it shows:
 // letters go to the filter, ↑↓ move among the quick targets, Enter confirms (the first folder
 // a filter finds first), Esc cancels. Rust decides what Enter does, and never confirms an
-// overwrite with it: only the button does.
+// overwrite with it: only the button does. A path typed into the path field and not entered
+// turns the button off until it is entered (or another folder is chosen): the button never
+// sends the items anywhere else than where the field says.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -35,6 +37,9 @@ export struct PickView {
     target-path: string,
     // Why the path typed cannot be the target; empty when nothing is wrong with it.
     path-error: string,
+    // The field holds a path typed and not entered; once Rust clears this, the field shows the
+    // target's path again.
+    path-edited: bool,
     can-make-folder: bool,
     filter: string,
     tree: [TreeRow],
@@ -50,6 +55,9 @@ export struct PickView {
     space: string,
     // Why the target cannot be chosen, or what to beware of; empty for neither.
     problem: string,
+    // How the picker confirms now: the path typed must be entered first, it is being looked
+    // at, or an overwrite takes the button; empty for none of these.
+    hint: string,
     confirm-text: string,
     can-confirm: bool,
 }
@@ -331,6 +339,8 @@ export component PickDialog inherits DialogFrame {
     callback tree-clicked(index: int);
     callback tree-toggled(index: int);
     callback filter-edited(text: string);
+    // The path field's text changed by typing (not entered yet).
+    callback path-edited(text: string);
     callback path-entered(text: string);
     callback new-folder();
     callback mode-chosen(is-move: bool);
@@ -359,6 +369,16 @@ export component PickDialog inherits DialogFrame {
     changed target-path => {
         path.text = root.target-path;
         path.to-end();
+    }
+
+    // What was typed is no longer pending (another folder was chosen, or the path entered
+    // turned out to be the target): the field shows the target.
+    private property <bool> path-pending: root.view.path-edited;
+    changed path-pending => {
+        if (!root.path-pending) {
+            path.text = root.view.target-path;
+            path.to-end();
+        }
     }
 
     changed scroll-serial => {
@@ -507,6 +527,9 @@ export component PickDialog inherits DialogFrame {
                         icon: "folder";
                         label: "대상 경로";
                         hint: "폴더 경로를 입력하세요";
+                        edited(text) => {
+                            root.path-edited(text);
+                        }
                         accepted(text) => {
                             root.path-entered(text);
                         }
@@ -675,14 +698,26 @@ export component PickDialog inherits DialogFrame {
                         }
                     }
                 }
-                Text {
+                HorizontalLayout {
                     horizontal-stretch: 1;
-                    text: root.view.policy-note;
-                    font-size: 13px;
-                    color: root.view.policy-danger ? Theme.text : Theme.muted;
-                    font-weight: root.view.policy-danger ? 600 : 400;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
+                    spacing: 6px;
+
+                    if root.view.policy-danger: Icon {
+                        y: (parent.height - self.height) / 2;
+                        width: 18px;
+                        height: 18px;
+                        name: "warning";
+                        color: Theme.warning;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.view.policy-note;
+                        font-size: 13px;
+                        color: root.view.policy-danger ? Theme.text : Theme.muted;
+                        font-weight: root.view.policy-danger ? 600 : 400;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
                 }
             }
 
@@ -704,6 +739,12 @@ export component PickDialog inherits DialogFrame {
                         text: root.view.problem;
                         color: Theme.text;
                         font-weight: 500;
+                        wrap: word-wrap;
+                    }
+                    if root.view.hint != "": Text {
+                        text: root.view.hint;
+                        font-size: 13px;
+                        color: Theme.text;
                         wrap: word-wrap;
                     }
                 }

@@ -878,12 +878,14 @@ pub fn pick_confirm(mode: TransferMode) -> &'static str {
     }
 }
 
-/// What the picker copies or moves: `항목 3개 · 1.2 GB` for `count` items that are all files
-/// of `bytes` together, `항목 3개 · 파일 1.2 MB와 폴더 1개` with `folders` folders among
-/// them (whose size is not known before the job looks inside), `항목 2개 · 폴더 2개` for
-/// folders alone. Every unit of a size ends in a vowel when read, so `와` always follows it.
+/// What the picker copies or moves: `항목 3개 · 1.2 GB` for `count` items whose `files`
+/// files are `bytes` together, `항목 3개 · 파일 1.2 MB와 폴더 1개` with `folders` folders
+/// among them (whose size is not known before the job looks inside), `항목 2개 · 폴더 2개`
+/// without files, and `항목 1개` for links alone, which have no size. Every unit of a size ends
+/// in a vowel when read, so `와` always follows it.
 pub fn pick_summary(count: usize, files: usize, bytes: u64, folders: usize) -> String {
     let what = match (files, folders) {
+        (0, 0) => return item_count(count),
         (_, 0) => format_size(bytes),
         (0, folders) => format!("폴더 {folders}개"),
         (_, folders) => format!("파일 {}와 폴더 {folders}개", format_size(bytes)),
@@ -945,6 +947,27 @@ pub fn pick_space(available: u64) -> String {
     )
 }
 
+/// The picker's space line while a worker looks at the target.
+pub fn pick_space_pending() -> &'static str {
+    "남은 공간을 확인하는 중…"
+}
+
+/// What the picker says while a worker looks at a path typed into it.
+pub fn pick_path_pending() -> &'static str {
+    "입력한 경로를 확인하는 중…"
+}
+
+/// What the picker says while its path field holds a path typed and not entered: its button
+/// is off until the path is entered (or another folder is chosen).
+pub fn pick_path_unentered() -> &'static str {
+    "Enter로 경로를 먼저 확인하세요"
+}
+
+/// What the picker says while its policy overwrites: Enter does not confirm it.
+pub fn pick_overwrite_by_button() -> &'static str {
+    "덮어쓰기는 버튼으로만 확인합니다"
+}
+
 /// Why a path typed into the picker cannot be the target.
 pub fn pick_path_error(kind: ErrorKind) -> String {
     match kind {
@@ -958,8 +981,9 @@ pub fn pick_path_error(kind: ErrorKind) -> String {
 /// confirms with Enter alone.
 pub fn pick_policy(policy: ConflictPolicy) -> (&'static str, bool) {
     match policy {
+        // One sentence a line, so that a narrow window breaks the line between them.
         ConflictPolicy::Overwrite => (
-            "같은 이름의 파일을 바꿉니다. 있던 파일의 내용은 되살릴 수 없습니다.",
+            "같은 이름의 파일을 바꿉니다.\n있던 파일의 내용은 되살릴 수 없습니다.",
             true,
         ),
         ConflictPolicy::Skip => ("같은 이름이 있는 항목은 건너뜁니다", false),
