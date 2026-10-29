@@ -21,18 +21,13 @@ use rf_vfs::{
     Change, SortBy, SortKey, SortOrder, SortSpec, VisibilityFilter, compare_entries, sort_entries,
 };
 
-use crate::format::format_size;
 use crate::history::History;
 use crate::loader::{LoadEvent, LoadRequest};
 use crate::selection::Selection;
+use crate::words;
 
 /// How long after a key the next one still adds to the type-to-select prefix (NAV-14).
 pub const TYPE_TO_SELECT_WINDOW: Duration = Duration::from_secs(1);
-
-/// Up to this many new rows in one change are put in place one by one; more are added at the
-/// end and the whole list is sorted again, which is faster than many single insertions into a
-/// long list.
-const INSERT_ONE_BY_ONE: usize = 64;
 
 /// A generation that no request has had yet.
 fn next_generation() -> u64 {
@@ -60,9 +55,12 @@ pub enum OpenAction {
     /// The row is a file: open it with the app the system picks for it.
     OpenFile(VPath),
     /// The row is a link, and only `Provider::stat_target`, which the UI thread does not call,
-    /// tells whether it leads to a folder. The controller calls
-    /// [`Loader::follow`](crate::loader::Loader::follow) on a worker thread, which gives
-    /// `Navigate` for a link to a folder and `OpenFile` for anything else.
+    /// tells whether it leads to a folder. The controller hands it to
+    /// [`Loader::follow`](crate::loader::Loader::follow) with the tab's generation; the
+    /// result (`Navigate` for a link to a folder, `OpenFile` for anything else) comes back with
+    /// that generation, and only a tab that still has it
+    /// ([`Pane::tab_by_generation_mut`]) takes it, so a slow link cannot move a tab the user
+    /// has moved on from.
     Follow(VPath),
 }
 
@@ -71,7 +69,9 @@ pub enum OpenAction {
 /// The fields change only through the methods, which keep them consistent: `visible` is
 /// `all` without the items the filter hides, both in the order of `sort`, and the selection
 /// and the cursor refer to `visible`.
-#[derive(Clone, Debug)]
+///
+/// It is not `Clone`: a copy would share the tab's generation and take its events too.
+#[derive(Debug)]
 pub struct Tab {
     location: VPath,
     history: History,
@@ -333,29 +333,14 @@ impl Tab {
     /// shows only with a selection, and its size, the sum of the selected files (folders and
     /// links have none), only when a file is selected. The free space shows once known.
     pub fn status_line(&self) -> String {
-        let mut parts = vec![format!("항목 {}개", self.visible.len())];
         let selected = self.selection.indices(&self.visible);
-        if !selected.is_empty() {
-            let files: Vec<&Entry> = selected
-                .iter()
-                .map(|&i| &self.visible[i])
-                .filter(|entry| entry.kind == EntryKind::File)
-                .collect();
-            if files.is_empty() {
-                parts.push(format!("선택 {}개", selected.len()));
-            } else {
-                let bytes = files.iter().map(|entry| entry.size).sum();
-                parts.push(format!(
-                    "선택 {}개 ({})",
-                    selected.len(),
-                    format_size(bytes)
-                ));
-            }
-        }
-        if let Some(free) = self.free {
-            parts.push(format!("남은 공간 {}", format_size(free)));
-        }
-        parts.join(" · ")
+        let files: Vec<&Entry> = selected
+            .iter()
+            .map(|&i| &self.visible[i])
+            .filter(|entry| entry.kind == EntryKind::File)
+            .collect();
+        let bytes = (!files.is_empty()).then(|| files.iter().map(|entry| entry.size).sum());
+        words::status_line(self.visible.len(), selected.len(), bytes, self.free)
     }
 
     /// Moves the cursor to the first row whose name starts with what was typed, ignoring
@@ -441,6 +426,11 @@ impl Tab {
 }
 
 /// Applies `changes`, in their order, to `entries`, which are sorted by `sort` and stay so.
+///
+/// The rows that go are dropped in one pass; the rows that come are sorted among themselves
+/// and merged in with one more pass over the old rows, a binary search each finding where
+/// they go. For `n` rows and `k` changes that is about `n + k log n` steps, so a burst of
+/// changes costs little more than a single one.
 fn merge_changes(entries: &mut Vec<Entry>, changes: Vec<Change>, sort: SortSpec) {
     // The names whose current row goes, and the rows that come, by name (a later change of a
     // name replaces an earlier one).
@@ -468,16 +458,31 @@ fn merge_changes(entries: &mut Vec<Entry>, changes: Vec<Change>, sort: SortSpec)
     if !gone.is_empty() {
         entries.retain(|entry| !gone.contains(&entry.name));
     }
-    if arrived.len() > INSERT_ONE_BY_ONE {
-        entries.extend(arrived.into_values());
-        sort_entries(entries, &sort);
-    } else {
-        for entry in arrived.into_values() {
-            let at = entries
-                .partition_point(|row| compare_entries(row, &entry, &sort) == Ordering::Less);
-            entries.insert(at, entry);
-        }
+    if arrived.is_empty() {
+        return;
     }
+    let mut arrived: Vec<Entry> = arrived.into_values().collect();
+    sort_entries(&mut arrived, &sort);
+
+    // Where each new row goes among the old ones: the new rows are in order, so each search
+    // starts where the last one ended.
+    let mut places = Vec::with_capacity(arrived.len());
+    let mut start = 0;
+    for entry in &arrived {
+        start += entries[start..]
+            .partition_point(|row| compare_entries(row, entry, &sort) == Ordering::Less);
+        places.push(start);
+    }
+    // One pass that moves the old rows over and puts the new ones in between.
+    let mut old = std::mem::take(entries).into_iter();
+    entries.reserve(old.len() + arrived.len());
+    let mut moved = 0;
+    for (entry, place) in arrived.into_iter().zip(places) {
+        entries.extend(old.by_ref().take(place - moved));
+        moved = place;
+        entries.push(entry);
+    }
+    entries.extend(old);
 }
 
 /// What [`Pane::handle`] did with an event, and what the caller does next.
@@ -490,12 +495,20 @@ pub enum Handled {
     /// Tab `tab` may have missed changes and lists its folder again: the caller hands
     /// `request` to the loader and drops the ticket of the event's generation.
     Reload { tab: usize, request: LoadRequest },
-    /// The watch of tab `tab` ended at `path`: the folder is gone, or the watch failed. The
-    /// caller drops the ticket, finds [`Loader::nearest_existing_parent`] of `path` on a
-    /// worker thread and then, if the tab still has `generation`
-    /// ([`Pane::tab_by_generation_mut`]), navigates it there. When that is `path` itself the
-    /// folder is still there and only the watch failed: the tab keeps its rows, without live
-    /// updates, since a new watch may fail the same way.
+    /// The watch of tab `tab` ended at `path` and no change follows: the folder was removed,
+    /// moved or replaced by another one, or the watch failed while it is still there. The tab
+    /// is left as it is, and the caller:
+    ///
+    /// 1. keeps the ticket of `generation`: a listing that is still running still comes;
+    /// 2. on a worker thread, waits a moment (a folder replaced in one go, such as
+    ///    `rm -rf dist && mkdir dist`, is back by then) and finds
+    ///    [`Loader::nearest_existing_parent`] of `path`;
+    /// 3. back on the UI thread, if the tab still has `generation`
+    ///    ([`Pane::tab_by_generation_mut`]), navigates it to that folder, or home when none is
+    ///    left. When the folder found is `path` itself, [`Tab::navigate`] lists it again with a
+    ///    new watch, which shows a replaced folder's new contents; the caller allows that at
+    ///    most once per folder every few seconds, so that a watch that keeps failing on a
+    ///    folder that is there cannot reload it in a loop.
     ///
     /// [`Loader::nearest_existing_parent`]: crate::loader::Loader::nearest_existing_parent
     Vanished {
@@ -506,7 +519,7 @@ pub enum Handled {
 }
 
 /// One of the two folder panes: its tabs, of which one shows. A pane has at least one tab.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Pane {
     tabs: Vec<Tab>,
     active: usize,
@@ -898,6 +911,29 @@ mod tests {
         assert_eq!(names(&tab.visible()[4..6]), ["m1", "m2"]);
         assert_eq!(tab.visible()[303].name, "z");
         assert_eq!(selected(&tab), ["b", "d"]);
+    }
+
+    #[test]
+    fn a_changed_row_moves_to_its_place() {
+        let mut tab = ready_tab(
+            "a",
+            vec![file("a", 10), file("b", 20), file("c", 30), dir("d")],
+        );
+        tab.set_sort(SortKey::Size);
+        assert_eq!(names(tab.visible()), ["d", "a", "b", "c"]);
+        let generation = tab.generation();
+        // a grows past c, x arrives in the middle, and y and w at the ends.
+        assert!(tab.apply_changes(
+            generation,
+            vec![
+                Change::Upsert(file("a", 40)),
+                Change::Upsert(file("x", 25)),
+                Change::Upsert(file("y", 99)),
+                Change::Upsert(file("w", 1)),
+            ]
+        ));
+        assert_eq!(names(tab.visible()), ["d", "w", "b", "x", "c", "a", "y"]);
+        assert_eq!(names(tab.all()), names(tab.visible()));
     }
 
     #[test]

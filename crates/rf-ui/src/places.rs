@@ -7,6 +7,8 @@
 use rf_core::VPath;
 use rf_platform::{DiskSpace, KnownFolder};
 
+use crate::words;
+
 /// What kind of place a sidebar row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaceKind {
@@ -28,28 +30,15 @@ pub struct Place {
     pub space: Option<DiskSpace>,
 }
 
-/// The name of `folder` in the sidebar.
-fn favorite_label(folder: KnownFolder) -> &'static str {
-    match folder {
-        KnownFolder::Home => "홈",
-        KnownFolder::Desktop => "바탕 화면",
-        KnownFolder::Documents => "문서",
-        KnownFolder::Downloads => "다운로드",
-        KnownFolder::Pictures => "사진",
-        KnownFolder::Music => "음악",
-        KnownFolder::Videos => "동영상",
-    }
-}
-
 /// The user's well-known folders that the system defines, in the order of
-/// [`KnownFolder::ALL`]: 홈, 바탕 화면, 문서, 다운로드, 사진, 음악, 동영상. Blocks; call it on a
-/// worker thread.
+/// [`KnownFolder::ALL`], under their [`words::favorite`] names. Blocks; call it on a worker
+/// thread.
 pub fn favorites() -> Vec<Place> {
     KnownFolder::ALL
         .into_iter()
         .filter_map(|folder| {
             Some(Place {
-                label: favorite_label(folder).to_owned(),
+                label: words::favorite(folder).to_owned(),
                 path: rf_platform::known_folder(folder)?,
                 kind: PlaceKind::Favorite(folder),
                 space: None,
@@ -61,12 +50,14 @@ pub fn favorites() -> Vec<Place> {
 /// The drives, each with its space from [`rf_platform::disk_space`]. Blocks; call it on a
 /// worker thread.
 ///
-/// - Windows: every drive letter whose root can be read, `C:` as "로컬 디스크 (C:)" and the
-///   others as "드라이브 (D:)".
-/// - macOS: `/` as "시스템 디스크", then the folders of `/Volumes` that are other volumes than
-///   `/` (which skips the link to the system volume there).
-/// - Linux: `/` as "시스템 디스크", then the folders of `/media/*`, `/run/media/*` and `/mnt`
-///   that are other volumes than `/`, each volume once, under its folder's name.
+/// - Windows: every drive letter whose root can be read, named by [`words::drive_letter`].
+/// - macOS: `/` as [`words::system_disk`], then the folders of `/Volumes` that are other
+///   volumes than `/` (which skips the link to the system volume there).
+/// - Linux: `/` as [`words::system_disk`], then the folders of `/media/*`, `/run/media/*` and
+///   `/mnt` that are other volumes than `/`, each volume once, under its folder's name.
+///
+/// Folders whose names start with a dot (`/Volumes/.timemachine`) are the system's own and
+/// are left out.
 pub fn drives() -> Vec<Place> {
     imp::drive_roots()
         .into_iter()
@@ -86,18 +77,15 @@ pub fn drives() -> Vec<Place> {
 mod imp {
     use rf_core::VPath;
 
+    use crate::words;
+
     /// The readable drive letters, as labels and roots.
     pub(super) fn drive_roots() -> Vec<(String, VPath)> {
         ('A'..='Z')
             .filter_map(|letter| {
                 let root = format!("{letter}:\\");
                 std::fs::metadata(&root).ok()?;
-                let label = if letter == 'C' {
-                    "로컬 디스크 (C:)".to_owned()
-                } else {
-                    format!("드라이브 ({letter}:)")
-                };
-                Some((label, VPath::local(&root).ok()?))
+                Some((words::drive_letter(letter), VPath::local(&root).ok()?))
             })
             .collect()
     }
@@ -110,6 +98,8 @@ mod imp {
     use std::path::{Path, PathBuf};
 
     use rf_core::VPath;
+
+    use crate::words;
 
     /// The folders that may hold other volumes than `/`, as globs of one or two levels.
     #[cfg(target_os = "macos")]
@@ -126,7 +116,7 @@ mod imp {
             seen.insert(meta.dev());
         }
         if let Ok(path) = VPath::local(root) {
-            roots.push(("시스템 디스크".to_owned(), path));
+            roots.push((words::system_disk().to_owned(), path));
         }
         for &(base, depth) in MOUNT_FOLDERS {
             for folder in folders_at(Path::new(base), depth) {
@@ -149,15 +139,18 @@ mod imp {
         roots
     }
 
-    /// The folders `depth` levels below `base`, sorted by path.
-    fn folders_at(base: &Path, depth: usize) -> Vec<PathBuf> {
+    /// The folders `depth` levels below `base`, sorted by path, without those whose names
+    /// start with a dot.
+    pub(super) fn folders_at(base: &Path, depth: usize) -> Vec<PathBuf> {
         let mut level = vec![base.to_path_buf()];
         for _ in 0..depth {
             level = level
                 .iter()
                 .filter_map(|folder| std::fs::read_dir(folder).ok())
                 .flatten()
-                .filter_map(|child| Some(child.ok()?.path()))
+                .filter_map(Result::ok)
+                .filter(|child| !child.file_name().as_encoded_bytes().starts_with(b"."))
+                .map(|child| child.path())
                 .collect();
         }
         level.sort();
@@ -203,6 +196,20 @@ mod tests {
         assert_eq!(favorites(), expected);
         // Every test machine has a home folder, and it comes first.
         assert_eq!(expected[0].kind, PlaceKind::Favorite(KnownFolder::Home));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mount_folders_skip_dot_folders() {
+        let t = tempfile::tempdir().expect("a temporary folder");
+        for name in ["user/USB", "user/.hidden", ".timemachine/x", "Data"] {
+            std::fs::create_dir_all(t.path().join(name)).expect("a folder");
+        }
+        assert_eq!(
+            imp::folders_at(t.path(), 1),
+            [t.path().join("Data"), t.path().join("user")]
+        );
+        assert_eq!(imp::folders_at(t.path(), 2), [t.path().join("user/USB")]);
     }
 
     #[cfg(target_os = "linux")]

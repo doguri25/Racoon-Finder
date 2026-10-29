@@ -22,7 +22,7 @@ use rf_vfs::{SortKey, VisibilityFilter};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::keys::{self, Command, Mods};
-use crate::loader::{LoadEvent, LoadRequest, LoadTicket, Loader};
+use crate::loader::{Followed, LoadEvent, LoadRequest, LoadTicket, Loader};
 use crate::pane::{Handled, OpenAction, Pane, Tab};
 use crate::places::{self, Place};
 use crate::ui_bridge::{self, PaneModels, post};
@@ -52,7 +52,8 @@ pub enum Effect {
     /// [`AppState::found_existing`].
     FindExisting { generation: u64, path: VPath },
     /// The row opened in the tab with `generation` is a link: follow it on a worker thread
-    /// ([`Loader::follow`]), then call [`AppState::followed`].
+    /// ([`Loader::follow`]), then hand the result, which carries `generation`, to
+    /// [`AppState::followed`].
     Follow { generation: u64, link: VPath },
     /// Open the file with the system's default app.
     OpenFile(VPath),
@@ -348,13 +349,10 @@ impl AppState {
         }
     }
 
-    /// Takes what following a link opened in the tab with `generation` gave. A tab that has
-    /// moved on since takes nothing.
-    pub fn followed(
-        &mut self,
-        generation: u64,
-        result: Result<OpenAction, ErrorKind>,
-    ) -> Vec<Effect> {
+    /// Takes what following a link gave ([`Loader::follow`]). Only the tab that still has the
+    /// generation the result carries takes it: a tab that has moved on since takes nothing.
+    pub fn followed(&mut self, followed: Followed) -> Vec<Effect> {
+        let Followed { generation, result } = followed;
         let Some(tab) = self.tab_by_generation(generation) else {
             return Vec::new();
         };
@@ -719,10 +717,8 @@ impl Controller {
                     });
                 }
                 Effect::Follow { generation, link } => {
-                    let loader = self.loader.clone();
-                    spawn_worker("rf-ui-follow", move || {
-                        let result = loader.follow(&link);
-                        post(move |c| c.update(|state| state.followed(generation, result)));
+                    self.loader.follow(generation, link, |followed| {
+                        post(move |c| c.update(|state| state.followed(followed)));
                     });
                 }
                 Effect::OpenFile(file) => open::open_file(file, |kind| {
@@ -1050,7 +1046,10 @@ mod tests {
         };
         // The user moves on before the link's target is known.
         state.go_to(folder("elsewhere"));
-        let late = state.followed(generation, Ok(OpenAction::Navigate(link.clone())));
+        let late = state.followed(Followed {
+            generation,
+            result: Ok(OpenAction::Navigate(link.clone())),
+        });
         assert_eq!(late, []);
         assert_eq!(
             state.panes()[LEFT].active_tab().location(),
@@ -1061,16 +1060,25 @@ mod tests {
         // gives a notice.
         let generation = state.panes()[LEFT].active_tab().generation();
         assert_eq!(
-            state.followed(generation, Ok(OpenAction::OpenFile(link.clone()))),
+            state.followed(Followed {
+                generation,
+                result: Ok(OpenAction::OpenFile(link.clone())),
+            }),
             [Effect::OpenFile(link.clone())]
         );
         assert_eq!(
-            state.followed(generation, Err(ErrorKind::NotFound)),
+            state.followed(Followed {
+                generation,
+                result: Err(ErrorKind::NotFound),
+            }),
             [Effect::Notice(
                 "열 수 없습니다: 찾을 수 없습니다".to_owned()
             )]
         );
-        let effects = state.followed(generation, Ok(OpenAction::Navigate(link.clone())));
+        let effects = state.followed(Followed {
+            generation,
+            result: Ok(OpenAction::Navigate(link.clone())),
+        });
         assert_eq!(the_load(&effects).path, link);
     }
 

@@ -8,7 +8,9 @@
 //! the generation of its [`LoadRequest`], which is how a tab drops the events of a folder it
 //! has left.
 //!
-//! The other methods of [`Loader`] block too and are called on a worker thread.
+//! [`Loader::follow`] works the same way for a link a tab opens, and its result carries the
+//! tab's generation too. [`Loader::nearest_existing_parent`] blocks and is called on a worker
+//! thread.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,9 +52,11 @@ pub enum LoadEvent {
     },
     /// The watch may have lost changes: the folder must be listed again.
     Rescan { generation: u64 },
-    /// The watch ended and no other change follows: the folder is gone, or the watch failed
-    /// while the folder is still there. [`Loader::nearest_existing_parent`] tells which, and
-    /// where to go.
+    /// The watch ended and no other change follows: the folder was removed, moved or replaced,
+    /// or the watch failed while the folder is still there. The listing, if it is still
+    /// running, still comes, so the ticket stays. [`Loader::nearest_existing_parent`] tells
+    /// where to go; [`Handled::Vanished`](crate::pane::Handled::Vanished) has the whole
+    /// protocol.
     Vanished { generation: u64 },
     /// The bytes the user can still write on the folder's volume. Sent after `Listed`, and
     /// only when the provider can tell.
@@ -94,9 +98,12 @@ impl Loader {
     /// is dropped or cancelled. A watch that cannot start leaves the listing without live
     /// updates.
     ///
-    /// `sink` is called on the worker thread or the watch's thread, one call at a time, and
-    /// never after the ticket's [`LoadTicket::cancel`] has returned. It must not block: a
-    /// cancel waits for a call in progress.
+    /// `sink` is called one call at a time, and never after the ticket's
+    /// [`LoadTicket::cancel`] has returned: on the worker thread or the watch's thread, or,
+    /// when no worker thread can start, once with `Failed` on the calling thread before
+    /// `request` returns. It must not block, since a cancel waits for a call in progress, and
+    /// it must never cancel or drop its own ticket, or wait for anything that does: that would
+    /// wait for the very call it is in.
     pub fn request(
         &self,
         request: LoadRequest,
@@ -128,9 +135,13 @@ impl Loader {
         ticket
     }
 
-    /// The folder to show once the folder `path` has vanished: `path` itself when it is still
-    /// a folder (only its watch failed), else its nearest parent that is one, or `None` when
-    /// none is left (a removed drive). Blocks; call it on a worker thread.
+    /// Where a tab goes once the watch of its folder `path` has ended ([`LoadEvent::Vanished`]):
+    /// `path` itself when it is a folder (it was replaced by a new one, or only its watch
+    /// failed), which the tab then lists again; else the nearest parent that is a folder; or
+    /// `None` when none is left (a removed drive).
+    ///
+    /// Blocks; call it on a worker thread, a moment after the event, so that a folder replaced
+    /// in one go (`rm -rf dist && mkdir dist`) is back by then.
     pub fn nearest_existing_parent(&self, path: &VPath) -> Option<VPath> {
         let provider = self.vfs.provider(path).ok()?;
         let mut candidate = Some(path.clone());
@@ -143,18 +154,69 @@ impl Loader {
         None
     }
 
-    /// What opening the link at `link` does (the [`OpenAction::Follow`] of a row):
-    /// `Navigate` when it leads to a folder, else `OpenFile`. A link to nothing, or one that
-    /// cannot be followed, gives the error's kind. Blocks; call it on a worker thread.
-    pub fn follow(&self, link: &VPath) -> Result<OpenAction, ErrorKind> {
-        let provider = self.vfs.provider(link).map_err(|error| error.kind())?;
-        let target = provider.stat_target(link).map_err(|error| error.kind())?;
-        Ok(if target.kind == EntryKind::Dir {
-            OpenAction::Navigate(link.clone())
-        } else {
-            OpenAction::OpenFile(link.clone())
-        })
+    /// Finds out on a new worker thread what opening the link at `link` does (the
+    /// [`OpenAction::Follow`] of a row of the tab whose last request had `generation`) and
+    /// hands it to `sink` with that generation; returns at once, so it may be called on the UI
+    /// thread. The tab takes the result only if it still has `generation`: the user may have
+    /// moved on while a slow link was looked up.
+    ///
+    /// `sink` is called once: on the worker thread, or on the calling thread, with the error,
+    /// when no worker thread can start.
+    pub fn follow(
+        &self,
+        generation: u64,
+        link: VPath,
+        sink: impl FnOnce(Followed) + Send + 'static,
+    ) {
+        // The worker takes the sink; if the worker cannot start, it is still here.
+        let slot = Arc::new(Mutex::new(Some(sink)));
+        let worker_slot = Arc::clone(&slot);
+        let vfs = self.vfs.clone();
+        let worker_link = link.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rf-ui-follow".into())
+            .spawn(move || {
+                let result = resolve_link(&vfs, &worker_link);
+                let sink = worker_slot
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let Some(sink) = sink {
+                    sink(Followed { generation, result });
+                }
+            });
+        if let Err(error) = spawned {
+            let kind = Error::io("spawn the link follower", link, error).kind();
+            let sink = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(sink) = sink {
+                sink(Followed {
+                    generation,
+                    result: Err(kind),
+                });
+            }
+        }
     }
+}
+
+/// What [`Loader::follow`] found for a link opened in the tab whose request had `generation`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Followed {
+    /// The tab's generation when it asked; a tab with another one by now drops the result.
+    pub generation: u64,
+    /// `Navigate` when the link leads to a folder, else `OpenFile`; the error's kind for a
+    /// link to nothing, or one that cannot be followed.
+    pub result: Result<OpenAction, ErrorKind>,
+}
+
+/// What opening the link at `link` does. Blocks.
+fn resolve_link(vfs: &Vfs, link: &VPath) -> Result<OpenAction, ErrorKind> {
+    let provider = vfs.provider(link).map_err(|error| error.kind())?;
+    let target = provider.stat_target(link).map_err(|error| error.kind())?;
+    Ok(if target.kind == EntryKind::Dir {
+        OpenAction::Navigate(link.clone())
+    } else {
+        OpenAction::OpenFile(link.clone())
+    })
 }
 
 /// Whether `path` is a folder, or a link to one.
@@ -169,6 +231,7 @@ fn is_folder(provider: &dyn Provider, path: &VPath) -> bool {
 }
 
 /// The running work of one [`Loader::request`]. Dropping it cancels the work.
+#[must_use = "dropping the ticket stops the listing and the watch at once"]
 pub struct LoadTicket {
     generation: u64,
     cancel: CancelToken,
@@ -255,7 +318,11 @@ impl Worker {
                 return emit(&self.shared, LoadEvent::Failed { generation, kind });
             }
         };
-        if provider.capabilities(&path).contains(Capabilities::WATCH) {
+        let watchable = provider.capabilities(&path).contains(Capabilities::WATCH);
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        if watchable {
             self.start_watch(provider.as_ref(), &path, generation);
         }
 
@@ -280,6 +347,9 @@ impl Worker {
             },
         );
 
+        if self.cancel.is_cancelled() {
+            return;
+        }
         if let Ok(Some(space)) = provider.space(&path) {
             let available = space.available;
             emit(

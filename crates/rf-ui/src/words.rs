@@ -1,4 +1,5 @@
-//! The Korean words the app shows for errors, refusals and jobs (I18N-02).
+//! The Korean words the app shows for errors, refusals, jobs, the status bar and the sidebar
+//! (I18N-02).
 //!
 //! The `Display` text of `rf_core::Error` and of the job types is English and for the log; the
 //! screens show these words instead. They say what happened to the user's item, not how the
@@ -8,6 +9,7 @@ use rf_core::ErrorKind;
 use rf_jobs::{
     DeleteMethod, FailureReason, IssueKind, JobKind, JobSpec, JobState, Outcome, Severity,
 };
+use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded};
 
@@ -128,6 +130,58 @@ pub fn drive_space(available: u64, total: u64) -> String {
         format_size_rounded(available, Rounding::Down),
         format_size(total)
     )
+}
+
+/// The status bar of a folder: `항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB`.
+///
+/// `items` is the number of rows and `selected` the number of selected ones; the selection
+/// part shows only when there is one. `selected_bytes` is the size of the selected files, and
+/// `None` when only folders or links are selected, which have no size to add up. `free` is
+/// the space left on the volume, shown once known.
+pub fn status_line(
+    items: usize,
+    selected: usize,
+    selected_bytes: Option<u64>,
+    free: Option<u64>,
+) -> String {
+    let mut parts = vec![format!("항목 {items}개")];
+    match (selected, selected_bytes) {
+        (0, _) => {}
+        (count, Some(bytes)) => parts.push(format!("선택 {count}개 ({})", format_size(bytes))),
+        (count, None) => parts.push(format!("선택 {count}개")),
+    }
+    if let Some(free) = free {
+        parts.push(format!("남은 공간 {}", format_size(free)));
+    }
+    parts.join(" · ")
+}
+
+/// The sidebar name of one of the user's well-known folders.
+pub fn favorite(folder: KnownFolder) -> &'static str {
+    match folder {
+        KnownFolder::Home => "홈",
+        KnownFolder::Desktop => "바탕 화면",
+        KnownFolder::Documents => "문서",
+        KnownFolder::Downloads => "다운로드",
+        KnownFolder::Pictures => "사진",
+        KnownFolder::Music => "음악",
+        KnownFolder::Videos => "동영상",
+    }
+}
+
+/// The sidebar name of the Windows drive `letter`: `로컬 디스크 (C:)` for the system's usual
+/// drive, `드라이브 (D:)` for the others.
+pub fn drive_letter(letter: char) -> String {
+    if letter == 'C' {
+        "로컬 디스크 (C:)".to_owned()
+    } else {
+        format!("드라이브 ({letter}:)")
+    }
+}
+
+/// The sidebar name of the volume that holds `/` on macOS and Linux.
+pub fn system_disk() -> &'static str {
+    "시스템 디스크"
 }
 
 /// Why a job refused an item, or part of one: one sentence for each rule of the jobs, or for
@@ -331,6 +385,49 @@ mod tests {
             cannot_open(ErrorKind::NotFound),
             "열 수 없습니다: 찾을 수 없습니다"
         );
+    }
+
+    #[test]
+    fn status_line_matches_mockup() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(
+            status_line(9, 2, Some(1_477_427), Some(212 * GB)),
+            "항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB"
+        );
+        // Folders alone have no size; nothing selected shows no selection.
+        assert_eq!(
+            status_line(9, 1, None, Some(212 * GB)),
+            "항목 9개 · 선택 1개 · 남은 공간 212 GB"
+        );
+        assert_eq!(
+            status_line(9, 0, None, Some(212 * GB)),
+            "항목 9개 · 남은 공간 212 GB"
+        );
+        assert_eq!(status_line(0, 0, None, None), "항목 0개");
+        assert_eq!(
+            status_line(3, 3, Some(0), None),
+            "항목 3개 · 선택 3개 (0 바이트)"
+        );
+    }
+
+    #[test]
+    fn places_have_sidebar_names() {
+        let names: Vec<&str> = KnownFolder::ALL.into_iter().map(favorite).collect();
+        assert_eq!(
+            names,
+            [
+                "홈",
+                "바탕 화면",
+                "문서",
+                "다운로드",
+                "사진",
+                "음악",
+                "동영상"
+            ]
+        );
+        assert_eq!(drive_letter('C'), "로컬 디스크 (C:)");
+        assert_eq!(drive_letter('D'), "드라이브 (D:)");
+        assert_eq!(system_disk(), "시스템 디스크");
     }
 
     #[test]
