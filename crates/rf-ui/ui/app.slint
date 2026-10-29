@@ -301,6 +301,14 @@ export component MainWindow inherits Window {
 
     // Opens the 보기 menu under its button, for the keys to choose in.
     public function show-view-menu() {
+        root.open-view-menu();
+    }
+
+    // Where the keys were as the 보기 menu opened: the tree, or the panes. A sub-menu's choice
+    // gives them back there.
+    private property <bool> view-menu-from-tree;
+    function open-view-menu() {
+        root.view-menu-from-tree = tree-keys.has-focus;
         view-menu.open(0, view-button.height + 4px);
     }
 
@@ -659,8 +667,8 @@ export component MainWindow inherits Window {
                             divider-moved(step) => {
                                 root.move-divider(step);
                             }
-                            sort(column) => {
-                                root.sort(root.active-side, column, false);
+                            sort(column, then) => {
+                                root.sort(root.active-side, column, then);
                             }
                             sort-then(column) => {
                                 root.sort-then(root.active-side, column);
@@ -685,7 +693,7 @@ export component MainWindow inherits Window {
                             text: "보기";
                             keys: Shortcuts.view-menu;
                             clicked => {
-                                view-menu.open(0, self.height + 4px);
+                                root.open-view-menu();
                             }
                         }
                     }
@@ -1186,14 +1194,19 @@ export component MainWindow inherits Window {
     }
 
     // A sub-menu of the 보기 menu gives the keys back, as it closes, to the menu it opened from,
-    // which has closed too: the panes take them once both have.
+    // which has closed too: they go back where they were as the menu opened once both have (the
+    // tree, while it shows, or the panes).
     panes-focus-later := Timer {
         interval: 1ms;
         running: false;
         triggered => {
             self.running = false;
             if (root.dialog == DialogKind.none && !left.editing && !right.editing && !filter-box.has-focus) {
-                keys.focus();
+                if (root.view-menu-from-tree && root.show-tree) {
+                    tree-keys.focus();
+                } else {
+                    keys.focus();
+                }
             }
         }
     }

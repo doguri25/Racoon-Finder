@@ -48,6 +48,9 @@ pub const INLINE_SORT_ROWS: usize = 2_000;
 /// [`Sorted`] rows back to the tab (`AppState::sorted`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct SortRequest {
+    /// The tab that asked ([`Tab::id`]): a newer sort of the same tab takes the place of one
+    /// that waits for the worker.
+    pub tab: u64,
     /// The generation of the tab's listing: the rows are dropped if the tab has listed again
     /// or moved on by the time they come.
     pub generation: u64,
@@ -60,6 +63,7 @@ pub struct SortRequest {
 impl std::fmt::Debug for SortRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SortRequest")
+            .field("tab", &self.tab)
             .field("generation", &self.generation)
             .field("serial", &self.serial)
             .field("sort", &self.sort)
@@ -360,6 +364,7 @@ impl Tab {
         self.sorting = Some((serial, sort));
         self.since_sort.clear();
         Some(SortRequest {
+            tab: self.id,
             generation: self.generation,
             serial,
             sort,

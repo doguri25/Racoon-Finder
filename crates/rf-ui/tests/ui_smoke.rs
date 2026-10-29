@@ -12,7 +12,7 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::state::{FolderView, ViewMode};
+use rf_ui::state::{Column, FolderView, ShownColumn, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
@@ -967,10 +967,11 @@ fn header_window() -> (MainWindow, PaneModels, Rc<RefCell<Vec<String>>>) {
     (window, models, calls)
 }
 
-/// The box of the one column head called `title`.
+/// The box of the column head called `title` of the left pane (the right pane, empty, has the
+/// name's head too).
 fn head_box(window: &MainWindow, title: &str) -> (LogicalPosition, LogicalSize) {
     let found = labelled(window, title, AccessibleRole::Button);
-    assert_eq!(found.len(), 1, "one head {title}");
+    assert!(!found.is_empty(), "a head {title}");
     (found[0].absolute_position(), found[0].size())
 }
 
@@ -1023,36 +1024,63 @@ fn a_head_dragged_along_the_header_moves_its_column_and_drags_no_items() {
 }
 
 #[test]
-fn a_border_dragged_trades_width_and_a_double_click_fits_the_column() {
+fn a_border_dragged_resizes_its_own_column_and_a_double_click_fits_it() {
     let (window, _models, calls) = header_window();
-    let (modified_at, modified_size) = head_box(&window, "수정한 날짜");
+    let head = |title: &str| head_box(&window, title);
+    let ((modified_at, modified_size), size, (kind_at, _)) =
+        (head("수정한 날짜"), head("크기"), head("종류"));
     // The border before 수정한 날짜, in the gap between it and 크기.
     let border = LogicalPosition::new(
         modified_at.x - 5.0,
         modified_at.y + modified_size.height / 2.0,
     );
+    let at = |dx: f32| LogicalPosition::new(border.x + dx, border.y);
     pointer(&window, "move", border);
     pointer(&window, "press", border);
     for step in [5.0, 10.0, 20.0] {
-        pointer(
-            &window,
-            "move",
-            LogicalPosition::new(border.x + step, border.y),
-        );
+        pointer(&window, "move", at(step));
     }
-    pointer(
-        &window,
-        "release",
-        LogicalPosition::new(border.x + 20.0, border.y),
+    // While it is dragged: the column is narrower, the columns after it stay where they are, and
+    // those before it go along with the border, the name taking the room.
+    let (now_at, now_size) = head("수정한 날짜");
+    assert_eq!(
+        (now_at.x, now_size.width),
+        (modified_at.x + 20.0, modified_size.width - 20.0)
     );
-    // The column after the border gives up what the one before it takes.
+    assert_eq!(head("종류").0.x, kind_at.x);
+    assert_eq!(head("크기").0.x, size.0.x + 20.0);
+    assert_eq!(head("크기").1, size.1);
+    pointer(&window, "release", at(20.0));
+    // That column alone takes a new width.
     assert_eq!(
         calls.borrow_mut().drain(..).collect::<Vec<_>>(),
-        ["width 0 2 106", "width 0 1 92"]
+        ["width 0 2 106"]
     );
 
-    // A double click fits the column after it to the texts of the rows on screen.
-    let border = LogicalPosition::new(border.x, border.y);
+    // To the left, past the room of the name: the name keeps its least room and the list
+    // scrolls, so that the columns after the border stay where they are; the column goes as
+    // wide as a column can.
+    let (name_at, _) = head("이름");
+    pointer(&window, "press", border);
+    for step in [-100.0, -300.0, -600.0] {
+        pointer(&window, "move", at(step));
+    }
+    assert_eq!(head("수정한 날짜").1.width, 600.0);
+    assert_eq!(head("종류").0.x, kind_at.x);
+    assert_eq!(
+        labelled(&window, "이름", AccessibleRole::Button).len(),
+        1,
+        "the left pane's name scrolled out of view (the right pane's shows)"
+    );
+    pointer(&window, "release", at(-600.0));
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["width 0 2 600"]
+    );
+    // Rust kept the old width here: the list scrolls back, the heads as they were.
+    assert_eq!(head("이름").0.x, name_at.x);
+
+    // A double click fits the column to the texts of the rows on screen.
     for _ in 0..2 {
         pointer(&window, "press", border);
         pointer(&window, "release", border);
@@ -1061,6 +1089,112 @@ fn a_border_dragged_trades_width_and_a_double_click_fits_the_column() {
     assert_eq!(noted.len(), 2, "{noted:?}");
     assert!(noted[0].starts_with("texts 0 2 0 "), "{noted:?}");
     assert!(noted[1].starts_with("width 0 2 "), "{noted:?}");
+}
+
+#[test]
+fn every_column_chosen_shows_and_the_list_scrolls_sideways_when_they_overflow() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let mut pane = listed_pane(vec![
+        entry("a.txt", EntryKind::File, 10),
+        entry("bb.txt", EntryKind::File, 2000),
+    ]);
+    pane.active_tab_mut().set_view(FolderView {
+        columns: Column::OPTIONAL.into_iter().map(ShownColumn::new).collect(),
+        ..FolderView::default()
+    });
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let head = |title: &str| head_box(&window, title);
+
+    // The heads are wider than the pane's list: the name keeps its least room, and the last
+    // heads are right of the list, out of view.
+    let list = labelled(&window, "항목 목록", AccessibleRole::List).remove(0);
+    let (list_at, list_size) = (list.absolute_position(), list.size());
+    let right = list_at.x + list_size.width;
+    let (name_at, name_size) = head("이름");
+    assert!(name_size.width >= 120.0 - 26.0, "{name_size:?}");
+    let shown = || -> Vec<(Column, LogicalPosition, LogicalSize)> {
+        Column::OPTIONAL
+            .into_iter()
+            .filter_map(|column| {
+                let found = labelled(&window, column.title(), AccessibleRole::Button);
+                found
+                    .first()
+                    .map(|head| (column, head.absolute_position(), head.size()))
+            })
+            .collect()
+    };
+    assert!(
+        !shown()
+            .iter()
+            .any(|(column, ..)| *column == Column::Attributes),
+        "속성 is out of view"
+    );
+
+    // A sideways scroll moves the heads and the rows together.
+    let name_text = || labelled(&window, "a.txt", AccessibleRole::Text)[0].absolute_position();
+    let text_at = name_text();
+    let scroll = |dx: f32| {
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerScrolled {
+                position: LogicalPosition::new(list_at.x + 60.0, list_at.y + 40.0),
+                delta_x: dx,
+                delta_y: 0.0,
+            });
+        // A wheel scrolls smoothly, for a short while.
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
+    };
+    // (Not so far that the name goes out of view: the right pane's would be the one found.)
+    scroll(-40.0);
+    let moved = name_at.x - head("이름").0.x;
+    assert_eq!(moved, 40.0, "the heads scrolled");
+    assert_eq!(text_at.x - name_text().x, moved, "the rows with them");
+    // Every column chosen comes into view, as wide as it is, and the list scrolls as far as
+    // the last one, whole, and no further.
+    let mut seen = Vec::new();
+    for _ in 0..12 {
+        for (column, _, size) in shown() {
+            assert_eq!(
+                f64::from(size.width),
+                f64::from(column.default_width()),
+                "{column:?}"
+            );
+            if !seen.contains(&column) {
+                seen.push(column);
+            }
+        }
+        scroll(-100.0);
+    }
+    assert_eq!(seen.len(), Column::OPTIONAL.len(), "{seen:?}");
+    let (_, last_at, last_size) = shown().pop().expect("a head in view");
+    let end = last_at.x + last_size.width;
+    assert!(end <= right && end > right - 20.0, "{end} {right}");
+}
+
+#[test]
+fn a_right_click_beside_the_heads_opens_their_menu_with_its_marks() {
+    use slint::platform::PointerEventButton;
+    let (window, _models, _calls) = header_window();
+    // Left of the name's head, in the header's padding.
+    let (name_at, name_size) = head_box(&window, "이름");
+    let beside = LogicalPosition::new(name_at.x - 6.0, name_at.y + name_size.height / 2.0);
+    window.window().dispatch_event(WindowEvent::PointerPressed {
+        position: beside,
+        button: PointerEventButton::Right,
+    });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased {
+            position: beside,
+            button: PointerEventButton::Right,
+        });
+    // The marks of the columns that show: 크기, 수정한 날짜, 종류.
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&window, "✓").count(),
+        3
+    );
 }
 
 #[test]
@@ -3899,4 +4033,90 @@ fn the_view_menu_gives_the_tree_the_keys() {
 
     press(&window, Key::DownArrow);
     assert_eq!(calls.take(), ["tree"]);
+
+    // A choice in a sub-menu, opened from the tree, gives the keys back to the tree.
+    window.invoke_show_view_menu();
+    for _ in 0..4 {
+        press(&window, Key::DownArrow);
+    }
+    press(&window, Key::RightArrow);
+    press(&window, Key::DownArrow);
+    press(&window, Key::Return);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["tree"]);
+    // From the panes, back to the panes.
+    window.invoke_focus_panes();
+    window.invoke_show_view_menu();
+    for _ in 0..4 {
+        press(&window, Key::DownArrow);
+    }
+    press(&window, Key::RightArrow);
+    press(&window, Key::DownArrow);
+    press(&window, Key::Return);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+}
+
+#[test]
+fn the_view_menu_s_order_items_show_the_key_and_the_direction() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_sort(move |side, column, then| record.note(format!("sort {side} {column} {then}")));
+    let record = calls.clone();
+    window.on_sort_then(move |side, column| record.note(format!("then {side} {column}")));
+    // The left pane by size, descending, then by name, ascending.
+    let mut pane = listed_pane(vec![entry("a.txt", EntryKind::File, 10)]);
+    let mut view = FolderView::default();
+    view.sort_by(rf_vfs::SortKey::Size, false);
+    view.sort_by(rf_vfs::SortKey::Size, false);
+    view.set_then(Some(rf_vfs::SortKey::Name));
+    pane.active_tab_mut().set_view(view);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open = |path: &[&str]| {
+        button.invoke_accessible_default_action();
+        for item in path {
+            choose_item(&window, item);
+        }
+    };
+    let marked = |title: &str| marked(&window, title);
+    open(&["정렬"]);
+    assert!(marked("크기"));
+    assert!(marked("내림차순"));
+    assert!(!marked("오름차순"));
+    assert!(marked("폴더 먼저"));
+    // The direction chosen: the key's head clicked once more; the one it has already, nothing.
+    choose_item(&window, "오름차순");
+    assert_eq!(calls.take(), ["sort 0 1 false"]);
+    open(&["정렬"]);
+    choose_item(&window, "내림차순");
+    assert_eq!(calls.take(), Vec::<String>::new());
+    open(&["정렬", "2차 정렬"]);
+    assert!(marked("이름"));
+    assert!(!marked("없음"));
+    // The second key's direction: its head clicked with Shift (the sub-menu's item, the last
+    // of the two that show).
+    ElementHandle::find_by_accessible_label(&window, "내림차순")
+        .last()
+        .expect("the sub-menu shows it")
+        .mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(calls.take(), ["sort 0 0 true"]);
+}
+
+/// Whether the item `title` of a menu that shows has its check mark: a menu item's `✓` comes
+/// just before its title among the texts.
+fn marked(window: &MainWindow, title: &str) -> bool {
+    let texts: Vec<SharedString> = i_slint_backend_testing::ElementQuery::from_root(window)
+        .match_accessible_role(AccessibleRole::Text)
+        .find_all()
+        .iter()
+        .map(|text| text.accessible_label().unwrap_or_default())
+        .collect();
+    texts
+        .windows(2)
+        .any(|pair| pair[0] == "✓" && pair[1] == title)
 }

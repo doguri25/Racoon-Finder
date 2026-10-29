@@ -207,6 +207,11 @@ impl AppState {
                 self.close();
                 spec.map(|spec| submit(spec, None)).into_iter().collect()
             }
+            ConfirmPurpose::ApplyViewBelow { folder, view } => {
+                let (folder, view) = (folder.clone(), view.clone());
+                self.close();
+                self.apply_view_below(&folder, view)
+            }
         }
     }
 

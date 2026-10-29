@@ -946,8 +946,9 @@ mod tests {
         // Explorer's Ctrl+Shift with a digit is a view; macOS takes ⇧⌘3 and ⇧⌘4 for screenshots.
         assert_eq!(command_for("#", CMD_SHIFT, Os::MacOs), None);
         let windows_none = [
-            // Finder's Open with ⌘↓ and parent with ⌘↑: Ctrl+↓ and Ctrl+↑ move the cursor alone
-            // on Windows, as the arrows with Ctrl do in File Explorer.
+            // Finder's keys with Ctrl in the place of Command are nothing on Windows: Back (⌘[),
+            // Open (⌘O), the properties (⌘I), the hidden items (⇧⌘.) and Go to Folder (⇧⌘G) have
+            // File Explorer's keys there.
             (text("["), CTRL),
             (text("o"), CTRL),
             (text("i"), CTRL),

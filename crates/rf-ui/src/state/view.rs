@@ -22,13 +22,14 @@ use rf_core::VPath;
 use rf_vfs::{SortBy, SortKey, SortOrder, SortSpec};
 
 use super::{AppState, Effect};
+use crate::dialogs::{Confirm, Modal};
 use crate::pane::Pane;
 use crate::selection::Pick;
 use crate::words;
 
 mod store;
 
-pub use store::{MAX_FOLDER_URI, MAX_FOLDER_VIEWS, StoredView, ViewStore};
+pub use store::{MAX_FOLDER_URI, MAX_FOLDER_VIEWS, StoredView, UnknownParts, ViewStore};
 
 /// The narrowest and the widest a column of 자세히 can be made, in logical pixels.
 pub const MIN_COLUMN_WIDTH: u32 = 40;
@@ -502,16 +503,28 @@ impl AppState {
         Vec::new()
     }
 
-    /// Changes the view of the tab pane `side` shows with `change`, and remembers it for the
-    /// tab's folder; the pane gets the keyboard.
+    /// Changes the view of the folder the tab of pane `side` shows with `change`, remembers it
+    /// for the folder, and shows it in every tab at that folder; the pane gets the keyboard.
+    /// The change goes on top of the view the folder has now, not of what the tab shows: another
+    /// tab at the folder may have changed it since (its sort, while this tab's columns change),
+    /// which a whole view of this tab's would undo. A folder whose view cannot be kept
+    /// ([`ViewStore::keeps`]) changes as its tab shows it.
     fn change_view(&mut self, side: usize, change: impl FnOnce(&mut FolderView)) {
         self.activate(side);
-        let tab = self.panes[side].active_tab_mut();
-        let mut view = tab.view().clone();
+        let folder = self.tab(side).location().clone();
+        let mut view = if self.views.keeps(&folder) {
+            self.views.view_for(&folder)
+        } else {
+            self.tab(side).view().clone()
+        };
         change(&mut view);
-        tab.set_view(view.clone());
-        let folder = tab.location().clone();
-        self.views.remember(&folder, view);
+        self.views.remember(&folder, view.clone());
+        let views = &self.views;
+        for tab in self.panes.iter_mut().flat_map(Pane::tabs_mut) {
+            if views.same_folder(tab.location(), &folder) {
+                tab.set_view(view.clone());
+            }
+        }
     }
 
     /// Shows pane `side` in `mode`, and scrolls to its cursor there.
@@ -567,15 +580,34 @@ impl AppState {
     /// 하위 폴더에 적용: the view of pane `side` is the view of its folder and of every folder
     /// below it ([`ViewStore::apply_to_subfolders`]); a notice says so. The tabs that show a
     /// folder below it now take it when they go to a folder next.
+    ///
+    /// When folders below have views of their own, which it would forget, a confirmation asks
+    /// first and says how many ([`Confirm::apply_view_below`]).
+    ///
+    /// [`Confirm::apply_view_below`]: crate::dialogs::Confirm::apply_view_below
     pub fn apply_view_to_subfolders(&mut self, side: usize) -> Vec<Effect> {
         self.activate(side);
         let tab = self.panes[side].active_tab();
         let (folder, view) = (tab.location().clone(), tab.view().clone());
-        if !self.views.apply_to_subfolders(&folder, view) {
+        let below = self.views.count_below(&folder);
+        if below > 0 && self.views.keeps(&folder) {
+            let name = folder_name(&folder);
+            self.open(Modal::Confirm(Confirm::apply_view_below(
+                folder, view, &name, below,
+            )));
+            return Vec::new();
+        }
+        self.apply_view_below(&folder, view)
+    }
+
+    /// 하위 폴더에 적용, without asking (asked, or nothing to ask about): `view` for `folder` and
+    /// the folders below it.
+    pub(super) fn apply_view_below(&mut self, folder: &VPath, view: FolderView) -> Vec<Effect> {
+        if !self.views.apply_to_subfolders(folder, view) {
             return vec![Effect::Notice(words::view_not_kept().to_owned())];
         }
         vec![Effect::Notice(words::view_applied_below(&folder_name(
-            &folder,
+            folder,
         )))]
     }
 

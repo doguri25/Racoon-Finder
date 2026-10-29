@@ -32,8 +32,42 @@ pub struct StoredView {
     pub view: FolderView,
     /// 하위 폴더에 적용: the folders below show this view too, unless they have one of their own.
     pub subfolders: bool,
+    /// The values of a newer version that `view` cannot hold, written back as they are.
+    pub unknown: UnknownParts,
     /// The keys of a newer version, written back as they are.
     pub extra: toml::Table,
+}
+
+/// The parts of a folder's view that a newer version wrote and this one does not know (a view
+/// mode, a sort key, columns): the view shows its default in their place, and the settings
+/// write them back as they were, so that the newer version finds them again. A part the user
+/// changes here is this version's choice from then on, and the unknown value goes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnknownParts {
+    /// The view mode (`thumbnails`), in the place of 자세히.
+    pub mode: Option<String>,
+    /// The key that sorts first, in the place of the name (in the view's direction).
+    pub sort: Option<String>,
+    /// The second key, in the place of none, and whether it sorts descending.
+    pub then: Option<(String, bool)>,
+    /// The columns, with their widths (0 for none), after the columns of the view.
+    pub columns: Vec<(String, u32)>,
+}
+
+impl UnknownParts {
+    /// The view changed from `old` to `new`: the parts the change chose lose their unknown
+    /// values. The unknown columns stay, whatever the known ones do.
+    fn changed(&mut self, old: &FolderView, new: &FolderView) {
+        if new.mode != old.mode {
+            self.mode = None;
+        }
+        if new.sort.primary != old.sort.primary {
+            self.sort = None;
+        }
+        if new.sort.secondary != old.sort.secondary {
+            self.then = None;
+        }
+    }
 }
 
 impl Default for ViewStore {
@@ -108,7 +142,9 @@ impl ViewStore {
         }
         let key = self.key_of(&uri);
         if let Some(at) = self.position(&key) {
-            self.touch(at).view = view;
+            let entry = self.touch(at);
+            entry.unknown.changed(&entry.view, &view);
+            entry.view = view;
         } else {
             self.entries.push((
                 key,
@@ -116,11 +152,34 @@ impl ViewStore {
                     folder: uri,
                     view,
                     subfolders: false,
+                    unknown: UnknownParts::default(),
                     extra: toml::Table::new(),
                 },
             ));
             self.trim();
         }
+    }
+
+    /// Whether a view of `folder` can be remembered: its `to_uri` is no longer than
+    /// [`MAX_FOLDER_URI`].
+    pub fn keeps(&self, folder: &VPath) -> bool {
+        folder.to_uri().len() <= MAX_FOLDER_URI
+    }
+
+    /// Whether `a` and `b` are one folder, as the store tells folders apart (ignoring case on
+    /// Windows and macOS).
+    pub fn same_folder(&self, a: &VPath, b: &VPath) -> bool {
+        self.key(a) == self.key(b)
+    }
+
+    /// How many folders below `folder` have a view of their own: those 하위 폴더에 적용 would
+    /// forget.
+    pub fn count_below(&self, folder: &VPath) -> usize {
+        let below = self.below(folder);
+        self.entries
+            .iter()
+            .filter(|(known, _)| below(known))
+            .count()
     }
 
     /// 하위 폴더에 적용: `view` is the view of `folder` and of every folder below it. The folders
@@ -129,20 +188,23 @@ impl ViewStore {
     /// view is not remembered ([`MAX_FOLDER_URI`]).
     pub fn apply_to_subfolders(&mut self, folder: &VPath, view: FolderView) -> bool {
         self.remember(folder, view);
-        let key = self.key(folder);
-        let Some(at) = self.position(&key) else {
+        let Some(at) = self.position(&self.key(folder)) else {
             return false;
         };
         self.entries[at].1.subfolders = true;
-        let base = VPath::parse(&key).ok();
-        self.entries.retain(|(known, _)| {
-            let below = base
-                .as_ref()
-                .zip(VPath::parse(known).ok())
-                .is_some_and(|(base, path)| path != *base && path.starts_with(base));
-            !below
-        });
+        let below = self.below(folder);
+        self.entries.retain(|(known, _)| !below(known));
         true
+    }
+
+    /// Whether the folder of a key is below `folder` (not `folder` itself).
+    fn below(&self, folder: &VPath) -> impl Fn(&str) -> bool + use<> {
+        let base = VPath::parse(&self.key(folder)).ok();
+        move |known| {
+            base.as_ref()
+                .zip(VPath::parse(known).ok())
+                .is_some_and(|(base, path)| path != *base && path.starts_with(base))
+        }
     }
 
     /// 기본값으로 되돌리기: `folder` forgets its own view and whether it applied it to its
@@ -216,7 +278,12 @@ mod tests {
 
         // Applied to the subfolders: every folder below shows it, but one with a view of its own.
         store.remember(&mid, icons(ViewMode::List));
+        store.remember(&low, icons(ViewMode::List));
+        assert_eq!(store.count_below(&top), 2, "mid and low, not top itself");
+        assert_eq!(store.count_below(&mid), 1);
+        assert_eq!(store.count_below(&low), 0);
         assert!(store.apply_to_subfolders(&top, icons(ViewMode::SmallIcons)));
+        assert_eq!(store.count_below(&top), 0);
         assert_eq!(store.view_for(&low), icons(ViewMode::SmallIcons));
         assert_eq!(
             store.view_for(&mid),
@@ -258,6 +325,7 @@ mod tests {
             // One entry either way when the same folder is remembered under both spellings.
             store.remember(&lower, icons(ViewMode::SmallIcons));
             assert_eq!(store.len(), if alike { 1 } else { 2 }, "{os:?}");
+            assert_eq!(store.same_folder(&upper, &lower), alike, "{os:?}");
             // The folders below, too.
             let mut store = ViewStore::new(Vec::new(), os);
             store.apply_to_subfolders(&upper, icons(ViewMode::LargeIcons));
@@ -298,6 +366,7 @@ mod tests {
             folder: numbered(i).to_uri(),
             view: icons(mode),
             subfolders: false,
+            unknown: UnknownParts::default(),
             extra: toml::Table::new(),
         };
         let mut many: Vec<StoredView> = (0..=MAX_FOLDER_VIEWS)
@@ -317,5 +386,41 @@ mod tests {
             read.entries().last().map(|entry| entry.folder.clone()),
             Some(numbered(5).to_uri())
         );
+    }
+
+    #[test]
+    fn a_change_here_drops_the_unknown_value_of_what_it_changed() {
+        let mut store = ViewStore::new(
+            vec![StoredView {
+                folder: folder("new").to_uri(),
+                view: FolderView::default(),
+                subfolders: false,
+                unknown: UnknownParts {
+                    mode: Some("thumbnails".to_owned()),
+                    sort: Some("rating".to_owned()),
+                    then: Some(("tags".to_owned(), true)),
+                    columns: vec![("tags".to_owned(), 80)],
+                },
+                extra: toml::Table::new(),
+            }],
+            Os::Other,
+        );
+        let unknown = |store: &ViewStore| store.own(&folder("new")).expect("kept").unknown.clone();
+        // A change of the columns keeps every unknown part.
+        let mut view = FolderView::default();
+        view.toggle_column(crate::state::Column::Kind);
+        store.remember(&folder("new"), view.clone());
+        assert_eq!(unknown(&store).mode.as_deref(), Some("thumbnails"));
+        assert_eq!(unknown(&store).columns, [("tags".to_owned(), 80)]);
+        // The mode chosen here is this version's; the order stays unknown until it changes.
+        view.mode = ViewMode::List;
+        store.remember(&folder("new"), view.clone());
+        assert_eq!(unknown(&store).mode, None);
+        assert_eq!(unknown(&store).sort.as_deref(), Some("rating"));
+        view.sort_by(rf_vfs::SortKey::Size, false);
+        store.remember(&folder("new"), view);
+        assert_eq!(unknown(&store).sort, None);
+        assert_eq!(unknown(&store).then, Some(("tags".to_owned(), true)));
+        assert_eq!(unknown(&store).columns.len(), 1, "the unknown columns stay");
     }
 }

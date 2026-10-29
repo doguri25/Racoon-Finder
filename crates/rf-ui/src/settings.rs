@@ -22,8 +22,9 @@
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
 //! with the default layout and no tab pinned, and one without `[[folder_views]]` with no view
 //! remembered. A folder view falls back one key at a time too: a mode or a key of the order this
-//! version does not know is the default one, a column it does not know is left out, and the
-//! keys of a newer version stay in its `extra`.
+//! version does not know shows as the default one, and a column it does not know is left out of
+//! the view; all of them are kept as written (`UnknownParts`) and written back, until the user
+//! changes that part here, and the keys of a newer version stay in its `extra`.
 //!
 //! Folders are stored as `VPath::to_uri`, which reads back losslessly with `VPath::parse`.
 
@@ -42,7 +43,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::state::{
     Column, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, ShownColumn, StoredView,
-    ViewMode, ViewStore,
+    UnknownParts, ViewMode, ViewStore,
 };
 
 /// The name of the settings file in the config folder.
@@ -280,26 +281,32 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl FolderViewSettings {
-    /// What the store keeps of this entry.
+    /// What the store keeps of this entry. What this version does not know (a mode, a sort
+    /// key, a column of a newer version) shows as its default, and is kept as written
+    /// ([`UnknownParts`]).
     pub fn stored(&self) -> StoredView {
         let defaults = FolderView::default();
+        let mut unknown = UnknownParts::default();
         let columns = match &self.columns {
             None => defaults.columns,
             Some(names) => {
                 let mut columns: Vec<ShownColumn> = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    let Some(column) = Column::from_name(name).filter(|c| *c != Column::Name)
-                    else {
+                    let width = self.widths.get(i).copied().unwrap_or(0);
+                    let Some(column) = Column::from_name(name) else {
+                        if !unknown.columns.iter().any(|(known, _)| known == name) {
+                            unknown.columns.push((name.clone(), width));
+                        }
                         continue;
                     };
-                    if columns.iter().any(|shown| shown.column == column) {
+                    if column == Column::Name || columns.iter().any(|shown| shown.column == column)
+                    {
                         continue;
                     }
-                    let width = match self.widths.get(i) {
-                        Some(&width) if width > 0 => {
-                            width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
-                        }
-                        _ => column.default_width(),
+                    let width = if width > 0 {
+                        width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+                    } else {
+                        column.default_width()
                     };
                     columns.push(ShownColumn { column, width });
                 }
@@ -324,10 +331,20 @@ impl FolderViewSettings {
                 key: then,
                 order: order(self.then_descending),
             });
+        let mode = ViewMode::from_name(&self.mode);
+        if mode.is_none() && !self.mode.is_empty() {
+            unknown.mode = Some(self.mode.clone());
+        }
+        if key(&self.sort).is_none() && !self.sort.is_empty() {
+            unknown.sort = Some(self.sort.clone());
+        }
+        if key(&self.then).is_none() && !self.then.is_empty() {
+            unknown.then = Some((self.then.clone(), self.then_descending));
+        }
         StoredView {
             folder: self.folder.clone(),
             view: FolderView {
-                mode: ViewMode::from_name(&self.mode).unwrap_or_default(),
+                mode: mode.unwrap_or_default(),
                 columns,
                 sort: SortSpec {
                     primary,
@@ -336,47 +353,61 @@ impl FolderViewSettings {
                 },
             },
             subfolders: self.subfolders,
+            unknown,
             extra: self.extra.clone(),
         }
     }
 
-    /// The entry that keeps `stored`, without the defaults.
+    /// The entry that keeps `stored`, without the defaults, and with what this version did not
+    /// know as it was written (the unknown columns after the others).
     pub fn of(stored: &StoredView) -> FolderViewSettings {
-        let view = &stored.view;
+        let (view, unknown) = (&stored.view, &stored.unknown);
         let defaults = FolderView::default();
-        let mode = if view.mode == ViewMode::Details {
-            String::new()
-        } else {
-            view.mode.name().to_owned()
+        let mode = match &unknown.mode {
+            Some(mode) => mode.clone(),
+            None if view.mode == ViewMode::Details => String::new(),
+            None => view.mode.name().to_owned(),
         };
-        let columns = (view.columns != defaults.columns).then(|| {
+        let columns =
+            (view.columns != defaults.columns || !unknown.columns.is_empty()).then(|| {
+                view.columns
+                    .iter()
+                    .map(|shown| shown.column.name().to_owned())
+                    .chain(unknown.columns.iter().map(|(name, _)| name.clone()))
+                    .collect()
+            });
+        let widths = if columns.is_some() {
             view.columns
                 .iter()
-                .map(|shown| shown.column.name().to_owned())
+                .map(|shown| shown.width)
+                .chain(unknown.columns.iter().map(|&(_, width)| width))
                 .collect()
-        });
-        let widths = if columns.is_some() {
-            view.columns.iter().map(|shown| shown.width).collect()
         } else {
             Vec::new()
         };
         let name = |by: SortBy| Column::of_key(by.key).name().to_owned();
         let sort = view.sort;
+        let (then, then_descending) = match &unknown.then {
+            Some((then, descending)) => (then.clone(), *descending),
+            None => (
+                sort.secondary.map(name).unwrap_or_default(),
+                sort.secondary
+                    .is_some_and(|by| by.order == SortOrder::Descending),
+            ),
+        };
         FolderViewSettings {
             folder: stored.folder.clone(),
             mode,
             columns,
             widths,
-            sort: if sort.primary.key == defaults.sort.primary.key {
-                String::new()
-            } else {
-                name(sort.primary)
+            sort: match &unknown.sort {
+                Some(sort) => sort.clone(),
+                None if sort.primary.key == defaults.sort.primary.key => String::new(),
+                None => name(sort.primary),
             },
             descending: sort.primary.order == SortOrder::Descending,
-            then: sort.secondary.map(name).unwrap_or_default(),
-            then_descending: sort
-                .secondary
-                .is_some_and(|by| by.order == SortOrder::Descending),
+            then,
+            then_descending,
             mixed: !sort.folders_first,
             subfolders: stored.subfolders,
             extra: stored.extra.clone(),
@@ -1208,10 +1239,26 @@ mod tests {
         assert_eq!(second.view.mode, ViewMode::Details);
         assert!(!second.subfolders);
         assert!(!second.view.sort.folders_first);
-        // Written back, the newer key stays.
+        // Written back, the newer key stays, and so do the values this version did not know.
         let mut again = settings.clone();
         again.set_views(&views);
-        assert!(again.to_text().expect("text").contains("zoom = 2"));
+        let written = again.to_text().expect("text");
+        assert!(written.contains("zoom = 2"));
+        let entry = &again.folder_views[0];
+        assert_eq!(entry.mode, "thumbnails");
+        assert_eq!(
+            entry.columns.as_deref(),
+            Some(&["size".to_owned(), "kind".to_owned(), "tags".to_owned()][..]),
+            "the unknown column after the known ones"
+        );
+        assert_eq!(entry.widths, [MAX_COLUMN_WIDTH, 104, 90]);
+        assert_eq!(entry.sort, "rating");
+        assert!(entry.descending);
+        assert_eq!(entry.then, "kind");
+        // Read back, the same view and the same unknown values.
+        let read = FolderViewSettings::stored(entry);
+        assert_eq!(read.view, first.view);
+        assert_eq!(read.unknown, first.unknown);
 
         // A table that is no list, and entries that are no tables, leave no views.
         for broken in [

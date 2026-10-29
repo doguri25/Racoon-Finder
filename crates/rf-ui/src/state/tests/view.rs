@@ -265,3 +265,103 @@ fn a_view_applied_to_subfolders_shows_below_until_the_folder_is_reset() {
     assert_eq!(mode(&state, LEFT), ViewMode::Details);
     assert!(state.views().is_empty());
 }
+
+#[test]
+fn a_change_in_one_tab_shows_in_every_tab_at_its_folder_and_keeps_theirs() {
+    let mut state = ready_settled(files(3), vec![]);
+    // A second tab at a, and the right pane at a too.
+    let effects = press(&mut state, "t", CTRL).expect("used");
+    settled(&mut state, effects);
+    state.activate(RIGHT);
+    let effects = state.go_to(folder("a"));
+    settled(&mut state, effects);
+    let views = |state: &AppState| -> Vec<FolderView> {
+        state
+            .panes()
+            .iter()
+            .flat_map(Pane::tabs)
+            .map(|tab| tab.view().clone())
+            .collect()
+    };
+    assert_eq!(views(&state).len(), 3);
+
+    // The new tab sorts by size: the tab behind it and the right pane show it too.
+    let effects = state.sort_by(LEFT, SortKey::Size, false);
+    settled(&mut state, effects);
+    assert!(
+        views(&state)
+            .iter()
+            .all(|view| view.sort.primary.key == SortKey::Size)
+    );
+    // The right pane hides a column, which goes on top of that order: the order stays, in
+    // every tab and in what the folder remembers.
+    let effects = state.toggle_column(RIGHT, Column::Kind);
+    settled(&mut state, effects);
+    let kept = state
+        .views()
+        .own(&folder("a"))
+        .expect("a's own")
+        .view
+        .clone();
+    assert_eq!(kept.sort.primary.key, SortKey::Size);
+    assert!(!kept.shows(Column::Kind));
+    assert!(views(&state).iter().all(|view| *view == kept));
+    // The rows of every tab are in that order.
+    for side in [LEFT, RIGHT] {
+        assert_eq!(
+            state.panes()[side].active_tab().sort().primary.key,
+            SortKey::Size
+        );
+    }
+}
+
+#[test]
+fn applying_a_view_below_asks_first_when_folders_below_have_their_own() {
+    let mut state = ready_settled(vec![dir("sub")], vec![]);
+    // Nothing below has a view of its own: no question.
+    let effects = state.apply_view_to_subfolders(LEFT);
+    assert!(
+        matches!(effects.as_slice(), [Effect::Notice(_)]),
+        "{effects:?}"
+    );
+    assert!(state.modal().is_none());
+
+    // sub gets a view of its own; back in a, 하위 폴더에 적용 asks, and says how many.
+    let effects = press(&mut state, &special(Key::Return), NONE).expect("used");
+    settled(&mut state, effects);
+    state.set_view_mode(LEFT, ViewMode::List);
+    let effects = press(&mut state, &special(Key::UpArrow), ALT).expect("used");
+    settled(&mut state, effects);
+    state.set_view_mode(LEFT, ViewMode::LargeIcons);
+    assert_eq!(state.apply_view_to_subfolders(LEFT), []);
+    let Some(Modal::Confirm(confirm)) = state.modal() else {
+        panic!("a question: {:?}", state.modal());
+    };
+    assert_eq!(confirm.title, "하위 폴더에 적용");
+    assert!(
+        confirm.message.contains("하위 폴더 1개"),
+        "{}",
+        confirm.message
+    );
+    assert_eq!(confirm.ok, "적용");
+    let sub = folder("a").join("sub").expect("a name");
+    assert!(state.views().own(&sub).is_some(), "kept until the answer");
+
+    // Cancelled: nothing changes. Accepted: sub forgets its own and shows a's.
+    state.dialog_cancelled();
+    assert!(state.views().own(&sub).is_some());
+    state.apply_view_to_subfolders(LEFT);
+    let effects = state.confirm_accepted();
+    assert_eq!(
+        effects,
+        [Effect::Notice(
+            "‘a’ 폴더와 그 하위 폴더를 이 보기로 표시합니다".to_owned()
+        )]
+    );
+    assert!(state.modal().is_none());
+    assert!(state.views().own(&sub).is_none());
+    assert_eq!(
+        state.views().clone().view_for(&sub).mode,
+        ViewMode::LargeIcons
+    );
+}

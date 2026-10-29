@@ -33,7 +33,7 @@ export component ViewMenu inherits ContextMenuArea {
     callback divider-moved(step: float);
     // The active pane's order, columns and view, as the window's callbacks of the same names for
     // that pane.
-    callback sort(column: int);
+    callback sort(column: int, then: bool);
     callback sort-then(column: int);
     callback column-toggled(column: int);
     callback view-command(name: string);
@@ -57,6 +57,23 @@ export component ViewMenu inherits ContextMenuArea {
         root.mark-mode-3 = root.view.mode == 3;
         root.mark-mode-4 = root.view.mode == 4;
         root.mark-folders-first = root.view.folders-first;
+        root.mark-sort-0 = root.view.sort-key == 0;
+        root.mark-sort-1 = root.view.sort-key == 1;
+        root.mark-sort-2 = root.view.sort-key == 2;
+        root.mark-sort-3 = root.view.sort-key == 3;
+        root.mark-sort-4 = root.view.sort-key == 4;
+        root.mark-sort-5 = root.view.sort-key == 5;
+        root.mark-ascending = root.view.sort-ascending;
+        root.mark-descending = !root.view.sort-ascending;
+        root.mark-then-none = root.view.then-key < 0;
+        root.mark-then-0 = root.view.then-key == 0;
+        root.mark-then-1 = root.view.then-key == 1;
+        root.mark-then-2 = root.view.then-key == 2;
+        root.mark-then-3 = root.view.then-key == 3;
+        root.mark-then-4 = root.view.then-key == 4;
+        root.mark-then-5 = root.view.then-key == 5;
+        root.mark-then-ascending = root.view.then-key >= 0 && root.view.then-ascending;
+        root.mark-then-descending = root.view.then-key >= 0 && !root.view.then-ascending;
         root.mark-col-1 = root.view.shows[1];
         root.mark-col-2 = root.view.shows[2];
         root.mark-col-3 = root.view.shows[3];
@@ -71,6 +88,23 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> mark-mode-3;
     private property <bool> mark-mode-4;
     private property <bool> mark-folders-first;
+    private property <bool> mark-sort-0;
+    private property <bool> mark-sort-1;
+    private property <bool> mark-sort-2;
+    private property <bool> mark-sort-3;
+    private property <bool> mark-sort-4;
+    private property <bool> mark-sort-5;
+    private property <bool> mark-ascending;
+    private property <bool> mark-descending;
+    private property <bool> mark-then-none;
+    private property <bool> mark-then-0;
+    private property <bool> mark-then-1;
+    private property <bool> mark-then-2;
+    private property <bool> mark-then-3;
+    private property <bool> mark-then-4;
+    private property <bool> mark-then-5;
+    private property <bool> mark-then-ascending;
+    private property <bool> mark-then-descending;
     private property <bool> mark-col-1;
     private property <bool> mark-col-2;
     private property <bool> mark-col-3;
@@ -168,58 +202,97 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
         }
+        // The order: the key and its direction (as a click on a head, which flips the direction
+        // of the key that sorts already), the second key and its direction, folders first.
         Menu {
             title: "정렬";
 
             MenuItem {
                 title: "이름";
+                checkable: true;
+                checked <=> root.mark-sort-0;
                 activated => {
-                    root.sort(0);
+                    root.sort(0, false);
                     root.done();
                 }
             }
             MenuItem {
                 title: "크기";
+                checkable: true;
+                checked <=> root.mark-sort-1;
                 activated => {
-                    root.sort(1);
+                    root.sort(1, false);
                     root.done();
                 }
             }
             MenuItem {
                 title: "수정한 날짜";
+                checkable: true;
+                checked <=> root.mark-sort-2;
                 activated => {
-                    root.sort(2);
+                    root.sort(2, false);
                     root.done();
                 }
             }
             MenuItem {
                 title: "만든 날짜";
+                checkable: true;
+                checked <=> root.mark-sort-4;
                 activated => {
-                    root.sort(4);
+                    root.sort(4, false);
                     root.done();
                 }
             }
             MenuItem {
                 title: "종류";
+                checkable: true;
+                checked <=> root.mark-sort-3;
                 activated => {
-                    root.sort(3);
+                    root.sort(3, false);
                     root.done();
                 }
             }
             MenuItem {
                 title: "확장자";
+                checkable: true;
+                checked <=> root.mark-sort-5;
                 activated => {
-                    root.sort(5);
+                    root.sort(5, false);
                     root.done();
                 }
             }
             MenuSeparator { }
-            // The second key (Shift+click on a head).
+            MenuItem {
+                title: "오름차순";
+                checkable: true;
+                checked <=> root.mark-ascending;
+                activated => {
+                    if (!root.view.sort-ascending) {
+                        root.sort(root.view.sort-key, false);
+                    }
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "내림차순";
+                checkable: true;
+                checked <=> root.mark-descending;
+                activated => {
+                    if (root.view.sort-ascending) {
+                        root.sort(root.view.sort-key, false);
+                    }
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The second key (Shift+click on a head), which breaks the ties of the first.
             Menu {
                 title: "2차 정렬";
 
                 MenuItem {
                     title: "없음";
+                    checkable: true;
+                    checked <=> root.mark-then-none;
                     activated => {
                         root.sort-then(-1);
                         root.done();
@@ -227,6 +300,9 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "이름";
+                    checkable: true;
+                    checked <=> root.mark-then-0;
+                    enabled: root.view.sort-key != 0;
                     activated => {
                         root.sort-then(0);
                         root.done();
@@ -234,6 +310,9 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "크기";
+                    checkable: true;
+                    checked <=> root.mark-then-1;
+                    enabled: root.view.sort-key != 1;
                     activated => {
                         root.sort-then(1);
                         root.done();
@@ -241,6 +320,9 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "수정한 날짜";
+                    checkable: true;
+                    checked <=> root.mark-then-2;
+                    enabled: root.view.sort-key != 2;
                     activated => {
                         root.sort-then(2);
                         root.done();
@@ -248,6 +330,9 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "만든 날짜";
+                    checkable: true;
+                    checked <=> root.mark-then-4;
+                    enabled: root.view.sort-key != 4;
                     activated => {
                         root.sort-then(4);
                         root.done();
@@ -255,6 +340,9 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "종류";
+                    checkable: true;
+                    checked <=> root.mark-then-3;
+                    enabled: root.view.sort-key != 3;
                     activated => {
                         root.sort-then(3);
                         root.done();
@@ -262,8 +350,36 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuItem {
                     title: "확장자";
+                    checkable: true;
+                    checked <=> root.mark-then-5;
+                    enabled: root.view.sort-key != 5;
                     activated => {
                         root.sort-then(5);
+                        root.done();
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: "오름차순";
+                    checkable: true;
+                    checked <=> root.mark-then-ascending;
+                    enabled: root.view.then-key >= 0;
+                    activated => {
+                        if (!root.view.then-ascending) {
+                            root.sort(root.view.then-key, true);
+                        }
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "내림차순";
+                    checkable: true;
+                    checked <=> root.mark-then-descending;
+                    enabled: root.view.then-key >= 0;
+                    activated => {
+                        if (root.view.then-ascending) {
+                            root.sort(root.view.then-key, true);
+                        }
                         root.done();
                     }
                 }

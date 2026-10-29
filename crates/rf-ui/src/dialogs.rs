@@ -18,6 +18,7 @@ use rf_jobs::{
 
 use crate::pick::Picker;
 use crate::resolver::QuestionId;
+use crate::state::FolderView;
 use crate::words::{self, JobWork};
 
 /// A window over the main window. While one shows, the main window takes no keys or clicks.
@@ -243,6 +244,9 @@ pub enum ConfirmPurpose {
     },
     /// End the app while jobs run.
     Quit,
+    /// 하위 폴더에 적용: `view` for `folder` and the folders below it, which forget their own
+    /// views.
+    ApplyViewBelow { folder: VPath, view: FolderView },
 }
 
 /// A window that asks before something happens that cannot be taken back.
@@ -319,6 +323,21 @@ impl Confirm {
         }
     }
 
+    /// The question before 하위 폴더에 적용 gives `view` to `folder`, called `name`, and the
+    /// folders below it, of which `below` have views of their own that they would forget.
+    pub fn apply_view_below(folder: VPath, view: FolderView, name: &str, below: usize) -> Confirm {
+        Confirm {
+            purpose: ConfirmPurpose::ApplyViewBelow { folder, view },
+            title: words::view_apply_title().to_owned(),
+            message: words::view_apply_below(name, below),
+            detail: String::new(),
+            lines: Vec::new(),
+            question: String::new(),
+            ok: words::view_apply_button().to_owned(),
+            danger: false,
+        }
+    }
+
     /// The job the confirmation asks for, if it asks for one. The copies an undo could not
     /// trash give none: they go only once a worker has found them as they were once more
     /// ([`AppState::copies_checked`](crate::state::AppState::copies_checked)), so a yes alone
@@ -326,7 +345,9 @@ impl Confirm {
     pub fn job(&self) -> Option<JobSpec> {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
-            ConfirmPurpose::DeleteCopies { .. } | ConfirmPurpose::Quit => None,
+            ConfirmPurpose::DeleteCopies { .. }
+            | ConfirmPurpose::Quit
+            | ConfirmPurpose::ApplyViewBelow { .. } => None,
         }
     }
 }

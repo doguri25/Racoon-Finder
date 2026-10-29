@@ -58,7 +58,7 @@ use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
-    MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, ViewMode, ViewStore, target,
+    MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
 };
 
 /// The left pane's position in [`AppState::panes`].

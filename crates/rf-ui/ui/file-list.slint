@@ -30,7 +30,7 @@ export struct FileRow {
     kind: string,
     extension: string,
     attributes: string,
-    // The line icon of the icon views and 목록 (`Icon.name`).
+    // The line icon of the row, in every view (`Icon.name`).
     icon: string,
     is-dir: bool,
     is-link: bool,
@@ -155,6 +155,7 @@ export component FileList inherits Rectangle {
             then-ascending: root.then-ascending;
             first-row: root.first-row;
             page-rows: root.page-rows;
+            scroll-x <=> list.content-x;
             sort(column, then) => {
                 root.sort(column, then);
             }
@@ -215,7 +216,10 @@ export component FileList inherits Rectangle {
                             settle.stop();
                         }
 
+                        // As wide as the heads: wider than the list when the columns leave
+                        // the name too little room, and the list scrolls sideways then.
                         for row[i] in root.rows: Rectangle {
+                            width: head.content-width;
                             height: Theme.row-height;
                             background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
                             accessible-role: list-item;
@@ -264,8 +268,11 @@ export component FileList inherits Rectangle {
                                 }
                             }
 
-                            // Hidden items show at half strength.
+                            // Hidden items show at half strength. Its least width is the
+                            // row's (a ListView's content is as wide as its rows' least width,
+                            // which a row takes from such a child).
                             Rectangle {
+                                min-width: head.content-width;
                                 opacity: row.hidden ? 0.5 : 1;
 
                                 Icon {
@@ -273,7 +280,7 @@ export component FileList inherits Rectangle {
                                     y: (parent.height - self.height) / 2;
                                     width: 18px;
                                     height: 18px;
-                                    name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
+                                    name: row.icon;
                                     color: row.is-dir ? Theme.folder : Theme.muted;
                                 }
                                 Text {
@@ -289,7 +296,6 @@ export component FileList inherits Rectangle {
                                     x: head.col-x(c);
                                     width: head.w(c);
                                     height: parent.height;
-                                    visible: c < head.shown;
                                     text: Cells.text(row, column.id);
                                     color: Theme.muted;
                                     horizontal-alignment: column.align-end ? right : left;

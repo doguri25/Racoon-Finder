@@ -212,6 +212,24 @@ pub fn view_applied_below(name: &str) -> String {
     format!("‘{name}’ 폴더와 그 하위 폴더를 이 보기로 표시합니다")
 }
 
+/// The title of the question before 하위 폴더에 적용 makes folders below forget their views.
+pub fn view_apply_title() -> &'static str {
+    "하위 폴더에 적용"
+}
+
+/// The question before 하위 폴더에 적용 in the folder `name`, of whose subfolders `count` have
+/// views of their own.
+pub fn view_apply_below(name: &str, count: usize) -> String {
+    format!(
+        "‘{name}’ 폴더의 보기를 하위 폴더에도 적용할까요?\n하위 폴더 {count}개에 따로 정한 보기가 지워집니다."
+    )
+}
+
+/// The label of the button that applies a view below.
+pub fn view_apply_button() -> &'static str {
+    "적용"
+}
+
 /// The notice after 기본값으로 되돌리기 in the folder `name`.
 pub fn view_reset(name: &str) -> String {
     format!("‘{name}’ 폴더의 보기를 되돌렸습니다")

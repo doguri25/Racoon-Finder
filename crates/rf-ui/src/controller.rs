@@ -39,10 +39,12 @@ use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
 mod persist;
+mod sorter;
 
 pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
+use sorter::Sorter;
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -619,6 +621,8 @@ pub struct Controller {
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
     /// every look as the app ends.
     checks: RefCell<CopyChecks>,
+    /// Puts the rows of long listings in a new order, the newest sort of each tab only.
+    sorter: Sorter,
 }
 
 impl fmt::Debug for Controller {
@@ -676,6 +680,7 @@ impl Controller {
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
             checks: RefCell::new(CopyChecks::default()),
+            sorter: Sorter::new(|sorted| post(move |c| c.update(|state| state.sorted(sorted)))),
         }
     }
 
@@ -1114,10 +1119,11 @@ impl Controller {
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
-                Effect::Sort(request) => spawn_worker("rf-ui-sort", move || {
-                    let sorted = request.run();
-                    post(move |c| c.update(|state| state.sorted(sorted)));
-                }),
+                Effect::Sort(request) => {
+                    if self.sorter.sort(request).is_err() {
+                        self.notice(words::background_failed());
+                    }
+                }
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
