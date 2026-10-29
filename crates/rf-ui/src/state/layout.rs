@@ -33,7 +33,7 @@ use std::ffi::{OsStr, OsString};
 use rf_core::{Entry, EntryKind, Os};
 use rf_vfs::fold_name;
 
-use super::{AppState, Effect, LEFT, RIGHT};
+use super::{AppState, Effect, LEFT, RIGHT, load};
 use crate::loader::LoadRequest;
 use crate::pane::{LoadStatus, Tab};
 use crate::words;
@@ -192,10 +192,7 @@ impl AppState {
             return one_pane_only();
         }
         let here = self.tab(side).location().clone();
-        self.navigate_shown(RIGHT - side, here)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.navigate_shown(RIGHT - side, here))
     }
 
     /// Shift+F9: navigation sync on or off, and a notice that says which. With one pane, a

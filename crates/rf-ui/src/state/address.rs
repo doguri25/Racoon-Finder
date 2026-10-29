@@ -35,7 +35,7 @@ use std::ffi::OsString;
 use rf_core::{ErrorKind, Os, VPath};
 use rf_vfs::VisibilityFilter;
 
-use super::{AppState, Effect, Layout};
+use super::{AppState, Effect, Layout, load};
 use crate::keys::ListKey;
 use crate::loader::{LoadEvent, NamesRequest, name_starts_with};
 use crate::pane::{ancestors, next_generation};
@@ -447,10 +447,7 @@ impl AppState {
             return Vec::new();
         };
         self.activate(list.side);
-        self.navigate_shown(list.side, folder)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.navigate_shown(list.side, folder))
     }
 
     /// The list of subfolders closes.
@@ -544,10 +541,7 @@ impl AppState {
             return Vec::new();
         };
         self.activate(side);
-        self.navigate_shown(side, folder)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.navigate_shown(side, folder))
     }
 
     /// The completion list of pane `side` closes.
@@ -576,11 +570,7 @@ impl AppState {
             }
         };
         match typed {
-            Typed::Folder(folder) => self
-                .navigate_shown(side, folder)
-                .map(Effect::Load)
-                .into_iter()
-                .collect(),
+            Typed::Folder(folder) => load(self.navigate_shown(side, folder)),
             Typed::Remote => vec![Effect::Notice(words::remote_location().to_owned())],
             Typed::Invalid => vec![Effect::Notice(words::cannot_open(ErrorKind::InvalidPath))],
         }

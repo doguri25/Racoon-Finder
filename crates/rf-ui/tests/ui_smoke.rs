@@ -2167,13 +2167,23 @@ fn panes_stay_as_wide_as_each_other_whatever_their_tabs() {
 /// the menu's commands with the pane and the tab, the drag's `check` and `drop` with the tab's
 /// id, the pane and the place in the strip (each taken).
 fn tab_window() -> (MainWindow, Calls) {
+    tab_window_of(&["기획", "디자인", "회의록"], Some(2), 0)
+}
+
+/// A window whose left pane has a tab at each folder of `names` (under the temporary folder),
+/// tab `pinned` pinned and tab `shown` showing, its strip scrolled to show it; its tab
+/// callbacks are noted as [`tab_window`] notes them.
+fn tab_window_of(names: &[&str], pinned: Option<usize>, shown: usize) -> (MainWindow, Calls) {
     let window = window();
     let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
-    let (mut pane, _) = Pane::new(at("기획"), VisibilityFilter::default());
-    let _ = pane.add_tab(at("디자인"));
-    let _ = pane.add_tab(at("회의록"));
-    pane.tabs_mut()[2].set_pinned(true);
-    pane.select_tab(0);
+    let (mut pane, _) = Pane::new(at(names[0]), VisibilityFilter::default());
+    for name in &names[1..] {
+        let _ = pane.add_tab(at(name));
+    }
+    if let Some(pinned) = pinned {
+        pane.tabs_mut()[pinned].set_pinned(true);
+    }
+    pane.select_tab(shown);
     let models = PaneModels::default();
     window.set_left_pane(models.view(&pane, true));
     let calls = Calls::default();
@@ -2187,7 +2197,7 @@ fn tab_window() -> (MainWindow, Calls) {
     window.on_tab_move_check(move |data, side, slot| {
         let id = ui_bridge::tab_id(&data).unwrap_or(0);
         record.note(format!("check {id} {side} {slot}"));
-        true
+        rf_ui::TabDrop::Moves
     });
     let record = calls.clone();
     window.on_tab_move_dropped(move |data, side, slot| {
@@ -2195,7 +2205,22 @@ fn tab_window() -> (MainWindow, Calls) {
         record.note(format!("drop {id} {side} {slot}"));
         true
     });
+    slint::platform::update_timers_and_animations();
     (window, calls)
+}
+
+/// As the controller does: a payload of no tab from the start (a drag begins only on a press
+/// whose area has one), and the pressed tab's (id 5) once the press has shown it.
+fn ready_tab_drags(window: &MainWindow, calls: &Calls) {
+    window.set_tab_drag_data(ui_bridge::tab_payload(0));
+    let weak = window.as_weak();
+    let record = calls.clone();
+    window.on_tab_selected(move |side, i| {
+        record.note(format!("select {side} {i}"));
+        if let Some(window) = weak.upgrade() {
+            window.set_tab_drag_data(ui_bridge::tab_payload(5));
+        }
+    });
 }
 
 fn the_tab(window: &MainWindow, title: &str) -> ElementHandle {
@@ -2264,20 +2289,89 @@ fn a_tab_s_menu_closes_copies_pins_and_moves_tabs() {
     assert_eq!(calls.take(), ["select 0 1"]);
 }
 
+/// Twelve tabs, `폴더 0` to `폴더 11`, more than the strip shows, tab `shown` showing.
+fn full_strip_window(shown: usize) -> (MainWindow, Calls) {
+    let names: Vec<String> = (0..12).map(|i| format!("폴더 {i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (window, calls) = tab_window_of(&names, None, shown);
+    ready_tab_drags(&window, &calls);
+    (window, calls)
+}
+
+/// The places Rust was asked about, in order, by the strip of the left pane for tab 5.
+fn slots_checked(noted: &[String]) -> Vec<i32> {
+    noted
+        .iter()
+        .filter_map(|call| call.strip_prefix("check 5 0 "))
+        .map(|slot| slot.parse().expect("a number"))
+        .collect()
+}
+
+#[test]
+fn a_quick_drag_in_a_full_strip_moves_the_tab_not_the_strip() {
+    // The strip shows its first tabs, and could scroll on to the others.
+    let (window, calls) = full_strip_window(0);
+    let first_x = the_tab(&window, "폴더 0").absolute_position().x;
+    let from = centre(&the_tab(&window, "폴더 2"));
+    let one = the_tab(&window, "폴더 1");
+    let (at, size) = (one.absolute_position(), one.size());
+    // The left part of the tab before it: the place before that one.
+    let to = LogicalPosition::new(at.x + size.width * 0.25, from.y);
+
+    // A quick drag: a press, then big steps sideways, and a release.
+    pointer(&window, "press", from);
+    pointer(&window, "move", LogicalPosition::new(from.x - 40.0, from.y));
+    pointer(&window, "move", to);
+    pointer(&window, "release", to);
+
+    let noted = calls.take();
+    assert_eq!(noted.first().map(String::as_str), Some("select 0 2"));
+    assert_eq!(
+        noted.last().map(String::as_str),
+        Some("drop 5 0 1"),
+        "{noted:?}"
+    );
+    let still = the_tab(&window, "폴더 0").absolute_position().x;
+    assert!(
+        (still - first_x).abs() < 0.5,
+        "the strip stays: {first_x} {still}"
+    );
+}
+
+#[test]
+fn a_tab_held_at_an_end_of_a_full_strip_scrolls_it_that_way() {
+    // The strip shows its last tabs.
+    let (window, calls) = full_strip_window(11);
+    let pane = labelled(&window, "왼쪽 패널", AccessibleRole::Groupbox).remove(0);
+    let from = centre(&the_tab(&window, "폴더 11"));
+    // Just inside the strip's left end.
+    let left_end = LogicalPosition::new(pane.absolute_position().x + 14.0, from.y);
+    let tick = || {
+        for _ in 0..30 {
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+            slint::platform::update_timers_and_animations();
+        }
+    };
+
+    drag_to(&window, from, left_end);
+    let at_first = *slots_checked(&calls.take()).last().expect("asked");
+    tick();
+
+    // The tabs before came into view under the pointer, and Rust was asked about each place.
+    let slots = slots_checked(&calls.take());
+    let last = *slots.last().expect("asked again as the strip moved");
+    assert!(last + 2 <= at_first, "{at_first} → {slots:?}");
+    // Let go, the strip stops.
+    pointer(&window, "release", left_end);
+    calls.take();
+    tick();
+    assert_eq!(slots_checked(&calls.take()), Vec::<i32>::new());
+}
+
 #[test]
 fn a_tab_dragged_along_its_strip_or_into_the_other_one_asks_rust_where_it_goes() {
     let (window, calls) = tab_window();
-    // As the controller does: a payload of no tab from the start (a drag begins only on a press
-    // whose area has one), and the pressed tab's once the press has shown it.
-    window.set_tab_drag_data(ui_bridge::tab_payload(0));
-    let weak = window.as_weak();
-    let record = calls.clone();
-    window.on_tab_selected(move |side, i| {
-        record.note(format!("select {side} {i}"));
-        if let Some(window) = weak.upgrade() {
-            window.set_tab_drag_data(ui_bridge::tab_payload(5));
-        }
-    });
+    ready_tab_drags(&window, &calls);
     let first = centre(&the_tab(&window, "기획"));
     let last = the_tab(&window, "회의록");
     let (at, size) = (last.absolute_position(), last.size());
@@ -2459,7 +2553,7 @@ fn the_toolbar_and_the_tabs_say_the_keys_of_their_commands() {
         let wanted = if column == 1 {
             ["Ctrl+Shift+T", "Ctrl+Shift+PageUp", "Ctrl+Shift+PageDown"]
         } else {
-            ["⇧⌘T", "⌃⇧⇞", "⌃⇧⇟"]
+            ["⇧⌘T", "⇧⌘←", "⇧⌘→"]
         };
         assert_eq!(tab_keys.map(|key| key.to_string()), wanted, "{os:?}");
         for case in cases {

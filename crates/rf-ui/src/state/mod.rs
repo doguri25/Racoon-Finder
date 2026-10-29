@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use rf_core::VPath;
+use rf_core::{ErrorKind, VPath};
 use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
@@ -68,7 +68,8 @@ pub const AUTO_RELOAD_GAP: Duration = Duration::from_secs(5);
 pub enum Effect {
     /// List and watch a tab's folder ([`Loader::request`](crate::loader::Loader::request)).
     Load(LoadRequest),
-    /// The watch of the tab with `generation` ended: find on a worker thread where to go
+    /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
+    /// gone: find on a worker thread where to go
     /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
     /// `path`, after [`VANISHED_SETTLE`](crate::controller::VANISHED_SETTLE)), then call
     /// [`AppState::found_existing`].
@@ -556,11 +557,7 @@ impl AppState {
         match tab.open_target(row) {
             Some(OpenAction::Navigate(folder)) => {
                 let name = folder.file_name().map(std::ffi::OsStr::to_os_string);
-                let mut effects: Vec<Effect> = self
-                    .navigate_shown(side, folder)
-                    .map(Effect::Load)
-                    .into_iter()
-                    .collect();
+                let mut effects = load(self.navigate_shown(side, folder));
                 if let Some(name) = name {
                     effects.extend(self.sync_open(side, &name));
                 }
@@ -603,10 +600,7 @@ impl AppState {
         let Some(folder) = ancestors(self.tab(side).location()).into_iter().nth(index) else {
             return Vec::new();
         };
-        self.navigate_shown(side, folder)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.navigate_shown(side, folder))
     }
 
     /// Sorts pane `side` by `key`, the other way round when it already sorts by it.
@@ -641,10 +635,7 @@ impl AppState {
     /// Shows `folder` in the active pane (in a new tab beside a pinned one).
     pub fn go_to(&mut self, folder: VPath) -> Vec<Effect> {
         let side = self.active;
-        self.navigate_shown(side, folder)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.navigate_shown(side, folder))
     }
 
     /// Makes `places` (the favorites, then the drives) the roots of the folder tree, which
@@ -763,6 +754,18 @@ impl AppState {
         let Some(event) = self.address_loaded(event) else {
             return Vec::new();
         };
+        // A tab reopened at a folder that is gone by now goes where the tab of a vanished
+        // folder goes, the nearest folder above it that is left, rather than to the error.
+        if let LoadEvent::Failed {
+            generation,
+            kind: ErrorKind::NotFound,
+        } = event
+            && let Some(tab) = self.tab_by_generation(generation)
+            && tab.take_reopened()
+        {
+            let path = tab.location().clone();
+            return vec![Effect::FindExisting { generation, path }];
+        }
         let Some(side) = self.side_of(event.generation()) else {
             return self.tree_loaded(event);
         };
@@ -902,11 +905,7 @@ impl AppState {
             return Vec::new();
         };
         match result {
-            Ok(OpenAction::Navigate(folder)) => self
-                .navigate_tab(side, index, folder)
-                .map(Effect::Load)
-                .into_iter()
-                .collect(),
+            Ok(OpenAction::Navigate(folder)) => load(self.navigate_tab(side, index, folder)),
             Ok(OpenAction::OpenFile(file)) => vec![Effect::OpenFile(file)],
             // Following never gives another link to follow.
             Ok(OpenAction::Follow(_)) => Vec::new(),
@@ -1081,6 +1080,11 @@ impl AppState {
         effects.extend(self.with_pick_tree(|tree| tree.set_show_hidden(show)));
         effects
     }
+}
+
+/// The listing `request` asks for, if there is one: the effect of a move that may not be made.
+fn load(request: Option<LoadRequest>) -> Vec<Effect> {
+    request.map(Effect::Load).into_iter().collect()
 }
 
 /// The folders the panes start at: the left one at `start` (made absolute against

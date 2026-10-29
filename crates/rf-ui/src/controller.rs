@@ -34,7 +34,7 @@ use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, Subfolders, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
-use crate::{DialogKind, DropPlace, JobRowView, MainWindow, open, words};
+use crate::{DialogKind, DropPlace, JobRowView, MainWindow, TabDrop, open, words};
 
 mod persist;
 
@@ -335,7 +335,7 @@ fn connect_tabs(window: &MainWindow) {
         with(|c| c.update_at(i, |state, i| tab_command(state, side(s), i, &name)));
     });
     window.on_tab_move_check(|data, s, slot| {
-        with(|c| c.tab_move_check(&data, side(s), slot)).unwrap_or(false)
+        with(|c| c.tab_move_check(&data, side(s), slot)).unwrap_or(TabDrop::Refused)
     });
     window.on_tab_move_dropped(|data, s, slot| {
         with(|c| c.tab_move_dropped(&data, side(s), slot)).unwrap_or(false)
@@ -883,16 +883,22 @@ impl Controller {
         }
     }
 
-    /// Whether a drag with the payload `data`, a drag of a tab, would move the tab to `slot`
-    /// of pane `side`'s strip. Called at every move of the pointer; it changes nothing.
-    fn tab_move_check(&self, data: &DataTransfer, side: usize, slot: i32) -> bool {
-        let (Some(id), Some(slot)) = (ui_bridge::tab_id(data), index(slot)) else {
-            return false;
+    /// What a drag with the payload `data` would do at `slot` of pane `side`'s strip: nothing
+    /// for a payload that is no tab's, or a tab that cannot go into that strip; leave the tab
+    /// where it is; or move it there. Called at every move of the pointer, and at every step
+    /// the strip scrolls under it; it changes nothing.
+    fn tab_move_check(&self, data: &DataTransfer, side: usize, slot: i32) -> TabDrop {
+        let Some(id) = ui_bridge::tab_id(data) else {
+            return TabDrop::Refused;
         };
-        self.state
-            .borrow()
-            .as_ref()
-            .is_some_and(|state| state.tab_drop_offer(id, side, slot))
+        let state = self.state.borrow();
+        let Some(state) = state.as_ref().filter(|state| state.tab_may_enter(id, side)) else {
+            return TabDrop::Refused;
+        };
+        match index(slot) {
+            Some(slot) if state.tab_drop_offer(id, side, slot) => TabDrop::Moves,
+            _ => TabDrop::Stays,
+        }
     }
 
     /// The drag with the payload `data` was dropped at `slot` of pane `side`'s strip: the tab it

@@ -1,6 +1,7 @@
 //! The tabs (NAV-01): duplicating, reopening, reordering, pinning and moving them.
 
 use super::*;
+use crate::loader::Followed;
 use crate::settings::{Session, SessionPane};
 
 fn locations(state: &AppState, side: usize) -> Vec<VPath> {
@@ -126,6 +127,71 @@ fn a_reopened_tab_lists_its_folder_again_under_a_new_generation() {
     // Nothing more to reopen: the key does nothing.
     assert!(!state.panes()[LEFT].can_reopen());
     assert_eq!(press(&mut state, "T", CTRL_SHIFT), Some(Vec::new()));
+}
+
+#[test]
+fn a_reopened_tab_whose_folder_is_gone_goes_to_the_nearest_folder_left() {
+    let mut state = tabs_at(&["a", "c"], 0);
+    let into = the_load(&state.open_row(LEFT, 0));
+    listed(&mut state, into.generation, &["f"]);
+    state.close_tab(LEFT, 0);
+    let reopened = the_load(&state.reopen_tab(LEFT));
+
+    // x is gone by now: no error shows; where to go is looked for, as for a vanished folder.
+    let effects = state.loaded(LoadEvent::Failed {
+        generation: reopened.generation,
+        kind: ErrorKind::NotFound,
+    });
+    assert_eq!(
+        effects,
+        [Effect::FindExisting {
+            generation: reopened.generation,
+            path: into_x(),
+        }]
+    );
+    assert_eq!(
+        state.panes()[LEFT].active_tab().status(),
+        LoadStatus::Loading
+    );
+    let effects = state.found_existing(
+        reopened.generation,
+        &into_x(),
+        Some(folder("a")),
+        Instant::now(),
+    );
+    assert_eq!(the_load(&effects).path, folder("a"));
+    assert!(
+        effects.contains(&Effect::Notice(words::folder_vanished("x", true))),
+        "{effects:?}"
+    );
+    assert_eq!(locations(&state, LEFT), [folder("a"), folder("c")]);
+
+    // Another failure shows as it does for any tab.
+    state.close_tab(LEFT, 0);
+    let reopened = the_load(&state.reopen_tab(LEFT));
+    let effects = state.loaded(LoadEvent::Failed {
+        generation: reopened.generation,
+        kind: ErrorKind::PermissionDenied,
+    });
+    assert_eq!(effects, []);
+    assert_eq!(
+        state.panes()[LEFT].active_tab().status(),
+        LoadStatus::Failed(ErrorKind::PermissionDenied)
+    );
+    // So does a gone folder of a reopened tab listed again since: only its first listing is
+    // looked at.
+    state.close_tab(LEFT, 0);
+    let _ = state.reopen_tab(LEFT);
+    let again = the_load(&state.retry(LEFT));
+    let effects = state.loaded(LoadEvent::Failed {
+        generation: again.generation,
+        kind: ErrorKind::NotFound,
+    });
+    assert_eq!(effects, []);
+    assert_eq!(
+        state.panes()[LEFT].active_tab().status(),
+        LoadStatus::Failed(ErrorKind::NotFound)
+    );
 }
 
 #[test]
@@ -259,6 +325,118 @@ fn the_other_pane_keeps_its_pinned_tab_too() {
     assert_eq!(locations(&state, RIGHT), [folder("b"), folder("a")]);
     assert_eq!(shown(&state, RIGHT), 1);
     assert_eq!(state.active(), LEFT);
+}
+
+#[test]
+fn forward_from_a_pinned_tab_opens_beside_it() {
+    let mut state = tabs_at(&["a", "c"], 0);
+    let into = the_load(&state.open_row(LEFT, 0));
+    listed(&mut state, into.generation, &["f"]);
+    let out = the_load(&back(&mut state));
+    listed(&mut state, out.generation, &["x"]);
+    state.toggle_pin(LEFT, 0);
+
+    let effects = press(&mut state, &special(Key::RightArrow), ALT).expect("the key is used");
+
+    assert_eq!(the_load(&effects).path, into_x());
+    assert_eq!(
+        locations(&state, LEFT),
+        [folder("a"), into_x(), folder("c")]
+    );
+    assert_eq!(shown(&state, LEFT), 1);
+    // The pinned tab can still go forward itself; the new one can go back to it.
+    assert!(state.panes()[LEFT].tabs()[0].history().can_forward());
+    assert_eq!(the_load(&back(&mut state)).path, folder("a"));
+}
+
+#[test]
+fn a_link_followed_from_a_pinned_tab_opens_beside_it_and_shows_if_the_tab_did() {
+    let mut state = tabs_at(&["a", "c"], 0);
+    state.toggle_pin(LEFT, 0);
+    let pinned = state.panes()[LEFT].tabs()[0].generation();
+    let followed = |folder: VPath| Followed {
+        generation: pinned,
+        result: Ok(OpenAction::Navigate(folder)),
+    };
+
+    // The pinned tab shows: the folder opens beside it, and shows.
+    let effects = state.followed(followed(folder("one")));
+    assert_eq!(the_load(&effects).path, folder("one"));
+    assert_eq!(
+        locations(&state, LEFT),
+        [folder("a"), folder("one"), folder("c")]
+    );
+    assert_eq!(shown(&state, LEFT), 1);
+
+    // It no longer shows when the result comes: the folder opens beside it all the same, and
+    // the tab that shows keeps showing.
+    state.select_tab(LEFT, 2);
+    let effects = state.followed(followed(folder("two")));
+    assert_eq!(the_load(&effects).path, folder("two"));
+    assert_eq!(
+        locations(&state, LEFT),
+        [folder("a"), folder("two"), folder("one"), folder("c")]
+    );
+    assert_eq!(shown(&state, LEFT), 3);
+    assert_eq!(locations(&state, LEFT)[0], folder("a"));
+    assert!(state.panes()[LEFT].tabs()[0].pinned());
+}
+
+#[test]
+fn navigation_sync_goes_into_a_new_tab_beside_the_other_pane_s_pinned_one() {
+    let in_a = |path: &str| folder("a").join(path).expect("a plain name");
+    let in_c = |name: &str| folder("c").join(name).expect("a plain name");
+    let paths = |effects: &[Effect]| -> Vec<VPath> {
+        loads(effects)
+            .iter()
+            .map(|request| request.path.clone())
+            .collect()
+    };
+    // The right pane's pinned tab is still listing c when the left pane goes into x, then y.
+    let mut state = ready(vec![dir("x")], vec![]);
+    state.activate(RIGHT);
+    let waiting = the_load(&state.go_to(folder("c")));
+    state.toggle_pin(RIGHT, 0);
+    state.activate(LEFT);
+    press(&mut state, &special(Key::F9), SHIFT);
+    assert!(state.syncing());
+    let into = the_load(&state.open_row(LEFT, 0));
+    state.loaded(LoadEvent::Listed {
+        generation: into.generation,
+        entries: vec![dir("y")],
+    });
+    let _ = state.open_row(LEFT, 0);
+
+    // c's listing comes: x opens in a new tab beside the pinned one, whose listing sync waits
+    // for now.
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: waiting.generation,
+        entries: vec![dir("x")],
+    });
+    let fork = the_load(&effects);
+    assert_eq!(fork.path, in_c("x"));
+    assert_eq!(locations(&state, RIGHT), [folder("c"), in_c("x")]);
+    assert_eq!(shown(&state, RIGHT), 1);
+    // That tab's listing comes: it goes on into y itself.
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: fork.generation,
+        entries: vec![dir("y")],
+    });
+    let c_x_y = in_c("x").join("y").expect("a plain name");
+    assert_eq!(paths(&effects), std::slice::from_ref(&c_x_y));
+    assert_eq!(locations(&state, RIGHT), [folder("c"), c_x_y.clone()]);
+    assert!(state.syncing());
+
+    // With the pinned tab shown again, Up in the left pane: the pinned tab stays, and a new
+    // tab beside it goes up.
+    state.select_tab(RIGHT, 0);
+    state.activate(LEFT);
+    let effects = press(&mut state, &special(Key::UpArrow), ALT).expect("the key is used");
+    let parent = folder("c").parent().expect("the temp folder");
+    assert_eq!(paths(&effects), [in_a("x"), parent.clone()]);
+    assert_eq!(locations(&state, RIGHT), [folder("c"), parent, c_x_y]);
+    assert_eq!(shown(&state, RIGHT), 1);
+    assert!(state.syncing());
 }
 
 #[test]

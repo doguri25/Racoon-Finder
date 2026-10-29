@@ -129,6 +129,15 @@ export component FolderMenu inherits Rectangle {
     }
 }
 
+// What a drag over a pane's tab strip would do at the place under the pointer: nothing, as no
+// tab of this app's goes into this strip (`refused`); keep the tab where it is, as that place is
+// on either side of it (`stays`); or move it there (`moves`).
+export enum TabDrop {
+    refused,
+    stays,
+    moves,
+}
+
 export struct TabItem {
     title: string,
     active: bool,
@@ -529,9 +538,9 @@ export component Pane inherits Rectangle {
     // An item of tab `index`'s menu (`TabButton.command`).
     callback tab-command(index: int, name: string);
     // A drag with the payload `data` over the strip would put a tab at `slot` (0 before the
-    // first tab, the number of tabs after the last): whether Rust takes it there. Then the drop
-    // itself, the same way.
-    callback tab-move-check(data: data-transfer, slot: int) -> bool;
+    // first tab, the number of tabs after the last): what Rust makes of it. Then the drop
+    // itself, which says whether the tab moved.
+    callback tab-move-check(data: data-transfer, slot: int) -> TabDrop;
     callback tab-move-dropped(data: data-transfer, slot: int) -> bool;
     callback crumb-clicked(index: int);
     // A click on the `›` after piece `index`, whose bottom left corner is at (`x`, `y`) of the
@@ -623,6 +632,13 @@ export component Pane inherits Rectangle {
         return clamp(floor((x - tabs-view.x - tabs-view.content-x + step / 2) / step), 0, root.tab-count);
     }
 
+    // While a dragged tab is held within `edge` of an end of the strip that has tabs out of view
+    // beyond it, the strip scrolls that way (1 to the right, -1 to the left), a step at a time,
+    // so that every place can be reached; it stops when the drag leaves, ends, or the strip
+    // reaches that end.
+    private property <length> edge: 24px;
+    private property <int> scroll-way: !strip-drop.has-drag ? 0 : strip-drop.hover-x < tabs-view.x + root.edge && tabs-view.content-x < 0 ? 1 : strip-drop.hover-x > tabs-view.x + tabs-view.width - root.edge && tabs-view.content-x > tabs-view.width - root.tabs-width ? -1 : 0;
+
     // Scrolls the strip as little as needed to show the tab that shows whole.
     function show-active-tab() {
         let shown = min(root.tab-room, root.tabs-width);
@@ -643,6 +659,17 @@ export component Pane inherits Rectangle {
         }
     }
 
+    // The steps of `scroll-way`; the place under the still pointer changes with each.
+    Timer {
+        interval: 30ms;
+        running: root.scroll-way != 0;
+        triggered => {
+            tabs-view.content-x = clamp(tabs-view.content-x + root.scroll-way * 12px, tabs-view.width - root.tabs-width, 0px);
+            strip-drop.slot = root.slot-at(strip-drop.hover-x);
+            strip-drop.answer = root.tab-move-check(strip-drop.hover-data, strip-drop.slot);
+        }
+    }
+
     TouchArea {
         clicked => {
             root.activated();
@@ -658,11 +685,20 @@ export component Pane inherits Rectangle {
             // Under the tabs, which pass a drag of a tab on (they take dragged rows): the place
             // in the strip it would go to, and whether it goes there. A tab let go over another
             // one lands on that one, which hands it the same place.
+            // A drag of a tab is taken wherever it hovers in the strip, so that the strip can
+            // scroll under it, though only some places move the tab.
             strip-drop := DropArea {
                 property <int> slot: -1;
+                property <TabDrop> answer: TabDrop.refused;
+                // Where the pointer last was, and what it carries.
+                property <length> hover-x;
+                property <data-transfer> hover-data;
                 can-drop(event) => {
+                    self.hover-x = event.position.x;
+                    self.hover-data = event.data;
                     self.slot = root.slot-at(event.position.x);
-                    return root.tab-move-check(event.data, self.slot) ? DragAction.move : DragAction.none;
+                    self.answer = root.tab-move-check(event.data, self.slot);
+                    return self.answer == TabDrop.refused ? DragAction.none : DragAction.move;
                 }
                 dropped(event) => {
                     return root.tab-move-dropped(event.data, root.slot-at(event.position.x)) ? DragAction.move : DragAction.none;
@@ -676,6 +712,9 @@ export component Pane inherits Rectangle {
                 height: 34px;
                 content-width: root.tabs-width;
                 interactive: root.tabs-width > root.tab-room;
+                // A press and a move sideways drag a tab, not the strip; the wheel, a touchpad
+                // and a touch screen still scroll it.
+                mouse-drag-pan-enabled: false;
 
                 for tab[i] in root.view.tabs: TabButton {
                     x: i * (root.tab-width + root.tab-gap);
@@ -719,7 +758,7 @@ export component Pane inherits Rectangle {
 
             // Where the dragged tab would go: a bar between two tabs, in the part of the strip
             // in view.
-            if strip-drop.has-drag: Rectangle {
+            if strip-drop.has-drag && strip-drop.answer == TabDrop.moves: Rectangle {
                 x: clamp(tabs-view.x + tabs-view.content-x + strip-drop.slot * (root.tab-width + root.tab-gap) - root.tab-gap / 2 - 1px, tabs-view.x - 2px, tabs-view.x + tabs-view.width);
                 y: tabs-view.y + 4px;
                 width: 3px;

@@ -88,6 +88,10 @@ pub struct Tab {
     /// A pinned tab stays at its folder: a move to another one opens in a new tab beside it
     /// (NAV-01, [`Tab::fork`]).
     pinned: bool,
+    /// The tab came back after it was closed ([`Pane::reopen`]) and its first listing has not
+    /// come: a folder that is gone by now is not shown as an error, but left for the nearest
+    /// folder above it ([`Tab::take_reopened`]).
+    reopened: bool,
     location: VPath,
     history: History,
     /// Every item of the folder, sorted by `sort`.
@@ -149,6 +153,7 @@ impl Tab {
         Tab {
             id: next_generation(),
             pinned: false,
+            reopened: false,
             location,
             history: History::default(),
             all: Vec::new(),
@@ -184,6 +189,12 @@ impl Tab {
 
     pub fn set_pinned(&mut self, pinned: bool) {
         self.pinned = pinned;
+    }
+
+    /// Whether the tab was reopened and still waits for its first listing; it is not any more
+    /// after this. Any other request of the tab ends the wait too.
+    pub fn take_reopened(&mut self) -> bool {
+        std::mem::take(&mut self.reopened)
     }
 
     /// The folder the tab shows, or is loading.
@@ -523,6 +534,7 @@ impl Tab {
     /// A request with a new generation for the tab's folder; the rows stay as they are.
     fn start_request(&mut self) -> LoadRequest {
         self.generation = next_generation();
+        self.reopened = false;
         self.status = LoadStatus::Loading;
         self.incoming.clear();
         self.pending.clear();
@@ -779,13 +791,15 @@ impl Pane {
     /// Opens the tab closed last again, where it was in the tab bar (or at the end, when the
     /// bar is shorter now), at its folder, with its history, its order and its pin, and shows
     /// it. It is a new tab: the request for its listing has a new generation, so a late event
-    /// of the closed one does not reach it. `None` when no closed tab is left.
+    /// of the closed one does not reach it; and it is [reopened](Tab::take_reopened) until that
+    /// listing comes. `None` when no closed tab is left.
     pub fn reopen(&mut self) -> Option<LoadRequest> {
         let closed = self.closed.pop_back()?;
         let filter = self.active_tab().filter;
         let (mut tab, request) = Tab::new(closed.location, closed.sort, filter);
         tab.history = closed.history;
         tab.pinned = closed.pinned;
+        tab.reopened = true;
         let at = closed.index.min(self.tabs.len());
         self.tabs.insert(at, tab);
         self.active = at;

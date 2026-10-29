@@ -24,7 +24,7 @@
 
 use rf_core::VPath;
 
-use super::{AppState, Effect, RIGHT};
+use super::{AppState, Effect, RIGHT, load};
 use crate::loader::LoadRequest;
 use crate::pane::Tab;
 use crate::words;
@@ -33,21 +33,13 @@ impl AppState {
     /// Opens a copy of tab `index` of pane `side` right after it, and shows it.
     pub fn duplicate_tab(&mut self, side: usize, index: usize) -> Vec<Effect> {
         self.activate(side);
-        self.panes[side]
-            .duplicate(index)
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.panes[side].duplicate(index))
     }
 
     /// Opens the tab pane `side` closed last again (Ctrl+Shift+T); nothing when it closed none.
     pub fn reopen_tab(&mut self, side: usize) -> Vec<Effect> {
         self.activate(side);
-        self.panes[side]
-            .reopen()
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        load(self.panes[side].reopen())
     }
 
     /// Pins tab `index` of pane `side`, or unpins it.
@@ -110,26 +102,32 @@ impl AppState {
         self.carry_tab(side, index, RIGHT - side, slot)
     }
 
-    /// Whether a drop of the tab whose id is `id` (the payload of a drag of a tab) on `slot`
-    /// of the tab bar of pane `side` (0 before its first tab, the number of its tabs after the
-    /// last one) would move it: a place in its own bar that is not where it is, or any place in
-    /// the other pane's bar when that pane shows and the tab is not its pane's last one. Never
-    /// while a window shows over the main window or the app ends.
-    pub fn tab_drop_offer(&self, id: u64, side: usize, slot: usize) -> bool {
+    /// Whether the tab whose id is `id` (the payload of a drag of a tab) can go into the tab bar
+    /// of pane `side` at all: its own bar, or the other pane's when that pane shows and the tab
+    /// is not its pane's last one. Never while a window shows over the main window or the app
+    /// ends.
+    pub fn tab_may_enter(&self, id: u64, side: usize) -> bool {
         if self.modal.is_some() || self.quitting || side > RIGHT {
             return false;
         }
+        match self.find_tab(id) {
+            Some((from, _)) if from == side => true,
+            Some((from, _)) => {
+                self.layout.shows(side, self.active) && self.panes[from].tabs().len() > 1
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a drop of the tab whose id is `id` on `slot` of the tab bar of pane `side` (0
+    /// before its first tab, the number of its tabs after the last one) would move it: a bar it
+    /// may enter ([`AppState::tab_may_enter`]), at a place that is not on either side of it.
+    pub fn tab_drop_offer(&self, id: u64, side: usize, slot: usize) -> bool {
         let Some((from, index)) = self.find_tab(id) else {
             return false;
         };
-        let count = self.panes[side].tabs().len();
-        if from == side {
-            slot <= count && slot != index && slot != index + 1
-        } else {
-            self.layout.shows(side, self.active)
-                && self.panes[from].tabs().len() > 1
-                && slot <= count
-        }
+        let stays = from == side && (slot == index || slot == index + 1);
+        self.tab_may_enter(id, side) && slot <= self.panes[side].tabs().len() && !stays
     }
 
     /// The tab whose id is `id` was dropped on `slot` of the tab bar of pane `side`: it moves

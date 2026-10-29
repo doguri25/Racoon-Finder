@@ -565,9 +565,11 @@ static MACOS: &[(Chord, Command)] = &[
     (c('t', CMD), C::NewTab),
     (c('w', CMD), C::CloseTab),
     (c('t', CMD_SHIFT), C::ReopenTab),
-    // Firefox's keys to move a tab (fn with ↑ and ↓ on a Mac keyboard); Finder has none.
-    (k(Key::PageUp, CTL_SHIFT), C::MoveTabLeft),
-    (k(Key::PageDown, CTL_SHIFT), C::MoveTabRight),
+    // Finder has no keys to move a tab. The browsers' ⌃⇧⇞ and ⌃⇧⇟ are fn⌃⇧↑ and fn⌃⇧↓ on a
+    // Mac keyboard, which macOS 15 takes to arrange windows; ⇧⌘← and ⇧⌘→ are free, on every
+    // layout, and a text field that has the keys keeps them for selecting.
+    (k(Key::LeftArrow, CMD_SHIFT), C::MoveTabLeft),
+    (k(Key::RightArrow, CMD_SHIFT), C::MoveTabRight),
     (k(Key::DownArrow, CMD), C::Open),
     (c('o', CMD), C::Open),
     (k(Key::UpArrow, CMD), C::Up),
@@ -776,8 +778,8 @@ mod tests {
             (text("t"), CMD, C::NewTab),
             (text("w"), CMD, C::CloseTab),
             (text("T"), CMD_SHIFT, C::ReopenTab),
-            (key(Key::PageUp), CTL_SHIFT, C::MoveTabLeft),
-            (key(Key::PageDown), CTL_SHIFT, C::MoveTabRight),
+            (key(Key::LeftArrow), CMD_SHIFT, C::MoveTabLeft),
+            (key(Key::RightArrow), CMD_SHIFT, C::MoveTabRight),
             (key(Key::DownArrow), CMD, C::Open),
             (text("o"), CMD, C::Open),
             (key(Key::Return), NONE, C::Rename),
@@ -1010,6 +1012,53 @@ mod tests {
         keys
     }
 
+    /// The keys macOS takes before an app sees them, as Slint would hand them in: Spotlight,
+    /// the app and input source switchers, Mission Control and the spaces (⌃ with the arrows),
+    /// and the window tiling of macOS 15 (Window ▸ Move & Resize): fn⌃ and fn⌃⇧ with the
+    /// arrows, which a Mac keyboard sends as the keys home, end, page up and page down (another
+    /// keyboard's fn with an arrow is an arrow), and fn⌃F, fn⌃C, fn⌃R.
+    fn macos_reserved_keys() -> Vec<Chord> {
+        let mut keys = vec![
+            named(Key::Space, CMD),
+            named(Key::Space, Mods { alt: true, ..CMD }),
+            named(Key::Space, CTL),
+            named(Key::Tab, CMD),
+            named(Key::Tab, CMD_SHIFT),
+            letter('h', CMD),
+            letter('h', CMD_OPT),
+            letter('m', CMD),
+        ];
+        let arrows = [
+            Key::LeftArrow,
+            Key::RightArrow,
+            Key::UpArrow,
+            Key::DownArrow,
+            Key::Home,
+            Key::End,
+            Key::PageUp,
+            Key::PageDown,
+        ];
+        for mods in [CTL, CTL_SHIFT] {
+            keys.extend(arrows.iter().map(|&arrow| named(arrow, mods)));
+        }
+        keys.extend("fcr".chars().map(|c| letter(c, CTL)));
+        keys
+    }
+
+    #[test]
+    fn macos_keeps_its_own_keys() {
+        let taken = macos_reserved_keys();
+        for (chord, command) in bindings(Os::MacOs) {
+            assert!(
+                !taken.contains(&chord),
+                "{command:?}: {} is the system's",
+                label(chord, Os::MacOs)
+            );
+        }
+        // The browsers' keys to move a tab are among them on a Mac keyboard.
+        assert!(taken.contains(&named(Key::PageUp, CTL_SHIFT)));
+    }
+
     #[test]
     fn dual_pane_keys_keep_clear_of_the_file_managers() {
         for (os, taken) in [
@@ -1101,8 +1150,8 @@ mod tests {
             // ⌘[ and ⌘] come first; ⌘← and ⌘→ are the other keys.
             (C::Forward, Some("Alt+→"), Some("⌘]")),
             (C::ReopenTab, Some("Ctrl+Shift+T"), Some("⇧⌘T")),
-            (C::MoveTabLeft, Some("Ctrl+Shift+PageUp"), Some("⌃⇧⇞")),
-            (C::MoveTabRight, Some("Ctrl+Shift+PageDown"), Some("⌃⇧⇟")),
+            (C::MoveTabLeft, Some("Ctrl+Shift+PageUp"), Some("⇧⌘←")),
+            (C::MoveTabRight, Some("Ctrl+Shift+PageDown"), Some("⇧⌘→")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];

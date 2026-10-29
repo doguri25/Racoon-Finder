@@ -16,7 +16,7 @@ import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
-import { Pane, PaneView, TabItem, Crumb, PaneDivider, FolderMenu, FolderMenuView } from "pane.slint";
+import { Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
 import { JobPanel, JobRowView } from "job-panel.slint";
 import {
@@ -27,7 +27,7 @@ import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 
 export {
-    Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead, JobRowView, NameView,
+    Theme, FileRow, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView
 }
@@ -161,9 +161,9 @@ export component MainWindow inherits Window {
     // tab the active pane shows: close, close-others, close-right, duplicate, pin, move-other,
     // move-left, move-right, reopen.
     callback tab-command(side: int, index: int, name: string);
-    // A drag with the payload `data` would put a tab at `slot` of pane `side`'s strip: whether
-    // Rust takes it there. Then the drop itself, the same way.
-    callback tab-move-check(data: data-transfer, side: int, slot: int) -> bool;
+    // A drag with the payload `data` would put a tab at `slot` of pane `side`'s strip: what Rust
+    // makes of it (`TabDrop`). Then the drop itself, which says whether the tab moved.
+    callback tab-move-check(data: data-transfer, side: int, slot: int) -> TabDrop;
     callback tab-move-dropped(data: data-transfer, side: int, slot: int) -> bool;
     callback crumb-clicked(side: int, index: int);
     // The `›` after piece `index` of pane `side`'s path row was clicked; a row of its list was

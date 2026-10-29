@@ -77,17 +77,20 @@ pub struct PaneSettings {
     /// The position of the tab that shows.
     #[serde(deserialize_with = "or_default")]
     pub active: usize,
-    /// Whether each tab of `tabs` is pinned, in the same order, as far as the last pinned one:
-    /// a tab without a flag is not. Not written when no tab is pinned.
+    /// The folders of the pinned tabs, in the order of the tab bar, as `VPath::to_uri`: each
+    /// pins the first tab of `tabs` at that folder that it does not pin yet. Pins are kept by
+    /// folder, not by position: a version that knows nothing of them (the first demo) keeps
+    /// this key as it is while it writes `tabs` anew, which must not move a pin to another tab.
+    /// Not written when no tab is pinned.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "or_default")]
-    pub pinned: Vec<bool>,
+    pub pinned: Vec<String>,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
 
 /// `flags`, one for each tab, without the ones after the last `true`: none at all when no tab
-/// is pinned, as [`PaneSettings::pinned`] and [`SessionPane::pinned`] keep them.
+/// is pinned, as [`SessionPane::pinned`] keeps them.
 pub fn pinned_flags(flags: impl IntoIterator<Item = bool>) -> Vec<bool> {
     let mut flags: Vec<bool> = flags.into_iter().collect();
     let kept = flags
@@ -370,14 +373,21 @@ impl Settings {
             let Some(stored) = self.panes.get(side) else {
                 return pane;
             };
+            // The folders of the pins not given to a tab yet.
+            let mut pins: Vec<VPath> = stored
+                .pinned
+                .iter()
+                .filter_map(|uri| VPath::parse(uri).ok())
+                .collect();
             let mut pinned = Vec::new();
             for (i, uri) in stored.tabs.iter().enumerate() {
                 if let Ok(path) = VPath::parse(uri) {
                     if i == stored.active {
                         pane.active = pane.tabs.len();
                     }
+                    let pin = pins.iter().position(|pin| *pin == path);
+                    pinned.push(pin.map(|at| pins.remove(at)).is_some());
                     pane.tabs.push(path);
-                    pinned.push(stored.pinned.get(i).copied().unwrap_or(false));
                 }
             }
             pane.pinned = pinned_flags(pinned);
@@ -398,15 +408,25 @@ impl Settings {
             self.panes.resize_with(2, PaneSettings::default);
         }
         for (stored, pane) in self.panes.iter_mut().zip(&session.panes) {
-            let (unread, unread_pins): (Vec<String>, Vec<bool>) = stored
+            let unread: Vec<String> = stored
                 .tabs
                 .iter()
-                .enumerate()
-                .filter(|(_, uri)| VPath::parse(uri).is_err())
-                .map(|(i, uri)| (uri.clone(), stored.pinned.get(i).copied().unwrap_or(false)))
-                .unzip();
-            let pins = (0..pane.tabs.len()).map(|i| pane.pinned.get(i).copied().unwrap_or(false));
-            stored.pinned = pinned_flags(pins.chain(unread_pins));
+                .filter(|uri| VPath::parse(uri).is_err())
+                .cloned()
+                .collect();
+            // A pin of a tab this version cannot read does not read back as a path either.
+            let unread_pins = stored
+                .pinned
+                .iter()
+                .filter(|uri| VPath::parse(uri).is_err())
+                .cloned();
+            let pins = pane
+                .tabs
+                .iter()
+                .zip(&pane.pinned)
+                .filter(|&(_, &pinned)| pinned)
+                .map(|(path, _)| path.to_uri());
+            stored.pinned = pins.chain(unread_pins).collect();
             stored.tabs = pane.tabs.iter().map(VPath::to_uri).chain(unread).collect();
             stored.active = pane.active;
         }
@@ -878,13 +898,14 @@ mod tests {
     }
 
     #[test]
-    fn pinned_tabs_keep_their_flags_beside_their_folders() {
+    fn pinned_tabs_are_kept_by_their_folders() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let (a, b) = (folder(dir.path(), "a"), folder(dir.path(), "b"));
-        let session = |pinned: Vec<bool>| Session {
+        let (qa, qb) = (toml_string(&a.to_uri()), toml_string(&b.to_uri()));
+        let session = |tabs: &[&VPath], pinned: Vec<bool>| Session {
             panes: [
                 SessionPane {
-                    tabs: vec![a.clone(), b.clone()],
+                    tabs: tabs.iter().map(|&path| path.clone()).collect(),
                     active: 0,
                     pinned,
                 },
@@ -892,22 +913,55 @@ mod tests {
             ],
             ..Session::default()
         };
-        // A flag for each tab, as far as the last pinned one.
+        // The folder of each pinned tab.
         let mut settings = Settings::default();
-        settings.set_session(&session(vec![true]));
+        settings.set_session(&session(&[&a, &b], vec![false, true]));
         let text = settings.to_text().expect("text");
-        assert!(text.contains("pinned = [true]"), "{text}");
+        assert!(text.contains(&format!("pinned = [{qb}]")), "{text}");
         settings.save(dir.path()).expect("saved");
-        assert_eq!(load(dir.path()).settings.session(), session(vec![true]));
+        assert_eq!(
+            load(dir.path()).settings.session(),
+            session(&[&a, &b], vec![false, true])
+        );
         // Nothing pinned, nothing written: the file reads as the first demo's did.
-        settings.set_session(&session(Vec::new()));
+        settings.set_session(&session(&[&a, &b], Vec::new()));
         assert!(!settings.to_text().expect("text").contains("pinned"));
 
-        // A tab this version cannot read keeps its flag, after the others.
+        // The first demo, run in between, kept the pins as they were and wrote the tabs in
+        // another order: the pins stay on their folders' tabs.
+        let read = |text: String| {
+            std::fs::write(dir.path().join(FILE_NAME), text).expect("written");
+            load(dir.path()).settings.session().panes[0].clone()
+        };
+        let pane = read(format!("[[panes]]\ntabs = [{qb}, {qa}]\npinned = [{qb}]\n"));
+        assert_eq!(pane.tabs, [b.clone(), a.clone()]);
+        assert_eq!(pane.pinned, [true]);
+        let pane = read(format!("[[panes]]\ntabs = [{qa}, {qb}]\npinned = [{qb}]\n"));
+        assert_eq!(pane.pinned, [false, true]);
+        // One pin for each entry, on the first tab at its folder not pinned yet; a pin whose
+        // folder no tab shows any more pins nothing.
+        let qc = toml_string(&folder(dir.path(), "c").to_uri());
+        let pane = read(format!(
+            "[[panes]]\ntabs = [{qa}, {qb}, {qa}]\npinned = [{qa}, {qc}]\n"
+        ));
+        assert_eq!(pane.pinned, [true]);
+        let pane = read(format!(
+            "[[panes]]\ntabs = [{qa}, {qb}, {qa}]\npinned = [{qa}, {qa}]\n"
+        ));
+        assert_eq!(pane.pinned, [true, false, true]);
+        // Pins of a newer version that are no list of folders pin nothing; the tabs stay.
+        let pane = read(format!(
+            "[[panes]]\ntabs = [{qa}, {qb}]\npinned = [true, false]\nactive = 1\n"
+        ));
+        assert_eq!(pane.tabs, [a.clone(), b.clone()]);
+        assert_eq!(pane.active, 1);
+        assert_eq!(pane.pinned, Vec::<bool>::new());
+
+        // A tab this version cannot read keeps its pin, after the others.
         let mut stored = Settings {
             panes: vec![PaneSettings {
                 tabs: vec!["cloud+new://x".to_owned(), a.to_uri(), b.to_uri()],
-                pinned: vec![true, false, true],
+                pinned: vec!["cloud+new://x".to_owned(), b.to_uri()],
                 ..PaneSettings::default()
             }],
             ..Settings::default()
@@ -920,19 +974,10 @@ mod tests {
             stored.panes[0].tabs,
             [a.to_uri(), b.to_uri(), "cloud+new://x".to_owned()]
         );
-        assert_eq!(stored.panes[0].pinned, [false, true, true]);
-
-        // Flags of a newer version that are no list of flags pin nothing; the tabs stay.
-        let (qa, qb) = (toml_string(&a.to_uri()), toml_string(&b.to_uri()));
-        std::fs::write(
-            dir.path().join(FILE_NAME),
-            format!("[[panes]]\ntabs = [{qa}, {qb}]\npinned = \"all\"\nactive = 1\n"),
-        )
-        .expect("written");
-        let read = load(dir.path()).settings.session();
-        assert_eq!(read.panes[0].tabs, [a, b]);
-        assert_eq!(read.panes[0].active, 1);
-        assert_eq!(read.panes[0].pinned, Vec::<bool>::new());
+        assert_eq!(
+            stored.panes[0].pinned,
+            [b.to_uri(), "cloud+new://x".to_owned()]
+        );
     }
 
     /// `text` as a TOML string, quoted and escaped: a Windows path's `\` would otherwise
