@@ -15,8 +15,8 @@ use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuView, JobRowView, MainWindow,
-    MessageView, NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView,
+    ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuRow, FolderMenuView, JobRowView,
+    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView,
     RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
@@ -255,12 +255,19 @@ const SUBFOLDERS: &str = "하위 폴더";
 /// A list of the address bar with `rows`, the cursor on row `cursor` (-1 for none) and `note`
 /// under them.
 fn folder_menu(rows: &[&str], cursor: i32, note: &str) -> FolderMenuView {
-    let rows: Vec<SharedString> = rows.iter().map(|row| (*row).into()).collect();
+    let rows: Vec<FolderMenuRow> = rows
+        .iter()
+        .map(|row| FolderMenuRow {
+            name: (*row).into(),
+            link: false,
+        })
+        .collect();
     FolderMenuView {
         open: true,
         rows: ModelRc::new(slint::VecModel::from(rows)),
         cursor,
         note: note.into(),
+        pending: false,
     }
 }
 
@@ -353,6 +360,8 @@ fn a_pieces_chevron_asks_for_its_folders_and_the_list_takes_clicks() {
     // The list Rust gives shows under it, with the keys' row and the note; a click on a row
     // chooses it.
     window.set_subfolders(folder_menu(&["docs", "src"], 1, "외 3개"));
+    // A page of it is the rows it shows.
+    assert_eq!(window.get_subfolders_page(), 2);
     let row = |name: &str| labelled(&window, name, AccessibleRole::ListItem).remove(0);
     assert_eq!(row("docs").accessible_item_selected(), Some(false));
     assert_eq!(row("src").accessible_item_selected(), Some(true));
@@ -375,6 +384,11 @@ fn a_pieces_chevron_asks_for_its_folders_and_the_list_takes_clicks() {
         calls.borrow_mut().drain(..).collect::<Vec<_>>(),
         ["dismissed", "dismissed"]
     );
+    // A long list shows ten rows, a page.
+    let many: Vec<String> = (1..=25).map(|n| format!("여행 {n}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    window.set_subfolders(folder_menu(&many, -1, ""));
+    assert_eq!(window.get_subfolders_page(), 10);
     // So do the keys leaving the panes (here for the filter box).
     window.invoke_focus_filter();
     assert_eq!(
@@ -454,6 +468,18 @@ fn the_path_field_asks_for_completions_and_takes_the_lists_keys() {
         labelled(&window, "downloads", AccessibleRole::ListItem).len(),
         1
     );
+    // It is as wide as the field, and right under it (the field takes the path row less 8px on
+    // either side, and 4px above and below).
+    let list = labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).remove(0);
+    let row = path_row_of(&window, "오른쪽 패널");
+    let (list_at, row_at) = (list.absolute_position(), row.absolute_position());
+    assert!(
+        (list_at.x - (row_at.x + 8.0)).abs() < 0.5,
+        "{list_at:?} {row_at:?}"
+    );
+    assert!((list.size().width - (row.size().width - 16.0)).abs() < 0.5);
+    let under = row_at.y + row.size().height - 4.0 + 2.0;
+    assert!((list_at.y - under).abs() < 0.5, "{list_at:?} {row_at:?}");
     chord(&window, &[&down]);
     chord(&window, &[&up]);
     chord(&window, &[&tab]);
@@ -479,6 +505,199 @@ fn the_path_field_asks_for_completions_and_takes_the_lists_keys() {
     chord(&window, &[&escape]);
     chord(&window, &["z"]);
     assert_eq!(taken(), ["dismissed 1", "key z"]);
+}
+
+/// The path row of the pane named `pane` ("왼쪽 패널" or "오른쪽 패널").
+fn path_row_of(window: &MainWindow, pane: &str) -> ElementHandle {
+    labelled(window, pane, AccessibleRole::Groupbox)
+        .remove(0)
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::Groupbox)
+        .match_predicate(|group| group.accessible_label().as_deref() == Some("경로"))
+        .find_first()
+        .expect("the path row")
+}
+
+#[test]
+fn a_tab_before_the_first_completions_keeps_the_field_and_waits() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&calls);
+    window.on_path_completed(move |side, text| {
+        record.borrow_mut().push(format!("complete {side} {text}"));
+        SharedString::new()
+    });
+    let record = Rc::clone(&calls);
+    window.on_completion_step(move |side, delta| {
+        record.borrow_mut().push(format!("step {side} {delta}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_key(move |text, _, _, _, _| {
+        record.borrow_mut().push(format!("key {text}"));
+        true
+    });
+    let record = Rc::clone(&calls);
+    window.on_path_edited(move |side, text| {
+        record.borrow_mut().push(format!("edited {side} {text}"));
+    });
+    let taken = || calls.borrow_mut().drain(..).collect::<Vec<_>>();
+    let key = |k: Key| char::from(k).to_string();
+    let mut view = window.get_left_pane();
+    view.path_text = "/srv/d".into();
+    view.completion = FolderMenuView {
+        pending: true,
+        ..FolderMenuView::default()
+    };
+    window.set_left_pane(view);
+    window.invoke_edit_path(0);
+    chord(&window, &[&key(Key::RightArrow)]);
+    // Rust waits for the first names: Tab goes to it and stays in the field, ↓ is the field's.
+    chord(&window, &[&key(Key::Tab)]);
+    chord(&window, &[&key(Key::DownArrow)]);
+    chord(&window, &["x"]);
+    assert_eq!(taken(), ["complete 0 /srv/d", "edited 0 /srv/dx"]);
+    // The names come, and the text the Tab waited for fills the field.
+    window.invoke_fill_path(0, "/srv/docs/".into());
+    let field = labelled(&window, "경로", AccessibleRole::TextInput).remove(0);
+    assert_eq!(field.accessible_value().as_deref(), Some("/srv/docs/"));
+    chord(&window, &["y"]);
+    assert_eq!(taken(), ["edited 0 /srv/docs/y"]);
+    // A closed field takes no text.
+    let mut view = window.get_left_pane();
+    view.completion = FolderMenuView::default();
+    window.set_left_pane(view);
+    chord(&window, &[&key(Key::Escape)]);
+    window.invoke_fill_path(0, "/elsewhere".into());
+    chord(&window, &["z"]);
+    assert_eq!(taken(), ["key z"]);
+}
+
+#[test]
+fn esc_while_a_syllable_is_composed_closes_and_carries_out_nothing() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&calls);
+    window
+        .on_completion_dismissed(move |side| record.borrow_mut().push(format!("dismissed {side}")));
+    let record = Rc::clone(&calls);
+    window.on_path_entered(move |_, text| record.borrow_mut().push(format!("entered {text}")));
+    let record = Rc::clone(&calls);
+    window.on_path_completed(move |_, text| {
+        record.borrow_mut().push(format!("complete {text}"));
+        SharedString::new()
+    });
+    let record = Rc::clone(&calls);
+    window.on_key(move |text, _, _, _, _| {
+        record.borrow_mut().push(format!("key {text}"));
+        true
+    });
+    let taken = || calls.borrow_mut().drain(..).collect::<Vec<_>>();
+    let escape = char::from(Key::Escape).to_string();
+    let mut view = window.get_right_pane();
+    view.path_text = "/srv/".into();
+    view.completion = folder_menu(&["docs"], 0, "");
+    window.set_right_pane(view);
+    window.invoke_edit_path(1);
+    // Esc while a syllable is composed closes the list, and the field stays.
+    compose(&window, "ㄷ");
+    chord(&window, &[&escape]);
+    assert_eq!(taken(), ["dismissed 1"]);
+    // Rust closed the list: Esc closes the field, and nothing is entered or completed.
+    let mut view = window.get_right_pane();
+    view.completion = FolderMenuView::default();
+    window.set_right_pane(view);
+    compose(&window, "ㄷ");
+    chord(&window, &[&escape]);
+    assert_eq!(taken(), ["dismissed 1"]);
+    chord(&window, &["q"]);
+    assert_eq!(taken(), ["key q"]);
+}
+
+#[test]
+fn the_completion_list_fits_a_short_pane_and_shows_its_cursor() {
+    let window = window();
+    // One pane above the other, the lower one as short as a pane gets.
+    window.set_stacked(true);
+    window.set_split_share(0.9);
+    let names: Vec<String> = (1..=20).map(|n| format!("폴더 {n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    for (side, pane) in [(1, "오른쪽 패널"), (0, "왼쪽 패널")] {
+        let set = |cursor: i32| {
+            let mut view = if side == 1 {
+                window.get_right_pane()
+            } else {
+                window.get_left_pane()
+            };
+            view.path_text = "/srv/".into();
+            view.completion = folder_menu(&names, cursor, "");
+            if side == 1 {
+                window.set_right_pane(view);
+            } else {
+                window.set_left_pane(view);
+            }
+        };
+        set(-1);
+        window.invoke_edit_path(side);
+        // The list shows (as the window draws it), then the keys go down it to its last row.
+        assert_eq!(
+            labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).len(),
+            1,
+            "{pane}"
+        );
+        set(19);
+        for _ in 0..3 {
+            slint::platform::update_timers_and_animations();
+        }
+        let height = window
+            .window()
+            .size()
+            .to_logical(window.window().scale_factor())
+            .height;
+        let row = path_row_of(&window, pane);
+        let field_top = row.absolute_position().y + 4.0;
+        let field_bottom = row.absolute_position().y + row.size().height - 4.0;
+        let list = labelled(&window, "경로 자동 완성", AccessibleRole::Groupbox).remove(0);
+        let (top, bottom) = (
+            list.absolute_position().y,
+            list.absolute_position().y + list.size().height,
+        );
+        // In the window, and clear of the field.
+        assert!(
+            top >= 0.0 && bottom <= height,
+            "{pane}: {top} {bottom} {height}"
+        );
+        assert!(
+            top >= field_bottom || bottom <= field_top,
+            "{pane}: {top} {bottom}"
+        );
+        // The cursor's row shows whole inside it.
+        let last = labelled(&window, "폴더 20", AccessibleRole::ListItem);
+        let last = last
+            .iter()
+            .find(|row| row.accessible_item_selected() == Some(true))
+            .unwrap_or_else(|| panic!("{pane}: the cursor's row is made"));
+        let (at, size) = (last.absolute_position(), last.size());
+        assert!(
+            at.y >= top && at.y + size.height <= bottom,
+            "{pane}: row {} to {} in {top} to {bottom}",
+            at.y,
+            at.y + size.height
+        );
+        // The field closes for the other pane's turn.
+        chord(&window, &[&char::from(Key::Escape).to_string()]);
+        let mut view = if side == 1 {
+            window.get_right_pane()
+        } else {
+            window.get_left_pane()
+        };
+        view.completion = FolderMenuView::default();
+        if side == 1 {
+            window.set_right_pane(view);
+        } else {
+            window.set_left_pane(view);
+        }
+        chord(&window, &[&char::from(Key::Escape).to_string()]);
+    }
 }
 
 #[test]

@@ -26,7 +26,7 @@ use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_jobs::CreatedItem;
 use rf_vfs::{
     CancelToken, Capabilities, Change, Provider, SortSpec, Vfs, VisibilityFilter, WatchEvent,
-    WatchHandle, fold_name, sort_entries,
+    WatchHandle, fold_name, sort_by_name, sort_entries,
 };
 
 use crate::pane::OpenAction;
@@ -60,6 +60,24 @@ pub struct NamesRequest {
     pub limit: usize,
     /// The system whose rule the prefix follows ([`name_starts_with`]).
     pub os: Os,
+}
+
+/// A folder a [`Loader::list_names`] found: its name, and whether it is a link (a symbolic link,
+/// or a junction on Windows) that leads to a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderName {
+    pub name: OsString,
+    pub link: bool,
+}
+
+impl FolderName {
+    /// A folder that is no link.
+    pub fn folder(name: impl Into<OsString>) -> FolderName {
+        FolderName {
+            name: name.into(),
+            link: false,
+        }
+    }
 }
 
 /// Whether the folder name `name` starts with `prefix`, typed into the path field, on `os`:
@@ -102,12 +120,13 @@ pub enum LoadEvent {
     /// The bytes the user can still write on the folder's volume. Sent after `Listed`, and
     /// only when the provider can tell.
     Space { generation: u64, available: u64 },
-    /// The names a [`Loader::list_names`] found, in the natural order of the names: at most its
-    /// request's `limit` of them, and how many more there are. Sent once, in place of
-    /// `Listed`; a listing that fails sends `Failed` instead.
+    /// The folders a [`Loader::list_names`] found, in the natural order of their names: at most
+    /// its request's `limit` of them, and how many more there are (links past the limit are
+    /// not looked at, so they are not counted). Sent once, in place of `Listed`; a listing that
+    /// fails sends `Failed` instead.
     Names {
         generation: u64,
-        names: Vec<OsString>,
+        names: Vec<FolderName>,
         more: usize,
     },
 }
@@ -180,11 +199,13 @@ impl Loader {
     /// Lists the names of the folders in `request.folder` once, on a new worker thread, for a
     /// list of the address bar (NAV-03); returns at once, so it may be called on the UI thread.
     ///
-    /// The worker keeps the folders (no file, no link) that `request.filter` shows and whose
-    /// names start with `request.prefix` ([`name_starts_with`]), sorts them in the natural
-    /// order of their names, and sends one `Names` with the first `request.limit` of them and
-    /// the count of the rest, or one `Failed`, and ends. However large the folder, the UI
-    /// thread gets at most `limit` names, and the ticket stops the listing at its next batch.
+    /// The worker keeps the folders and the links that `request.filter` shows and whose names
+    /// start with `request.prefix` ([`name_starts_with`]), by name alone while it reads the
+    /// folder, sorts them in the natural order of their names, and sends one `Names` with the
+    /// first `request.limit` of them and the count of the rest, or one `Failed`, and ends. A
+    /// link counts when it leads to a folder: the worker follows the links among the first
+    /// `limit` names, and no other. However large the folder, the UI thread gets at most
+    /// `limit` names, and the ticket stops the listing at its next batch (and between links).
     /// `sink` is called as for [`Loader::request`].
     pub fn list_names(
         &self,
@@ -537,6 +558,15 @@ fn resolve_link(vfs: &Vfs, link: &VPath) -> Result<OpenAction, ErrorKind> {
     } else {
         OpenAction::OpenFile(link.clone())
     })
+}
+
+/// Whether the link `name` in `folder` leads to a folder.
+fn leads_to_folder(provider: &dyn Provider, folder: &VPath, name: &OsStr) -> bool {
+    folder
+        .join(name)
+        .ok()
+        .and_then(|link| provider.stat_target(&link).ok())
+        .is_some_and(|target| target.kind == EntryKind::Dir)
 }
 
 /// Whether `path` is a folder, or a link to one.
@@ -944,11 +974,19 @@ struct NameRule {
 }
 
 impl NameRule {
-    /// Whether the listing keeps `entry`.
-    fn keeps(&self, entry: &Entry) -> bool {
-        entry.kind == EntryKind::Dir
-            && self.filter.is_visible(entry)
-            && name_starts_with(&entry.name, &self.prefix, self.os)
+    /// What the listing keeps of `entry`: its name, when it is a folder or a link (which may
+    /// lead to one) that the filter shows and whose name starts with the prefix.
+    fn candidate(&self, entry: Entry) -> Option<FolderName> {
+        let link = match entry.kind {
+            EntryKind::Dir => false,
+            EntryKind::Symlink => true,
+            EntryKind::File | EntryKind::Other => return None,
+        };
+        (self.filter.is_visible(&entry) && name_starts_with(&entry.name, &self.prefix, self.os))
+            .then_some(FolderName {
+                name: entry.name,
+                link,
+            })
     }
 }
 
@@ -974,6 +1012,9 @@ impl Worker {
                 return emit(&self.shared, LoadEvent::Failed { generation, kind });
             }
         };
+        if let Mode::Names(rule) = &self.mode {
+            return self.send_names(provider.as_ref(), &path, generation, rule);
+        }
         let live = self.mode == Mode::Live;
         if live {
             let watchable = provider.capabilities(&path).contains(Capabilities::WATCH);
@@ -988,14 +1029,12 @@ impl Worker {
         let mut entries = Vec::new();
         let listed = provider.list(&path, &self.cancel, &mut |batch| match &self.mode {
             Mode::Live => entries.extend(batch),
-            Mode::Folders => entries.extend(
+            // A listing of names went to `send_names`.
+            Mode::Folders | Mode::Names(_) => entries.extend(
                 batch
                     .into_iter()
                     .filter(|entry| entry.kind == EntryKind::Dir),
             ),
-            Mode::Names(rule) => {
-                entries.extend(batch.into_iter().filter(|entry| rule.keeps(entry)));
-            }
         });
         if self.cancel.is_cancelled() {
             return;
@@ -1007,19 +1046,6 @@ impl Worker {
         sort_entries(&mut entries, &sort);
         if self.cancel.is_cancelled() {
             return;
-        }
-        if let Mode::Names(rule) = &self.mode {
-            let more = entries.len().saturating_sub(rule.limit);
-            entries.truncate(rule.limit);
-            let names = entries.into_iter().map(|entry| entry.name).collect();
-            return emit(
-                &self.shared,
-                LoadEvent::Names {
-                    generation,
-                    names,
-                    more,
-                },
-            );
         }
         emit(
             &self.shared,
@@ -1042,6 +1068,54 @@ impl Worker {
                 },
             );
         }
+    }
+
+    /// The work of a [`Mode::Names`] request for `folder`: the names that `rule` keeps, sorted,
+    /// at most its limit of them, the links among them that lead to folders only.
+    fn send_names(
+        &self,
+        provider: &dyn Provider,
+        folder: &VPath,
+        generation: u64,
+        rule: &NameRule,
+    ) {
+        let mut found = Vec::new();
+        let listed = provider.list(folder, &self.cancel, &mut |batch| {
+            found.extend(batch.into_iter().filter_map(|entry| rule.candidate(entry)));
+        });
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        if let Err(error) = listed {
+            let kind = error.kind();
+            return emit(&self.shared, LoadEvent::Failed { generation, kind });
+        }
+        sort_by_name(&mut found, |each| each.name.as_os_str());
+        let mut names = Vec::with_capacity(found.len().min(rule.limit));
+        let mut more = 0;
+        for each in found {
+            if names.len() < rule.limit {
+                if self.cancel.is_cancelled() {
+                    return;
+                }
+                if !each.link || leads_to_folder(provider, folder, &each.name) {
+                    names.push(each);
+                }
+            } else if !each.link {
+                more += 1;
+            }
+        }
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        emit(
+            &self.shared,
+            LoadEvent::Names {
+                generation,
+                names,
+                more,
+            },
+        );
     }
 
     /// Starts the watch and hands it to the ticket; a watch that fails to start is left out.

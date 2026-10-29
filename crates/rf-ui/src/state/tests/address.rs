@@ -1,12 +1,12 @@
 //! The address bar (NAV-03): what typed text names, the list of a piece's subfolders under its
 //! `›`, and the completion list of the path field.
 
-use std::ffi::OsString;
-use std::path::MAIN_SEPARATOR;
+use std::fmt::Write as _;
+use std::path::{MAIN_SEPARATOR, Path};
 
 use super::*;
 use crate::keys::ListKey;
-use crate::loader::NamesRequest;
+use crate::loader::{FolderName, NamesRequest};
 
 /// A lookup of the variables `vars`.
 fn vars<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -94,7 +94,6 @@ fn addresses_of_remote_places_are_told_apart_from_paths() {
         "smb://server/share",
         "ftp://example.org/x",
         "https://example.org",
-        "file:///C:/x",
         "webdav+https://host/x",
         "remote://profile/dir",
     ] {
@@ -111,9 +110,109 @@ fn addresses_of_remote_places_are_told_apart_from_paths() {
         "a:b://c",
         "1ab://x",
         "/srv/a://b",
+        // A file URL is read as the path it names (`read_file_url`).
+        "file:///C:/x",
+        "FILE://server/share",
     ] {
         assert!(!is_remote_url(path), "{path}");
     }
+}
+
+#[test]
+fn file_urls_name_local_paths_on_each_system() {
+    let path = |text: &str| FileUrl::Path(text.to_owned());
+    let windows = |url: &str| read_file_url(url, Os::Windows);
+    // A drive: decoded, with `\` between names.
+    assert_eq!(
+        windows("file:///C:/Users/me%20too/%ED%95%9C%EA%B8%80"),
+        Some(path(r"C:\Users\me too\한글"))
+    );
+    assert_eq!(windows("file:///C:"), Some(path(r"C:\")));
+    assert_eq!(windows("file:///C:/"), Some(path(r"C:\")));
+    assert_eq!(windows("file:///c|/x"), Some(path(r"c:\x")));
+    assert_eq!(windows("file://localhost/D:/x"), Some(path(r"D:\x")));
+    assert_eq!(windows("FILE:///C:/x?query#part"), Some(path(r"C:\x")));
+    // A computer: its share.
+    assert_eq!(
+        windows("file://server/share/x%20y"),
+        Some(path(r"\\server\share\x y"))
+    );
+    assert_eq!(
+        windows("file:////server/share/x"),
+        Some(path(r"\\server\share\x"))
+    );
+    // No drive, or a drive with no root.
+    assert_eq!(windows("file:///home/me"), Some(FileUrl::Invalid));
+    assert_eq!(windows("file:///C:x"), Some(FileUrl::Invalid));
+    for os in [Os::MacOs, Os::Other] {
+        let unix = |url: &str| read_file_url(url, os);
+        assert_eq!(unix("file:///home/me%20too"), Some(path("/home/me too")));
+        assert_eq!(unix("file://localhost/home"), Some(path("/home")));
+        assert_eq!(unix("file://LOCALHOST/home"), Some(path("/home")));
+        assert_eq!(unix("file:/home/x"), Some(path("/home/x")));
+        assert_eq!(unix("file://"), Some(path("/")));
+        assert_eq!(unix("file:///home/%ED%95%9C"), Some(path("/home/한")));
+        // A `%` that starts no `%XX` stays; bytes that are no text are no path.
+        assert_eq!(unix("file:///home/50%"), Some(path("/home/50%")));
+        assert_eq!(unix("file:///home/%zz"), Some(path("/home/%zz")));
+        assert_eq!(unix("file:///home/%FF"), Some(FileUrl::Invalid));
+        // Another computer is remote.
+        assert_eq!(unix("file://server/share"), Some(FileUrl::Remote));
+        assert_eq!(unix("file:x"), Some(FileUrl::Invalid));
+    }
+    // Other text is no file URL.
+    for text in [
+        "/home/me",
+        "files:///x",
+        "file",
+        "fil",
+        r"C:\x",
+        "sftp://host/x",
+    ] {
+        assert_eq!(read_file_url(text, Os::Other), None, "{text}");
+        assert_eq!(read_file_url(text, Os::Windows), None, "{text}");
+    }
+}
+
+/// The `file:` URL of the local path `path`, every byte but letters, digits and `/-_.~:`
+/// percent-encoded.
+fn file_url(path: &Path) -> String {
+    let text = path
+        .to_str()
+        .expect("a temporary path is text")
+        .replace('\\', "/");
+    let mut url = String::from(if text.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    });
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~:".contains(&byte) {
+            url.push(char::from(byte));
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
+    url
+}
+
+#[test]
+fn a_file_url_is_read_before_anything_is_expanded() {
+    // Its `%20` and `%25` are no `%VAR%`, and a `$HOME` it names is a folder's name.
+    let folder = std::env::temp_dir().join("50% off $HOME");
+    let env = [
+        ("HOME", "/nowhere"),
+        ("USERPROFILE", r"C:\nowhere"),
+        ("25", "BAD"),
+        ("20off", "BAD"),
+    ];
+    let env = vars(&env);
+    let url = file_url(&folder);
+    assert!(url.contains("%20off%20%24HOME"), "{url}");
+    assert_eq!(
+        read_typed(&url, Os::CURRENT, &env),
+        Typed::Folder(VPath::local(&folder).expect("a local path"))
+    );
 }
 
 #[test]
@@ -163,8 +262,8 @@ fn completion_splits_after_the_last_separator() {
     assert_eq!(split_last("docs", Os::Other), None);
 }
 
-fn names(list: &[&str]) -> Vec<OsString> {
-    list.iter().map(OsString::from).collect()
+fn names(list: &[&str]) -> Vec<FolderName> {
+    list.iter().map(|name| FolderName::folder(*name)).collect()
 }
 
 /// The one listing of names among `effects`.
@@ -196,6 +295,9 @@ fn names_come(
     })
 }
 
+/// The rows a page of the list of subfolders has.
+const PAGE: usize = 10;
+
 /// What the controller does after every change.
 fn settle(state: &mut AppState) {
     state.drop_stale_address();
@@ -210,7 +312,7 @@ fn listed(names: &Names) -> Vec<&str> {
     names
         .rows()
         .iter()
-        .map(|name| name.to_str().expect("test names are text"))
+        .map(|each| each.name.to_str().expect("test names are text"))
         .collect()
 }
 
@@ -263,14 +365,14 @@ fn a_pieces_chevron_lists_its_folders_and_opens_the_one_chosen() {
     let cursor = |state: &AppState| state.subfolders().and_then(Subfolders::cursor);
     // ↓ from no row goes to the first one; the cursor stops at either end.
     assert_eq!(cursor(&state), None);
-    state.subfolders_key(ListKey::Down);
+    state.subfolders_key(ListKey::Down, PAGE);
     assert_eq!(cursor(&state), Some(0));
-    state.subfolders_key(ListKey::Up);
+    state.subfolders_key(ListKey::Up, PAGE);
     assert_eq!(cursor(&state), Some(0));
-    state.subfolders_key(ListKey::Down);
-    state.subfolders_key(ListKey::Down);
+    state.subfolders_key(ListKey::Down, PAGE);
+    state.subfolders_key(ListKey::Down, PAGE);
     assert_eq!(cursor(&state), Some(1));
-    let effects = state.subfolders_key(ListKey::Choose);
+    let effects = state.subfolders_key(ListKey::Choose, PAGE);
     assert_eq!(the_load(&effects).path, in_folder("b", "src"));
     assert!(state.subfolders().is_none());
     assert!(!state.generations().contains(&request.generation));
@@ -282,7 +384,7 @@ fn a_pieces_chevron_lists_its_folders_and_opens_the_one_chosen() {
     let root = ancestors(&folder("a")).remove(0);
     assert_eq!(request.folder, root);
     names_come(&mut state, &request, &["tmp", "usr"], 0);
-    state.subfolders_key(ListKey::Up);
+    state.subfolders_key(ListKey::Up, PAGE);
     assert_eq!(cursor(&state), Some(1));
     let effects = state.choose_subfolder(0);
     assert_eq!(the_load(&effects).path, root.join("tmp").expect("a name"));
@@ -292,7 +394,7 @@ fn a_pieces_chevron_lists_its_folders_and_opens_the_one_chosen() {
     press(&mut state, "h", CTRL);
     let request = the_names_request(&state.open_subfolders(LEFT, 0));
     assert!(request.filter.show_hidden);
-    state.subfolders_key(ListKey::Close);
+    state.subfolders_key(ListKey::Close, PAGE);
     assert!(state.subfolders().is_none());
     assert!(!state.generations().contains(&request.generation));
 }
@@ -324,7 +426,7 @@ fn a_late_listing_of_names_is_dropped_and_a_failed_one_shows() {
         Some(&Names::Failed(ErrorKind::PermissionDenied))
     );
     // Enter with no row does nothing.
-    assert_eq!(state.subfolders_key(ListKey::Choose), []);
+    assert_eq!(state.subfolders_key(ListKey::Choose, PAGE), []);
     assert!(state.subfolders().is_some());
     state.close_subfolders();
     assert!(state.subfolders().is_none());
@@ -426,28 +528,30 @@ fn the_path_field_completes_the_folders_after_its_last_separator() {
         Some(&Names::Loading)
     );
     assert_eq!(state.completion(RIGHT), None);
-    assert_eq!(
-        names_come(&mut state, &request, &["docs", "downloads"], 0),
-        []
-    );
-    assert_eq!(completion_rows(&state, LEFT), ["docs", "downloads"]);
 
-    // A longer name asks again and drops the request before; meanwhile the names already found
-    // that still fit show.
+    // A longer name before the answer asks again and drops the request before.
     let longer = format!("{a}{MAIN_SEPARATOR}do");
+    let first = request;
+    let request = the_names_request(&state.path_edited(LEFT, &longer));
+    assert_eq!(request.prefix, "do");
+    assert!(!state.generations().contains(&first.generation));
+    assert!(state.generations().contains(&request.generation));
+    // The answer for the text before is dropped; the one for this text shows.
+    names_come(&mut state, &first, &["docs", "downloads"], 0);
+    assert_eq!(completion_rows(&state, LEFT), Vec::<&str>::new());
+    names_come(&mut state, &request, &["docs", "downloads"], 0);
+    assert_eq!(completion_rows(&state, LEFT), ["docs", "downloads"]);
+    // That answer is all the folder has for "do": a longer start narrows it here, with no new
+    // listing.
+    let narrower = format!("{a}{MAIN_SEPARATOR}doc");
+    assert_eq!(state.path_edited(LEFT, &narrower), []);
+    assert_eq!(completion_rows(&state, LEFT), ["docs"]);
+    assert!(state.generations().contains(&request.generation));
+    // A shorter start asks again; meanwhile the names already found that still fit show.
     let second = the_names_request(&state.path_edited(LEFT, &longer));
     assert_eq!(second.prefix, "do");
-    assert!(!state.generations().contains(&request.generation));
-    assert!(state.generations().contains(&second.generation));
-    assert_eq!(completion_rows(&state, LEFT), ["docs", "downloads"]);
-    let narrower = format!("{a}{MAIN_SEPARATOR}doc");
-    let third = the_names_request(&state.path_edited(LEFT, &narrower));
     assert_eq!(completion_rows(&state, LEFT), ["docs"]);
-    // The answer for the text before is dropped; the one for this text shows.
-    names_come(&mut state, &second, &["docs", "downloads"], 0);
-    assert_eq!(completion_rows(&state, LEFT), ["docs"]);
-    names_come(&mut state, &third, &["docs", "doctor"], 3);
-    assert_eq!(completion_rows(&state, LEFT), ["docs", "doctor"]);
+    names_come(&mut state, &second, &["docs", "doctor"], 3);
     assert_eq!(
         state.completion(LEFT).map(Completion::names),
         Some(&Names::Listed {
@@ -455,6 +559,18 @@ fn the_path_field_completes_the_folders_after_its_last_separator() {
             more: 3
         })
     );
+    // A listing that left folders out is narrowed only while a new one is out.
+    let third = the_names_request(&state.path_edited(LEFT, &narrower));
+    assert_eq!(third.prefix, "doc");
+    assert_eq!(completion_rows(&state, LEFT), ["docs", "doctor"]);
+    names_come(&mut state, &third, &["docs", "doctor"], 3);
+    // So is one of another folder.
+    let elsewhere = format!("{}{MAIN_SEPARATOR}doc", folder("b"));
+    let fourth = the_names_request(&state.path_edited(LEFT, &elsewhere));
+    assert_eq!(fourth.folder, folder("b"));
+    let fifth = the_names_request(&state.path_edited(LEFT, &narrower));
+    names_come(&mut state, &fifth, &["docs", "doctor"], 3);
+    assert_eq!(completion_rows(&state, LEFT), ["docs", "doctor"]);
 
     // ↓ twice: the second row. Tab completes the text with its name and a separator, which
     // lists that folder next.
@@ -596,7 +712,169 @@ fn typed_paths_expand_home_and_variables_and_remote_ones_are_refused() {
             "{remote}"
         );
     }
+    // A file URL names its local folder.
+    let effects = state.enter_path(LEFT, &file_url(&std::env::temp_dir().join("a b")));
+    assert_eq!(the_load(&effects).path, folder("a b"));
     // The completion list reads the text the same way.
     let request = the_names_request(&state.path_edited(LEFT, &format!("~{MAIN_SEPARATOR}")));
     assert_eq!(request.folder, folder("home"));
+    let url = file_url(&std::env::temp_dir().join("a b"));
+    let request = the_names_request(&state.path_edited(LEFT, &format!("{url}/x%20y")));
+    assert_eq!(request.folder, folder("a b"));
+    assert_eq!(request.prefix, "x y");
+}
+
+#[test]
+fn a_tab_before_the_first_names_waits_for_them() {
+    let mut state = ready(vec![], vec![]);
+    let a = folder("a").to_string();
+    let typed = format!("{a}{MAIN_SEPARATOR}d");
+    let request = the_names_request(&state.path_edited(LEFT, &typed));
+    // Tab before the names: nothing yet, and the field keeps the keys (`pane.slint`).
+    assert_eq!(state.complete_path(LEFT, &typed), None);
+    // The names come: the field gets the text completed with the first one, and that folder's
+    // listing starts.
+    let effects = names_come(&mut state, &request, &["docs", "downloads"], 0);
+    let completed = format!("{a}{MAIN_SEPARATOR}docs{MAIN_SEPARATOR}");
+    assert!(
+        effects.contains(&Effect::FillPath {
+            side: LEFT,
+            text: completed.clone()
+        }),
+        "{effects:?}"
+    );
+    assert_eq!(the_names_request(&effects).folder, in_folder("a", "docs"));
+    assert_eq!(
+        state.completion(LEFT).map(Completion::text),
+        Some(completed.as_str())
+    );
+
+    // A Tab for a text that has changed since does nothing when the names come.
+    let x = format!("{a}{MAIN_SEPARATOR}x");
+    let _ = the_names_request(&state.path_edited(LEFT, &x));
+    assert_eq!(state.complete_path(LEFT, &x), None);
+    let xy = format!("{a}{MAIN_SEPARATOR}xy");
+    let request = the_names_request(&state.path_edited(LEFT, &xy));
+    assert_eq!(names_come(&mut state, &request, &["xyz"], 0), []);
+    // Nor when no folder fits, or the folder could not be listed.
+    let q = format!("{a}{MAIN_SEPARATOR}q");
+    let request = the_names_request(&state.path_edited(LEFT, &q));
+    assert_eq!(state.complete_path(LEFT, &q), None);
+    assert_eq!(names_come(&mut state, &request, &[], 0), []);
+    let r = format!("{a}{MAIN_SEPARATOR}r");
+    let request = the_names_request(&state.path_edited(LEFT, &r));
+    assert_eq!(state.complete_path(LEFT, &r), None);
+    let failed = state.loaded(LoadEvent::Failed {
+        generation: request.generation,
+        kind: ErrorKind::PermissionDenied,
+    });
+    assert_eq!(failed, []);
+}
+
+#[test]
+fn the_list_of_subfolders_moves_by_pages_and_to_its_ends() {
+    let mut state = ready(vec![], vec![]);
+    let names: Vec<String> = (1..=25).map(|n| format!("여행 {n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let cursor = |state: &AppState| state.subfolders().and_then(Subfolders::cursor);
+    open_listed(&mut state, LEFT, &names);
+    // From no row, PageDown goes a page from the first row; it stops at the last one.
+    state.subfolders_key(ListKey::PageDown, PAGE);
+    assert_eq!(cursor(&state), Some(9));
+    state.subfolders_key(ListKey::PageDown, PAGE);
+    assert_eq!(cursor(&state), Some(19));
+    state.subfolders_key(ListKey::PageDown, PAGE);
+    assert_eq!(cursor(&state), Some(24));
+    state.subfolders_key(ListKey::PageUp, PAGE);
+    assert_eq!(cursor(&state), Some(14));
+    state.subfolders_key(ListKey::First, PAGE);
+    assert_eq!(cursor(&state), Some(0));
+    state.subfolders_key(ListKey::PageUp, PAGE);
+    assert_eq!(cursor(&state), Some(0));
+    state.subfolders_key(ListKey::Last, PAGE);
+    assert_eq!(cursor(&state), Some(24));
+    // From no row, PageUp goes a page from the last row; a page of the rows the list shows.
+    open_listed(&mut state, LEFT, &names);
+    state.subfolders_key(ListKey::PageUp, 4);
+    assert_eq!(cursor(&state), Some(21));
+    // A list with no row has no cursor.
+    open_listed(&mut state, LEFT, &[]);
+    for key in [ListKey::First, ListKey::Last, ListKey::PageDown] {
+        state.subfolders_key(key, PAGE);
+        assert_eq!(cursor(&state), None, "{key:?}");
+    }
+}
+
+#[test]
+fn a_new_layout_alone_closes_the_lists() {
+    let mut state = ready(vec![], vec![]);
+    open_listed(&mut state, LEFT, &["docs"]);
+    // Nothing changed: the list stays.
+    settle(&mut state);
+    assert!(state.subfolders().is_some());
+    let before = |state: &AppState| {
+        let tab = state.panes()[LEFT].active_tab();
+        (state.active(), tab.id(), tab.location().clone())
+    };
+    let was = before(&state);
+    // The divider moves: the pane, its tab and its folder stay, and the list closes.
+    state.set_split_share(0.3);
+    settle(&mut state);
+    assert_eq!(before(&state), was);
+    assert!(state.subfolders().is_none());
+    // So does the completion list.
+    let typed = format!("{}{MAIN_SEPARATOR}", folder("a"));
+    let request = the_names_request(&state.path_edited(LEFT, &typed));
+    names_come(&mut state, &request, &["docs"], 0);
+    settle(&mut state);
+    assert!(state.completion(LEFT).is_some());
+    state.set_split_share(0.6);
+    settle(&mut state);
+    assert_eq!(before(&state), was);
+    assert_eq!(state.completion(LEFT), None);
+}
+
+#[test]
+fn the_completion_list_closes_when_the_panes_swap_or_one_shows() {
+    let mut state = ready(vec![], vec![]);
+    let typed = format!("{}{MAIN_SEPARATOR}", folder("a"));
+    let edit = |state: &mut AppState| {
+        let request = the_names_request(&state.path_edited(LEFT, &typed));
+        names_come(state, &request, &["docs"], 0);
+        settle(state);
+        assert!(state.completion(LEFT).is_some());
+    };
+    edit(&mut state);
+    press(&mut state, "u", CTRL);
+    settle(&mut state);
+    assert_eq!(state.completion(LEFT), None);
+    edit(&mut state);
+    press(&mut state, &special(Key::F12), NONE);
+    settle(&mut state);
+    assert!(!state.layout().dual);
+    assert_eq!(state.completion(LEFT), None);
+}
+
+#[test]
+fn a_link_to_a_folder_is_listed_and_opened_as_a_folder() {
+    let mut state = ready(vec![], vec![]);
+    let request = the_names_request(&state.open_subfolders(LEFT, 0));
+    let link = FolderName {
+        name: "bin".into(),
+        link: true,
+    };
+    state.loaded(LoadEvent::Names {
+        generation: request.generation,
+        names: vec![link.clone(), FolderName::folder("etc")],
+        more: 0,
+    });
+    assert_eq!(
+        state.subfolders().map(|list| list.names().rows()),
+        Some([link, FolderName::folder("etc")].as_slice())
+    );
+    let effects = state.choose_subfolder(0);
+    assert_eq!(
+        the_load(&effects).path,
+        request.folder.join("bin").expect("a name")
+    );
 }

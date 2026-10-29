@@ -3,8 +3,8 @@
 // pane, a tab into its folder. A tab can be dragged too, to another place in its strip or into
 // the other pane's strip; its menu (a right click) closes, copies, pins and moves tabs. The path
 // row is the address bar (NAV-03): the `›` after each piece asks for the list of that folder's
-// folders, which the window shows under it (`FolderMenu`), and the path field shows the
-// completions Rust finds for its text under it.
+// folders, which the window shows under it (`FolderMenu`), and the window shows the completions
+// Rust finds for the path field's text under the field (`field-x` and the others say where).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -12,41 +12,70 @@ import { Icon } from "icons.slint";
 import { FileList, FileRow } from "file-list.slint";
 import { Shortcuts } from "shortcuts.slint";
 
+// A row of a list of folder names of the address bar: a folder, or a link that leads to one.
+export struct FolderMenuRow {
+    name: string,
+    link: bool,
+}
+
 // A list of folder names of the address bar, as Rust has it.
 export struct FolderMenuView {
     // The list shows.
     open: bool,
-    rows: [string],
+    rows: [FolderMenuRow],
     // The row of the keyboard's cursor, or -1.
     cursor: int,
     // A line under the rows: the listing is on its way, it failed, the folder has no folder,
     // or how many more folders there are than the rows. Empty for none.
     note: string,
+    // Rust waits for the list's first names (a Tab in the path field waits with it).
+    pending: bool,
+}
+
+// How a list of folder names is measured: rows of `row` height between `padding` above and
+// below, and a note line of `row` height when it has one. A list shows ten rows at most.
+export global MenuRoom {
+    out property <length> row: 30px;
+    out property <length> padding: 4px;
+
+    // The rows a list (with its note line when `note`) shows in `room`: as many as fit, one at
+    // least, ten at most.
+    public pure function rows(room: length, note: bool) -> int {
+        return clamp(floor((room - 2 * MenuRoom.padding - (note ? MenuRoom.row : 0px)) / MenuRoom.row), 1, 10);
+    }
 }
 
 // A drop-down list of folder names (the folders of a piece of the path row, or the completions
-// of the path field): at most ten rows show, and it scrolls to the keyboard's row. A click on a
-// row chooses it. It takes no focus: its keys come from the field or the window that has them.
+// of the path field): `max-rows` rows show at most (the window gives it the room there is), and
+// it scrolls to the keyboard's row, which so always shows. A click on a row chooses it. It
+// takes no focus: its keys come from the field or the window that has them. A link to a folder
+// shows the link icon, as the file list shows it.
 export component FolderMenu inherits Rectangle {
     in property <FolderMenuView> view;
     // The list's name for screen readers.
     in property <string> label;
+    in property <int> max-rows: 10;
     callback chosen(index: int);
 
-    property <length> row-height: 30px;
-    property <int> shown-rows: min(root.view.rows.length, 10);
+    property <int> shown-rows: min(root.view.rows.length, root.max-rows);
     property <int> cursor: root.view.cursor;
     // Scrolls as little as needed to show the keyboard's row whole.
-    changed cursor => {
+    function show-cursor() {
         if (root.cursor < 0) {
             return;
         }
-        let top = root.cursor * root.row-height;
+        let top = root.cursor * MenuRoom.row;
         if (top + list.content-y < 0) {
             list.content-y = -top;
-        } else if (top + root.row-height + list.content-y > list.visible-height) {
-            list.content-y = list.visible-height - top - root.row-height;
+        } else if (top + MenuRoom.row + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - top - MenuRoom.row;
         }
+    }
+    changed cursor => {
+        root.show-cursor();
+    }
+    changed shown-rows => {
+        root.show-cursor();
     }
 
     height: layout.preferred-height;
@@ -64,19 +93,20 @@ export component FolderMenu inherits Rectangle {
     TouchArea { }
 
     layout := VerticalLayout {
-        padding: 4px;
+        padding: MenuRoom.padding;
 
         list := ListView {
-            height: root.shown-rows * root.row-height;
+            height: root.shown-rows * MenuRoom.row;
             visible: root.shown-rows > 0;
             accessible-label: root.label;
 
-            for name[i] in root.view.rows: Rectangle {
-                height: root.row-height;
+            for row[i] in root.view.rows: Rectangle {
+                height: MenuRoom.row;
                 border-radius: 4px;
                 background: i == root.view.cursor ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
                 accessible-role: list-item;
-                accessible-label: name;
+                accessible-label: row.name;
+                accessible-description: row.link ? "바로 가기" : "";
                 accessible-item-index: i;
                 accessible-item-selectable: true;
                 accessible-item-selected: i == root.view.cursor;
@@ -93,12 +123,12 @@ export component FolderMenu inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: 16px;
                         height: 16px;
-                        name: "folder";
+                        name: row.link ? "link" : "folder";
                         color: Theme.folder;
                     }
                     Text {
                         accessible-role: none;
-                        text: name;
+                        text: row.name;
                         color: Theme.text;
                         vertical-alignment: center;
                         overflow: elide;
@@ -116,7 +146,7 @@ export component FolderMenu inherits Rectangle {
         if root.view.note != "": HorizontalLayout {
             padding-left: 8px;
             padding-right: 8px;
-            height: root.row-height;
+            height: MenuRoom.row;
 
             Text {
                 text: root.view.note;
@@ -418,6 +448,11 @@ component ChevronButton inherits Rectangle {
             root.clicked();
         }
     }
+
+    // In front of the touch area, which would take the pointer from it.
+    Tooltip {
+        text: @markdown("하위 폴더 보기");
+    }
 }
 
 component CrumbButton inherits Rectangle {
@@ -543,20 +578,20 @@ export component Pane inherits Rectangle {
     callback tab-move-check(data: data-transfer, slot: int) -> TabDrop;
     callback tab-move-dropped(data: data-transfer, slot: int) -> bool;
     callback crumb-clicked(index: int);
-    // A click on the `›` after piece `index`, whose bottom left corner is at (`x`, `y`) of the
-    // window: the window shows the list of that piece's folders there.
-    callback subfolders-clicked(index: int, x: length, y: length);
+    // A click on the `›` after piece `index`, whose left edge is at `x` of the window and whose
+    // top and bottom are at `top` and `bottom`: the window shows the list of that piece's
+    // folders under it (or above it, when there is more room there).
+    callback subfolders-clicked(index: int, x: length, top: length, bottom: length);
     // Enter in the path field.
     callback path-entered(text: string);
     // The text of the path field changed as it was typed (not by Tab's completion).
     callback path-edited(text: string);
     // ↑ (-1) or ↓ (1) in the path field while its completion list shows.
     callback completion-step(delta: int);
-    // Tab in the path field, which holds `text`, while its completion list shows: the completed
-    // text, or an empty one for none.
+    // Tab in the path field, which holds `text`, while its completion list shows or Rust waits
+    // for its first names: the completed text, or an empty one for none (yet: a Tab that waits
+    // gets its text by `fill-path`).
     callback path-completed(text: string) -> string;
-    // A click on row `index` of the completion list; the field closes.
-    callback completion-chosen(index: int);
     // The completion list is to close: Esc while it shows, or the field closed.
     callback completion-dismissed();
     // Esc closed the path field. (A field that loses focus closes silently: the focus stays
@@ -592,6 +627,27 @@ export component Pane inherits Rectangle {
     public function scroll-to(index: int) {
         files.scroll-to(index);
     }
+
+    // The path field closes (a click on a row of the window's completion list).
+    public function end-edit() {
+        root.editing = false;
+    }
+
+    // The path field, while it is edited, holds `text` with the cursor at its end (a Tab that
+    // waited for the completion list's first names).
+    public function fill-path(text: string) {
+        if (root.editing) {
+            path-input.text = text;
+            path-input.set-selection-offsets(2147483647, 2147483647);
+        }
+    }
+
+    // Where the path field is in the window (its left edge, top, bottom and width), for the
+    // completion list the window shows under it.
+    out property <length> field-x: field-box.absolute-position.x;
+    out property <length> field-top: field-box.absolute-position.y;
+    out property <length> field-bottom: field-box.absolute-position.y + field-box.height;
+    out property <length> field-width: field-box.width;
 
     // "불러오는 중…" shows only once a listing has taken 0.3 s, so a quick one never flashes it.
     private property <bool> loading: root.view.loading;
@@ -853,7 +909,7 @@ export component Pane inherits Rectangle {
                                         label: "‘\{root.view.crumbs[i - 1].label}’ 하위 폴더";
                                         open: root.view.chevron == crumb.index - 1;
                                         clicked => {
-                                            root.subfolders-clicked(crumb.index - 1, self.absolute-position.x, self.absolute-position.y + self.height);
+                                            root.subfolders-clicked(crumb.index - 1, self.absolute-position.x, self.absolute-position.y, self.absolute-position.y + self.height);
                                         }
                                     }
                                 }
@@ -876,7 +932,7 @@ export component Pane inherits Rectangle {
                                         label: "‘\{crumb.label}’ 하위 폴더";
                                         open: root.view.chevron == crumb.index;
                                         clicked => {
-                                            root.subfolders-clicked(crumb.index, self.absolute-position.x, self.absolute-position.y + self.height);
+                                            root.subfolders-clicked(crumb.index, self.absolute-position.x, self.absolute-position.y, self.absolute-position.y + self.height);
                                         }
                                     }
                                 }
@@ -897,7 +953,7 @@ export component Pane inherits Rectangle {
                 }
             }
 
-            Rectangle {
+            field-box := Rectangle {
                 x: 8px;
                 y: 4px;
                 width: parent.width - 16px;
@@ -947,11 +1003,14 @@ export component Pane inherits Rectangle {
                         edited => {
                             root.path-edited(self.text);
                         }
-                        // Esc closes the completion list first, then the field. The list's keys
-                        // (↑↓ and Tab) act only while it shows and no input method composes:
-                        // Tab is kept from moving the focus then, as in the dialogs.
+                        // Esc closes the completion list first, then the field, composing or not;
+                        // it carries out nothing. The list's keys act only while no input method
+                        // composes: ↑↓ while the list shows, and Tab while it shows or Rust waits
+                        // for its first names (that Tab waits with it). Tab is kept from moving
+                        // the focus then, composing or not, as in the dialogs.
                         key-pressed(event) => {
                             let listing = root.view.completion.open;
+                            let waiting = root.view.completion.pending;
                             if (event.text == Key.Escape) {
                                 if (listing) {
                                     root.completion-dismissed();
@@ -963,7 +1022,7 @@ export component Pane inherits Rectangle {
                                 return accept;
                             }
                             let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
-                            if (!listing || !plain) {
+                            if (!(listing || waiting) || !plain) {
                                 return reject;
                             }
                             if (event.text == Key.Tab) {
@@ -976,7 +1035,7 @@ export component Pane inherits Rectangle {
                                 }
                                 return accept;
                             }
-                            if (!self.composing && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                            if (listing && !self.composing && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
                                 root.completion-step(event.text == Key.UpArrow ? -1 : 1);
                                 return accept;
                             }
@@ -1128,19 +1187,6 @@ export component Pane inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
             }
-        }
-    }
-
-    // The completion list, under the path field while it is edited and Rust has names for it.
-    if root.editing && root.view.completion.open: FolderMenu {
-        x: 8px;
-        y: 40px + 38px - 2px;
-        width: min(parent.width - 16px, 420px);
-        view: root.view.completion;
-        label: "경로 자동 완성";
-        chosen(index) => {
-            root.editing = false;
-            root.completion-chosen(index);
         }
     }
 

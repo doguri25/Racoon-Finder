@@ -34,9 +34,9 @@ use crate::state::{Completion, Names};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuView, JobRowView, MainWindow,
-    MessageView, NameView, PaneView, PickTarget, PickView, PreflightView, RecoveryView,
-    SectionHead, Shortcuts, TabItem, TreeRow,
+    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow, FolderMenuView,
+    JobRowView, MainWindow, MessageView, NameView, PaneView, PickTarget, PickView, PreflightView,
+    RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -68,7 +68,7 @@ pub struct PaneModels {
     rows: Rc<FileRows>,
     tabs: Rc<VecModel<TabItem>>,
     crumbs: Rc<VecModel<Crumb>>,
-    completions: Rc<VecModel<SharedString>>,
+    completions: Rc<VecModel<FolderMenuRow>>,
 }
 
 impl fmt::Debug for PaneModels {
@@ -163,9 +163,10 @@ impl PaneModels {
 /// when it is closed), with `model` as its rows. The list of a piece's folders (`notes`) shows
 /// from the click on, and says while the folder is listed, when it could not be, and when it has
 /// no folder; the completion list shows only while it has names. Both say how many folders more
-/// there are than their rows.
+/// there are than their rows, and mark the links among them, and whether their first names are
+/// still on their way (`pending`).
 pub fn folder_menu(
-    model: &Rc<VecModel<SharedString>>,
+    model: &Rc<VecModel<FolderMenuRow>>,
     list: Option<(&Names, Option<usize>)>,
     notes: bool,
 ) -> FolderMenuView {
@@ -177,10 +178,13 @@ pub fn folder_menu(
             ..FolderMenuView::default()
         };
     };
-    let rows: Vec<SharedString> = names
+    let rows: Vec<FolderMenuRow> = names
         .rows()
         .iter()
-        .map(|name| name.to_string_lossy().as_ref().into())
+        .map(|each| FolderMenuRow {
+            name: each.name.to_string_lossy().as_ref().into(),
+            link: each.link,
+        })
         .collect();
     let note = match names {
         Names::Listed { more, .. } if *more > 0 => words::more_folders(*more),
@@ -198,6 +202,7 @@ pub fn folder_menu(
         rows: ModelRc::from(Rc::clone(model)),
         cursor: cursor.and_then(|row| i32::try_from(row).ok()).unwrap_or(-1),
         note: note.into(),
+        pending: *names == Names::Loading,
     }
 }
 

@@ -5,6 +5,7 @@
 //! every sort here goes through `stable_order_by`, a merge sort that never panics.
 
 use std::cmp::Ordering;
+use std::ffi::OsStr;
 
 use rf_core::{Entry, EntryKind};
 use rf_platform::NaturalKey;
@@ -155,6 +156,25 @@ pub fn sort_entries(entries: &mut Vec<Entry>, spec: &SortSpec) {
     entries.extend(order.into_iter().filter_map(|index| slots[index].take()));
 }
 
+/// Sorts `items` by the names `name` gives them, as `sort_entries` sorts entries by name
+/// ascending with no other key and no folders first: the natural order of the name, then its
+/// bytes. For a list of names that need no other field of an [`Entry`]. The sort is stable and
+/// does not panic whatever the OS natural order does.
+pub fn sort_by_name<T>(items: &mut Vec<T>, name: impl Fn(&T) -> &OsStr) {
+    // As in `sort_entries`, the keys live only inside this call.
+    let keys: Vec<NaturalKey> = items
+        .iter()
+        .map(|item| NaturalKey::new(name(item)))
+        .collect();
+    let order = stable_order_by(items.len(), |a, b| {
+        keys[a]
+            .compare(&keys[b])
+            .then_with(|| name(&items[a]).cmp(name(&items[b])))
+    });
+    let mut slots: Vec<Option<T>> = items.drain(..).map(Some).collect();
+    items.extend(order.into_iter().filter_map(|index| slots[index].take()));
+}
+
 /// The indices `0..len` in sorted order, by a bottom-up merge sort: adjacent runs of width 1,
 /// 2, 4, ... are merged, and on a tie the left element goes first, so the result is stable.
 ///
@@ -227,6 +247,27 @@ mod tests {
         let mut order = stable_order_by(1_000, rps);
         order.sort_unstable();
         assert_eq!(order, (0..1_000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn names_sort_as_entries_sort_by_name() {
+        let mut names: Vec<(&str, usize)> =
+            vec![("b10", 0), ("Alpha", 1), ("b2", 2), ("beta", 3), ("b2", 4)];
+        sort_by_name(&mut names, |(name, _)| OsStr::new(name));
+        // Natural order, case-insensitive; equal names keep their order.
+        assert_eq!(
+            names,
+            [("Alpha", 1), ("b2", 2), ("b2", 4), ("b10", 0), ("beta", 3)]
+        );
+        let mut entries: Vec<Entry> = ["b10", "Alpha", "b2", "beta"]
+            .into_iter()
+            .map(|name| Entry::new(name, EntryKind::Dir))
+            .collect();
+        sort_entries(&mut entries, &SortSpec::default());
+        let mut alone: Vec<&str> = vec!["b10", "Alpha", "b2", "beta"];
+        sort_by_name(&mut alone, |name| OsStr::new(name));
+        let sorted: Vec<&OsStr> = entries.iter().map(|entry| entry.name.as_os_str()).collect();
+        assert_eq!(sorted, alone.iter().map(OsStr::new).collect::<Vec<_>>());
     }
 
     #[test]

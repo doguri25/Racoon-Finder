@@ -9,7 +9,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use rf_core::{Entry, ErrorKind, Os, Scheme, VPath};
-use rf_ui::loader::{LoadEvent, LoadRequest, LoadTicket, Loader, NamesRequest};
+use rf_ui::loader::{FolderName, LoadEvent, LoadRequest, LoadTicket, Loader, NamesRequest};
 use rf_ui::pane::{Handled, LoadStatus, Pane};
 use rf_vfs::{
     CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LocalProvider, Provider, ReadStream,
@@ -583,8 +583,8 @@ fn a_folder_listing_has_only_folders_and_no_watch() {
     );
 }
 
-/// What a [`Loader::list_names`] of `request` sent: the names, and how many more there are.
-fn names_of(loader: &Loader, request: NamesRequest) -> (Vec<String>, usize) {
+/// What a [`Loader::list_names`] of `request` sent: the folders, and how many more there are.
+fn folders_of(loader: &Loader, request: NamesRequest) -> (Vec<FolderName>, usize) {
     let generation = request.generation;
     let (tx, rx) = mpsc::channel();
     let _ticket = loader.list_names(request, sender(&tx));
@@ -595,14 +595,20 @@ fn names_of(loader: &Loader, request: NamesRequest) -> (Vec<String>, usize) {
             more,
         } => {
             assert_eq!(sent, generation);
-            let names = names
-                .iter()
-                .map(|name| name.to_string_lossy().into_owned())
-                .collect();
             (names, more)
         }
         other => panic!("expected names, got {other:?}"),
     }
+}
+
+/// What a [`Loader::list_names`] of `request` sent: the names, and how many more there are.
+fn names_of(loader: &Loader, request: NamesRequest) -> (Vec<String>, usize) {
+    let (folders, more) = folders_of(loader, request);
+    let names = folders
+        .iter()
+        .map(|each| each.name.to_string_lossy().into_owned())
+        .collect();
+    (names, more)
 }
 
 #[test]
@@ -613,10 +619,7 @@ fn a_listing_of_names_keeps_the_folders_that_fit_and_counts_the_rest() {
     }
     std::fs::write(t.path().join("b.txt"), b"a").unwrap();
     #[cfg(unix)]
-    {
-        std::fs::create_dir(t.path().join(".cache")).unwrap();
-        std::os::unix::fs::symlink(t.path().join("b2"), t.path().join("blink")).unwrap();
-    }
+    std::fs::create_dir(t.path().join(".cache")).unwrap();
     let request = |prefix: &str, filter: VisibilityFilter, limit: usize, os: Os| NamesRequest {
         generation: 7,
         folder: local(t.path()),
@@ -629,8 +632,8 @@ fn a_listing_of_names_keeps_the_folders_that_fit_and_counts_the_rest() {
     let (gated, log, open) = Gated::loader(Hold::List);
     // The gate is open from the start.
     open.send(()).unwrap();
-    // The folders, in natural order: no file, no link, and no hidden folder while the panes
-    // hide them.
+    // The folders, in natural order: no file, and no hidden folder while the panes hide them
+    // (links: `a_listing_of_names_keeps_the_links_that_lead_to_folders`).
     assert_eq!(
         names_of(&gated, request("", shown, 100, Os::Other)),
         (strings(&["Alpha", "b2", "b10", "beta", "music"]), 0)
@@ -718,6 +721,55 @@ fn a_cancelled_listing_of_names_sends_nothing() {
         [Step::Listed(Err(ErrorKind::Cancelled)), Step::Dropped]
     );
     assert_no_events(&rx);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_of_names_keeps_the_links_that_lead_to_folders() {
+    use std::os::unix::fs::symlink;
+
+    let t = tempfile::tempdir().unwrap();
+    for dir in ["docs", "music"] {
+        std::fs::create_dir(t.path().join(dir)).unwrap();
+    }
+    std::fs::write(t.path().join("a.txt"), b"a").unwrap();
+    symlink(t.path().join("docs"), t.path().join("docs link")).unwrap();
+    symlink(t.path().join("a.txt"), t.path().join("file link")).unwrap();
+    symlink(t.path().join("missing"), t.path().join("broken link")).unwrap();
+    let request = |prefix: &str, limit: usize| NamesRequest {
+        generation: 3,
+        folder: local(t.path()),
+        prefix: prefix.to_owned(),
+        filter: VisibilityFilter::default(),
+        limit,
+        os: Os::Other,
+    };
+    let link = |name: &str| FolderName {
+        name: name.into(),
+        link: true,
+    };
+    // A link that leads to a folder is listed among the folders by its name, as a link; one to
+    // a file or to nothing is not.
+    assert_eq!(
+        folders_of(&loader(), request("", 100)),
+        (
+            vec![
+                FolderName::folder("docs"),
+                link("docs link"),
+                FolderName::folder("music"),
+            ],
+            0
+        )
+    );
+    // Past the limit a link is neither followed nor counted; a folder is counted.
+    assert_eq!(
+        folders_of(&loader(), request("d", 1)),
+        (vec![FolderName::folder("docs")], 0)
+    );
+    assert_eq!(
+        folders_of(&loader(), request("", 1)),
+        (vec![FolderName::folder("docs")], 1)
+    );
 }
 
 fn strings(list: &[&str]) -> Vec<String> {

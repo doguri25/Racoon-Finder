@@ -16,7 +16,10 @@ import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
-import { Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView } from "pane.slint";
+import {
+    Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
+    MenuRoom
+} from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
 import { JobPanel, JobRowView } from "job-panel.slint";
 import {
@@ -29,7 +32,7 @@ import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 export {
     Theme, FileRow, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow, Shortcuts, FolderMenuView
+    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -133,7 +136,29 @@ export component MainWindow inherits Window {
     // it (one at a time, in either pane), and where that `›` is.
     in property <FolderMenuView> subfolders;
     private property <length> subfolders-x;
-    private property <length> subfolders-y;
+    private property <length> subfolders-top;
+    private property <length> subfolders-bottom;
+    // How many rows PageUp and PageDown move in that list: the rows it shows.
+    out property <int> subfolders-page: max(1, min(root.subfolders.rows.length, root.subfolders-rows));
+    // The list goes under the `›`, or above it when its first rows do not fit under it and
+    // there is more room above, and shows the rows that fit there.
+    private property <length> subfolders-below: root.height - root.subfolders-bottom - 2px - 8px;
+    private property <length> subfolders-above: root.subfolders-top - 2px - 8px;
+    private property <bool> subfolders-up: MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < min(root.subfolders.rows.length, 3) && root.subfolders-above > root.subfolders-below;
+    private property <int> subfolders-rows: MenuRoom.rows(root.subfolders-up ? root.subfolders-above : root.subfolders-below, root.subfolders.note != "");
+    // The completion list of the path field being edited: the pane whose list shows (0 or 1;
+    // -1 for none), the list, and where that pane's field is. It goes under the field, as wide
+    // as it, or above it as the list of subfolders goes above its `›`.
+    private property <int> completing: left.editing && root.left-pane.completion.open ? 0 : right.editing && root.right-pane.completion.open ? 1 : -1;
+    private property <FolderMenuView> completion: root.completing == 1 ? root.right-pane.completion : root.left-pane.completion;
+    private property <length> completion-x: root.completing == 1 ? right.field-x : left.field-x;
+    private property <length> completion-width: root.completing == 1 ? right.field-width : left.field-width;
+    private property <length> completion-top: root.completing == 1 ? right.field-top : left.field-top;
+    private property <length> completion-bottom: root.completing == 1 ? right.field-bottom : left.field-bottom;
+    private property <length> completion-below: root.height - root.completion-bottom - 2px - 8px;
+    private property <length> completion-above: root.completion-top - 2px - 8px;
+    private property <bool> completion-up: MenuRoom.rows(root.completion-below, root.completion.note != "") < min(root.completion.rows.length, 3) && root.completion-above > root.completion-below;
+    private property <int> completion-rows: MenuRoom.rows(root.completion-up ? root.completion-above : root.completion-below, root.completion.note != "");
 
     // A key pressed while no text field has focus: the key's text (a character of
     // `Key` for a special key) and the modifiers (on macOS `ctrl` is Command and `meta`
@@ -172,9 +197,10 @@ export component MainWindow inherits Window {
     callback subfolder-chosen(index: int);
     callback subfolders-dismissed();
     callback path-entered(side: int, text: string);
-    // The path field of pane `side`: its text was typed, ↑ (-1) or ↓ (1) or Tab while its
-    // completion list shows (Tab gives the completed text, or an empty one), a row of the list
-    // was clicked, the list is to close (Esc, or the field closed).
+    // The path field of pane `side`: its text was typed, ↑ (-1) or ↓ (1) while its completion
+    // list shows, Tab while it shows or Rust waits for its first names (Tab gives the completed
+    // text, or an empty one), a row of the list was clicked, the list is to close (Esc, or the
+    // field closed).
     callback path-edited(side: int, text: string);
     callback completion-step(side: int, delta: int);
     callback path-completed(side: int, text: string) -> string;
@@ -275,6 +301,16 @@ export component MainWindow inherits Window {
             left.edit-path();
         } else {
             right.edit-path();
+        }
+    }
+
+    // Puts `text` into pane `side`'s path field while it is edited: a Tab that waited for the
+    // completion list's first names has completed it.
+    public function fill-path(side: int, text: string) {
+        if (side == 0) {
+            left.fill-path(text);
+        } else {
+            right.fill-path(text);
         }
     }
 
@@ -981,9 +1017,10 @@ export component MainWindow inherits Window {
                             root.crumb-clicked(0, index);
                             keys.focus();
                         }
-                        subfolders-clicked(index, x, y) => {
+                        subfolders-clicked(index, x, top, bottom) => {
                             root.subfolders-x = x;
-                            root.subfolders-y = y;
+                            root.subfolders-top = top;
+                            root.subfolders-bottom = bottom;
                             keys.focus();
                             root.subfolders-clicked(0, index);
                         }
@@ -999,10 +1036,6 @@ export component MainWindow inherits Window {
                         }
                         path-completed(text) => {
                             return root.path-completed(0, text);
-                        }
-                        completion-chosen(index) => {
-                            keys.focus();
-                            root.completion-chosen(0, index);
                         }
                         completion-dismissed => {
                             root.completion-dismissed(0);
@@ -1111,9 +1144,10 @@ export component MainWindow inherits Window {
                             root.crumb-clicked(1, index);
                             keys.focus();
                         }
-                        subfolders-clicked(index, x, y) => {
+                        subfolders-clicked(index, x, top, bottom) => {
                             root.subfolders-x = x;
-                            root.subfolders-y = y;
+                            root.subfolders-top = top;
+                            root.subfolders-bottom = bottom;
                             keys.focus();
                             root.subfolders-clicked(1, index);
                         }
@@ -1129,10 +1163,6 @@ export component MainWindow inherits Window {
                         }
                         path-completed(text) => {
                             return root.path-completed(1, text);
-                        }
-                        completion-chosen(index) => {
-                            keys.focus();
-                            root.completion-chosen(1, index);
                         }
                         completion-dismissed => {
                             root.completion-dismissed(1);
@@ -1269,11 +1299,32 @@ export component MainWindow inherits Window {
     if root.subfolders.open: FolderMenu {
         width: 300px;
         x: max(8px, min(root.subfolders-x - 4px, root.width - self.width - 8px));
-        y: min(root.subfolders-y + 2px, max(8px, root.height - self.height - 8px));
+        y: root.subfolders-up ? max(8px, root.subfolders-top - 2px - self.height) : min(root.subfolders-bottom + 2px, max(8px, root.height - self.height - 8px));
+        max-rows: root.subfolders-rows;
         view: root.subfolders;
         label: "하위 폴더";
         chosen(index) => {
             root.subfolder-chosen(index);
+        }
+    }
+    // The completion list of the path field being edited. A click on a row closes the field and
+    // goes to that row's folder.
+    if root.completing >= 0: FolderMenu {
+        x: root.completion-x;
+        width: root.completion-width;
+        y: root.completion-up ? max(8px, root.completion-top - 2px - self.height) : min(root.completion-bottom + 2px, max(8px, root.height - self.height - 8px));
+        max-rows: root.completion-rows;
+        view: root.completion;
+        label: "경로 자동 완성";
+        chosen(index) => {
+            let side = root.completing;
+            if (side == 1) {
+                right.end-edit();
+            } else {
+                left.end-edit();
+            }
+            keys.focus();
+            root.completion-chosen(side, index);
         }
     }
 

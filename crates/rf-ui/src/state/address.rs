@@ -5,8 +5,9 @@
 //!   opens the list of the folders in that piece's folder, under it
 //!   ([`AppState::open_subfolders`]). A worker lists them
 //!   ([`Loader::list_names`](crate::loader::Loader::list_names): folders only, those the panes
-//!   show, at most [`MAX_NAMES`] of them and the count of the rest), and the list scrolls. ↑↓
-//!   move its cursor, Enter goes to the cursor's folder and Esc closes it
+//!   show, and the links that lead to folders, at most [`MAX_NAMES`] of them and the count of
+//!   the rest), and the list scrolls. ↑↓ move its cursor a row, `PageUp` and `PageDown` a page,
+//!   Home and End to either end, Enter goes to the cursor's folder and Esc closes it
 //!   ([`AppState::subfolders_key`]: the controller hands it the keys of `keys::list_key` while
 //!   the list shows); a click on a row goes to its folder. Any other command of the window
 //!   closes the list ([`AppState::key`]), and so does a change of what it belongs to
@@ -17,27 +18,32 @@
 //!   changes, a worker lists the folders in the folder that the text's last separator ends
 //!   whose names start with what follows that separator. A new text drops the request before
 //!   it; while the new one is out, the names already found in that folder that still fit keep
-//!   showing. ↑↓ move the cursor ([`AppState::completion_step`]), Tab completes the text with
-//!   the cursor's name, or the first one, and a separator, which lists that folder next
-//!   ([`AppState::complete_path`]), Enter goes to the cursor's folder or else to the text
-//!   ([`AppState::enter_path`]), and Esc closes the list ([`AppState::dismiss_completion`]).
-//!   None of them acts while an input method composes (the field's guard, in `pane.slint`).
-//! - **What a typed path names** ([`read_typed`]): `~` and the environment's variables are
-//!   expanded first ([`expand_user_path`]), and a remote address (`sftp://…`) gets the notice
-//!   that the app cannot open it yet.
+//!   showing. When the names found were all the folder has for a start of the name that the
+//!   new text only lengthens, they are narrowed here and the folder is not listed again. ↑↓
+//!   move the cursor ([`AppState::completion_step`]), Tab completes the text with the cursor's
+//!   name, or the first one, and a separator, which lists that folder next
+//!   ([`AppState::complete_path`]; a Tab before the first names come waits for them), Enter
+//!   goes to the cursor's folder or else to the text ([`AppState::enter_path`]), and Esc
+//!   closes the list ([`AppState::dismiss_completion`]). None of them acts while an input
+//!   method composes (the field's guard, in `pane.slint`).
+//! - **What a typed path names** ([`read_typed`]): a `file:` URL is read as the local path it
+//!   names ([`read_file_url`]); other text has `~` and the environment's variables expanded
+//!   first ([`expand_user_path`]). A remote address (`sftp://…`) gets the notice that the app
+//!   cannot open it yet.
 //!
 //! A folder chosen in either list goes as a typed path goes: into the tab the pane shows, or
 //! into a new tab beside a pinned one ([`AppState::navigate_shown`]); navigation sync leaves
 //! the other pane where it is ([`layout`](super::layout)).
 
-use std::ffi::OsString;
+use std::borrow::Cow;
+use std::ffi::OsStr;
 
 use rf_core::{ErrorKind, Os, VPath};
 use rf_vfs::VisibilityFilter;
 
 use super::{AppState, Effect, Layout, load};
 use crate::keys::ListKey;
-use crate::loader::{LoadEvent, NamesRequest, name_starts_with};
+use crate::loader::{FolderName, LoadEvent, NamesRequest, name_starts_with};
 use crate::pane::{ancestors, next_generation};
 use crate::words;
 
@@ -72,15 +78,16 @@ impl Environment {
 pub enum Names {
     /// The worker is listing the folder.
     Loading,
-    /// The names, in the natural order, and how many more there are than [`MAX_NAMES`].
-    Listed { names: Vec<OsString>, more: usize },
+    /// The folders, in the natural order of their names, and how many more there are than
+    /// [`MAX_NAMES`].
+    Listed { names: Vec<FolderName>, more: usize },
     /// The folder could not be listed.
     Failed(ErrorKind),
 }
 
 impl Names {
-    /// The names the list shows as rows: none until they are listed.
-    pub fn rows(&self) -> &[OsString] {
+    /// The folders the list shows as rows: none until they are listed.
+    pub fn rows(&self) -> &[FolderName] {
         match self {
             Names::Listed { names, .. } => names,
             Names::Loading | Names::Failed(_) => &[],
@@ -92,7 +99,7 @@ impl Names {
     fn narrowed(self, prefix: &str, os: Os) -> Names {
         match self {
             Names::Listed { mut names, .. } => {
-                names.retain(|name| name_starts_with(name, prefix, os));
+                names.retain(|each| name_starts_with(&each.name, prefix, os));
                 Names::Listed { names, more: 0 }
             }
             Names::Loading | Names::Failed(_) => Names::Loading,
@@ -137,7 +144,7 @@ impl Subfolders {
         &self.names
     }
 
-    /// The row of the keyboard's cursor; none until ↑ or ↓.
+    /// The row of the keyboard's cursor; none until a key moves it.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor
     }
@@ -152,11 +159,19 @@ pub struct Completion {
     /// That text as far as its last separator (included), and the folder it names.
     head: String,
     folder: VPath,
+    /// The start of the names it lists: the text after `head`.
+    prefix: String,
     names: Names,
+    /// `names` are all the folder has that start with `prefix`: a listing for it, or for a
+    /// shorter start, came whole (with no folder left out).
+    complete: bool,
+    /// A Tab came before the first names: the text is completed once they come.
+    tab_waiting: bool,
     cursor: Option<usize>,
     generation: u64,
-    /// The tab (its id) the pane showed when the field's text last changed.
+    /// The tab (its id) the pane showed, and the layout, when the field's text last changed.
     tab: u64,
+    layout: Layout,
 }
 
 impl Completion {
@@ -186,8 +201,8 @@ impl Completion {
 
     /// The folder of the cursor's row.
     fn chosen(&self) -> Option<VPath> {
-        let name = self.names.rows().get(self.cursor?)?;
-        self.folder.join(name).ok()
+        let row = self.names.rows().get(self.cursor?)?;
+        self.folder.join(&row.name).ok()
     }
 }
 
@@ -309,10 +324,11 @@ fn is_variable_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Whether `text` is the address of a place given by a scheme and `//` (`sftp://host/dir`,
-/// `smb://server/share`, `https://…`, `file:///…`): the app opens the paths of the local file
-/// systems alone for now (a Windows share as `\\server\share` is one of those). A drive
-/// (`C://`) is no scheme, and `local:`, the app's own form of a local path, is not an address.
+/// Whether `text` is the address of a remote place given by a scheme and `//`
+/// (`sftp://host/dir`, `smb://server/share`, `https://…`): the app opens the paths of the local
+/// file systems alone for now (a Windows share as `\\server\share` is one of those). A drive
+/// (`C://`) is no scheme; `local:`, the app's own form of a local path, and `file:`, which
+/// [`read_file_url`] reads, are no remote addresses.
 pub fn is_remote_url(text: &str) -> bool {
     let Some((scheme, _)) = text.split_once("://") else {
         return false;
@@ -322,16 +338,121 @@ pub fn is_remote_url(text: &str) -> bool {
         && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
         && !scheme.eq_ignore_ascii_case("local")
+        && !scheme.eq_ignore_ascii_case("file")
 }
 
-/// What `text`, typed into a path field, names: it is trimmed and expanded by the rules of
-/// `os` ([`expand_user_path`]), then read as a path of this system (`VPath::parse`).
+/// What a `file:` URL names on a system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileUrl {
+    /// This path of the system.
+    Path(String),
+    /// A file on another computer, which the system reaches by no local path (Linux, macOS).
+    Remote,
+    /// No path: one that is not text once decoded, or a Windows one without a drive or a
+    /// computer.
+    Invalid,
+}
+
+/// What `text` names on `os` when it is a `file:` URL (`file:///C:/x`, `file://server/share`,
+/// `file:/x`; the scheme in any case); `None` for other text.
+///
+/// The path is percent-decoded (a `%` that starts no `%XX` stays as it is) and cut at a `?` or
+/// `#`. On Windows `file:///C:/x` (and `file:///C|/x`) is `C:\x`, and a computer's name, given
+/// as `file://server/share/x` or `file:////server/share/x`, makes the share path
+/// `\\server\share\x`. On Linux and macOS the computer must be none or `localhost`:
+/// `file:///x` and `file://localhost/x` are `/x`, and any other computer is remote.
+pub fn read_file_url(text: &str, os: Os) -> Option<FileUrl> {
+    let scheme = text.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("file:") {
+        return None;
+    }
+    let rest = &text[5..];
+    let (host, path) = match rest.strip_prefix("//") {
+        Some(after) => after.split_at(after.find('/').unwrap_or(after.len())),
+        None if rest.starts_with('/') => ("", rest),
+        None => return Some(FileUrl::Invalid),
+    };
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let (Some(host), Some(path)) = (percent_decode(host), percent_decode(path)) else {
+        return Some(FileUrl::Invalid);
+    };
+    let here = host.is_empty() || host.eq_ignore_ascii_case("localhost");
+    if os != Os::Windows {
+        return Some(if here {
+            FileUrl::Path(if path.is_empty() {
+                "/".to_owned()
+            } else {
+                path
+            })
+        } else {
+            FileUrl::Remote
+        });
+    }
+    let windows = |path: &str| path.replace('/', "\\");
+    if !here {
+        return Some(FileUrl::Path(format!("\\\\{host}{}", windows(&path))));
+    }
+    if let Some(share) = path.strip_prefix("//") {
+        return Some(FileUrl::Path(format!("\\\\{}", windows(share))));
+    }
+    // `/C:/x` or `/C|/x`: the drive, and the path on it from its root.
+    let drive = path.strip_prefix('/').and_then(|after| {
+        let mut chars = after.chars();
+        let (drive, mark) = (chars.next()?, chars.next()?);
+        (drive.is_ascii_alphabetic() && matches!(mark, ':' | '|'))
+            .then_some((drive, chars.as_str()))
+    });
+    Some(match drive {
+        Some((drive, "")) => FileUrl::Path(format!("{drive}:\\")),
+        Some((drive, on_drive)) if on_drive.starts_with('/') => {
+            FileUrl::Path(format!("{drive}:{}", windows(on_drive)))
+        }
+        _ => FileUrl::Invalid,
+    })
+}
+
+/// `text` with each `%XX` turned into its byte; `None` when the bytes are not UTF-8. A `%` that
+/// two hexadecimal digits do not follow stays as it is.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = |offset: usize| {
+            bytes
+                .get(at + offset)
+                .and_then(|&digit| char::from(digit).to_digit(16))
+        };
+        match (bytes[at], hex(1), hex(2)) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push(u8::try_from(high * 16 + low).unwrap_or(b'%'));
+                at += 3;
+            }
+            (byte, _, _) => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// What `text`, typed into a path field, names: it is trimmed, then a `file:` URL is read as
+/// the path it names on `os` ([`read_file_url`], before anything is expanded, so that its `%20`
+/// is no `%VAR%`), and other text is expanded by the rules of `os` ([`expand_user_path`]). The
+/// path is read as one of this system (`VPath::parse`).
 pub fn read_typed(text: &str, os: Os, var: &dyn Fn(&str) -> Option<String>) -> Typed {
-    let expanded = expand_user_path(text.trim(), os, var);
-    if is_remote_url(&expanded) {
+    let text = text.trim();
+    let path = match read_file_url(text, os) {
+        Some(FileUrl::Path(path)) => path,
+        Some(FileUrl::Remote) => return Typed::Remote,
+        Some(FileUrl::Invalid) => return Typed::Invalid,
+        None => expand_user_path(text, os, var),
+    };
+    if is_remote_url(&path) {
         return Typed::Remote;
     }
-    match VPath::parse(&expanded) {
+    match VPath::parse(&path) {
         Ok(path) => Typed::Folder(path),
         Err(_) => Typed::Invalid,
     }
@@ -345,29 +466,36 @@ pub fn split_last(text: &str, os: Os) -> Option<(&str, &str)> {
 }
 
 /// Where the completion of `text` looks on `os`: `text` as far as its last separator, the
-/// folder that names ([`read_typed`]), and the start of the name after it. `None` when that
-/// part names no folder the app can open.
+/// folder that names ([`read_typed`]), and the start of the name after it (percent-decoded in
+/// a `file:` URL). `None` when that part names no folder the app can open.
 fn completion_base<'t>(
     text: &'t str,
     os: Os,
     var: &dyn Fn(&str) -> Option<String>,
-) -> Option<(&'t str, &'t str, VPath)> {
+) -> Option<(&'t str, Cow<'t, str>, VPath)> {
     let (head, prefix) = split_last(text, os)?;
-    match read_typed(head, os, var) {
-        Typed::Folder(folder) => Some((head, prefix, folder)),
-        Typed::Remote | Typed::Invalid => None,
-    }
+    let Typed::Folder(folder) = read_typed(head, os, var) else {
+        return None;
+    };
+    let prefix = if read_file_url(head.trim_start(), os).is_some() {
+        Cow::Owned(percent_decode(prefix)?)
+    } else {
+        Cow::Borrowed(prefix)
+    };
+    Some((head, prefix, folder))
 }
 
-/// The cursor of a list of `count` rows moved `delta` rows from `cursor`: from no row, ↓ goes to
-/// the first one and ↑ to the last; it stops at either end. `None` for a list with no row.
+/// The cursor of a list of `count` rows moved `delta` rows from `cursor`: from no row, a step
+/// down lands on the first row and a step up on the last (a page goes on from there), and it
+/// stops at either end. `None` for a list with no row.
 fn step(cursor: Option<usize>, delta: isize, count: usize) -> Option<usize> {
     let last = count.checked_sub(1)?;
-    Some(match cursor {
-        None if delta < 0 => last,
-        None => 0,
-        Some(row) => row.saturating_add_signed(delta).min(last),
-    })
+    let row = match cursor {
+        None if delta < 0 => last.saturating_add_signed(delta + 1),
+        None => 0usize.saturating_add_signed(delta - 1),
+        Some(row) => row.saturating_add_signed(delta),
+    };
+    Some(row.min(last))
 }
 
 impl AppState {
@@ -412,16 +540,22 @@ impl AppState {
         vec![Effect::ListNames(request)]
     }
 
-    /// A key of the list of subfolders (`keys::list_key`): ↑↓ move its cursor, Enter goes to
-    /// the cursor's folder (nothing without a cursor), Esc closes it.
-    pub fn subfolders_key(&mut self, key: ListKey) -> Vec<Effect> {
+    /// A key of the list of subfolders (`keys::list_key`): ↑↓ move its cursor a row, `PageUp`
+    /// and `PageDown` `page` rows (the rows it shows), Home and End to the first and the last row;
+    /// Enter goes to the cursor's folder (nothing without a cursor), Esc closes it.
+    pub fn subfolders_key(&mut self, key: ListKey, page: usize) -> Vec<Effect> {
         let Some(list) = self.subfolders.as_mut() else {
             return Vec::new();
         };
         let count = list.names.rows().len();
+        let page = isize::try_from(page.max(1)).unwrap_or(isize::MAX);
         match key {
             ListKey::Up => list.cursor = step(list.cursor, -1, count),
             ListKey::Down => list.cursor = step(list.cursor, 1, count),
+            ListKey::PageUp => list.cursor = step(list.cursor, -page, count),
+            ListKey::PageDown => list.cursor = step(list.cursor, page, count),
+            ListKey::First => list.cursor = (count > 0).then_some(0),
+            ListKey::Last => list.cursor = count.checked_sub(1),
             ListKey::Choose => {
                 if let Some(row) = list.cursor {
                     return self.choose_subfolder(row);
@@ -442,7 +576,7 @@ impl AppState {
             .names
             .rows()
             .get(row)
-            .and_then(|name| list.folder.join(name).ok())
+            .and_then(|each| list.folder.join(&each.name).ok())
         else {
             return Vec::new();
         };
@@ -465,36 +599,51 @@ impl AppState {
     /// The text of the path field of pane `side` changed to `text`: a worker lists the folders
     /// in the folder that the text's last separator ends whose names start with what follows
     /// it, and the request before is dropped. While it lists, the names found before in the
-    /// same folder that still fit show. Text without a separator, or whose part before it names
-    /// no folder (a relative path, a remote address), has no completion.
+    /// same folder that still fit show. When those names were all the folder has for a start
+    /// that the new one only lengthens, they are all there is: no listing. Text without a
+    /// separator, or whose part before it names no folder (a relative path, a remote address),
+    /// has no completion.
     pub fn path_edited(&mut self, side: usize, text: &str) -> Vec<Effect> {
         self.activate(side);
-        let before = self.completion.take();
+        let before = self.completion.take().filter(|before| before.side == side);
         let environment = &self.environment;
         let Some((head, prefix, folder)) =
             completion_base(text, Os::CURRENT, &|name| environment.var(name))
         else {
             return Vec::new();
         };
-        let names = match before {
-            Some(before) if before.side == side && before.folder == folder => {
-                before.names.narrowed(prefix, Os::CURRENT)
+        let (names, complete, kept) = match before {
+            Some(before) if before.folder == folder => {
+                let whole = before.complete
+                    && name_starts_with(OsStr::new(prefix.as_ref()), &before.prefix, Os::CURRENT);
+                let names = before.names.narrowed(&prefix, Os::CURRENT);
+                (names, whole, whole.then_some(before.generation))
             }
-            _ => Names::Loading,
+            _ => (Names::Loading, false, None),
         };
-        let generation = next_generation();
-        let request = self.names_request(generation, folder.clone(), prefix);
+        // A listing that came whole stays the list's.
+        let (generation, effects) = if let Some(generation) = kept {
+            (generation, Vec::new())
+        } else {
+            let generation = next_generation();
+            let request = self.names_request(generation, folder.clone(), &prefix);
+            (generation, vec![Effect::ListNames(request)])
+        };
         self.completion = Some(Completion {
             side,
             text: text.to_owned(),
             head: head.to_owned(),
             folder,
+            prefix: prefix.into_owned(),
             names,
+            complete,
+            tab_waiting: false,
             cursor: None,
             generation,
             tab: self.tab(side).id(),
+            layout: self.layout,
         });
-        vec![Effect::ListNames(request)]
+        effects
     }
 
     /// ↑ (`delta` below 0) or ↓ in the path field of pane `side` while its completion list
@@ -510,18 +659,28 @@ impl AppState {
     /// Tab in the path field of pane `side`, which holds `text`: the text completed with the
     /// name of the cursor's row (the first row's without a cursor) and the separator the text
     /// used last, and the request for that folder's completions; `None`, and nothing done, when
-    /// the list is not for `text` or has no row.
+    /// the list is not for `text` or has no row. Before the first names of the list come, the
+    /// Tab waits for them: the field gets the completed text when they come
+    /// ([`Effect::FillPath`]).
     pub fn complete_path(&mut self, side: usize, text: &str) -> Option<(String, Vec<Effect>)> {
         let completion = self
             .completion
-            .as_ref()
+            .as_mut()
             .filter(|each| each.side == side && each.text == text)?;
-        let name = completion
+        if completion.names == Names::Loading {
+            completion.tab_waiting = true;
+            return None;
+        }
+        let row = completion
             .names
             .rows()
             .get(completion.cursor.unwrap_or(0))?;
         let separator = completion.head.chars().next_back()?;
-        let completed = format!("{}{}{separator}", completion.head, name.to_string_lossy());
+        let completed = format!(
+            "{}{}{separator}",
+            completion.head,
+            row.name.to_string_lossy()
+        );
         let effects = self.path_edited(side, &completed);
         Some((completed, effects))
     }
@@ -536,7 +695,7 @@ impl AppState {
             .names
             .rows()
             .get(row)
-            .and_then(|name| completion.folder.join(name).ok())
+            .and_then(|each| completion.folder.join(&each.name).ok())
         else {
             return Vec::new();
         };
@@ -579,8 +738,8 @@ impl AppState {
     /// Drops a list of the address bar that what it belongs to has left: the list of
     /// subfolders when its pane no longer has the keys, shows another tab or folder, the
     /// layout changed or a dialog shows over the window (or the app ends); the completion list
-    /// when its pane no longer has the keys, shows another tab, or a dialog shows. The
-    /// controller calls this after every change.
+    /// when its pane no longer has the keys, shows another tab, the layout changed or a dialog
+    /// shows. The controller calls this after every change.
     pub fn drop_stale_address(&mut self) {
         let quiet = self.modal.is_none() && !self.quitting;
         let shows = |state: &AppState, side: usize, tab: u64| {
@@ -595,7 +754,7 @@ impl AppState {
             }
         }
         if let Some(completion) = &self.completion
-            && !shows(self, completion.side, completion.tab)
+            && !(shows(self, completion.side, completion.tab) && self.layout == completion.layout)
         {
             self.completion = None;
         }
@@ -612,37 +771,41 @@ impl AppState {
 
     /// Takes `event`, when a list of the address bar waits for its listing: the names, or the
     /// failure, show there, and the cursor stays on the name it was on, if that is still
-    /// listed. Gives `event` back when no list waits for it.
-    pub(super) fn address_loaded(&mut self, event: LoadEvent) -> Option<LoadEvent> {
+    /// listed; a Tab that waited for the completion list's names completes the field now. Gives
+    /// `event` back (`Err`) when no list waits for it.
+    pub(super) fn address_loaded(&mut self, event: LoadEvent) -> Result<Vec<Effect>, LoadEvent> {
         let generation = event.generation();
-        let (names, cursor) = if let Some(list) = self
+        if let Some(list) = self
             .subfolders
             .as_mut()
             .filter(|list| list.generation == generation)
         {
-            (&mut list.names, &mut list.cursor)
-        } else if let Some(completion) = self
+            take_names(&mut list.names, &mut list.cursor, event);
+            return Ok(Vec::new());
+        }
+        let Some(completion) = self
             .completion
             .as_mut()
             .filter(|completion| completion.generation == generation)
-        {
-            (&mut completion.names, &mut completion.cursor)
-        } else {
-            return Some(event);
+        else {
+            return Err(event);
         };
-        let kept = cursor.and_then(|row| names.rows().get(row).cloned());
-        *names = match event {
-            LoadEvent::Names { names, more, .. } => Names::Listed { names, more },
-            LoadEvent::Failed { kind, .. } => Names::Failed(kind),
-            // A listing of names sends nothing else.
-            LoadEvent::Listed { .. }
-            | LoadEvent::Changes { .. }
-            | LoadEvent::Rescan { .. }
-            | LoadEvent::Vanished { .. }
-            | LoadEvent::Space { .. } => return None,
-        };
-        *cursor = kept.and_then(|name| names.rows().iter().position(|row| *row == name));
-        None
+        completion.complete = matches!(event, LoadEvent::Names { more: 0, .. });
+        take_names(&mut completion.names, &mut completion.cursor, event);
+        if !std::mem::take(&mut completion.tab_waiting) {
+            return Ok(Vec::new());
+        }
+        let (side, text) = (completion.side, completion.text.clone());
+        Ok(match self.complete_path(side, &text) {
+            Some((completed, mut effects)) => {
+                effects.push(Effect::FillPath {
+                    side,
+                    text: completed,
+                });
+                effects
+            }
+            None => Vec::new(),
+        })
     }
 
     /// The request for the names of the folders in `folder` that start with `prefix`, under
@@ -660,4 +823,21 @@ impl AppState {
             os: Os::CURRENT,
         }
     }
+}
+
+/// Puts what the listing `event` found into `names`, and keeps `cursor` on the folder it was on
+/// when that is still listed.
+fn take_names(names: &mut Names, cursor: &mut Option<usize>, event: LoadEvent) {
+    let kept = cursor.and_then(|row| names.rows().get(row).map(|each| each.name.clone()));
+    *names = match event {
+        LoadEvent::Names { names, more, .. } => Names::Listed { names, more },
+        LoadEvent::Failed { kind, .. } => Names::Failed(kind),
+        // A listing of names sends nothing else.
+        LoadEvent::Listed { .. }
+        | LoadEvent::Changes { .. }
+        | LoadEvent::Rescan { .. }
+        | LoadEvent::Vanished { .. }
+        | LoadEvent::Space { .. } => return,
+    };
+    *cursor = kept.and_then(|name| names.rows().iter().position(|each| each.name == name));
 }

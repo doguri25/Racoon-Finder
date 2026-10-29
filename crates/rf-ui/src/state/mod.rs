@@ -46,8 +46,8 @@ mod sidebar;
 mod tabs;
 
 pub use address::{
-    Completion, Environment, MAX_NAMES, Names, Subfolders, Typed, expand_user_path, is_remote_url,
-    read_typed, split_last,
+    Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
+    is_remote_url, read_file_url, read_typed, split_last,
 };
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
@@ -92,6 +92,9 @@ pub enum Effect {
     Notice(String),
     /// Show the path of pane `side` as text to edit.
     EditPath(usize),
+    /// Put `text` into the path field of pane `side`, while it is edited: a Tab that waited for
+    /// the completion list's first names has completed it.
+    FillPath { side: usize, text: String },
     /// Give the toolbar's filter box (이 폴더에서 거르기) the keys.
     FocusFilter,
     /// Open the 보기 menu.
@@ -751,8 +754,9 @@ impl AppState {
     /// event that no tab asked for goes to the folder tree.
     pub fn loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
         // The listing of a list of the address bar.
-        let Some(event) = self.address_loaded(event) else {
-            return Vec::new();
+        let event = match self.address_loaded(event) {
+            Ok(effects) => return effects,
+            Err(event) => event,
         };
         // A tab reopened at a folder that is gone by now goes where the tab of a vanished
         // folder goes, the nearest folder above it that is left, rather than to the error.

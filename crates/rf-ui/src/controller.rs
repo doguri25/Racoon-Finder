@@ -21,7 +21,7 @@ use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
 use slint::language::DragAction;
-use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, SharedString, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
@@ -34,7 +34,7 @@ use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, Subfolders, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
-use crate::{DialogKind, DropPlace, JobRowView, MainWindow, TabDrop, open, words};
+use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
 mod persist;
 
@@ -534,7 +534,7 @@ pub struct Controller {
     places: RefCell<Vec<Place>>,
     tree_rows: Rc<TreeRows>,
     /// The rows of the list of folders under a `›` of a path row.
-    subfolder_rows: Rc<VecModel<SharedString>>,
+    subfolder_rows: Rc<VecModel<FolderMenuRow>>,
     panes: [PaneModels; 2],
     /// The tab (its position) and folder each pane showed at the last redraw: a pane that
     /// shows another folder or tab scrolls to its cursor, or its top.
@@ -771,7 +771,12 @@ impl Controller {
             .as_ref()
             .is_some_and(|state| state.subfolders().is_some());
         if listing && let Some(key) = keys::list_key(text, mods, Os::CURRENT) {
-            self.update(|state| state.subfolders_key(key));
+            let page = self
+                .window
+                .upgrade()
+                .and_then(|window| usize::try_from(window.get_subfolders_page()).ok())
+                .unwrap_or(1);
+            self.update(|state| state.subfolders_key(key, page));
             return true;
         }
         let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
@@ -1069,6 +1074,7 @@ impl Controller {
                 }),
                 Effect::Notice(_)
                 | Effect::EditPath(_)
+                | Effect::FillPath { .. }
                 | Effect::FocusFilter
                 | Effect::ShowViewMenu
                 | Effect::FocusTree
@@ -1175,6 +1181,7 @@ impl Controller {
             | Effect::ReloadLater { .. }
             | Effect::Notice(_)
             | Effect::EditPath(_)
+            | Effect::FillPath { .. }
             | Effect::FocusFilter
             | Effect::ShowViewMenu
             | Effect::FocusTree
@@ -1197,6 +1204,11 @@ impl Controller {
             Effect::EditPath(side) => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_edit_path(side_number(side));
+                }
+            }
+            Effect::FillPath { side, text } => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_fill_path(side_number(side), text.into());
                 }
             }
             Effect::FocusFilter => {

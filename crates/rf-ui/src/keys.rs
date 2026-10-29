@@ -236,6 +236,14 @@ pub enum ListKey {
     Up,
     /// ↓: the row below (from no row, the first one).
     Down,
+    /// `PageUp`: a page of rows up (from no row, from the last one).
+    PageUp,
+    /// `PageDown`: a page of rows down (from no row, from the first one).
+    PageDown,
+    /// Home: the first row.
+    First,
+    /// End: the last row.
+    Last,
     /// Enter (and the system's key to open): the active pane goes to the row's folder.
     Choose,
     /// Esc: the list closes.
@@ -251,6 +259,10 @@ pub fn list_key(text: &str, mods: Mods, os: Os) -> Option<ListKey> {
         let plain = [
             (Key::UpArrow, ListKey::Up),
             (Key::DownArrow, ListKey::Down),
+            (Key::PageUp, ListKey::PageUp),
+            (Key::PageDown, ListKey::PageDown),
+            (Key::Home, ListKey::First),
+            (Key::End, ListKey::Last),
             (Key::Return, ListKey::Choose),
             (Key::Escape, ListKey::Close),
         ];
@@ -1206,11 +1218,15 @@ mod tests {
     }
 
     #[test]
-    fn the_list_of_subfolders_takes_the_arrows_enter_and_esc() {
+    fn the_list_of_subfolders_takes_the_arrows_pages_enter_and_esc() {
         for os in [Os::Windows, Os::MacOs, Os::Other] {
             for (k, wanted) in [
                 (Key::UpArrow, ListKey::Up),
                 (Key::DownArrow, ListKey::Down),
+                (Key::PageUp, ListKey::PageUp),
+                (Key::PageDown, ListKey::PageDown),
+                (Key::Home, ListKey::First),
+                (Key::End, ListKey::Last),
                 (Key::Return, ListKey::Choose),
                 (Key::Escape, ListKey::Close),
             ] {
@@ -1222,7 +1238,8 @@ mod tests {
                 (key(Key::UpArrow), SHIFT),
                 (key(Key::UpArrow), ALT),
                 (key(Key::LeftArrow), NONE),
-                (key(Key::Home), NONE),
+                (key(Key::Home), SHIFT),
+                (key(Key::PageDown), CTRL),
                 (text("a"), NONE),
                 (text("t"), CTRL),
                 (key(Key::F2), NONE),
