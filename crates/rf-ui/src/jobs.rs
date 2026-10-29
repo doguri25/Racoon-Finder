@@ -52,6 +52,9 @@ pub enum JobEffect {
     Undo,
     /// Redo the last undo (`JobEngine::redo`).
     Redo,
+    /// Take the record off the undo list if it is the one to undo next: its job was undone
+    /// another way (`JobEngine::forget_undo`).
+    ForgetUndo(UndoRecord),
     /// Run the recovered job `id`, which was asked to do `spec`, again.
     Resubmit {
         id: JobId,
@@ -155,6 +158,10 @@ impl Jobs {
             }
             JobEffect::Undo => self.history_job(self.engine.undo(), JobWork::Undo),
             JobEffect::Redo => self.history_job(self.engine.redo(), JobWork::Redo),
+            JobEffect::ForgetUndo(record) => {
+                self.engine.forget_undo(&record);
+                None
+            }
             JobEffect::Resubmit { id, spec } => {
                 let new = self.engine.resubmit_recovered(id)?;
                 Some(Started {

@@ -13,7 +13,7 @@ use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{
     Conflict, ConflictAction, ConflictAnswer, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy,
     IncompleteJob, Issue, IssueKind, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer, Severity,
-    numbered_name,
+    UndoRecord, numbered_name,
 };
 
 use crate::pick::Picker;
@@ -234,6 +234,12 @@ pub enum DeleteWhy {
 pub enum ConfirmPurpose {
     /// Delete these items for good.
     DeletePermanently(Vec<VPath>),
+    /// Delete for good the copies an undo of the copy `record` could not send to the trash,
+    /// whose originals a worker has found as they were.
+    DeleteCopies {
+        copies: Vec<VPath>,
+        record: Box<UndoRecord>,
+    },
     /// End the app while jobs run.
     Quit,
 }
@@ -247,6 +253,10 @@ pub struct Confirm {
     pub message: String,
     /// The items it happens to, when there are some.
     pub detail: String,
+    /// The items it happens to, one whole path a line, for a list; empty for none.
+    pub lines: Vec<String>,
+    /// What it asks, after the list; empty when the message asks it.
+    pub question: String,
     /// The label of the button that does it.
     pub ok: String,
     /// Whether it destroys something: then Enter does not confirm, only the button does.
@@ -266,9 +276,30 @@ impl Confirm {
             title: words::delete_permanently_title().to_owned(),
             message,
             detail: words::names_line(&paths),
+            lines: Vec::new(),
+            question: String::new(),
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
             purpose: ConfirmPurpose::DeletePermanently(paths),
+        }
+    }
+
+    /// The question before `copies` are deleted for good: the copies an undo of the copy
+    /// `record` could not send to the trash, whose originals are as they were. It lists every
+    /// copy by its whole path.
+    pub fn delete_copies(copies: Vec<VPath>, record: UndoRecord) -> Confirm {
+        Confirm {
+            title: words::delete_permanently_title().to_owned(),
+            message: words::copies_refused().to_owned(),
+            detail: String::new(),
+            lines: copies.iter().map(ToString::to_string).collect(),
+            question: words::delete_copies(copies.len()),
+            ok: words::delete_permanently_button().to_owned(),
+            danger: true,
+            purpose: ConfirmPurpose::DeleteCopies {
+                copies,
+                record: Box::new(record),
+            },
         }
     }
 
@@ -279,6 +310,8 @@ impl Confirm {
             title: words::quit_title().to_owned(),
             message: words::quit_with_jobs(running),
             detail: String::new(),
+            lines: Vec::new(),
+            question: String::new(),
             ok: words::quit_button().to_owned(),
             danger: false,
         }
@@ -287,11 +320,14 @@ impl Confirm {
     /// The job the confirmation asks for, if it asks for one.
     pub fn job(&self) -> Option<JobSpec> {
         match &self.purpose {
-            ConfirmPurpose::DeletePermanently(paths) => Some(JobSpec::Delete(DeleteSpec {
-                paths: paths.clone(),
-                method: DeleteMethod::Permanent,
-                errors: ErrorPolicy::Continue,
-            })),
+            ConfirmPurpose::DeletePermanently(paths)
+            | ConfirmPurpose::DeleteCopies { copies: paths, .. } => {
+                Some(JobSpec::Delete(DeleteSpec {
+                    paths: paths.clone(),
+                    method: DeleteMethod::Permanent,
+                    errors: ErrorPolicy::Continue,
+                }))
+            }
             ConfirmPurpose::Quit => None,
         }
     }

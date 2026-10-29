@@ -185,6 +185,41 @@ impl Loader {
         None
     }
 
+    /// How `original` is now beside `copy`, a copy of it that an undo could not send to the
+    /// trash: whether deleting the copy for good would lose nothing that is not still in the
+    /// original.
+    ///
+    /// Each is looked at as it is, a link as the link. They must be of one kind (a copy that
+    /// followed a link is compared with what the link leads to). A file must be of the copy's
+    /// size, and changed when the copy says (a copy keeps its source's time; within
+    /// [`rf_jobs::MTIME_TOLERANCE`]), and a link lead where the copy's does. A folder must
+    /// hold, under the same names, everything the copy holds, each the same way, down to
+    /// [`rf_jobs::MAX_DEPTH`] levels; what the original has more does not matter. Past
+    /// [`ORIGINAL_ITEMS`] items, or for anything that cannot be looked at (the copy among
+    /// them), it cannot be told.
+    ///
+    /// Blocks (a large folder, a slow drive); call it on a worker thread.
+    pub fn compare_with_original(&self, copy: &VPath, original: &VPath) -> Original {
+        let (Ok(at_copy), Ok(at_original)) = (self.vfs.provider(copy), self.vfs.provider(original))
+        else {
+            return Original::Unknown;
+        };
+        let Ok(copied) = at_copy.stat(copy) else {
+            return Original::Unknown;
+        };
+        let compare = Compare {
+            copy: at_copy.as_ref(),
+            original: at_original.as_ref(),
+            cancel: CancelToken::new(),
+        };
+        let mut budget = ORIGINAL_ITEMS;
+        match at_original.stat(original) {
+            Ok(entry) => compare.items(copy, &copied, original, &entry, 0, &mut budget),
+            Err(error) if error.kind() == ErrorKind::NotFound => Original::Missing,
+            Err(_) => Original::Unknown,
+        }
+    }
+
     /// What is at `path`, a folder of the last run that a tab is to show again: the folder (or
     /// a link to one); nothing, while the folders that held it are there; or nothing because
     /// its drive, share or volume is not there ([`Found::Offline`]): no folder above it is there
@@ -332,6 +367,155 @@ fn is_folder(provider: &dyn Provider, path: &VPath) -> bool {
             .stat_target(path)
             .is_ok_and(|target| target.kind == EntryKind::Dir),
         _ => false,
+    }
+}
+
+/// How many items [`Loader::compare_with_original`] looks at, at most, before it gives up.
+pub const ORIGINAL_ITEMS: usize = 20_000;
+
+/// How the original of a copy is beside the copy ([`Loader::compare_with_original`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Original {
+    /// It holds everything the copy holds: deleting the copy loses nothing.
+    Same,
+    /// It is gone.
+    Missing,
+    /// It is there, but of another kind or size, or something of the copy is not in it.
+    Changed,
+    /// It could not be found out.
+    Unknown,
+}
+
+/// The two providers [`Loader::compare_with_original`] compares a copy and its original
+/// through.
+struct Compare<'p> {
+    copy: &'p dyn Provider,
+    original: &'p dyn Provider,
+    cancel: CancelToken,
+}
+
+impl Compare<'_> {
+    /// How the item `original`, which `stat` found as `found`, is beside `copied`, the copy at
+    /// `copy`, at `depth` levels below the items compared first; each item looked at takes one
+    /// from `budget`.
+    fn items(
+        &self,
+        copy: &VPath,
+        copied: &Entry,
+        original: &VPath,
+        found: &Entry,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Original {
+        if *budget == 0 || depth > rf_jobs::MAX_DEPTH {
+            return Original::Unknown;
+        }
+        *budget -= 1;
+        // A copy that followed a link is what the link leads to.
+        let followed;
+        let found = if found.kind == EntryKind::Symlink && copied.kind != EntryKind::Symlink {
+            match self.original.stat_target(original) {
+                Ok(target) => {
+                    followed = target;
+                    &followed
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => return Original::Missing,
+                Err(_) => return Original::Unknown,
+            }
+        } else {
+            found
+        };
+        if found.kind != copied.kind {
+            return Original::Changed;
+        }
+        match copied.kind {
+            EntryKind::File => same_file(copied, found),
+            EntryKind::Symlink => {
+                match (self.copy.read_link(copy), self.original.read_link(original)) {
+                    (Ok(a), Ok(b)) if a.target == b.target => Original::Same,
+                    (Ok(_), Ok(_)) => Original::Changed,
+                    _ => Original::Unknown,
+                }
+            }
+            EntryKind::Dir => self.folders(copy, original, depth, budget),
+            // A device or a pipe is never copied.
+            EntryKind::Other => Original::Unknown,
+        }
+    }
+
+    /// Whether the folder `original` holds everything the folder `copy` holds, as
+    /// [`Compare::items`] tells for each.
+    fn folders(
+        &self,
+        copy: &VPath,
+        original: &VPath,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Original {
+        let (Some(copied), Some(found)) = (
+            self.listing(self.copy, copy),
+            self.listing(self.original, original),
+        ) else {
+            return Original::Unknown;
+        };
+        let found: std::collections::HashMap<&std::ffi::OsStr, &Entry> = found
+            .iter()
+            .map(|entry| (entry.name.as_os_str(), entry))
+            .collect();
+        for child in &copied {
+            let Some(&there) = found.get(child.name.as_os_str()) else {
+                return Original::Changed;
+            };
+            let (Ok(copy_child), Ok(original_child)) =
+                (copy.join(&child.name), original.join(&child.name))
+            else {
+                return Original::Unknown;
+            };
+            let compared = self.items(
+                &copy_child,
+                child,
+                &original_child,
+                there,
+                depth + 1,
+                budget,
+            );
+            if compared != Original::Same {
+                // Gone below a folder that is there is a change of the folder.
+                return if compared == Original::Missing {
+                    Original::Changed
+                } else {
+                    compared
+                };
+            }
+        }
+        Original::Same
+    }
+
+    /// Everything in the folder `dir` of `provider`; `None` when it cannot be listed.
+    fn listing(&self, provider: &dyn Provider, dir: &VPath) -> Option<Vec<Entry>> {
+        let mut entries = Vec::new();
+        provider
+            .list(dir, &self.cancel, &mut |batch| entries.extend(batch))
+            .ok()?;
+        Some(entries)
+    }
+}
+
+/// How the file `found` is beside `copied`, a copy of it: the same when it has the copy's size
+/// and was last changed when the copy says (a copy keeps its source's time, within the clock
+/// tolerance of the jobs); changed when not; not known without both times.
+fn same_file(copied: &Entry, found: &Entry) -> Original {
+    let (Some(copy_time), Some(original_time)) = (copied.modified, found.modified) else {
+        return Original::Unknown;
+    };
+    let apart = copy_time
+        .duration_since(original_time)
+        .or_else(|_| original_time.duration_since(copy_time))
+        .unwrap_or_default();
+    if found.size == copied.size && apart <= rf_jobs::MTIME_TOLERANCE {
+        Original::Same
+    } else {
+        Original::Changed
     }
 }
 

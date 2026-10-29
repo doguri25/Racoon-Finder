@@ -739,6 +739,41 @@ pub fn trash_refused(count: usize) -> String {
     )
 }
 
+/// What the confirmation after an undo of a copy says first, once a worker has found every
+/// copy's original as it was: the trash refused the copies, and nothing is lost without them.
+pub fn copies_refused() -> &'static str {
+    "복사본을 휴지통으로 보낼 수 없습니다. 원본은 그대로 있습니다."
+}
+
+/// The question of that confirmation, under the copies' paths.
+pub fn delete_copies(count: usize) -> String {
+    format!("복사본 {count}개를 영구 삭제할까요? 되돌릴 수 없습니다.")
+}
+
+/// The toast once the copies an undo could not trash are deleted for good: the copy is undone.
+pub fn copies_deleted(count: usize) -> String {
+    format!("복사본 {count}개를 영구 삭제해 복사를 되돌렸습니다")
+}
+
+/// Why the copies an undo could not trash were not offered for a permanent delete, after
+/// [`failure_line`] of a copy: its original is gone, it differs from the copy (another kind,
+/// another size, something of the copy missing in it), or it could not be found out.
+pub fn copy_kept(why: CopyKept) -> &'static str {
+    match why {
+        CopyKept::OriginalMissing => "원본이 없어 복사본을 지우지 않았습니다",
+        CopyKept::OriginalChanged => "원본이 바뀌어 복사본을 지우지 않았습니다",
+        CopyKept::OriginalUnknown => "원본을 확인할 수 없어 복사본을 지우지 않았습니다",
+    }
+}
+
+/// Why a copy an undo could not trash stays ([`copy_kept`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyKept {
+    OriginalMissing,
+    OriginalChanged,
+    OriginalUnknown,
+}
+
 /// The names of the items a confirmation is about: up to three, in quotes, and how many more.
 pub fn names_line(paths: &[VPath]) -> String {
     const SHOWN: usize = 3;

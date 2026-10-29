@@ -683,9 +683,11 @@ fn trashed(paths: &[VPath]) -> UndoRecord {
 }
 
 #[test]
-fn an_undo_never_offers_a_permanent_delete() {
+fn an_undo_never_offers_a_permanent_delete_by_itself() {
     // An undo of a copy trashes the copies; where the trash refuses one, the undo has failed
-    // for it, and that is all: an undo never deletes anything for good.
+    // for it. An undo never deletes anything for good: only a confirmation the user answers,
+    // offered once the copies' originals are known and found as they were (see `copies`),
+    // which this run cannot tell for a copy it did not make.
     let mut state = ready(vec![file("a.txt")], vec![]);
     let spec = JobSpec::Undo(UndoRecord::Copied {
         created: Vec::new(),
@@ -711,7 +713,9 @@ fn an_undo_never_offers_a_permanent_delete() {
         panic!("the failed item and why");
     };
     assert!(
-        failures.lines[0].ends_with("휴지통으로 보낼 수 없습니다"),
+        failures.lines[0].ends_with(
+            "휴지통으로 보낼 수 없습니다. 원본을 확인할 수 없어 복사본을 지우지 않았습니다"
+        ),
         "{:?}",
         failures.lines
     );

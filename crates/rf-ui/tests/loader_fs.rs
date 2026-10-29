@@ -734,3 +734,69 @@ fn a_volume_is_not_there_when_the_folders_that_hold_it_are_missing_too() {
     assert!(!not_there("/home/kim/docs", "/home"));
     assert!(!not_there("/run/user/docs", "/run"));
 }
+
+/// Gives the file at `path` the modification time `at`.
+fn set_modified(path: &Path, at: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(at))
+        .expect("the time is set");
+}
+
+/// Writes `text` at `path`, changed at `at`, as a copy keeps the time of its source.
+fn write_at(path: &Path, text: &str, at: std::time::SystemTime) {
+    std::fs::write(path, text).expect("a test file");
+    set_modified(path, at);
+}
+
+#[test]
+fn a_copy_is_compared_with_its_original() {
+    use rf_ui::loader::Original;
+
+    let dir = tempfile::TempDir::new().expect("a temporary folder");
+    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+    let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    for folder in [&src, &dst] {
+        std::fs::create_dir_all(folder.join("docs").join("sub")).expect("folders");
+        write_at(&folder.join("a.txt"), "AAAA", at);
+        write_at(&folder.join("docs").join("x.txt"), "X", at);
+        write_at(&folder.join("docs").join("sub").join("y.txt"), "YY", at);
+    }
+    write_at(&src.join("docs").join("only-in-source.txt"), "S", at);
+    let loader = loader();
+    let compare =
+        |name: &str| loader.compare_with_original(&local(&dst.join(name)), &local(&src.join(name)));
+
+    // As they were: a file of the same size and time, and a folder that holds everything the
+    // copy holds (and more).
+    assert_eq!(compare("a.txt"), Original::Same);
+    assert_eq!(compare("docs"), Original::Same);
+
+    // Something of the copy is not in the original: deleting the copy would lose it.
+    std::fs::remove_file(src.join("docs").join("sub").join("y.txt")).expect("removed");
+    assert_eq!(compare("docs"), Original::Changed);
+    write_at(&src.join("docs").join("sub").join("y.txt"), "YYY", at);
+    assert_eq!(compare("docs"), Original::Changed, "another size deep down");
+    write_at(&src.join("docs").join("sub").join("y.txt"), "YY", at);
+    assert_eq!(compare("docs"), Original::Same);
+
+    // The original edited since (same size, a later time), of another kind, or gone.
+    set_modified(&src.join("a.txt"), at + Duration::from_secs(60));
+    assert_eq!(compare("a.txt"), Original::Changed);
+    std::fs::remove_file(src.join("a.txt")).expect("removed");
+    std::fs::create_dir(src.join("a.txt")).expect("a folder in its place");
+    assert_eq!(compare("a.txt"), Original::Changed);
+    std::fs::remove_dir(src.join("a.txt")).expect("removed");
+    assert_eq!(compare("a.txt"), Original::Missing);
+
+    // A copy that is gone cannot be told about.
+    std::fs::remove_file(dst.join("docs").join("x.txt")).expect("removed");
+    assert_eq!(
+        loader.compare_with_original(
+            &local(&dst.join("docs").join("x.txt")),
+            &local(&src.join("docs").join("x.txt"))
+        ),
+        Original::Unknown
+    );
+}

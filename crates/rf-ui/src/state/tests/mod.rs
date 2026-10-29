@@ -11,6 +11,7 @@ use rf_vfs::SortOrder;
 use slint::platform::Key;
 use std::sync::Arc;
 
+mod copies;
 mod drag;
 mod jobs;
 mod nav;

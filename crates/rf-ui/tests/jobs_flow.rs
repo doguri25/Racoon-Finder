@@ -694,3 +694,180 @@ fn a_question_during_shutdown_waits_for_the_release_and_the_job_is_recovered() {
     );
     assert!(next.close_down(WAIT));
 }
+
+/// Where there is no trash (Linux), the undo of a copy trashes nothing: the copies stay until the
+/// user has them deleted for good. These tests run only there: elsewhere the undo would send the
+/// copies to the user's own trash.
+#[cfg(target_os = "linux")]
+mod without_a_trash {
+    use rf_ui::loader::Original;
+
+    use super::*;
+
+    /// Ctrl+Z, as the window takes it.
+    fn undo_key(state: &mut AppState) -> Vec<Effect> {
+        let ctrl = rf_ui::keys::Mods {
+            ctrl: true,
+            ..rf_ui::keys::Mods::default()
+        };
+        state
+            .key(rf_ui::keys::Command::Undo, ctrl, 10, Instant::now())
+            .expect("the window takes it")
+    }
+
+    /// The one check of originals among `effects`, its pairs in path order.
+    fn the_check(effects: &[Effect]) -> (u64, Vec<(VPath, VPath)>) {
+        let checks: Vec<(u64, Vec<(VPath, VPath)>)> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::CheckOriginals { token, pairs } => Some((*token, pairs.clone())),
+                _ => None,
+            })
+            .collect();
+        let [(token, pairs)] = checks.as_slice() else {
+            panic!("one check of the originals: {effects:?}");
+        };
+        let mut pairs = pairs.clone();
+        pairs.sort_by_key(|(copy, _)| copy.to_string());
+        (*token, pairs)
+    }
+
+    /// The user is offered the copies for a permanent delete once their originals are found as
+    /// they were, and the copy is undone once they are gone.
+    #[test]
+    fn undo_of_a_copy_without_a_trash_offers_the_copies_for_good() {
+        let (_dir, left, right) = folders();
+        write(&left.join("a.txt"), "A");
+        std::fs::create_dir_all(left.join("docs")).expect("docs");
+        write(&left.join("docs").join("x.txt"), "X");
+        write(&left.join("older.txt"), "O");
+        let mut harness = Harness::new();
+        let mut state = harness.open(&left, &right);
+
+        // An older job, to undo once the copy is undone.
+        click(&mut state, LEFT, "older.txt");
+        key(&mut state, Key::F2, false);
+        let effects = state.name_confirmed("renamed.txt");
+        harness.run(&mut state, effects);
+        let older = harness.jobs.history().top.expect("the rename's record");
+
+        click(&mut state, LEFT, "a.txt");
+        let docs = state.panes()[LEFT]
+            .active_tab()
+            .visible()
+            .iter()
+            .position(|entry| entry.name == "docs")
+            .expect("docs is listed");
+        state.click_row(LEFT, docs, true, false);
+        let dest = local(&right);
+        let effects = state.transfer(LEFT, TransferMode::Copy, &dest, TransferOptions::default());
+        harness.run(&mut state, effects);
+        assert_eq!(read(&right.join("docs").join("x.txt")), "X");
+        let copied = harness.jobs.history().top.expect("the copy's record");
+
+        // The undo trashes nothing, keeps its record for another try, and asks a worker about the
+        // originals before anything is offered.
+        let effects = undo_key(&mut state);
+        let seen = harness.run(&mut state, effects);
+        assert!(right.join("a.txt").exists() && right.join("docs").exists());
+        assert_eq!(harness.jobs.history().top.as_ref(), Some(&copied));
+        assert_eq!(state.modal(), None);
+        let (token, pairs) = the_check(&seen);
+        assert_eq!(
+            pairs,
+            [
+                (local(&right.join("a.txt")), local(&left.join("a.txt"))),
+                (local(&right.join("docs")), local(&left.join("docs"))),
+            ]
+        );
+        let found: Vec<Original> = pairs
+            .iter()
+            .map(|(copy, original)| harness.loader.compare_with_original(copy, original))
+            .collect();
+        assert_eq!(found, [Original::Same, Original::Same]);
+
+        // The copies are offered, each by its whole path, as a danger confirmation.
+        let (copy_order, _): (Vec<VPath>, Vec<VPath>) = seen
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::CheckOriginals { pairs, .. } => Some(pairs.iter().cloned().unzip()),
+                _ => None,
+            })
+            .expect("the check");
+        let found_in_order: Vec<Original> = copy_order.iter().map(|_| Original::Same).collect();
+        assert_eq!(state.originals_checked(token, &found_in_order), []);
+        let Some(Modal::Confirm(confirm)) = state.modal() else {
+            panic!("the copies are offered: {:?}", state.modal());
+        };
+        assert!(confirm.danger);
+        let mut lines = confirm.lines.clone();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                local(&right.join("a.txt")).to_string(),
+                local(&right.join("docs")).to_string()
+            ]
+        );
+
+        // Yes: the copies go for good, the originals stay, and the copy is undone: the next undo
+        // is the older job's.
+        let effects = state.confirm_accepted();
+        let seen = harness.run(&mut state, effects);
+        assert!(!right.join("a.txt").exists() && !right.join("docs").exists());
+        assert_eq!(read(&left.join("a.txt")), "A");
+        assert_eq!(read(&left.join("docs").join("x.txt")), "X");
+        assert!(
+            seen.iter().any(|effect| matches!(
+                effect,
+                Effect::Toast { text, .. } if text == "복사본 2개를 영구 삭제해 복사를 되돌렸습니다"
+            )),
+            "{seen:?}"
+        );
+        assert_eq!(harness.jobs.history().top, Some(older));
+    }
+
+    /// An original removed after the copy: the copy is the only one left, and is never offered.
+    #[test]
+    fn undo_of_a_copy_whose_original_is_gone_keeps_the_copy() {
+        let (_dir, left, right) = folders();
+        write(&left.join("a.txt"), "A");
+        let mut harness = Harness::new();
+        let mut state = harness.open(&left, &right);
+        click(&mut state, LEFT, "a.txt");
+        let dest = local(&right);
+        let effects = state.transfer(LEFT, TransferMode::Copy, &dest, TransferOptions::default());
+        harness.run(&mut state, effects);
+        let copied = harness.jobs.history().top.expect("the copy's record");
+        std::fs::remove_file(left.join("a.txt")).expect("the original goes");
+
+        let effects = undo_key(&mut state);
+        let seen = harness.run(&mut state, effects);
+        let (token, pairs) = the_check(&seen);
+        let found: Vec<Original> = pairs
+            .iter()
+            .map(|(copy, original)| harness.loader.compare_with_original(copy, original))
+            .collect();
+        assert_eq!(found, [Original::Missing]);
+        let effects = state.originals_checked(token, &found);
+        assert_eq!(state.modal(), None, "nothing is offered");
+        let Some(Effect::Toast { token, text, .. }) = effects.first() else {
+            panic!("a toast: {effects:?}");
+        };
+        assert_eq!(text, "항목 1개를 처리하지 못했습니다");
+        state.toast_clicked(*token);
+        let Some(Modal::Failures(failures)) = state.modal() else {
+            panic!("the copy and why: {:?}", state.modal());
+        };
+        assert_eq!(
+            failures.lines,
+            [format!(
+                "{}: 휴지통으로 보낼 수 없습니다. 원본이 없어 복사본을 지우지 않았습니다",
+                local(&right.join("a.txt"))
+            )]
+        );
+        assert_eq!(read(&right.join("a.txt")), "A");
+        // The record stays: the undo can be tried again.
+        assert_eq!(harness.jobs.history().top, Some(copied));
+    }
+}

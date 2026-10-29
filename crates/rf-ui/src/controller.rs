@@ -779,12 +779,10 @@ impl Controller {
                         state.track(started);
                     }
                 }
-                Effect::CheckTrash { folder, paths } => {
-                    spawn_worker("rf-ui-trash", move || {
-                        let supported = rf_platform::trash_supported(&folder);
-                        post(move |c| c.update(|state| state.trash_checked(paths, supported)));
-                    });
-                }
+                Effect::CheckTrash { .. }
+                | Effect::CheckOriginals { .. }
+                | Effect::FindExisting { .. }
+                | Effect::InspectTarget { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
                 Effect::Load(request) => {
                     let generation = request.generation;
@@ -799,18 +797,6 @@ impl Controller {
                         post(move |c| c.loaded(event));
                     });
                     self.tickets.borrow_mut().insert(generation, ticket);
-                }
-                Effect::FindExisting { generation, path } => {
-                    let loader = self.loader.clone();
-                    spawn_worker("rf-ui-vanished", move || {
-                        std::thread::sleep(VANISHED_SETTLE);
-                        let found = loader.nearest_existing_parent(&path);
-                        post(move |c| {
-                            c.update(|state| {
-                                state.found_existing(generation, &path, found, Instant::now())
-                            });
-                        });
-                    });
                 }
                 Effect::Follow { generation, link } => {
                     self.loader.follow(generation, link, |followed| {
@@ -827,19 +813,6 @@ impl Controller {
                 } => slint::Timer::single_shot(after, move || {
                     with(|c| c.update(|state| state.reload_due(generation, &path, Instant::now())));
                 }),
-                Effect::InspectTarget {
-                    generation,
-                    path,
-                    from_dir,
-                } => {
-                    let loader = self.loader.clone();
-                    spawn_worker("rf-ui-pick", move || {
-                        let facts = loader.inspect_target(&path, &from_dir);
-                        post(move |c| {
-                            c.update(|state| state.target_inspected(generation, &path, facts));
-                        });
-                    });
-                }
                 Effect::Notice(_)
                 | Effect::EditPath(_)
                 | Effect::ScrollTo { .. }
@@ -866,6 +839,55 @@ impl Controller {
         }
         // Any change may be one the settings keep (a tab, the hidden items, a recent target).
         self.plan_save();
+    }
+
+    /// Carries out an effect whose work blocks, on a worker thread of its own: its result comes
+    /// back to the state on the UI thread.
+    fn on_worker(&self, effect: Effect) {
+        match effect {
+            Effect::CheckTrash { folder, paths } => {
+                spawn_worker("rf-ui-trash", move || {
+                    let supported = rf_platform::trash_supported(&folder);
+                    post(move |c| c.update(|state| state.trash_checked(paths, supported)));
+                });
+            }
+            Effect::CheckOriginals { token, pairs } => {
+                let loader = self.loader.clone();
+                spawn_worker("rf-ui-originals", move || {
+                    let found: Vec<_> = pairs
+                        .iter()
+                        .map(|(copy, original)| loader.compare_with_original(copy, original))
+                        .collect();
+                    post(move |c| c.update(|state| state.originals_checked(token, &found)));
+                });
+            }
+            Effect::FindExisting { generation, path } => {
+                let loader = self.loader.clone();
+                spawn_worker("rf-ui-vanished", move || {
+                    std::thread::sleep(VANISHED_SETTLE);
+                    let found = loader.nearest_existing_parent(&path);
+                    post(move |c| {
+                        c.update(|state| {
+                            state.found_existing(generation, &path, found, Instant::now())
+                        });
+                    });
+                });
+            }
+            Effect::InspectTarget {
+                generation,
+                path,
+                from_dir,
+            } => {
+                let loader = self.loader.clone();
+                spawn_worker("rf-ui-pick", move || {
+                    let facts = loader.inspect_target(&path, &from_dir);
+                    post(move |c| {
+                        c.update(|state| state.target_inspected(generation, &path, facts));
+                    });
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Does an effect that shows on the screen.
@@ -908,6 +930,7 @@ impl Controller {
             | Effect::OpenFile(_)
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
+            | Effect::CheckOriginals { .. }
             | Effect::InspectTarget { .. }
             | Effect::Quit => {}
         }

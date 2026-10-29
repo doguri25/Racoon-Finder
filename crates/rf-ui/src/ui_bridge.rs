@@ -830,11 +830,16 @@ pub fn name_view(dialog: &NameDialog) -> NameView {
     }
 }
 
+/// The confirmation; its first `MEASURED_LINES` lines go in `head` too, as in
+/// [`message_view`].
 pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
     ConfirmView {
         title: confirm.title.as_str().into(),
         message: confirm.message.as_str().into(),
         detail: confirm.detail.as_str().into(),
+        lines: lines_model(&confirm.lines),
+        head: lines_model(head(&confirm.lines)),
+        question: confirm.question.as_str().into(),
         ok_text: confirm.ok.as_str().into(),
         danger: confirm.danger,
     }

@@ -32,10 +32,12 @@ use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
+mod copies;
 mod drag;
 mod jobs;
 mod pick;
 
+pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 
 /// The left pane's position in [`AppState::panes`].
@@ -102,6 +104,14 @@ pub enum Effect {
     /// Find on a worker thread whether the location of `folder` has a trash
     /// (`rf_platform::trash_supported`), then call [`AppState::trash_checked`] with `paths`.
     CheckTrash { folder: VPath, paths: Vec<VPath> },
+    /// Find on a worker thread how the original of each copy of `pairs` (the copy, then its
+    /// original) is beside it
+    /// ([`Loader::compare_with_original`](crate::loader::Loader::compare_with_original)), then
+    /// call [`AppState::originals_checked`] with `token` and what was found, in order.
+    CheckOriginals {
+        token: u64,
+        pairs: Vec<(VPath, VPath)>,
+    },
     /// Show a toast with the message `text` and the button `action`, whose click comes back
     /// to [`AppState::toast_clicked`] with `token`.
     Toast {
@@ -163,6 +173,8 @@ pub struct AppState {
     quitting: bool,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
+    /// The copies an undo of a copy could not trash, and where they came from.
+    copies: copies::Copies,
     /// The items the last press on a row readied a drag of, under the id its payload carries.
     drag: Option<Drag>,
     /// The click a press on a selected row left for its release.
@@ -232,6 +244,7 @@ impl AppState {
             toast_token: 0,
             quitting: false,
             journal_error_told: false,
+            copies: copies::Copies::default(),
             drag: None,
             pending_click: None,
         };

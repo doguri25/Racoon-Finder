@@ -23,6 +23,12 @@ export struct ConfirmView {
     message: string,
     // The items it is about; empty for none.
     detail: string,
+    // The items it is about, one whole path a line, in a list; empty for none. The first lines,
+    // which the window lays out out of sight to fit its list to them.
+    lines: [string],
+    head: [string],
+    // What it asks, under the list; empty when the message asks it.
+    question: string,
     ok-text: string,
     // Destroys something: Enter does not confirm.
     danger: bool,
@@ -154,72 +160,6 @@ export component NameDialog inherits DialogFrame {
     }
 }
 
-// Asks before something happens that cannot be taken back. Its text says what will happen.
-export component ConfirmDialog inherits DialogFrame {
-    in property <ConfirmView> view;
-    callback accepted();
-    callback cancelled();
-
-    width: 500px;
-    height: layout.preferred-height;
-    accessible-label: root.view.title;
-    accessible-description: root.view.message;
-
-    init => {
-        keys.focus();
-    }
-
-    keys := FocusScope {
-        key-pressed(event) => {
-            if (event.text == Key.Escape) {
-                root.cancelled();
-                return accept;
-            }
-            if (event.text == Key.Return && !root.view.danger) {
-                root.accepted();
-                return accept;
-            }
-            reject
-        }
-
-        layout := VerticalLayout {
-            padding: 24px;
-            spacing: Theme.gap-m;
-
-            Heading {
-                text: root.view.title;
-            }
-            Text {
-                text: root.view.message;
-                color: Theme.text;
-                wrap: word-wrap;
-            }
-            if root.view.detail != "": Body {
-                text: root.view.detail;
-            }
-            HorizontalLayout {
-                alignment: end;
-                spacing: Theme.gap-s;
-                padding-top: Theme.gap-s;
-
-                OutlineButton {
-                    text: "취소";
-                    clicked => {
-                        root.cancelled();
-                    }
-                }
-                PrimaryButton {
-                    button-height: 36px;
-                    text: root.view.ok-text;
-                    clicked => {
-                        root.accepted();
-                    }
-                }
-            }
-        }
-    }
-}
-
 // One line of a list of items: an item's whole path or name and what about it, wrapped. A
 // line breaks between words, and inside a word too long for a line: a Windows path has no
 // place to break at its `\`, and would otherwise run past the list.
@@ -269,6 +209,83 @@ component LineList inherits Rectangle {
     list := ListView {
         for line in root.lines: MessageLine {
             text: line;
+        }
+    }
+}
+
+// Asks before something happens that cannot be taken back. Its text says what will happen.
+export component ConfirmDialog inherits DialogFrame {
+    in property <ConfirmView> view;
+    callback accepted();
+    callback cancelled();
+
+    width: 500px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+    accessible-description: root.view.message;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            if (event.text == Key.Return && !root.view.danger) {
+                root.accepted();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Text {
+                text: root.view.message;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.view.lines.length > 0: LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 200px;
+            }
+            if root.view.detail != "": Body {
+                text: root.view.detail;
+            }
+            if root.view.question != "": Text {
+                text: root.view.question;
+                color: Theme.text;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: root.view.ok-text;
+                    clicked => {
+                        root.accepted();
+                    }
+                }
+            }
         }
     }
 }

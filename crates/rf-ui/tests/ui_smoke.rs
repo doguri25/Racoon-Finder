@@ -486,6 +486,7 @@ fn a_dialog_takes_the_keys_until_it_closes() {
         detail: "‘a.txt’".into(),
         ok_text: "영구 삭제".into(),
         danger: true,
+        ..ConfirmView::default()
     });
     window.set_dialog(DialogKind::Confirm);
     let message =
@@ -510,6 +511,40 @@ fn a_dialog_takes_the_keys_until_it_closes() {
     window.set_dialog(DialogKind::None);
     chord(&window, &[&down]);
     assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn the_copies_an_undo_could_not_trash_are_listed_by_their_whole_paths() {
+    let window = window();
+    let in_backup = |name: &str| {
+        VPath::local(std::env::temp_dir().join("백업").join(name)).expect("a local path")
+    };
+    let copies = vec![in_backup("a.txt"), in_backup("docs")];
+    let record = rf_jobs::UndoRecord::Copied {
+        created: Vec::new(),
+        overwritten: 0,
+        at: None,
+    };
+    let confirm = rf_ui::dialogs::Confirm::delete_copies(copies.clone(), record);
+    window.set_confirm_view(ui_bridge::confirm_view(&confirm));
+    window.set_dialog(DialogKind::Confirm);
+    for copy in &copies {
+        assert_eq!(
+            labelled(&window, &copy.to_string(), AccessibleRole::Text).len(),
+            1,
+            "{copy}"
+        );
+    }
+    for text in [
+        "복사본을 휴지통으로 보낼 수 없습니다. 원본은 그대로 있습니다.",
+        "복사본 2개를 영구 삭제할까요? 되돌릴 수 없습니다.",
+    ] {
+        assert_eq!(
+            labelled(&window, text, AccessibleRole::Text).len(),
+            1,
+            "{text}"
+        );
+    }
 }
 
 #[test]

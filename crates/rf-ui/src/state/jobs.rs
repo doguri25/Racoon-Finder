@@ -188,6 +188,12 @@ impl AppState {
         };
         match (&confirm.purpose, confirm.job()) {
             (ConfirmPurpose::Quit, _) => self.begin_quit(),
+            (ConfirmPurpose::DeleteCopies { record, .. }, Some(spec)) => {
+                let record = UndoRecord::clone(record);
+                self.close();
+                self.deleting_copies(spec.clone(), record);
+                vec![submit(spec, None)]
+            }
             (_, Some(spec)) => {
                 self.close();
                 vec![submit(spec, None)]
@@ -410,6 +416,12 @@ impl AppState {
         } = ended;
         let mut effects = self.folders_changed(&touched_folders(&report.spec, &report.outputs));
         effects.extend(self.pick_made(&report));
+        // Before the end of a cancelled copy, which may have made some of its items.
+        self.note_copies(&report);
+        if let Some(done) = self.copies_deleted(&report) {
+            effects.extend(done);
+            return effects;
+        }
         if self.quitting || report.outcome == Outcome::Cancelled {
             return effects;
         }
@@ -420,11 +432,18 @@ impl AppState {
             effects.extend(self.select_output(side, output));
         }
 
-        // Only a trash job offers to delete for good what its trash refused. An undo also
-        // trashes (the copies it takes back), but an undo never deletes anything for good
-        // (the undo contract of rf-jobs): its refusals are failures like any other.
+        // A trash job offers to delete for good what its trash refused, and so does the undo of
+        // a copy, for the copies it could not trash, once their originals are found as they
+        // were ([`AppState::copies_refused`]). No other undo does: an undo never deletes
+        // anything for good itself (the undo contract of rf-jobs), and the refusals of an undo
+        // of another record are failures like any other.
+        let copied = match &report.spec {
+            JobSpec::Undo(record @ UndoRecord::Copied { .. }) => Some(record),
+            _ => None,
+        };
         let refusal = |failure: &&ItemFailure| {
-            work == JobWork::Trash && failure.reason == Some(FailureReason::TrashRefused)
+            (work == JobWork::Trash || copied.is_some())
+                && failure.reason == Some(FailureReason::TrashRefused)
         };
         let refused: Vec<VPath> = report
             .failures
@@ -437,6 +456,11 @@ impl AppState {
             .iter()
             .filter(|failure| !refusal(failure))
             .collect();
+        if let Some(record) = copied.filter(|_| !refused.is_empty()) {
+            let record = record.clone();
+            effects.extend(self.copies_refused(&record, refused, &failures, &report));
+            return effects;
+        }
         if !failures.is_empty() {
             effects.push(self.failure_notice(work, &failures, &report));
         } else if work == JobWork::Trash {
@@ -545,7 +569,7 @@ impl AppState {
     }
 
     /// A toast with `text`, whose button does `action`, replacing the one on screen.
-    fn toast(&mut self, text: String, action: Option<ToastAction>) -> Effect {
+    pub(super) fn toast(&mut self, text: String, action: Option<ToastAction>) -> Effect {
         self.toast_token += 1;
         let token = self.toast_token;
         let label = match &action {
@@ -677,7 +701,7 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 
 /// The warnings of `report` for the items the location deleted for good when they were to go
 /// to the trash (`DeletedNotTrashed`): nothing brings them back.
-fn deleted_for_good(report: &JobReport) -> impl Iterator<Item = &ItemFailure> {
+pub(super) fn deleted_for_good(report: &JobReport) -> impl Iterator<Item = &ItemFailure> {
     report
         .warnings
         .iter()
