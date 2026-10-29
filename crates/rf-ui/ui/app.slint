@@ -10,7 +10,9 @@ export component MainWindow inherits Window {
     // Window title and the name beside the logo; Rust passes the product name.
     in property <string> app-title;
     // Below 1200px the toolbar drops the name and the button texts. Handlers set it,
-    // not a binding: the window's width depends on the toolbar's layout.
+    // not a binding: the window's width depends on the toolbar's layout. The full
+    // toolbar needs about 1090px; 1200px only works while that stays below it, so a
+    // change that widens the toolbar must re-check both numbers.
     private property <bool> compact;
 
     title: root.app-title;
@@ -77,11 +79,14 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Rectangle {
-                    y: (parent.height - self.height) / 2;
-                    width: 1px;
-                    height: 28px;
-                    background: Theme.border;
+                VerticalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 1px;
+                        height: 28px;
+                        background: Theme.border;
+                    }
                 }
 
                 HorizontalLayout {

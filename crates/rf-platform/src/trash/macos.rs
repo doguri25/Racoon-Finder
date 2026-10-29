@@ -73,10 +73,12 @@ pub fn move_to_trash(path: &VPath) -> Result<Option<PathBuf>> {
     // dangling. A link goes to `NSFileManager`, which moves the link itself.
     let link = is_symlink(local);
     autoreleasepool(|_| {
-        if !link && !FINDER_UNUSABLE.load(Ordering::Relaxed)
-            && let Finder::Trashed(location) = via_finder(local) {
-                return Ok(location);
-            }
+        if !link
+            && !FINDER_UNUSABLE.load(Ordering::Relaxed)
+            && let Finder::Trashed(location) = via_finder(local)
+        {
+            return Ok(location);
+        }
         via_file_manager(local)
     })
     // Whoever reported success, the item that was asked for must be gone from its place;

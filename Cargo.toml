@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-# apps/README.md keeps the apps/* glob non-empty until the first app crate exists.
+# Libraries live in crates/, executables in apps/ (apps/README.md describes the folder).
 members = ["crates/*", "apps/*"]
 
 [workspace.package]

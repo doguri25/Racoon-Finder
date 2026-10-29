@@ -138,7 +138,7 @@ export component ProgressBar inherits Rectangle {
     border-radius: self.height / 2;
     background: Theme.border;
     accessible-role: progress-indicator;
-    accessible-value: round(clamp(root.value, 0, 1) * 100) + "%";
+    accessible-value: clamp(root.value, 0, 1);
     accessible-value-minimum: 0;
     accessible-value-maximum: 1;
 
