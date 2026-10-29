@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use rf_core::{Entry, EntryKind, VPath};
+use rf_core::{Attributes, Entry, EntryKind, VPath};
 
 /// The units above bytes, each 1024 times the one before.
 const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
@@ -182,6 +182,59 @@ pub fn kind_label(entry: &Entry) -> String {
         "zip" | "7z" | "rar" | "tar" | "gz" => format!("{upper} 압축 파일"),
         _ => format!("{upper} 파일"),
     }
+}
+
+/// The line icon of `entry` in the icon views and the list (`Icon.name`): a folder, a link, an
+/// app, or a file by what its extension says it holds (the groups of [`kind_label`]); thumbnails
+/// are for a later version.
+pub fn file_icon(entry: &Entry) -> &'static str {
+    match entry.kind {
+        EntryKind::Dir if is_app_bundle(&entry.name) => return "app",
+        EntryKind::Dir => return "folder",
+        EntryKind::Symlink => return "link",
+        EntryKind::Other => return "file",
+        EntryKind::File => {}
+    }
+    let Some(ext) = entry.extension() else {
+        return "file";
+    };
+    match ext.to_string_lossy().to_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "bmp" | "tiff" | "ico" | "svg" => {
+            "image"
+        }
+        "mp3" | "wav" | "flac" | "m4a" | "ogg" | "aac" => "audio",
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => "video",
+        "zip" | "7z" | "rar" | "tar" | "gz" | "xz" | "bz2" => "archive",
+        "pdf" | "txt" | "md" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "hwp"
+        | "hwpx" | "rtf" | "csv" => "document",
+        "exe" | "app" | "msi" | "dmg" | "sh" | "bat" | "cmd" => "app",
+        _ => "file",
+    }
+}
+
+/// The attribute column (속성): a letter for each attribute set, in File Explorer's letters and
+/// order — R read-only, H hidden, S system, A archive, C compressed, E encrypted, P sparse, O
+/// offline, L a link or reparse point. Windows sets any of them; on macOS and Linux an item
+/// has R (no one may write it), H (a dot file, or Finder's hidden flag), and on macOS C and O
+/// (iCloud's files not on the disk). The Unix permission bits are not in an `Entry`, so the
+/// column does not show them.
+pub fn attribute_letters(attributes: Attributes) -> String {
+    const LETTERS: [(Attributes, char); 9] = [
+        (Attributes::READONLY, 'R'),
+        (Attributes::HIDDEN, 'H'),
+        (Attributes::SYSTEM, 'S'),
+        (Attributes::ARCHIVE, 'A'),
+        (Attributes::COMPRESSED, 'C'),
+        (Attributes::ENCRYPTED, 'E'),
+        (Attributes::SPARSE, 'P'),
+        (Attributes::OFFLINE, 'O'),
+        (Attributes::REPARSE_POINT, 'L'),
+    ];
+    LETTERS
+        .into_iter()
+        .filter(|(attribute, _)| attributes.contains(*attribute))
+        .map(|(_, letter)| letter)
+        .collect()
 }
 
 /// Whether a folder called `name` is a macOS app bundle: its extension is `app`, in any case.
@@ -369,5 +422,43 @@ mod tests {
         for (name, label) in cases {
             assert_eq!(kind_label(&file(name)), label, "{name}");
         }
+    }
+
+    #[test]
+    fn icons_follow_the_kind() {
+        let cases = [
+            (Entry::new("사진", EntryKind::Dir), "folder"),
+            (Entry::new("Safari.app", EntryKind::Dir), "app"),
+            (Entry::new("링크.pdf", EntryKind::Symlink), "link"),
+            (Entry::new("fifo", EntryKind::Other), "file"),
+            (file("a.JPG"), "image"),
+            (file("a.flac"), "audio"),
+            (file("a.mkv"), "video"),
+            (file("a.tar.gz"), "archive"),
+            (file("보고서.hwp"), "document"),
+            (file("setup.exe"), "app"),
+            (file("main.rs"), "file"),
+            (file("Makefile"), "file"),
+        ];
+        for (entry, icon) in cases {
+            assert_eq!(file_icon(&entry), icon, "{:?}", entry.name);
+        }
+    }
+
+    #[test]
+    fn attributes_read_as_explorer_letters() {
+        assert_eq!(attribute_letters(Attributes::empty()), "");
+        assert_eq!(attribute_letters(Attributes::ARCHIVE), "A");
+        assert_eq!(
+            attribute_letters(Attributes::ARCHIVE | Attributes::HIDDEN | Attributes::SYSTEM),
+            "HSA"
+        );
+        assert_eq!(
+            attribute_letters(
+                Attributes::READONLY | Attributes::OFFLINE | Attributes::REPARSE_POINT
+            ),
+            "ROL"
+        );
+        assert_eq!(attribute_letters(Attributes::all()), "RHSACEPOL");
     }
 }

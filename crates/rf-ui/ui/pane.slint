@@ -9,7 +9,8 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { FileList, FileRow } from "file-list.slint";
+import { FileList, FileRow, ColumnView } from "file-list.slint";
+import { FileGrid } from "file-grid.slint";
 import { Shortcuts } from "shortcuts.slint";
 
 // A row of a list of folder names of the address bar: a folder, or a link that leads to one.
@@ -197,9 +198,21 @@ export struct PaneView {
     rows: [FileRow],
     // The keyboard cursor's row, or -1.
     cursor: int,
-    // 0 name, 1 size, 2 modified, 3 kind.
+    // How the rows show: 0 자세히, 1 목록, 2 small icons, 3 medium icons, 4 large icons.
+    mode: int,
+    // The columns of 자세히 after the name, in their order, and which columns show by number
+    // (0 name, 1 size, 2 modified, 3 kind, 4 created, 5 extension, 6 attributes).
+    columns: [ColumnView],
+    shows: [bool],
+    // The column the rows are sorted by first and its direction, the column of the second key
+    // (-1 for none) and its direction, and whether folders come first.
     sort-key: int,
     sort-ascending: bool,
+    then-key: int,
+    then-ascending: bool,
+    folders-first: bool,
+    // The folder has a view of its own (기본값으로 되돌리기 has something to undo).
+    own-view: bool,
     status: string,
     // A listing is on its way.
     loading: bool,
@@ -562,7 +575,10 @@ export component Pane inherits Rectangle {
     in property <data-transfer> tab-drag-data;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
-    out property <int> page-rows: files.page-rows;
+    // For the keys: how many lines (rows, or columns of 목록) a page key moves, and how many
+    // items a line holds.
+    out property <int> page-rows: root.view.mode == 0 ? files.page-rows : grid.page-lines;
+    out property <int> line-items: root.view.mode == 0 ? 1 : grid.line-items;
 
     // Any click on the pane that nothing else takes.
     callback activated();
@@ -597,7 +613,13 @@ export component Pane inherits Rectangle {
     // Esc closed the path field. (A field that loses focus closes silently: the focus stays
     // where the click put it.)
     callback edit-ended();
-    callback sort(column: int);
+    // The column heads of 자세히 (`FileList`): a click (with Shift: `then`), the head's menu, a
+    // head dragged, a border dragged or double-clicked.
+    callback sort(column: int, then: bool);
+    callback column-toggled(column: int);
+    callback column-moved(from: int, slot: int);
+    callback column-resized(column: int, width: length);
+    callback column-texts(column: int, first: int, count: int) -> string;
     // A left press on row `index`, and its release when no drag came of it.
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
@@ -625,7 +647,11 @@ export component Pane inherits Rectangle {
     }
 
     public function scroll-to(index: int) {
-        files.scroll-to(index);
+        if (root.view.mode == 0) {
+            files.scroll-to(index);
+        } else {
+            grid.scroll-to(index);
+        }
     }
 
     // The path field closes (a click on a row of the window's completion list).
@@ -1064,12 +1090,17 @@ export component Pane inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
 
+            // The view that shows has the rows; the other has none, and makes no items.
             files := FileList {
-                visible: root.view.error == "";
-                rows: root.view.rows;
+                visible: root.view.error == "" && root.view.mode == 0;
+                rows: root.view.mode == 0 ? root.view.rows : [];
                 cursor: root.view.cursor;
+                columns: root.view.columns;
+                shows: root.view.shows;
                 sort-key: root.view.sort-key;
                 sort-ascending: root.view.sort-ascending;
+                then-key: root.view.then-key;
+                then-ascending: root.view.then-ascending;
                 active: root.view.active;
                 drag-data: root.drag-data;
                 drag-label: root.drag-label;
@@ -1077,8 +1108,55 @@ export component Pane inherits Rectangle {
                 drag-ended => {
                     root.drag-ended();
                 }
-                sort(column) => {
-                    root.sort(column);
+                sort(column, then) => {
+                    root.sort(column, then);
+                }
+                column-toggled(column) => {
+                    root.column-toggled(column);
+                }
+                column-moved(from, slot) => {
+                    root.column-moved(from, slot);
+                }
+                column-resized(column, width) => {
+                    root.column-resized(column, width);
+                }
+                column-texts(column, first, count) => {
+                    return root.column-texts(column, first, count);
+                }
+                row-clicked(index, ctrl, shift) => {
+                    root.row-clicked(index, ctrl, shift);
+                }
+                row-released(index) => {
+                    root.row-released(index);
+                }
+                drop-check(data, index, action) => {
+                    return root.list-drop-check(data, index, action);
+                }
+                dropped(data, index, action) => {
+                    return root.list-dropped(data, index, action);
+                }
+                row-activated(index) => {
+                    root.row-activated(index);
+                }
+                row-menu(index) => {
+                    root.row-menu(index);
+                }
+                menu-command(name) => {
+                    root.menu-command(name);
+                }
+            }
+
+            grid := FileGrid {
+                visible: root.view.error == "" && root.view.mode != 0;
+                mode: root.view.mode;
+                rows: root.view.mode != 0 ? root.view.rows : [];
+                cursor: root.view.cursor;
+                active: root.view.active;
+                drag-data: root.drag-data;
+                drag-label: root.drag-label;
+                refusal: root.refusal;
+                drag-ended => {
+                    root.drag-ended();
                 }
                 row-clicked(index, ctrl, shift) => {
                     root.row-clicked(index, ctrl, shift);

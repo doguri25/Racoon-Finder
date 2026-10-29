@@ -34,6 +34,17 @@ impl Named for OsString {
     }
 }
 
+/// What a key that moves the cursor does with the row it goes to ([`Selection::go_to`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// The row alone is selected: the key alone.
+    Select,
+    /// The rows from the anchor to it are selected: with Shift.
+    Extend,
+    /// Only the cursor moves: with Ctrl (Windows and Linux; Finder has no such keys).
+    Focus,
+}
+
 /// Which rows of a list are selected, and where the keyboard cursor and the range anchor are.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
@@ -142,6 +153,26 @@ impl Selection {
             self.extend_to(target, names);
         } else {
             self.click(target, names);
+        }
+    }
+
+    /// A key that moves the cursor to row `i`: the row alone is selected ([`Pick::Select`]),
+    /// the range from the anchor to it is ([`Pick::Extend`], Shift), or only the cursor moves
+    /// ([`Pick::Focus`], Ctrl) and the selection and the anchor stay. A cursor moved alone onto
+    /// a row that is not selected is on a row the screen shows unselected: no command acts on it
+    /// ([`Selection::user_cursor`]) until the user selects it (Ctrl+Space, a click).
+    pub fn go_to(&mut self, i: usize, pick: Pick, names: &[impl Named]) {
+        let Some(row) = names.get(i) else { return };
+        match pick {
+            Pick::Select => self.click(i, names),
+            Pick::Extend => self.extend_to(i, names),
+            Pick::Focus => {
+                self.cursor_by_user = self.selected.contains(row.name());
+                self.cursor = Some(i);
+                if self.anchor.is_none() {
+                    self.anchor = Some(i);
+                }
+            }
         }
     }
 
@@ -447,6 +478,37 @@ mod tests {
         let without_b = list(&["x", "a", "c", "d", "e"]);
         sel.reconcile(&moved, &without_b);
         assert_eq!((sel.cursor(), sel.user_cursor()), (Some(2), None));
+    }
+
+    #[test]
+    fn a_key_selects_extends_or_moves_the_cursor_alone() {
+        let names = list(&ABCDE);
+        let mut sel = Selection::default();
+        sel.go_to(1, Pick::Select, &names);
+        assert_eq!((sel.cursor(), sel.indices(&names)), (Some(1), vec![1]));
+        // Ctrl: the cursor moves, the selection and the anchor stay; the row it is on shows
+        // unselected, and nothing acts on it.
+        sel.go_to(3, Pick::Focus, &names);
+        assert_eq!((sel.cursor(), sel.anchor()), (Some(3), Some(1)));
+        assert_eq!(sel.indices(&names), [1]);
+        assert_eq!(sel.user_cursor(), None);
+        // On a selected row it is the user's again.
+        sel.go_to(1, Pick::Focus, &names);
+        assert_eq!(sel.user_cursor(), Some(1));
+        // Shift: the range from the anchor.
+        sel.go_to(3, Pick::Focus, &names);
+        sel.go_to(4, Pick::Extend, &names);
+        assert_eq!(sel.indices(&names), [1, 2, 3, 4]);
+        assert_eq!(sel.user_cursor(), Some(4));
+        // A cursor placed by the list stays nobody's when Ctrl moves it to a row not selected.
+        let mut placed = Selection::default();
+        placed.place_cursor(0, &names);
+        placed.go_to(2, Pick::Focus, &names);
+        assert_eq!((placed.cursor(), placed.user_cursor()), (Some(2), None));
+        assert!(placed.is_empty());
+        // Past the end, nothing.
+        placed.go_to(9, Pick::Select, &names);
+        assert_eq!(placed.cursor(), Some(2));
     }
 
     #[test]

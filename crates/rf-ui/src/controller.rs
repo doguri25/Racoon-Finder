@@ -32,7 +32,9 @@ use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
-use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, Subfolders, start_folders};
+use crate::state::{
+    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, RIGHT, Subfolders, start_folders,
+};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
@@ -248,11 +250,7 @@ fn connect(window: &MainWindow) {
     window.on_filter_edited(|text| {
         with(|c| c.update(|state| state.filter_edited(&text)));
     });
-    window.on_sort(|s, column| {
-        if let Some(key) = ui_bridge::sort_key(column) {
-            with(|c| c.update(|state| state.sort(side(s), key)));
-        }
-    });
+    connect_view(window);
     window.on_row_clicked(|s, i, ctrl, shift| {
         with(|c| c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift)));
     });
@@ -280,6 +278,71 @@ fn connect(window: &MainWindow) {
     connect_tabs(window);
     connect_jobs(window);
     connect_pick(window);
+}
+
+/// The callbacks of the panes' views (NAV-07, NAV-08, NAV-10): the order, the columns of 자세히
+/// and the 보기 menu's commands for a folder's view.
+fn connect_view(window: &MainWindow) {
+    window.on_sort(|s, column, then| {
+        if let Some(key) = ui_bridge::sort_key(column) {
+            with(|c| c.update(|state| state.sort_by(side(s), key, then)));
+        }
+    });
+    window.on_sort_then(|s, column| {
+        let key = ui_bridge::sort_key(column);
+        with(|c| c.update(|state| state.sort_then(side(s), key)));
+    });
+    window.on_column_toggled(|s, column| {
+        if let Some(column) = Column::from_number(column) {
+            with(|c| c.update(|state| state.toggle_column(side(s), column)));
+        }
+    });
+    window.on_column_moved(|s, from, slot| {
+        if let (Some(from), Some(slot)) = (index(from), index(slot)) {
+            with(|c| c.update(|state| state.move_column(side(s), from, slot)));
+        }
+    });
+    window.on_column_resized(|s, column, width| {
+        let width = whole_width(width);
+        if let Some(column) = Column::from_number(column) {
+            with(|c| c.update(|state| state.set_column_width(side(s), column, width)));
+        }
+    });
+    window.on_column_texts(|s, column, first, count| {
+        let (Some(column), Some(first), Some(count)) =
+            (Column::from_number(column), index(first), index(count))
+        else {
+            return slint::SharedString::new();
+        };
+        with(|c| c.panes[side(s)].column_texts(column, first, count))
+            .unwrap_or_default()
+            .into()
+    });
+    window.on_view_command(|s, name| {
+        let side = side(s);
+        with(|c| match name.as_str() {
+            "folders-first" => c.update(|state| state.toggle_folders_first(side)),
+            "apply-below" => c.update(|state| state.apply_view_to_subfolders(side)),
+            "reset-view" => c.update(|state| state.reset_view(side)),
+            _ => {}
+        });
+    });
+}
+
+/// A width from Slint as whole logical pixels (0 for one that is not a width).
+fn whole_width(width: f32) -> u32 {
+    let rounded = width.round();
+    if rounded.is_finite() && rounded >= 0.0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the cast saturates, and a column is clamped to a few hundred pixels"
+        )]
+        let whole = rounded as u32;
+        whole
+    } else {
+        0
+    }
 }
 
 /// The callbacks of the address bar (NAV-03): the `›` of a piece of a path row and its list of
@@ -634,6 +697,10 @@ impl Controller {
         *self.tz.borrow_mut() = tz.clone();
         let (mut state, mut effects) = AppState::restore(left, right, session, waiting, home);
         state.set_recent_targets(self.settings.borrow().recent());
+        // The tabs show the views remembered for their folders, and ask for their listings in
+        // their orders.
+        state.set_views(self.settings.borrow().views());
+        state.settle_views(&mut effects);
         if !self.saver.writable() {
             effects.push(Effect::Notice(words::settings_unreadable().to_owned()));
         }
@@ -782,14 +849,17 @@ impl Controller {
         let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
             return false;
         };
-        let page = self
+        // How the active pane's view lays its rows out.
+        let paging = self
             .window
             .upgrade()
-            .and_then(|window| usize::try_from(window.get_page_rows()).ok())
-            .unwrap_or(1);
+            .map_or(Paging::rows(1), |window| Paging {
+                line: usize::try_from(window.get_line_items()).unwrap_or(1),
+                page: usize::try_from(window.get_page_rows()).unwrap_or(1),
+            });
         let mut used = false;
         self.update(|state| {
-            let effects = state.key(command, mods, page, Instant::now());
+            let effects = state.key(command, mods, paging, Instant::now());
             used = effects.is_some();
             effects.unwrap_or_default()
         });
@@ -981,17 +1051,24 @@ impl Controller {
             "swap-panes" => Command::SwapPanes,
             "same-folder" => Command::SameFolderInOther,
             "toggle-sync" => Command::SyncNavigation,
+            "view-details" => Command::ViewDetails,
+            "view-list" => Command::ViewList,
+            "view-small-icons" => Command::ViewSmallIcons,
+            "view-medium-icons" => Command::ViewMediumIcons,
+            "view-large-icons" => Command::ViewLargeIcons,
             _ => return,
         };
         self.update(|state| {
             state
-                .key(command, Mods::default(), 1, Instant::now())
+                .key(command, Mods::default(), Paging::rows(1), Instant::now())
                 .unwrap_or_default()
         });
     }
 
     /// Changes the state with `f`, drops the address bar's lists that the change left behind,
-    /// lets the tree follow the active pane, then carries out what both return and redraws.
+    /// lets the tree follow the active pane, gives each tab that came to another folder the view
+    /// remembered for that folder and hands the sorts too long for this thread to a worker
+    /// ([`AppState::settle_views`]), then carries out what all of them return and redraws.
     fn update(&self, f: impl FnOnce(&mut AppState) -> Vec<Effect>) {
         let effects = {
             let mut state = self.state.borrow_mut();
@@ -1001,6 +1078,7 @@ impl Controller {
             let mut effects = f(state);
             state.drop_stale_address();
             effects.extend(state.follow_active());
+            state.settle_views(&mut effects);
             effects
         };
         self.apply(effects);
@@ -1036,6 +1114,10 @@ impl Controller {
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
+                Effect::Sort(request) => spawn_worker("rf-ui-sort", move || {
+                    let sorted = request.run();
+                    post(move |c| c.update(|state| state.sorted(sorted)));
+                }),
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
@@ -1174,6 +1256,7 @@ impl Controller {
             }
             // `apply` carries these out itself: it hands only the ones above to this method.
             Effect::Load(_)
+            | Effect::Sort(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::Follow { .. }
@@ -1265,6 +1348,7 @@ impl Controller {
             }
             // Carried out by `apply`.
             Effect::Load(_)
+            | Effect::Sort(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::FindExisting { .. }
@@ -1328,6 +1412,7 @@ impl Controller {
             for side in [LEFT, RIGHT] {
                 let pane = &state.panes()[side];
                 let mut view = self.panes[side].view(pane, side == state.active());
+                view.own_view = state.views().own(pane.active_tab().location()).is_some();
                 let chevron = state
                     .subfolders()
                     .filter(|list| list.side() == side)

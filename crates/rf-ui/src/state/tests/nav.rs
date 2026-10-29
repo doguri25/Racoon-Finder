@@ -133,14 +133,19 @@ fn keys_move_the_cursor_and_select() {
 fn typing_jumps_to_a_name() {
     let mut state = ready(vec![file("apple"), file("banana"), file("berry")], vec![]);
     let now = Instant::now();
-    let effects = state.key(Command::TypeToSelect("be".into()), NONE, 10, now);
+    let effects = state.key(
+        Command::TypeToSelect("be".into()),
+        NONE,
+        Paging::rows(10),
+        now,
+    );
     assert_eq!(effects, Some(vec![Effect::ScrollTo { side: LEFT, row: 2 }]));
     assert_eq!(selected(&state, LEFT), [2]);
     // No match moves nothing, and the key is still used.
     let effects = state.key(
         Command::TypeToSelect("x".into()),
         NONE,
-        10,
+        Paging::rows(10),
         now + Duration::from_secs(5),
     );
     assert_eq!(effects, Some(vec![]));

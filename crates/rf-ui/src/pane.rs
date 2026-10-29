@@ -12,6 +12,11 @@
 //! bar, or to the other pane) keeps its generation, so its listing follows it there; a tab
 //! that comes back after it was closed ([`Pane::reopen`]) or a copy of one
 //! ([`Pane::duplicate`]) is a new tab with a request of its own.
+//!
+//! A tab shows its folder in a [`FolderView`]: a view mode, columns and an order of the rows.
+//! A long listing is put in a new order on a worker thread ([`Tab::take_sort_request`]), which
+//! hands it back with the tab's generation and the number of that sort: the rows stay in the
+//! old order until it comes, and a sort the tab no longer waits for is dropped.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -20,13 +25,12 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use rf_core::{Entry, EntryKind, ErrorKind, VPath};
-use rf_vfs::{
-    Change, SortBy, SortKey, SortOrder, SortSpec, VisibilityFilter, compare_entries, sort_entries,
-};
+use rf_vfs::{Change, SortKey, SortSpec, VisibilityFilter, compare_entries, sort_entries};
 
 use crate::history::History;
 use crate::loader::{LoadEvent, LoadRequest};
 use crate::selection::Selection;
+use crate::state::FolderView;
 use crate::words;
 
 /// How long after a key the next one still adds to the type-to-select prefix (NAV-14).
@@ -34,6 +38,65 @@ pub const TYPE_TO_SELECT_WINDOW: Duration = Duration::from_secs(1);
 
 /// How many closed tabs a pane keeps to reopen ([`Pane::reopen`]); the oldest goes first.
 pub const CLOSED_TABS_KEPT: usize = 10;
+
+/// The most rows a tab puts in a new order on the UI thread; a longer listing is sorted on a
+/// worker ([`Tab::take_sort_request`]). Sorting takes some microseconds a row (the natural
+/// order of the names), so this many take a few milliseconds.
+pub const INLINE_SORT_ROWS: usize = 2_000;
+
+/// A tab's rows to put in a new order on a worker thread: [`SortRequest::run`] there, and the
+/// [`Sorted`] rows back to the tab (`AppState::sorted`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct SortRequest {
+    /// The generation of the tab's listing: the rows are dropped if the tab has listed again
+    /// or moved on by the time they come.
+    pub generation: u64,
+    /// The number of this sort: the rows are dropped if the tab has asked for another since.
+    pub serial: u64,
+    pub sort: SortSpec,
+    pub entries: Vec<Entry>,
+}
+
+impl std::fmt::Debug for SortRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SortRequest")
+            .field("generation", &self.generation)
+            .field("serial", &self.serial)
+            .field("sort", &self.sort)
+            .field("entries", &self.entries.len())
+            .finish()
+    }
+}
+
+impl SortRequest {
+    /// Sorts the rows. It takes long for many rows: call it on a worker thread.
+    pub fn run(mut self) -> Sorted {
+        sort_entries(&mut self.entries, &self.sort);
+        Sorted {
+            generation: self.generation,
+            serial: self.serial,
+            entries: self.entries,
+        }
+    }
+}
+
+/// The rows of a [`SortRequest`], in its order.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Sorted {
+    pub generation: u64,
+    pub serial: u64,
+    pub entries: Vec<Entry>,
+}
+
+impl std::fmt::Debug for Sorted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sorted")
+            .field("generation", &self.generation)
+            .field("serial", &self.serial)
+            .field("entries", &self.entries.len())
+            .finish()
+    }
+}
 
 /// A generation that no request has had yet: the tabs and the folder tree
 /// ([`crate::tree`]) draw from the same count, so a generation names one request in the
@@ -75,8 +138,9 @@ pub enum OpenAction {
 /// One folder tab: where it is, what it lists, in which order, and what is selected.
 ///
 /// The fields change only through the methods, which keep them consistent: `visible` is
-/// `all` without the items the filter hides, both in the order of `sort`, and the selection
-/// and the cursor refer to `visible`.
+/// `all` without the items the filter hides, both in the order of `shown_sort` (the view's
+/// order, or the one before it while a worker sorts), and the selection and the cursor refer to
+/// `visible`.
 ///
 /// It is not `Clone`: a copy would share the tab's generation and take its events too
 /// ([`Pane::duplicate`] makes a copy with a request of its own).
@@ -94,14 +158,26 @@ pub struct Tab {
     reopened: bool,
     location: VPath,
     history: History,
-    /// Every item of the folder, sorted by `sort`.
+    /// Every item of the folder, sorted by `shown_sort`.
     all: Vec<Entry>,
     /// The items of `all` that `filter` shows and whose names hold `name_filter`, in the same
     /// order: the rows on screen.
     visible: Vec<Entry>,
     /// How many items of `all` `filter` shows, whatever their names.
     unfiltered: usize,
-    sort: SortSpec,
+    /// The view mode, the columns and the order the tab shows its folder in.
+    view: FolderView,
+    /// The folder whose remembered view `view` is (`AppState::settle_views`); `None` until one
+    /// is given.
+    view_for: Option<VPath>,
+    /// The order `all` is in: the order of `view`, or the one before it while a worker puts the
+    /// rows in the new one.
+    shown_sort: SortSpec,
+    /// The sort a worker does for the tab: its number and its order.
+    sorting: Option<(u64, SortSpec)>,
+    /// The changes the watch reported since the worker took the rows to sort; they go on top of
+    /// what it gives back.
+    since_sort: Vec<Change>,
     filter: VisibilityFilter,
     /// What the rows' names must hold, ignoring case, while it is not empty (the toolbar's
     /// "이 폴더에서 거르기"): it filters this folder, and goes when the tab goes elsewhere.
@@ -129,9 +205,19 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// A tab that is about to show `location`, and the request for its listing.
+    /// A tab that is about to show `location` in the default view in the order `sort`, and
+    /// the request for its listing.
     pub fn new(location: VPath, sort: SortSpec, filter: VisibilityFilter) -> (Tab, LoadRequest) {
-        let mut tab = Tab::idle(location.clone(), sort, filter);
+        Tab::with_view(location, FolderView::sorted(sort), filter)
+    }
+
+    /// A tab that is about to show `location` in `view`, and the request for its listing.
+    pub fn with_view(
+        location: VPath,
+        view: FolderView,
+        filter: VisibilityFilter,
+    ) -> (Tab, LoadRequest) {
+        let mut tab = Tab::idle(location.clone(), view, filter);
         let request = tab.load(location);
         (tab, request)
     }
@@ -142,14 +228,15 @@ impl Tab {
     /// pane only then ([`Pane::open_beside`]). A pinned tab's moves go to such a tab.
     #[must_use]
     pub fn fork(&self) -> Tab {
-        let mut tab = Tab::idle(self.location.clone(), self.sort, self.filter);
+        let mut tab = Tab::idle(self.location.clone(), self.view.clone(), self.filter);
         tab.history = self.history.clone();
         tab
     }
 
     /// A tab at `location` that has asked for nothing yet (generation 0, which no request
     /// has).
-    fn idle(location: VPath, sort: SortSpec, filter: VisibilityFilter) -> Tab {
+    fn idle(location: VPath, view: FolderView, filter: VisibilityFilter) -> Tab {
+        let sort = view.sort;
         Tab {
             id: next_generation(),
             pinned: false,
@@ -159,7 +246,11 @@ impl Tab {
             all: Vec::new(),
             visible: Vec::new(),
             unfiltered: 0,
-            sort,
+            view,
+            view_for: None,
+            shown_sort: sort,
+            sorting: None,
+            since_sort: Vec::new(),
             filter,
             name_filter: String::new(),
             selection: Selection::default(),
@@ -217,9 +308,106 @@ impl Tab {
         &self.visible
     }
 
-    /// The order of the rows.
+    /// The order of the rows, as the user chose it (the rows may still be in the one before,
+    /// while a worker sorts them).
     pub fn sort(&self) -> SortSpec {
-        self.sort
+        self.view.sort
+    }
+
+    /// The view mode, the columns and the order of the rows.
+    pub fn view(&self) -> &FolderView {
+        &self.view
+    }
+
+    /// Shows the folder in `view`; the rows are put in its order.
+    pub fn set_view(&mut self, view: FolderView) {
+        self.view = view;
+        self.resort();
+    }
+
+    /// The folder whose remembered view the tab shows, once it has been given one.
+    pub fn view_for(&self) -> Option<&VPath> {
+        self.view_for.as_ref()
+    }
+
+    /// Gives the tab `view`, the view remembered for its folder. When `request` is the request
+    /// for its listing, not sent yet, it asks for the listing in the view's order, which the
+    /// worker that lists it sorts it in.
+    pub fn settle_view(&mut self, view: FolderView, request: Option<&mut LoadRequest>) {
+        self.view_for = Some(self.location.clone());
+        if let Some(request) = request.filter(|request| request.generation == self.generation) {
+            request.sort = view.sort;
+            self.requested_sort = view.sort;
+        }
+        self.set_view(view);
+    }
+
+    /// The tab's folder forgot its view: it is to be given the one remembered for it again.
+    pub fn unsettle_view(&mut self) {
+        self.view_for = None;
+    }
+
+    /// The sort a worker is to do, when the rows are not in the order of the view and no
+    /// worker sorts them for it yet: the rows, which stay in the old order until
+    /// [`Tab::apply_sort`] takes them back.
+    pub fn take_sort_request(&mut self) -> Option<SortRequest> {
+        let sort = self.view.sort;
+        let asked = self.sorting.is_some_and(|(_, asked)| asked == sort);
+        if self.status != LoadStatus::Ready || self.shown_sort == sort || asked {
+            return None;
+        }
+        let serial = next_generation();
+        self.sorting = Some((serial, sort));
+        self.since_sort.clear();
+        Some(SortRequest {
+            generation: self.generation,
+            serial,
+            sort,
+            entries: self.all.clone(),
+        })
+    }
+
+    /// Takes the rows a worker sorted, when they are those of the sort the tab waits for: they
+    /// are the rows, with the changes since on top of them. `false`, and no change, for rows the
+    /// tab no longer waits for (it listed again, moved on, or asked for another order).
+    pub fn apply_sort(&mut self, sorted: Sorted) -> bool {
+        let Some((serial, sort)) = self.sorting else {
+            return false;
+        };
+        if sorted.generation != self.generation || sorted.serial != serial {
+            return false;
+        }
+        self.sorting = None;
+        self.all = sorted.entries;
+        self.shown_sort = sort;
+        let since = std::mem::take(&mut self.since_sort);
+        if !since.is_empty() {
+            merge_changes(&mut self.all, since, sort);
+        }
+        self.refresh_visible();
+        true
+    }
+
+    /// Puts the rows in the order of the view: at once when they are few, or else later, by a
+    /// worker ([`Tab::take_sort_request`]). While a listing is on its way, the listing brings the
+    /// order.
+    fn resort(&mut self) {
+        let sort = self.view.sort;
+        if self.shown_sort == sort {
+            self.sorting = None;
+            self.since_sort.clear();
+            return;
+        }
+        if self.status == LoadStatus::Loading {
+            return;
+        }
+        if self.all.len() <= INLINE_SORT_ROWS {
+            sort_entries(&mut self.all, &sort);
+            self.shown_sort = sort;
+            self.sorting = None;
+            self.since_sort.clear();
+            self.refresh_visible();
+        }
     }
 
     /// Which hidden and system items show.
@@ -331,7 +519,8 @@ impl Tab {
         match result {
             Ok(()) => {
                 let mut entries = std::mem::take(&mut self.incoming);
-                sort_entries(&mut entries, &self.sort);
+                sort_entries(&mut entries, &self.view.sort);
+                self.shown_sort = self.view.sort;
                 self.show_listing(entries);
             }
             Err(kind) => {
@@ -346,15 +535,18 @@ impl Tab {
     }
 
     /// Takes the whole listing of request `generation`, sorted by the worker in the order
-    /// the request asked for, which keeps a long sort off the UI thread. It is sorted again
-    /// here only if the tab's order has changed since. `false`, and no change, for another
-    /// request or a listing that has ended already.
+    /// the request asked for, which keeps a long sort off the UI thread. When the tab's order
+    /// has changed since, a short listing is sorted again here, and a long one shows in the
+    /// order it came in until a worker sorts it ([`Tab::take_sort_request`]). `false`, and no
+    /// change, for another request or a listing that has ended already.
     pub fn apply_sorted(&mut self, generation: u64, mut entries: Vec<Entry>) -> bool {
         if !self.is_loading(generation) {
             return false;
         }
-        if self.requested_sort != self.sort {
-            sort_entries(&mut entries, &self.sort);
+        self.shown_sort = self.requested_sort;
+        if self.requested_sort != self.view.sort && entries.len() <= INLINE_SORT_ROWS {
+            sort_entries(&mut entries, &self.view.sort);
+            self.shown_sort = self.view.sort;
         }
         self.incoming.clear();
         self.show_listing(entries);
@@ -375,7 +567,10 @@ impl Tab {
         match self.status {
             LoadStatus::Loading => self.pending.extend(changes),
             LoadStatus::Ready => {
-                merge_changes(&mut self.all, changes, self.sort);
+                if self.sorting.is_some() {
+                    self.since_sort.extend(changes.iter().cloned());
+                }
+                merge_changes(&mut self.all, changes, self.shown_sort);
                 self.refresh_visible();
             }
             // There are no rows to change.
@@ -394,19 +589,13 @@ impl Tab {
         true
     }
 
-    /// Sorts by `key`: ascending for a new key, the other way round for the key that sorts
-    /// now (a second click on a column head). Folders stay first.
+    /// Sorts by `key` alone: ascending for a new key, the other way round for the key that
+    /// sorts now (a second click on a column head, [`FolderView::sort_by`]). Folders stay
+    /// where the order puts them (first, or among the files).
     pub fn set_sort(&mut self, key: SortKey) {
-        let order = match self.sort.primary {
-            SortBy {
-                key: current,
-                order: SortOrder::Ascending,
-            } if current == key => SortOrder::Descending,
-            _ => SortOrder::Ascending,
-        };
-        self.sort.primary = SortBy { key, order };
-        sort_entries(&mut self.all, &self.sort);
-        self.refresh_visible();
+        let mut view = self.view.clone();
+        view.sort_by(key, false);
+        self.set_view(view);
     }
 
     /// Shows or hides the hidden items. The selection keeps the rows that still show.
@@ -521,6 +710,7 @@ impl Tab {
         self.location = to;
         self.stands_in_for = None;
         self.all.clear();
+        self.shown_sort = self.view.sort;
         self.visible.clear();
         self.unfiltered = 0;
         self.name_filter.clear();
@@ -538,11 +728,13 @@ impl Tab {
         self.status = LoadStatus::Loading;
         self.incoming.clear();
         self.pending.clear();
-        self.requested_sort = self.sort;
+        self.requested_sort = self.view.sort;
+        self.sorting = None;
+        self.since_sort.clear();
         LoadRequest {
             generation: self.generation,
             path: self.location.clone(),
-            sort: self.sort,
+            sort: self.view.sort,
         }
     }
 
@@ -554,7 +746,7 @@ impl Tab {
         self.all = entries;
         let pending = std::mem::take(&mut self.pending);
         if !pending.is_empty() {
-            merge_changes(&mut self.all, pending, self.sort);
+            merge_changes(&mut self.all, pending, self.shown_sort);
         }
         self.status = LoadStatus::Ready;
         self.refresh_visible();
@@ -710,7 +902,7 @@ struct ClosedTab {
     index: usize,
     location: VPath,
     history: History,
-    sort: SortSpec,
+    view: FolderView,
     pinned: bool,
 }
 
@@ -758,7 +950,7 @@ impl Pane {
     /// filter of the tab that showed.
     pub fn add_tab(&mut self, location: VPath) -> LoadRequest {
         let current = self.active_tab();
-        let (tab, request) = Tab::new(location, current.sort, current.filter);
+        let (tab, request) = Tab::with_view(location, current.view.clone(), current.filter);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         request
@@ -777,7 +969,7 @@ impl Pane {
             index: i,
             location: closed.location.clone(),
             history: closed.history.clone(),
-            sort: closed.sort,
+            view: closed.view.clone(),
             pinned: closed.pinned,
         });
         Some(closed)
@@ -796,7 +988,7 @@ impl Pane {
     pub fn reopen(&mut self) -> Option<LoadRequest> {
         let closed = self.closed.pop_back()?;
         let filter = self.active_tab().filter;
-        let (mut tab, request) = Tab::new(closed.location, closed.sort, filter);
+        let (mut tab, request) = Tab::with_view(closed.location, closed.view, filter);
         tab.history = closed.history;
         tab.pinned = closed.pinned;
         tab.reopened = true;
@@ -811,8 +1003,11 @@ impl Pane {
     /// the end.
     pub fn duplicate(&mut self, i: usize) -> Option<LoadRequest> {
         let original = self.tabs.get(i)?;
-        let (mut tab, request) =
-            Tab::new(original.location.clone(), original.sort, original.filter);
+        let (mut tab, request) = Tab::with_view(
+            original.location.clone(),
+            original.view.clone(),
+            original.filter,
+        );
         tab.history = original.history.clone();
         self.open_beside(i, tab);
         Some(request)
@@ -1281,6 +1476,99 @@ mod tests {
         assert_eq!(names(tab.visible()), ["d", "b", "c", "a"]);
         // The next listing is asked for in the new order.
         assert_eq!(tab.reload().sort, tab.sort());
+    }
+
+    /// A tab at `at` that has listed `count` files `f0`, `f1`, … of growing sizes, more than
+    /// the UI thread sorts.
+    fn long_tab(count: usize) -> Tab {
+        ready_tab(
+            "long",
+            (0..count)
+                .map(|i| file(&format!("f{i}"), u64::try_from(i).unwrap_or(0)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_long_listing_is_sorted_by_a_worker_and_the_rows_wait_in_their_order() {
+        let count = INLINE_SORT_ROWS + 1;
+        let mut tab = long_tab(count);
+        {
+            let (selection, rows) = tab.selection_mut();
+            selection.click(1, rows);
+        }
+        tab.set_sort(SortKey::Size);
+        // The header says the new order at once; the rows keep the old one meanwhile.
+        assert_eq!(tab.sort().primary.key, SortKey::Size);
+        assert_eq!(tab.visible()[0].name, "f0");
+        assert_eq!(tab.visible()[1].name, "f1");
+        let request = tab.take_sort_request().expect("a worker sorts");
+        assert_eq!(request.generation, tab.generation());
+        assert_eq!(request.entries.len(), count);
+        // Asked once.
+        assert_eq!(tab.take_sort_request(), None);
+
+        // A change while the worker sorts goes on top of what it gives back.
+        let generation = tab.generation();
+        assert!(tab.apply_changes(
+            generation,
+            vec![
+                Change::Upsert(file("new", 0)),
+                Change::Removed(OsString::from("f2"))
+            ]
+        ));
+        let by_size = request.run();
+        assert!(tab.apply_sort(by_size.clone()));
+        assert_eq!(tab.visible().len(), count);
+        assert_eq!(names(&tab.visible()[..3]), ["f0", "new", "f1"]);
+        assert!(!tab.visible().iter().any(|entry| entry.name == "f2"));
+        // The selection follows its name, and the same rows again are no news.
+        assert_eq!(selected(&tab), ["f1"]);
+        assert!(!tab.apply_sort(by_size));
+
+        // Another order asked for before the first came: the first is dropped.
+        tab.set_sort(SortKey::Size);
+        let first = tab.take_sort_request().expect("descending");
+        tab.set_sort(SortKey::Name);
+        let second = tab.take_sort_request().expect("by name");
+        assert!(!tab.apply_sort(first.run()));
+        assert!(tab.apply_sort(second.run()));
+        assert_eq!(tab.visible()[0].name, "f0");
+
+        // A reload drops a sort in progress; so does a move elsewhere.
+        tab.set_sort(SortKey::Size);
+        let late = tab.take_sort_request().expect("a worker sorts");
+        let reload = tab.reload();
+        assert!(!tab.apply_sort(late.run()));
+        // The listing comes in the order asked for: no worker needed.
+        assert_eq!(reload.sort, tab.sort());
+        assert!(tab.apply_sorted(reload.generation, vec![file("b", 2), file("a", 1)]));
+        assert_eq!(tab.take_sort_request(), None);
+    }
+
+    #[test]
+    fn a_short_listing_is_sorted_at_once_and_a_listing_in_an_old_order_waits_for_a_worker() {
+        let mut tab = long_tab(INLINE_SORT_ROWS);
+        tab.set_sort(SortKey::Size);
+        tab.set_sort(SortKey::Size);
+        assert_eq!(tab.take_sort_request(), None);
+        let first = format!("f{}", INLINE_SORT_ROWS - 1);
+        assert_eq!(tab.visible()[0].name.to_str(), Some(first.as_str()));
+
+        // A long listing asked for in the order before a change of it shows as it came, then a
+        // worker sorts it.
+        let request = tab.reload();
+        tab.set_sort(SortKey::Name);
+        let came: Vec<Entry> = (0..=INLINE_SORT_ROWS)
+            .rev()
+            .map(|i| file(&format!("f{i}"), 0))
+            .collect();
+        assert!(tab.apply_sorted(request.generation, came));
+        let last = format!("f{INLINE_SORT_ROWS}");
+        assert_eq!(tab.visible()[0].name.to_str(), Some(last.as_str()));
+        let sort = tab.take_sort_request().expect("a worker sorts");
+        assert!(tab.apply_sort(sort.run()));
+        assert_eq!(tab.visible()[0].name, "f0");
     }
 
     #[test]

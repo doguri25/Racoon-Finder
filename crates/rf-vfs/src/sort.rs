@@ -21,6 +21,10 @@ pub enum SortKey {
     Modified,
     /// The kind (folder, file, symlink, other), then the lowercase extension.
     Kind,
+    /// The creation time; an unknown time (a file system that keeps none) sorts first.
+    Created,
+    /// The lowercase extension alone, whatever the kind; none sorts first.
+    Extension,
 }
 
 /// Which way a key sorts.
@@ -101,6 +105,8 @@ fn compare_by(by: SortBy, a: (&Entry, &Keys), b: (&Entry, &Keys)) -> Ordering {
         SortKey::Kind => kind_rank(entry_a.kind)
             .cmp(&kind_rank(entry_b.kind))
             .then_with(|| keys_a.extension.cmp(&keys_b.extension)),
+        SortKey::Created => entry_a.created.cmp(&entry_b.created),
+        SortKey::Extension => keys_a.extension.cmp(&keys_b.extension),
     };
     match by.order {
         SortOrder::Ascending => ordering,

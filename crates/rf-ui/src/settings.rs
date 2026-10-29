@@ -1,7 +1,9 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
 //! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size and layout
 //! (`[layout]`), the tabs of both panes (in their order, pinned or not) and which one has the
-//! keyboard, and the destination picker's recent targets.
+//! keyboard, the destination picker's recent targets, and the views remembered per folder
+//! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
+//! first).
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -18,10 +20,14 @@
 //! know (a new theme) takes its default, and a tab whose folder this version cannot read stays
 //! in the file. Running an older version in between loses as little as it can. The other way
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
-//! with the default layout and no tab pinned.
+//! with the default layout and no tab pinned, and one without `[[folder_views]]` with no view
+//! remembered. A folder view falls back one key at a time too: a mode or a key of the order this
+//! version does not know is the default one, a column it does not know is left out, and the
+//! keys of a newer version stay in its `extra`.
 //!
 //! Folders are stored as `VPath::to_uri`, which reads back losslessly with `VPath::parse`.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,11 +35,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
-use rf_core::VPath;
+use rf_core::{Os, VPath};
+use rf_vfs::{SortBy, SortOrder, SortSpec};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::state::Layout;
+use crate::state::{
+    Column, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, ShownColumn, StoredView,
+    ViewMode, ViewStore,
+};
 
 /// The name of the settings file in the config folder.
 pub const FILE_NAME: &str = "settings.toml";
@@ -41,8 +51,10 @@ pub const FILE_NAME: &str = "settings.toml";
 pub const BAD_FILE_NAME: &str = "settings.toml.bad";
 /// The file a save writes before it takes the place of the settings file.
 pub const TEMP_FILE_NAME: &str = "settings.toml.tmp";
-/// A settings file larger than this is no file this app wrote; it is treated as broken.
-const MAX_FILE_SIZE: u64 = 1024 * 1024;
+/// A settings file larger than this is no file this app wrote; it is treated as broken. The
+/// views of a thousand folders of the longest paths kept (`state::MAX_FOLDER_URI`) stay below
+/// it.
+const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
 
 /// How many times a save tries to put its file in place. On Windows an antivirus, an indexer
 /// or a sync tool that has the old file open makes the rename fail for a moment.
@@ -188,9 +200,188 @@ pub struct Settings {
     /// a pane past the second (a newer version's) is kept as it is.
     #[serde(deserialize_with = "panes_or_default")]
     pub panes: Vec<PaneSettings>,
+    /// The views remembered per folder, the one used longest ago first ([`Settings::views`]).
+    /// Read as a list: an entry that is no table is left out. Not written when there is none.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "folder_views_or_default"
+    )]
+    pub folder_views: Vec<FolderViewSettings>,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// One folder's view, as stored (an entry of `[[folder_views]]`). Each key the entry lacks, or
+/// whose value this version cannot read, takes its default, and the defaults are not written:
+/// 자세히 with the default columns, by name ascending, folders first, for the folder alone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each key is a separate choice of the view, kept as the file has it"
+)]
+pub struct FolderViewSettings {
+    /// The folder, as `VPath::to_uri`.
+    #[serde(deserialize_with = "or_default")]
+    pub folder: String,
+    /// The view mode: `list`, `small-icons`, `medium-icons`, `large-icons`, or 자세히
+    /// (`details`, or none).
+    #[serde(
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "or_default"
+    )]
+    pub mode: String,
+    /// The columns of 자세히 after the name, in their order (`size`, `modified`, `created`,
+    /// `kind`, `extension`, `attributes`); none for the default ones.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_default"
+    )]
+    pub columns: Option<Vec<String>>,
+    /// The widths of `columns`, in logical pixels, in the same order; a column without one (or
+    /// with 0) is as wide as by default.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "or_default")]
+    pub widths: Vec<u32>,
+    /// The column whose key sorts first (as `columns` names them, or `name`); none for the
+    /// name.
+    #[serde(
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "or_default"
+    )]
+    pub sort: String,
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub descending: bool,
+    /// The column whose key breaks the ties of the first; none for no second key.
+    #[serde(
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "or_default"
+    )]
+    pub then: String,
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub then_descending: bool,
+    /// The folders mixed in with the files, rather than first.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub mixed: bool,
+    /// 하위 폴더에 적용: the folders below show this view too, unless they have one of their own.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub subfolders: bool,
+    /// The keys of a newer version.
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` hands the field by reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl FolderViewSettings {
+    /// What the store keeps of this entry.
+    pub fn stored(&self) -> StoredView {
+        let defaults = FolderView::default();
+        let columns = match &self.columns {
+            None => defaults.columns,
+            Some(names) => {
+                let mut columns: Vec<ShownColumn> = Vec::new();
+                for (i, name) in names.iter().enumerate() {
+                    let Some(column) = Column::from_name(name).filter(|c| *c != Column::Name)
+                    else {
+                        continue;
+                    };
+                    if columns.iter().any(|shown| shown.column == column) {
+                        continue;
+                    }
+                    let width = match self.widths.get(i) {
+                        Some(&width) if width > 0 => {
+                            width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+                        }
+                        _ => column.default_width(),
+                    };
+                    columns.push(ShownColumn { column, width });
+                }
+                columns
+            }
+        };
+        let key = |name: &str| Column::from_name(name).and_then(Column::sort_key);
+        let order = |descending: bool| {
+            if descending {
+                SortOrder::Descending
+            } else {
+                SortOrder::Ascending
+            }
+        };
+        let primary = SortBy {
+            key: key(&self.sort).unwrap_or(defaults.sort.primary.key),
+            order: order(self.descending),
+        };
+        let secondary = key(&self.then)
+            .filter(|then| *then != primary.key)
+            .map(|then| SortBy {
+                key: then,
+                order: order(self.then_descending),
+            });
+        StoredView {
+            folder: self.folder.clone(),
+            view: FolderView {
+                mode: ViewMode::from_name(&self.mode).unwrap_or_default(),
+                columns,
+                sort: SortSpec {
+                    primary,
+                    secondary,
+                    folders_first: !self.mixed,
+                },
+            },
+            subfolders: self.subfolders,
+            extra: self.extra.clone(),
+        }
+    }
+
+    /// The entry that keeps `stored`, without the defaults.
+    pub fn of(stored: &StoredView) -> FolderViewSettings {
+        let view = &stored.view;
+        let defaults = FolderView::default();
+        let mode = if view.mode == ViewMode::Details {
+            String::new()
+        } else {
+            view.mode.name().to_owned()
+        };
+        let columns = (view.columns != defaults.columns).then(|| {
+            view.columns
+                .iter()
+                .map(|shown| shown.column.name().to_owned())
+                .collect()
+        });
+        let widths = if columns.is_some() {
+            view.columns.iter().map(|shown| shown.width).collect()
+        } else {
+            Vec::new()
+        };
+        let name = |by: SortBy| Column::of_key(by.key).name().to_owned();
+        let sort = view.sort;
+        FolderViewSettings {
+            folder: stored.folder.clone(),
+            mode,
+            columns,
+            widths,
+            sort: if sort.primary.key == defaults.sort.primary.key {
+                String::new()
+            } else {
+                name(sort.primary)
+            },
+            descending: sort.primary.order == SortOrder::Descending,
+            then: sort.secondary.map(name).unwrap_or_default(),
+            then_descending: sort
+                .secondary
+                .is_some_and(|by| by.order == SortOrder::Descending),
+            mixed: !sort.folders_first,
+            subfolders: stored.subfolders,
+            extra: stored.extra.clone(),
+        }
+    }
 }
 
 /// A known key's value as `T`, or `T`'s default when it is no `T` (the wrong type, or a name a
@@ -202,6 +393,21 @@ where
 {
     let value = toml::Value::deserialize(deserializer)?;
     Ok(value.try_into().unwrap_or_default())
+}
+
+/// The folder views as a list, without the entries that are no table; no list at all is none.
+fn folder_views_or_default<'de, D>(deserializer: D) -> Result<Vec<FolderViewSettings>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let toml::Value::Array(views) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(views
+        .into_iter()
+        .filter(toml::Value::is_table)
+        .filter_map(|view| view.try_into().ok())
+        .collect())
 }
 
 /// The panes as a list, each one that cannot be read an empty pane; no list at all is none.
@@ -447,6 +653,24 @@ impl Settings {
         self.recent_targets = targets.iter().map(VPath::to_uri).collect();
     }
 
+    /// The views remembered per folder, with this system's rule of case. A file with more than
+    /// the store keeps keeps the ones used last.
+    pub fn views(&self) -> ViewStore {
+        ViewStore::new(
+            self.folder_views
+                .iter()
+                .map(FolderViewSettings::stored)
+                .collect(),
+            Os::CURRENT,
+        )
+    }
+
+    /// Takes the views of `store` in, the one used longest ago first, with the keys of a newer
+    /// version each kept.
+    pub fn set_views(&mut self, store: &ViewStore) {
+        self.folder_views = store.entries().map(FolderViewSettings::of).collect();
+    }
+
     /// The size the window opens at, in logical pixels: the stored one, kept between
     /// [`MIN_WINDOW`] and [`MAX_WINDOW`]; `None` without one.
     pub fn window_size(&self) -> Option<(u32, u32)> {
@@ -460,14 +684,62 @@ impl Settings {
 
     /// The text of `settings.toml` for these settings. Two settings are the same to save when
     /// their texts are: a newer version's `nan` is never equal to itself as a value.
+    ///
+    /// The window asks for it after every change, to see whether there is anything to save, and
+    /// most changes leave the folder views (up to a thousand of them) as they were: their text
+    /// is made once for each set of them, and put after the rest.
     pub fn to_text(&self) -> io::Result<String> {
-        toml::to_string(self).map_err(io::Error::other)
+        let head = Settings {
+            theme: self.theme,
+            show_hidden: self.show_hidden,
+            window: self.window,
+            active_pane: self.active_pane,
+            recent_targets: self.recent_targets.clone(),
+            layout: self.layout.clone(),
+            panes: self.panes.clone(),
+            folder_views: Vec::new(),
+            extra: self.extra.clone(),
+        };
+        let mut text = toml::to_string(&head).map_err(io::Error::other)?;
+        if self.folder_views.is_empty() {
+            return Ok(text);
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&folder_views_text(&self.folder_views)?);
+        Ok(text)
     }
 
     /// Writes the settings to `config_dir` at once ([`write_text`]). Blocks on the disk.
     pub fn save(&self, config_dir: &Path) -> io::Result<()> {
         write_text(config_dir, &self.to_text()?)
     }
+}
+
+/// The text of `views` as `[[folder_views]]` tables ([`Settings::to_text`]): made once for each
+/// set of views on this thread, and kept until another set comes.
+fn folder_views_text(views: &[FolderViewSettings]) -> io::Result<String> {
+    thread_local! {
+        static LAST: RefCell<Option<(Vec<FolderViewSettings>, String)>> = const { RefCell::new(None) };
+    }
+    #[derive(Serialize)]
+    struct Views<'a> {
+        folder_views: &'a [FolderViewSettings],
+    }
+    LAST.with_borrow_mut(|last| {
+        if let Some((known, text)) = last.as_ref()
+            && known.as_slice() == views
+        {
+            return Ok(text.clone());
+        }
+        let text = toml::to_string(&Views {
+            folder_views: views,
+        })
+        .map_err(io::Error::other)?;
+        *last = Some((views.to_vec(), text.clone()));
+        Ok(text)
+    })
 }
 
 /// Writes `text` as `settings.toml` in `config_dir` (made if missing), atomically: to
@@ -666,7 +938,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::state::Layout;
+    use crate::state::{Column, FolderView, Layout, ViewMode, ViewStore};
 
     fn folder(dir: &Path, name: &str) -> VPath {
         VPath::local(dir.join(name)).expect("a local path")
@@ -712,7 +984,32 @@ mod tests {
         settings.panes[1]
             .extra
             .insert("split".to_owned(), toml::Value::Float(0.5));
+        settings.set_views(&odd_views(dir));
         settings
+    }
+
+    /// Views of three folders, with every value of a view off its default in one of them.
+    fn odd_views(dir: &Path) -> ViewStore {
+        let mut store = ViewStore::default();
+        let mut icons = FolderView {
+            mode: ViewMode::LargeIcons,
+            ..FolderView::default()
+        };
+        store.remember(&folder(dir, "a"), icons.clone());
+        icons.mode = ViewMode::List;
+        store.apply_to_subfolders(&folder(dir, "사진"), icons);
+        let mut odd = FolderView::default();
+        odd.toggle_column(Column::Kind);
+        odd.toggle_column(Column::Attributes);
+        odd.toggle_column(Column::Created);
+        odd.move_column(2, 0);
+        odd.set_width(Column::Size, 88);
+        odd.sort_by(rf_vfs::SortKey::Modified, false);
+        odd.sort_by(rf_vfs::SortKey::Modified, false);
+        odd.sort_by(rf_vfs::SortKey::Extension, true);
+        odd.sort.folders_first = false;
+        store.remember(&folder(dir, "c"), odd);
+        store
     }
 
     /// A layout with every value off its default.
@@ -820,6 +1117,142 @@ mod tests {
     }
 
     #[test]
+    fn folder_views_round_trip_without_their_defaults() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut settings = Settings::default();
+        settings.set_views(&odd_views(dir.path()));
+        let text = settings.to_text().expect("text");
+        settings.save(dir.path()).expect("saved");
+
+        let views = load(dir.path()).settings.views();
+        assert_eq!(views, odd_views(dir.path()));
+        // The one used last comes last.
+        let order: Vec<&str> = views.entries().map(|entry| entry.folder.as_str()).collect();
+        let uri = |name: &str| folder(dir.path(), name).to_uri();
+        assert_eq!(order, [uri("a"), uri("사진"), uri("c")]);
+        // A view keeps only what differs from the default view: a's has its mode alone.
+        let a = &settings.folder_views[0];
+        assert_eq!(a.mode, "large-icons");
+        assert_eq!((a.columns.as_ref(), a.sort.as_str()), (None, ""));
+        assert!(
+            !text.contains("folders_first") && !text.contains("then_descending"),
+            "{text}"
+        );
+        let c = &settings.folder_views[2];
+        assert_eq!(
+            c.columns.as_deref(),
+            Some(
+                [
+                    "attributes".to_owned(),
+                    "size".to_owned(),
+                    "modified".to_owned(),
+                    "created".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(c.widths, [56, 88, 126, 126]);
+        assert_eq!(
+            (c.sort.as_str(), c.descending, c.then.as_str(), c.mixed),
+            ("modified", true, "extension", true)
+        );
+        // No views, no table: the file reads as the first demo's did.
+        settings.set_views(&ViewStore::default());
+        assert!(!settings.to_text().expect("text").contains("folder_views"));
+    }
+
+    #[test]
+    fn folder_views_of_a_newer_version_fall_back_one_key_at_a_time() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let a = toml_string(&folder(dir.path(), "a").to_uri());
+        let b = toml_string(&folder(dir.path(), "b").to_uri());
+        let text = format!(
+            "theme = \"dark\"\n\n[[folder_views]]\nfolder = {a}\nmode = \"thumbnails\"\n\
+             columns = [\"size\", \"tags\", \"kind\", \"name\", \"size\"]\n\
+             widths = [5000, 90, 0]\nsort = \"rating\"\ndescending = true\nthen = \"kind\"\n\
+             zoom = 2\n\n[[folder_views]]\nfolder = {b}\nmode = 7\nsubfolders = \"yes\"\n\
+             mixed = true\n"
+        );
+        std::fs::write(dir.path().join(FILE_NAME), &text).expect("written");
+
+        let settings = load(dir.path()).settings;
+        assert_eq!(settings.theme, ThemeChoice::Dark);
+        let views = settings.views();
+        let first = views.own(&folder(dir.path(), "a")).expect("a's view");
+        // A mode it does not know: 자세히. A column it does not know is left out, and so is the
+        // name and a column twice; a width past the most is the most, and 0 the default.
+        assert_eq!(first.view.mode, ViewMode::Details);
+        let columns: Vec<(Column, u32)> = first
+            .view
+            .columns
+            .iter()
+            .map(|shown| (shown.column, shown.width))
+            .collect();
+        assert_eq!(
+            columns,
+            [(Column::Size, MAX_COLUMN_WIDTH), (Column::Kind, 104)]
+        );
+        // A key it does not know: the name, in the direction given; the second key stays.
+        assert_eq!(first.view.sort.primary.key, rf_vfs::SortKey::Name);
+        assert_eq!(first.view.sort.primary.order, SortOrder::Descending);
+        assert_eq!(
+            first.view.sort.secondary.map(|by| by.key),
+            Some(rf_vfs::SortKey::Kind)
+        );
+        assert_eq!(
+            first.extra.get("zoom"),
+            Some(&toml::Value::Integer(2)),
+            "a key of a newer version stays"
+        );
+        let second = views.own(&folder(dir.path(), "b")).expect("b's view");
+        assert_eq!(second.view.mode, ViewMode::Details);
+        assert!(!second.subfolders);
+        assert!(!second.view.sort.folders_first);
+        // Written back, the newer key stays.
+        let mut again = settings.clone();
+        again.set_views(&views);
+        assert!(again.to_text().expect("text").contains("zoom = 2"));
+
+        // A table that is no list, and entries that are no tables, leave no views.
+        for broken in [
+            "folder_views = 5\n",
+            "folder_views = [1, \"x\"]\n",
+            "[folder_views]\nfolder = \"x\"\n",
+        ] {
+            std::fs::write(dir.path().join(FILE_NAME), broken).expect("written");
+            let loaded = load(dir.path());
+            assert!(loaded.writable, "{broken}");
+            assert!(loaded.settings.views().is_empty(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn a_file_with_more_views_than_kept_keeps_the_ones_used_last() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let many = crate::state::MAX_FOLDER_VIEWS + 5;
+        let settings = Settings {
+            folder_views: (0..many)
+                .map(|i| FolderViewSettings {
+                    folder: folder(dir.path(), &format!("f{i}")).to_uri(),
+                    mode: "list".to_owned(),
+                    ..FolderViewSettings::default()
+                })
+                .collect(),
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        let views = load(dir.path()).settings.views();
+        assert_eq!(views.len(), crate::state::MAX_FOLDER_VIEWS);
+        assert!(views.own(&folder(dir.path(), "f4")).is_none());
+        assert!(views.own(&folder(dir.path(), "f5")).is_some());
+        assert!(
+            views
+                .own(&folder(dir.path(), &format!("f{}", many - 1)))
+                .is_some()
+        );
+    }
+
+    #[test]
     fn a_file_of_the_first_demo_opens_with_the_default_layout() {
         // As the first demo wrote it: no layout.
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -850,6 +1283,7 @@ mod tests {
         assert_eq!(session.active_pane, 1);
         assert!(session.show_hidden);
         assert_eq!(session.layout, Layout::default());
+        assert!(settings.views().is_empty());
 
         // Saved again with another layout, it keeps the rest as it was.
         let mut changed = session.clone();

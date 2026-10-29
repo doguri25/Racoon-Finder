@@ -341,6 +341,7 @@ impl Controller {
             let state = state.as_ref()?;
             settings.set_session(&state.session());
             settings.set_recent(state.recent_targets());
+            settings.set_views(state.views());
         }
         settings.theme = self.theme.get();
         if let Some(size) = self.window_size() {

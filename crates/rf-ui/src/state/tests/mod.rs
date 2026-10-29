@@ -22,6 +22,7 @@ mod pick;
 mod session;
 mod sidebar;
 mod tabs;
+mod view;
 
 fn folder(name: &str) -> VPath {
     VPath::local(std::env::temp_dir().join(name)).expect("a local path")
@@ -101,7 +102,7 @@ fn cursor(state: &AppState, side: usize) -> Option<usize> {
 
 fn press(state: &mut AppState, text: &str, mods: Mods) -> Option<Vec<Effect>> {
     let command = keys::command_for(text, mods, Os::Windows).expect("a shortcut");
-    state.key(command, mods, 10, Instant::now())
+    state.key(command, mods, Paging::rows(10), Instant::now())
 }
 
 fn special(key: Key) -> String {

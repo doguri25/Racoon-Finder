@@ -372,7 +372,7 @@ fn only_the_payload_of_the_last_drag_drops_and_only_on_the_main_window() {
     assert!(state.drop_offer(second, RIGHT_LIST).is_some());
 
     // While a window shows over the main window, nothing takes a drop.
-    state.key(Command::NewFolder, NONE, 1, Instant::now());
+    state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     assert_eq!(state.drop_offer(second, RIGHT_LIST), None);
     assert_eq!(state.drop_items(second, RIGHT_LIST, TransferMode::Move), []);

@@ -23,20 +23,22 @@ use crate::controller::{self, Controller};
 use crate::dialogs::{
     Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
 };
-use crate::format::{folder_label, format_size, format_time_in, kind_label, short_path};
+use crate::format::{
+    attribute_letters, file_icon, folder_label, format_size, format_time_in, kind_label, short_path,
+};
 use crate::jobs::JobRow;
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
-use crate::state::{Completion, Names};
+use crate::state::{Column, Completion, Names};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow, FolderMenuView,
-    JobRowView, MainWindow, MessageView, NameView, PaneView, PickTarget, PickView, PreflightView,
-    RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow,
+    FolderMenuView, JobRowView, MainWindow, MessageView, NameView, PaneView, PickTarget, PickView,
+    PreflightView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -69,6 +71,9 @@ pub struct PaneModels {
     tabs: Rc<VecModel<TabItem>>,
     crumbs: Rc<VecModel<Crumb>>,
     completions: Rc<VecModel<FolderMenuRow>>,
+    /// The columns of 자세히 after the name, and which columns show by number.
+    columns: Rc<VecModel<ColumnView>>,
+    shows: Rc<VecModel<bool>>,
 }
 
 impl fmt::Debug for PaneModels {
@@ -84,6 +89,12 @@ impl PaneModels {
     /// Shows the dates in `tz` from now on ([`FileRows::set_time_zone`]).
     pub fn set_time_zone(&self, tz: TimeZone) {
         self.rows.set_time_zone(tz);
+    }
+
+    /// The texts of `column` in `count` rows of the list from row `first` on, one a line, as
+    /// the list shows them: what a double click on the column's border fits it to.
+    pub fn column_texts(&self, column: Column, first: usize, count: usize) -> String {
+        self.rows.texts(column, first, count)
     }
 
     /// What `pane` shows; `active` when it has the keyboard. The models are brought up to
@@ -111,7 +122,38 @@ impl PaneModels {
                 .collect(),
         );
         set_rows(&self.crumbs, crumbs(&ancestors(tab.location())));
-        let sort = tab.sort().primary;
+        let view = tab.view();
+        set_rows(
+            &self.columns,
+            view.columns
+                .iter()
+                .map(|shown| ColumnView {
+                    id: shown.column.number(),
+                    title: shown.column.title().into(),
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "a column is at most a few hundred pixels wide"
+                    )]
+                    width: shown.width as f32,
+                    align_end: shown.column.align_end(),
+                    sortable: shown.column.sort_key().is_some(),
+                })
+                .collect(),
+        );
+        set_rows(
+            &self.shows,
+            std::iter::once(Column::Name)
+                .chain(Column::OPTIONAL)
+                .map(|column| (column.number(), view.shows(column)))
+                .fold(vec![false; 7], |mut shows, (number, shown)| {
+                    if let Some(slot) = usize::try_from(number).ok().and_then(|n| shows.get_mut(n))
+                    {
+                        *slot = shown;
+                    }
+                    shows
+                }),
+        );
+        let sort = view.sort;
         PaneView {
             tabs: ModelRc::from(Rc::clone(&self.tabs)),
             active_tab: i32::try_from(pane.active()).unwrap_or(0),
@@ -123,8 +165,17 @@ impl PaneModels {
                 .cursor()
                 .and_then(|row| i32::try_from(row).ok())
                 .unwrap_or(-1),
-            sort_key: sort_column(sort.key),
-            sort_ascending: sort.order == SortOrder::Ascending,
+            mode: view.mode.number(),
+            columns: ModelRc::from(Rc::clone(&self.columns)),
+            shows: ModelRc::from(Rc::clone(&self.shows)),
+            sort_key: sort_column(sort.primary.key),
+            sort_ascending: sort.primary.order == SortOrder::Ascending,
+            then_key: sort.secondary.map_or(-1, |by| sort_column(by.key)),
+            then_ascending: sort
+                .secondary
+                .is_none_or(|by| by.order == SortOrder::Ascending),
+            folders_first: sort.folders_first,
+            own_view: false,
             // A folder that could not be listed has no items to count.
             status: match tab.status() {
                 LoadStatus::Failed(_) => SharedString::new(),
@@ -298,6 +349,38 @@ impl FileRows {
         *self.rows.borrow_mut() = new;
         tell(&self.notify, changes);
     }
+}
+
+impl FileRows {
+    /// The texts of `column` in `count` rows from row `first` on, one a line
+    /// ([`PaneModels::column_texts`]).
+    fn texts(&self, column: Column, first: usize, count: usize) -> String {
+        let rows = self.rows.borrow();
+        let tz = self.tz.borrow();
+        let mut texts: Vec<String> = rows
+            .iter()
+            .skip(first)
+            .take(count)
+            .map(|shown| cell_text(&file_row(&shown.entry, shown.selected, &tz), column))
+            .collect();
+        texts.sort_unstable();
+        texts.dedup();
+        texts.join("\n")
+    }
+}
+
+/// The text of `column` in `row`.
+fn cell_text(row: &FileRow, column: Column) -> String {
+    match column {
+        Column::Name => &row.name,
+        Column::Size => &row.size,
+        Column::Modified => &row.modified,
+        Column::Created => &row.created,
+        Column::Kind => &row.kind,
+        Column::Extension => &row.extension,
+        Column::Attributes => &row.attributes,
+    }
+    .to_string()
 }
 
 impl Model for FileRows {
@@ -563,9 +646,14 @@ pub fn diff_rows<'a, T: PartialEq, K: Eq + Hash>(
     (steps.len() <= MAX_ROW_CHANGES).then_some(steps)
 }
 
-/// The row the list shows for `entry`. Only a file has a size; a time beyond what can be shown
-/// shows nothing.
+/// The row the list shows for `entry`. Only a file has a size; a time that is not known (the
+/// creation time on a file system that keeps none) or beyond what can be shown shows nothing.
 pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone) -> FileRow {
+    let time = |time: Option<std::time::SystemTime>| -> SharedString {
+        time.map(|time| format_time_in(time, tz))
+            .unwrap_or_default()
+            .into()
+    };
     FileRow {
         name: entry.name.to_string_lossy().as_ref().into(),
         size: if entry.kind == EntryKind::File {
@@ -573,12 +661,16 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone) -> FileRow {
         } else {
             SharedString::new()
         },
-        modified: entry
-            .modified
-            .map(|time| format_time_in(time, tz))
+        modified: time(entry.modified),
+        created: time(entry.created),
+        kind: kind_label(entry).into(),
+        extension: entry
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
             .unwrap_or_default()
             .into(),
-        kind: kind_label(entry).into(),
+        attributes: attribute_letters(entry.attributes).into(),
+        icon: file_icon(entry).into(),
         is_dir: entry.kind == EntryKind::Dir,
         is_link: entry.kind == EntryKind::Symlink,
         selected,
@@ -615,25 +707,16 @@ pub fn place_space(place: &Place) -> (String, f32) {
     }
 }
 
-/// The column of the file list that sorts by `key` (0 name, 1 size, 2 modified, 3 kind).
+/// The number of the column of the file list that sorts by `key` ([`Column::number`]: 0 name,
+/// 1 size, 2 modified, 3 kind, 4 created, 5 extension).
 pub fn sort_column(key: SortKey) -> i32 {
-    match key {
-        SortKey::Name => 0,
-        SortKey::Size => 1,
-        SortKey::Modified => 2,
-        SortKey::Kind => 3,
-    }
+    Column::of_key(key).number()
 }
 
-/// The key that column `column` of the file list sorts by; `None` for no column.
+/// The key that the column numbered `column` sorts by; `None` for no column, or the
+/// attributes, which sort nothing.
 pub fn sort_key(column: i32) -> Option<SortKey> {
-    Some(match column {
-        0 => SortKey::Name,
-        1 => SortKey::Size,
-        2 => SortKey::Modified,
-        3 => SortKey::Kind,
-        _ => return None,
-    })
+    Column::from_number(column)?.sort_key()
 }
 
 /// What the payload of a drag of rows holds: the id under which the state noted the items
@@ -720,6 +803,11 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_swap_panes(key(Command::SwapPanes));
     shown.set_same_folder(key(Command::SameFolderInOther));
     shown.set_sync_navigation(key(Command::SyncNavigation));
+    shown.set_view_details(key(Command::ViewDetails));
+    shown.set_view_list(key(Command::ViewList));
+    shown.set_view_small_icons(key(Command::ViewSmallIcons));
+    shown.set_view_medium_icons(key(Command::ViewMediumIcons));
+    shown.set_view_large_icons(key(Command::ViewLargeIcons));
 }
 
 /// A row of the job panel.
@@ -1551,10 +1639,16 @@ mod tests {
             SortKey::Size,
             SortKey::Modified,
             SortKey::Kind,
+            SortKey::Created,
+            SortKey::Extension,
         ] {
             assert_eq!(sort_key(sort_column(key)), Some(key));
         }
-        assert_eq!(sort_key(4), None);
+        // The first demo's numbers stay.
+        assert_eq!(sort_column(SortKey::Kind), 3);
+        // The attributes sort nothing.
+        assert_eq!(sort_key(6), None);
+        assert_eq!(sort_key(7), None);
         assert_eq!(sort_key(-1), None);
     }
 

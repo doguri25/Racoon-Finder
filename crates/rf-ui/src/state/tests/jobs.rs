@@ -66,7 +66,7 @@ fn new_folder_asks_for_a_name_then_creates_it() {
     );
     assert_eq!(state.modal(), None);
     // The toolbar's 새 폴더 opens it too, and Esc closes it without a job.
-    state.key(Command::NewFolder, NONE, 1, Instant::now());
+    state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     assert_eq!(state.dialog_cancelled(), []);
     assert_eq!(state.modal(), None);

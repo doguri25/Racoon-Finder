@@ -17,6 +17,7 @@ use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::pick::Validity;
+use crate::state::Column;
 
 /// How many characters a path takes at most in a row of a recovered job, beside its buttons:
 /// the middle of a longer one is left out ([`short_path`]), so that the end of the path stays
@@ -191,6 +192,34 @@ pub fn folder_vanished(name: &str, to_parent: bool) -> String {
         "홈 폴더"
     };
     format!("‘{name}’ 폴더가 없어져 {to}로 옮겼습니다")
+}
+
+/// What the head of `column` of 자세히 says (the 보기 menu's 열 and 정렬 say it too).
+pub fn column_title(column: Column) -> &'static str {
+    match column {
+        Column::Name => "이름",
+        Column::Size => "크기",
+        Column::Modified => "수정한 날짜",
+        Column::Created => "만든 날짜",
+        Column::Kind => "종류",
+        Column::Extension => "확장자",
+        Column::Attributes => "속성",
+    }
+}
+
+/// The notice after 하위 폴더에 적용 in the folder `name`.
+pub fn view_applied_below(name: &str) -> String {
+    format!("‘{name}’ 폴더와 그 하위 폴더를 이 보기로 표시합니다")
+}
+
+/// The notice after 기본값으로 되돌리기 in the folder `name`.
+pub fn view_reset(name: &str) -> String {
+    format!("‘{name}’ 폴더의 보기를 되돌렸습니다")
+}
+
+/// The notice when a folder's view cannot be remembered (its path is too long to keep).
+pub fn view_not_kept() -> &'static str {
+    "경로가 너무 길어 이 폴더의 보기를 기억할 수 없습니다"
 }
 
 /// The notice when the folder `name` a pane showed is gone, the pane went to the nearest folder

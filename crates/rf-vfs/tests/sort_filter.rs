@@ -145,6 +145,46 @@ fn kind_sort_groups_by_kind_then_extension() {
 }
 
 #[test]
+fn created_and_extension_orders() {
+    let at = |name: &str, secs: Option<u64>| {
+        let mut x = f(name);
+        x.created = secs.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+        x
+    };
+    // An unknown creation time (a file system that does not keep one) sorts first.
+    let v = || {
+        vec![
+            at("new", Some(30)),
+            at("unknown", None),
+            at("old", Some(10)),
+        ]
+    };
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Created, Ascending), true)),
+        ["unknown", "old", "new"]
+    );
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Created, Descending), true)),
+        ["new", "old", "unknown"]
+    );
+
+    // The extension alone, in any case; no extension (a folder, `noext`) sorts first, and a
+    // tie goes by the name. A link is not set apart, as the kind sort sets it.
+    let v = vec![
+        Entry::new("l.png", EntryKind::Symlink),
+        f("b.txt"),
+        f("c.PNG"),
+        f("noext"),
+        d("x"),
+        f("a.png"),
+    ];
+    assert_eq!(
+        sorted(v, spec(by(SortKey::Extension, Ascending), false)),
+        ["noext", "x", "a.png", "c.PNG", "l.png", "b.txt"]
+    );
+}
+
+#[test]
 fn secondary_key_breaks_ties() {
     let v = vec![
         sized("small.txt", 1),

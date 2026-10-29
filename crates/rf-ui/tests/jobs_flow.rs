@@ -18,7 +18,7 @@ use rf_ui::jobs::{JobEffect, Jobs};
 use rf_ui::loader::{LoadEvent, LoadTicket, Loader};
 use rf_ui::pane::LoadStatus;
 use rf_ui::resolver::{Asked, Question, UiResolver};
-use rf_ui::state::{AppState, Effect, LEFT, RIGHT};
+use rf_ui::state::{AppState, Effect, LEFT, Paging, RIGHT};
 use rf_vfs::Vfs;
 use slint::platform::Key;
 use tempfile::TempDir;
@@ -369,7 +369,7 @@ fn key(state: &mut AppState, key: Key, shift: bool) -> Vec<Effect> {
     let command = rf_ui::keys::command_for(&char::from(key).to_string(), mods, Os::Windows)
         .expect("a shortcut");
     state
-        .key(command, mods, 10, Instant::now())
+        .key(command, mods, Paging::rows(10), Instant::now())
         .expect("the window takes it")
 }
 
@@ -379,7 +379,7 @@ fn new_folder(state: &mut AppState) -> Vec<Effect> {
         .key(
             rf_ui::keys::Command::NewFolder,
             rf_ui::keys::Mods::NONE,
-            10,
+            Paging::rows(10),
             Instant::now(),
         )
         .expect("the window takes it")
@@ -629,7 +629,7 @@ fn undo_disabled_while_running() {
         ..rf_ui::keys::Mods::default()
     };
     let undo = rf_ui::keys::Command::Undo;
-    let effects = state.key(undo.clone(), ctrl, 10, Instant::now());
+    let effects = state.key(undo.clone(), ctrl, Paging::rows(10), Instant::now());
     assert_eq!(effects, Some(vec![Effect::Job(JobEffect::Undo)]));
     harness.carry_out(&mut state, effects.unwrap_or_default());
     // The first move is next on the list, but nothing starts while the undo is under way.
@@ -638,9 +638,17 @@ fn undo_disabled_while_running() {
     assert!(!state.can_redo());
     assert_eq!(state.active_jobs(), 2);
     assert_eq!(harness.jobs.engine().undo(), None, "the engine agrees");
-    assert_eq!(state.key(undo, ctrl, 10, Instant::now()), Some(vec![]));
     assert_eq!(
-        state.key(rf_ui::keys::Command::Redo, ctrl, 10, Instant::now()),
+        state.key(undo, ctrl, Paging::rows(10), Instant::now()),
+        Some(vec![])
+    );
+    assert_eq!(
+        state.key(
+            rf_ui::keys::Command::Redo,
+            ctrl,
+            Paging::rows(10),
+            Instant::now()
+        ),
         Some(vec![])
     );
     assert!(!left.join("m.txt").exists() && right.join("m.txt").exists());
@@ -658,7 +666,12 @@ fn undo_disabled_while_running() {
     assert!(state.can_undo());
     assert!(state.can_redo());
     assert_eq!(
-        state.key(rf_ui::keys::Command::Redo, ctrl, 10, Instant::now()),
+        state.key(
+            rf_ui::keys::Command::Redo,
+            ctrl,
+            Paging::rows(10),
+            Instant::now()
+        ),
         Some(vec![Effect::Job(JobEffect::Redo)])
     );
 }
@@ -733,7 +746,12 @@ mod without_a_trash {
             ..rf_ui::keys::Mods::default()
         };
         state
-            .key(rf_ui::keys::Command::Undo, ctrl, 10, Instant::now())
+            .key(
+                rf_ui::keys::Command::Undo,
+                ctrl,
+                Paging::rows(10),
+                Instant::now(),
+            )
             .expect("the window takes it")
     }
 

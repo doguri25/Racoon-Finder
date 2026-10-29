@@ -15,7 +15,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { Shortcuts } from "shortcuts.slint";
-import { FileRow } from "file-list.slint";
+import { FileRow, ColumnView } from "file-list.slint";
 import {
     Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
     MenuRoom
@@ -30,7 +30,7 @@ import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 
 export {
-    Theme, FileRow, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
+    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow
 }
@@ -96,8 +96,10 @@ export component MainWindow inherits Window {
     // Whether the toast's button still does what it says; it hides when it does not (an undo
     // whose job is no longer the next one to undo, or while an undo runs).
     in property <bool> notice-action-live: true;
-    // How many rows PageUp and PageDown move in the pane with the keyboard.
+    // How many lines (rows, or columns of 목록) PageUp and PageDown move in the pane with the
+    // keyboard, and how many items a line of its view holds (1 in 자세히).
     out property <int> page-rows: root.active-side == 1 ? right.page-rows : left.page-rows;
+    out property <int> line-items: root.active-side == 1 ? right.line-items : left.line-items;
     // The pane with the keyboard, which the 보기 menu's 정렬 sorts, and what it shows (its tab
     // is the one of the 보기 menu's 탭 items).
     private property <int> active-side: root.right-pane.active ? 1 : 0;
@@ -106,6 +108,7 @@ export component MainWindow inherits Window {
     // A 탭 item of the 보기 menu for the tab the active pane shows.
     function shown-tab(name: string) {
         root.tab-command(root.active-side, root.active-view.active-tab, name);
+        root.sub-menu-done();
     }
     // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게) and whether hidden
     // items show, for the menu's check marks.
@@ -166,7 +169,8 @@ export component MainWindow inherits Window {
     callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
     // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
-    // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync.
+    // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
+    // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons.
     callback command(name: string);
     // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
     callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
@@ -208,7 +212,20 @@ export component MainWindow inherits Window {
     callback completion-dismissed(side: int);
     // The filter box changed: the active pane shows the rows whose names hold `text`.
     callback filter-edited(text: string);
-    callback sort(side: int, column: int);
+    // The order and the columns of pane `side` (NAV-07, NAV-08): a click on the head of
+    // `column` (with Shift: `then`, the second key), the 보기 menu's 2차 정렬 (-1 for none), a
+    // column shown or hidden, a head dragged from `from` to `slot` among the columns after the
+    // name, a column's new width, and the texts a fit of `column` measures (`count` rows from row
+    // `first`, one a line).
+    callback sort(side: int, column: int, then: bool);
+    callback sort-then(side: int, column: int);
+    callback column-toggled(side: int, column: int);
+    callback column-moved(side: int, from: int, slot: int);
+    callback column-resized(side: int, column: int, width: length);
+    callback column-texts(side: int, column: int, first: int, count: int) -> string;
+    // The 보기 menu's commands for the view of pane `side`'s folder: folders-first,
+    // apply-below (하위 폴더에 적용), reset-view (기본값으로 되돌리기).
+    callback view-command(side: int, name: string);
     // A left press on row `index` of pane `side`, and its release when no drag came of it.
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
     callback row-released(side: int, index: int);
@@ -285,7 +302,43 @@ export component MainWindow inherits Window {
 
     // Opens the 보기 menu under its button, for the keys to choose in.
     public function show-view-menu() {
+        root.mark-view();
         view-menu.show({ x: 0, y: view-button.height + 4px });
+    }
+
+    // The check marks of the 보기 menu's view items, set from the active pane's view as the menu
+    // opens and after an item changed it (a checkable item flips its own mark as it is chosen).
+    private property <bool> mark-mode-0;
+    private property <bool> mark-mode-1;
+    private property <bool> mark-mode-2;
+    private property <bool> mark-mode-3;
+    private property <bool> mark-mode-4;
+    private property <bool> mark-folders-first;
+    private property <bool> mark-col-1;
+    private property <bool> mark-col-2;
+    private property <bool> mark-col-3;
+    private property <bool> mark-col-4;
+    private property <bool> mark-col-5;
+    private property <bool> mark-col-6;
+    // An item of a sub-menu of the 보기 menu was chosen: its marks show the view, and the panes
+    // take the keys again once the menus have closed.
+    function sub-menu-done() {
+        root.mark-view();
+        panes-focus-later.running = true;
+    }
+    function mark-view() {
+        root.mark-mode-0 = root.active-view.mode == 0;
+        root.mark-mode-1 = root.active-view.mode == 1;
+        root.mark-mode-2 = root.active-view.mode == 2;
+        root.mark-mode-3 = root.active-view.mode == 3;
+        root.mark-mode-4 = root.active-view.mode == 4;
+        root.mark-folders-first = root.active-view.folders-first;
+        root.mark-col-1 = root.active-view.shows[1];
+        root.mark-col-2 = root.active-view.shows[2];
+        root.mark-col-3 = root.active-view.shows[3];
+        root.mark-col-4 = root.active-view.shows[4];
+        root.mark-col-5 = root.active-view.shows[5];
+        root.mark-col-6 = root.active-view.shows[6];
     }
 
     // The filter box shows `text`, the filter of the active pane, when it does not already.
@@ -632,11 +685,250 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
-                    // The 보기 menu: the theme, the hidden items and the order of the active pane
-                    // (its column heads, for the keys).
+                    // The 보기 menu: how the active pane shows its folder (its view mode, order
+                    // and columns, which its column heads change too), the theme, the hidden
+                    // items, the layout and the tabs.
                     Rectangle {
                         view-menu := ContextMenuArea {
                             Menu {
+                                Menu {
+                                    title: "보기 방식";
+
+                                    MenuItem {
+                                        title: Shortcuts.titled("큰 아이콘", Shortcuts.view-large-icons);
+                                        checkable: true;
+                                        checked <=> root.mark-mode-4;
+                                        activated => {
+                                            root.command("view-large-icons");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("보통 아이콘", Shortcuts.view-medium-icons);
+                                        checkable: true;
+                                        checked <=> root.mark-mode-3;
+                                        activated => {
+                                            root.command("view-medium-icons");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("작은 아이콘", Shortcuts.view-small-icons);
+                                        checkable: true;
+                                        checked <=> root.mark-mode-2;
+                                        activated => {
+                                            root.command("view-small-icons");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("목록", Shortcuts.view-list);
+                                        checkable: true;
+                                        checked <=> root.mark-mode-1;
+                                        activated => {
+                                            root.command("view-list");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("자세히", Shortcuts.view-details);
+                                        checkable: true;
+                                        checked <=> root.mark-mode-0;
+                                        activated => {
+                                            root.command("view-details");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuSeparator { }
+                                    // The view of this folder for its subfolders too, or the
+                                    // folder's own view forgotten.
+                                    MenuItem {
+                                        title: "하위 폴더에 적용";
+                                        activated => {
+                                            root.view-command(root.active-side, "apply-below");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "기본값으로 되돌리기";
+                                        enabled: root.active-view.own-view;
+                                        activated => {
+                                            root.view-command(root.active-side, "reset-view");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                }
+                                Menu {
+                                    title: "정렬";
+
+                                    MenuItem {
+                                        title: "이름";
+                                        activated => {
+                                            root.sort(root.active-side, 0, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "크기";
+                                        activated => {
+                                            root.sort(root.active-side, 1, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "수정한 날짜";
+                                        activated => {
+                                            root.sort(root.active-side, 2, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "만든 날짜";
+                                        activated => {
+                                            root.sort(root.active-side, 4, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "종류";
+                                        activated => {
+                                            root.sort(root.active-side, 3, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "확장자";
+                                        activated => {
+                                            root.sort(root.active-side, 5, false);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuSeparator { }
+                                    // The second key (Shift+click on a head).
+                                    Menu {
+                                        title: "2차 정렬";
+
+                                        MenuItem {
+                                            title: "없음";
+                                            activated => {
+                                                root.sort-then(root.active-side, -1);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "이름";
+                                            activated => {
+                                                root.sort-then(root.active-side, 0);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "크기";
+                                            activated => {
+                                                root.sort-then(root.active-side, 1);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "수정한 날짜";
+                                            activated => {
+                                                root.sort-then(root.active-side, 2);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "만든 날짜";
+                                            activated => {
+                                                root.sort-then(root.active-side, 4);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "종류";
+                                            activated => {
+                                                root.sort-then(root.active-side, 3);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "확장자";
+                                            activated => {
+                                                root.sort-then(root.active-side, 5);
+                                                root.sub-menu-done();
+                                            }
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "폴더 먼저";
+                                        checkable: true;
+                                        checked <=> root.mark-folders-first;
+                                        activated => {
+                                            root.view-command(root.active-side, "folders-first");
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                }
+                                // The columns of 자세히 after the name (as the menu of its heads).
+                                Menu {
+                                    title: "열";
+                                    enabled: root.active-view.mode == 0;
+
+                                    MenuItem {
+                                        title: "크기";
+                                        checkable: true;
+                                        checked <=> root.mark-col-1;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 1);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "수정한 날짜";
+                                        checkable: true;
+                                        checked <=> root.mark-col-2;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 2);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "만든 날짜";
+                                        checkable: true;
+                                        checked <=> root.mark-col-4;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 4);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "종류";
+                                        checkable: true;
+                                        checked <=> root.mark-col-3;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 3);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "확장자";
+                                        checkable: true;
+                                        checked <=> root.mark-col-5;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 5);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "속성";
+                                        checkable: true;
+                                        checked <=> root.mark-col-6;
+                                        activated => {
+                                            root.column-toggled(root.active-side, 6);
+                                            root.sub-menu-done();
+                                        }
+                                    }
+                                }
+                                MenuSeparator { }
                                 MenuItem {
                                     title: "밝게";
                                     checkable: true;
@@ -821,34 +1113,6 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                 }
-                                Menu {
-                                    title: "정렬";
-
-                                    MenuItem {
-                                        title: "이름";
-                                        activated => {
-                                            root.sort(root.active-side, 0);
-                                        }
-                                    }
-                                    MenuItem {
-                                        title: "크기";
-                                        activated => {
-                                            root.sort(root.active-side, 1);
-                                        }
-                                    }
-                                    MenuItem {
-                                        title: "수정한 날짜";
-                                        activated => {
-                                            root.sort(root.active-side, 2);
-                                        }
-                                    }
-                                    MenuItem {
-                                        title: "종류";
-                                        activated => {
-                                            root.sort(root.active-side, 3);
-                                        }
-                                    }
-                                }
                             }
                         }
 
@@ -858,6 +1122,7 @@ export component MainWindow inherits Window {
                             text: "보기";
                             keys: Shortcuts.view-menu;
                             clicked => {
+                                root.mark-view();
                                 view-menu.show({ x: 0, y: self.height + 4px });
                             }
                         }
@@ -1043,9 +1308,24 @@ export component MainWindow inherits Window {
                         edit-ended => {
                             keys.focus();
                         }
-                        sort(column) => {
-                            root.sort(0, column);
+                        sort(column, then) => {
+                            root.sort(0, column, then);
                             keys.focus();
+                        }
+                        column-toggled(column) => {
+                            root.column-toggled(0, column);
+                            keys.focus();
+                        }
+                        column-moved(from, slot) => {
+                            root.column-moved(0, from, slot);
+                            keys.focus();
+                        }
+                        column-resized(column, width) => {
+                            root.column-resized(0, column, width);
+                            keys.focus();
+                        }
+                        column-texts(column, first, count) => {
+                            return root.column-texts(0, column, first, count);
                         }
                         row-clicked(index, ctrl, shift) => {
                             root.row-clicked(0, index, ctrl, shift);
@@ -1170,9 +1450,24 @@ export component MainWindow inherits Window {
                         edit-ended => {
                             keys.focus();
                         }
-                        sort(column) => {
-                            root.sort(1, column);
+                        sort(column, then) => {
+                            root.sort(1, column, then);
                             keys.focus();
+                        }
+                        column-toggled(column) => {
+                            root.column-toggled(1, column);
+                            keys.focus();
+                        }
+                        column-moved(from, slot) => {
+                            root.column-moved(1, from, slot);
+                            keys.focus();
+                        }
+                        column-resized(column, width) => {
+                            root.column-resized(1, column, width);
+                            keys.focus();
+                        }
+                        column-texts(column, first, count) => {
+                            return root.column-texts(1, column, first, count);
                         }
                         row-clicked(index, ctrl, shift) => {
                             root.row-clicked(1, index, ctrl, shift);
@@ -1325,6 +1620,19 @@ export component MainWindow inherits Window {
             }
             keys.focus();
             root.completion-chosen(side, index);
+        }
+    }
+
+    // A sub-menu of the 보기 menu gives the keys back, as it closes, to the menu it opened from,
+    // which has closed too: the panes take them once both have.
+    panes-focus-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.dialog == DialogKind.none && !left.editing && !right.editing && !filter-box.has-focus) {
+                keys.focus();
+            }
         }
     }
 

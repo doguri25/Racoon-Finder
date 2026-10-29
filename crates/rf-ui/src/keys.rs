@@ -43,7 +43,10 @@ impl Mods {
 /// What a key asks the active pane, or the window, to do.
 ///
 /// The cursor commands come with Shift too: the caller extends the selection from the anchor
-/// when `mods.shift` is set (`Selection::move_cursor`). Some commands are in the table before
+/// when `mods.shift` is set, and moves the cursor alone when `mods.ctrl` is (Windows and Linux;
+/// `Selection::go_to`). The view lays the rows out, and says where each key goes
+/// (`state::target`): ← and → move along a row of icons and across the columns of 목록, and do
+/// nothing in 자세히. Some commands are in the table before
 /// the window can do them (`AppState::key` gives `None` for those, and the key goes on to the
 /// system); `docs/ux/keyboard.md` says which task brings each.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -76,6 +79,8 @@ pub enum Command {
     Refresh,
     CursorUp,
     CursorDown,
+    CursorLeft,
+    CursorRight,
     CursorHome,
     CursorEnd,
     PageUp,
@@ -110,6 +115,13 @@ pub enum Command {
     Properties,
     /// Show or hide hidden items.
     ToggleHidden,
+    /// The view modes (NAV-06): one row per item with columns (자세히), names in columns (목록),
+    /// and icons of three sizes.
+    ViewDetails,
+    ViewList,
+    ViewSmallIcons,
+    ViewMediumIcons,
+    ViewLargeIcons,
     /// Open the 보기 menu.
     ViewMenu,
     /// Open the menu of the selected items, as a right click on them does.
@@ -150,6 +162,8 @@ impl Command {
                 | Command::Open
                 | Command::CursorUp
                 | Command::CursorDown
+                | Command::CursorLeft
+                | Command::CursorRight
                 | Command::CursorHome
                 | Command::CursorEnd
                 | Command::PageUp
@@ -526,6 +540,10 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::UpArrow, SHIFT), C::CursorUp),
     (k(Key::DownArrow, NONE), C::CursorDown),
     (k(Key::DownArrow, SHIFT), C::CursorDown),
+    (k(Key::LeftArrow, NONE), C::CursorLeft),
+    (k(Key::LeftArrow, SHIFT), C::CursorLeft),
+    (k(Key::RightArrow, NONE), C::CursorRight),
+    (k(Key::RightArrow, SHIFT), C::CursorRight),
     (k(Key::Home, NONE), C::CursorHome),
     (k(Key::Home, SHIFT), C::CursorHome),
     (k(Key::End, NONE), C::CursorEnd),
@@ -534,6 +552,14 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::PageUp, SHIFT), C::PageUp),
     (k(Key::PageDown, NONE), C::PageDown),
     (k(Key::PageDown, SHIFT), C::PageDown),
+    // File Explorer's keys that move the cursor and leave the selection as it is (Ctrl+Space
+    // then selects).
+    (k(Key::UpArrow, CTRL), C::CursorUp),
+    (k(Key::DownArrow, CTRL), C::CursorDown),
+    (k(Key::LeftArrow, CTRL), C::CursorLeft),
+    (k(Key::RightArrow, CTRL), C::CursorRight),
+    (k(Key::Home, CTRL), C::CursorHome),
+    (k(Key::End, CTRL), C::CursorEnd),
     (k(Key::Space, CTRL), C::ToggleSelect),
     (c('a', CTRL), C::SelectAll),
     (k(Key::Escape, NONE), C::ClearSelection),
@@ -553,6 +579,13 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('c', CTRL_SHIFT), C::CopyPath),
     (k(Key::Return, ALT), C::Properties),
     (c('h', CTRL), C::ToggleHidden),
+    // File Explorer's views: 2 large icons, 3 medium, 4 small, 5 list, 6 details (1 extra large,
+    // 7 tiles and 8 content are views this app has not).
+    (c('2', CTRL_SHIFT), C::ViewLargeIcons),
+    (c('3', CTRL_SHIFT), C::ViewMediumIcons),
+    (c('4', CTRL_SHIFT), C::ViewSmallIcons),
+    (c('5', CTRL_SHIFT), C::ViewList),
+    (c('6', CTRL_SHIFT), C::ViewDetails),
     (k(Key::F10, NONE), C::ViewMenu),
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
@@ -606,6 +639,10 @@ static MACOS: &[(Chord, Command)] = &[
     (k(Key::PageUp, SHIFT), C::PageUp),
     (k(Key::PageDown, NONE), C::PageDown),
     (k(Key::PageDown, SHIFT), C::PageDown),
+    (k(Key::LeftArrow, NONE), C::CursorLeft),
+    (k(Key::LeftArrow, SHIFT), C::CursorLeft),
+    (k(Key::RightArrow, NONE), C::CursorRight),
+    (k(Key::RightArrow, SHIFT), C::CursorRight),
     (c('a', CMD), C::SelectAll),
     (k(Key::Escape, NONE), C::ClearSelection),
     (c('a', CMD_OPT), C::ClearSelection),
@@ -626,6 +663,11 @@ static MACOS: &[(Chord, Command)] = &[
     (c('c', CMD_OPT), C::CopyPath),
     (c('i', CMD), C::Properties),
     (c('.', CMD_SHIFT), C::ToggleHidden),
+    // Finder's ⌘1 as Icons, ⌘2 as List (its list has columns, as 자세히 has) and ⌘3 as Columns
+    // (names in columns, as 목록 shows them, without the levels of folders).
+    (c('1', CMD), C::ViewMediumIcons),
+    (c('2', CMD), C::ViewDetails),
+    (c('3', CMD), C::ViewList),
     (c('j', CMD), C::ViewMenu),
     (c('y', CMD), C::QuickLook),
     (c('p', CMD_SHIFT), C::TogglePreview),
@@ -699,6 +741,8 @@ mod tests {
         let moves = [
             (Key::UpArrow, C::CursorUp),
             (Key::DownArrow, C::CursorDown),
+            (Key::LeftArrow, C::CursorLeft),
+            (Key::RightArrow, C::CursorRight),
             (Key::Home, C::CursorHome),
             (Key::End, C::CursorEnd),
             (Key::PageUp, C::PageUp),
@@ -759,6 +803,20 @@ mod tests {
             (text("C"), CTRL_SHIFT, C::CopyPath),
             (key(Key::Return), ALT, C::Properties),
             (text("h"), CTRL, C::ToggleHidden),
+            // Explorer's views; Slint reports the shifted digit.
+            (text("@"), CTRL_SHIFT, C::ViewLargeIcons),
+            (text("2"), CTRL_SHIFT, C::ViewLargeIcons),
+            (text("#"), CTRL_SHIFT, C::ViewMediumIcons),
+            (text("$"), CTRL_SHIFT, C::ViewSmallIcons),
+            (text("%"), CTRL_SHIFT, C::ViewList),
+            (text("^"), CTRL_SHIFT, C::ViewDetails),
+            // Explorer's moves of the cursor alone.
+            (key(Key::UpArrow), CTRL, C::CursorUp),
+            (key(Key::DownArrow), CTRL, C::CursorDown),
+            (key(Key::LeftArrow), CTRL, C::CursorLeft),
+            (key(Key::RightArrow), CTRL, C::CursorRight),
+            (key(Key::Home), CTRL, C::CursorHome),
+            (key(Key::End), CTRL, C::CursorEnd),
             (key(Key::F10), NONE, C::ViewMenu),
             (key(Key::F10), SHIFT, C::ContextMenu),
             (key(Key::Menu), NONE, C::ContextMenu),
@@ -825,6 +883,9 @@ mod tests {
             (text("."), CMD_SHIFT, C::ToggleHidden),
             (text(">"), CMD_SHIFT, C::ToggleHidden),
             (text("j"), CMD, C::ViewMenu),
+            (text("1"), CMD, C::ViewMediumIcons),
+            (text("2"), CMD, C::ViewDetails),
+            (text("3"), CMD, C::ViewList),
             (text("y"), CMD, C::QuickLook),
             (text("P"), CMD_SHIFT, C::TogglePreview),
             (text("s"), CTL_CMD, C::ToggleTree),
@@ -872,12 +933,21 @@ mod tests {
         }
         // ⌘Y is Quick Look in Finder, not Redo.
         assert_eq!(command_for("y", CMD, Os::MacOs), Some(C::QuickLook));
+        // ⌘↓ opens and ⌘↑ goes up in Finder; Ctrl+↓ and Ctrl+↑ move the cursor alone in File
+        // Explorer.
+        assert_eq!(
+            command_for(&key(Key::DownArrow), CMD, Os::MacOs),
+            Some(C::Open)
+        );
+        assert_eq!(
+            command_for(&key(Key::DownArrow), CTRL, Os::Windows),
+            Some(C::CursorDown)
+        );
+        // Explorer's Ctrl+Shift with a digit is a view; macOS takes ⇧⌘3 and ⇧⌘4 for screenshots.
+        assert_eq!(command_for("#", CMD_SHIFT, Os::MacOs), None);
         let windows_none = [
-            (key(Key::DownArrow), CTRL),
-            (key(Key::UpArrow), CTRL),
-            // A word to the left or right in text, and nothing in the list.
-            (key(Key::LeftArrow), CTRL),
-            (key(Key::RightArrow), CTRL),
+            // Finder's Open with ⌘↓ and parent with ⌘↑: Ctrl+↓ and Ctrl+↑ move the cursor alone
+            // on Windows, as the arrows with Ctrl do in File Explorer.
             (text("["), CTRL),
             (text("o"), CTRL),
             (text("i"), CTRL),
@@ -1164,6 +1234,12 @@ mod tests {
             (C::ReopenTab, Some("Ctrl+Shift+T"), Some("⇧⌘T")),
             (C::MoveTabLeft, Some("Ctrl+Shift+PageUp"), Some("⇧⌘←")),
             (C::MoveTabRight, Some("Ctrl+Shift+PageDown"), Some("⇧⌘→")),
+            (C::ViewLargeIcons, Some("Ctrl+Shift+2"), None),
+            (C::ViewMediumIcons, Some("Ctrl+Shift+3"), Some("⌘1")),
+            (C::ViewSmallIcons, Some("Ctrl+Shift+4"), None),
+            (C::ViewList, Some("Ctrl+Shift+5"), Some("⌘3")),
+            (C::ViewDetails, Some("Ctrl+Shift+6"), Some("⌘2")),
+            (C::CursorLeft, Some("←"), Some("←")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];
@@ -1260,6 +1336,8 @@ mod tests {
         for command in [
             C::Open,
             C::CursorDown,
+            C::CursorLeft,
+            C::CursorRight,
             C::SelectAll,
             C::ClearSelection,
             C::Rename,
@@ -1293,6 +1371,11 @@ mod tests {
             C::Up,
             C::Undo,
             C::ToggleHidden,
+            C::ViewDetails,
+            C::ViewList,
+            C::ViewSmallIcons,
+            C::ViewMediumIcons,
+            C::ViewLargeIcons,
         ] {
             assert!(!command.acts_on_rows(), "{command:?}");
         }
@@ -1343,8 +1426,12 @@ mod tests {
             (key(Key::Return), CTRL),
             (key(Key::Backspace), CTRL),
             (key(Key::DownArrow), ALT),
-            (key(Key::LeftArrow), NONE),
-            (key(Key::UpArrow), CTRL),
+            (key(Key::LeftArrow), CTRL_SHIFT),
+            (key(Key::UpArrow), CTRL_ALT),
+            (key(Key::PageDown), CTRL),
+            (text("!"), CTRL_SHIFT),
+            (text("&"), CTRL_SHIFT),
+            (text("1"), CTRL),
             (key(Key::Delete), CTRL),
             (key(Key::Escape), SHIFT),
             (key(Key::Space), CTRL_SHIFT),

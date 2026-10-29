@@ -12,6 +12,7 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
+use rf_ui::state::{FolderView, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
@@ -861,7 +862,12 @@ fn sort_header_invokes_callback() {
     let window = window();
     let sorted = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&sorted);
-    window.on_sort(move |side, column| record.borrow_mut().push((side, column)));
+    window.on_sort(move |side, column, then| record.borrow_mut().push((side, column, then)));
+    // The heads after the name come from the pane's view.
+    let models = [PaneModels::default(), PaneModels::default()];
+    let pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    window.set_left_pane(models[0].view(&pane, true));
+    window.set_right_pane(models[1].view(&pane, false));
 
     // Both panes have the heads; the left one comes first.
     let size_heads = labelled(&window, "크기", AccessibleRole::Button);
@@ -869,7 +875,144 @@ fn sort_header_invokes_callback() {
     size_heads[0].invoke_accessible_default_action();
     size_heads[1].invoke_accessible_default_action();
     labelled(&window, "이름", AccessibleRole::Button)[0].invoke_accessible_default_action();
-    assert_eq!(sorted.borrow().as_slice(), [(0, 1), (1, 1), (0, 0)]);
+    assert_eq!(
+        sorted.borrow().as_slice(),
+        [(0, 1, false), (1, 1, false), (0, 0, false)]
+    );
+}
+
+/// A window whose left pane lists two files in 자세히 with the default columns (크기, 수정한
+/// 날짜, 종류), and what its header's callbacks and a drop check were called with.
+fn header_window() -> (MainWindow, PaneModels, Rc<RefCell<Vec<String>>>) {
+    let window = window();
+    let pane = listed_pane(vec![
+        entry("a.txt", EntryKind::File, 10),
+        entry("bb.txt", EntryKind::File, 2000),
+    ]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let note = |calls: &Rc<RefCell<Vec<String>>>| {
+        let calls = Rc::clone(calls);
+        move |call: String| calls.borrow_mut().push(call)
+    };
+    let record = note(&calls);
+    window.on_column_toggled(move |side, column| record(format!("toggle {side} {column}")));
+    let record = note(&calls);
+    window.on_column_moved(move |side, from, slot| record(format!("move {side} {from} {slot}")));
+    let record = note(&calls);
+    window.on_column_resized(move |side, column, width| {
+        record(format!("width {side} {column} {width}"));
+    });
+    let record = note(&calls);
+    window.on_column_texts(move |side, column, first, count| {
+        record(format!("texts {side} {column} {first} {count}"));
+        "1023.9 KB\n2 KB".into()
+    });
+    let record = note(&calls);
+    window.on_sort(move |side, column, then| record(format!("sort {side} {column} {then}")));
+    let record = note(&calls);
+    window.on_drop_check(move |_, _, _, _, _| {
+        record("drop-check".to_owned());
+        DragAction::None
+    });
+    (window, models, calls)
+}
+
+/// The box of the one column head called `title`.
+fn head_box(window: &MainWindow, title: &str) -> (LogicalPosition, LogicalSize) {
+    let found = labelled(window, title, AccessibleRole::Button);
+    assert_eq!(found.len(), 1, "one head {title}");
+    (found[0].absolute_position(), found[0].size())
+}
+
+#[test]
+fn a_head_s_menu_shows_and_hides_the_columns() {
+    use slint::platform::PointerEventButton;
+    let (window, _models, calls) = header_window();
+    for (head, item, call) in [
+        ("크기", "만든 날짜", "toggle 0 4"),
+        ("이름", "종류", "toggle 0 3"),
+        ("종류", "속성", "toggle 0 6"),
+    ] {
+        labelled(&window, head, AccessibleRole::Button)[0]
+            .mock_single_click(PointerEventButton::Right);
+        choose_item(&window, item);
+        assert_eq!(calls.borrow_mut().drain(..).collect::<Vec<_>>(), [call]);
+    }
+}
+
+#[test]
+fn a_head_dragged_along_the_header_moves_its_column_and_drags_no_items() {
+    let (window, _models, calls) = header_window();
+    let (size_at, _) = head_box(&window, "크기");
+    let (kind_at, kind_size) = head_box(&window, "종류");
+    let kind = LogicalPosition::new(
+        kind_at.x + kind_size.width / 2.0,
+        kind_at.y + kind_size.height / 2.0,
+    );
+    // Let go before the size's middle: the kind goes first.
+    let before_size = LogicalPosition::new(size_at.x + 4.0, kind.y);
+    drag_to(&window, kind, before_size);
+    pointer(&window, "release", before_size);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["move 0 2 0"],
+        "no click of the head, and no drop asked about"
+    );
+    // A short move is a click: it sorts.
+    pointer(&window, "press", kind);
+    pointer(&window, "move", LogicalPosition::new(kind.x + 3.0, kind.y));
+    pointer(
+        &window,
+        "release",
+        LogicalPosition::new(kind.x + 3.0, kind.y),
+    );
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["sort 0 3 false"]
+    );
+}
+
+#[test]
+fn a_border_dragged_trades_width_and_a_double_click_fits_the_column() {
+    let (window, _models, calls) = header_window();
+    let (modified_at, modified_size) = head_box(&window, "수정한 날짜");
+    // The border before 수정한 날짜, in the gap between it and 크기.
+    let border = LogicalPosition::new(
+        modified_at.x - 5.0,
+        modified_at.y + modified_size.height / 2.0,
+    );
+    pointer(&window, "move", border);
+    pointer(&window, "press", border);
+    for step in [5.0, 10.0, 20.0] {
+        pointer(
+            &window,
+            "move",
+            LogicalPosition::new(border.x + step, border.y),
+        );
+    }
+    pointer(
+        &window,
+        "release",
+        LogicalPosition::new(border.x + 20.0, border.y),
+    );
+    // The column after the border gives up what the one before it takes.
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["width 0 2 106", "width 0 1 92"]
+    );
+
+    // A double click fits the column after it to the texts of the rows on screen.
+    let border = LogicalPosition::new(border.x, border.y);
+    for _ in 0..2 {
+        pointer(&window, "press", border);
+        pointer(&window, "release", border);
+    }
+    let noted = calls.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert_eq!(noted.len(), 2, "{noted:?}");
+    assert!(noted[0].starts_with("texts 0 2 0 "), "{noted:?}");
+    assert!(noted[1].starts_with("width 0 2 "), "{noted:?}");
 }
 
 #[test]
@@ -2213,6 +2356,150 @@ fn a_row_dragged_onto_the_other_pane_drops_there() {
     assert_eq!(labelled(&window, "List -1", AccessibleRole::Text).len(), 0);
 }
 
+/// The left pane of [`drag_window`] shown in `mode`.
+fn left_in(window: &MainWindow, models: &[PaneModels; 2], mode: ViewMode) {
+    let mut left = listed_pane(vec![
+        entry("docs", EntryKind::Dir, 0),
+        entry("x.txt", EntryKind::File, 10),
+    ]);
+    left.active_tab_mut().set_view(FolderView {
+        mode,
+        ..FolderView::default()
+    });
+    window.set_left_pane(models[0].view(&left, true));
+}
+
+#[test]
+fn icons_and_the_list_take_presses_drags_and_menus_as_rows_do() {
+    use slint::platform::PointerEventButton;
+    let (window, calls, models, _tree) = drag_window();
+    let menus = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&menus);
+    window.on_row_menu(move |side, i| record.borrow_mut().push((side, i)));
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&opened);
+    window.on_row_activated(move |side, i| record.borrow_mut().push((side, i)));
+
+    for mode in [
+        ViewMode::LargeIcons,
+        ViewMode::MediumIcons,
+        ViewMode::SmallIcons,
+        ViewMode::List,
+    ] {
+        left_in(&window, &models, mode);
+        // One item each, as list items named for screen readers, and no rows of 자세히.
+        let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+        let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+        // The keys know the layout: a row of icons holds several, a column of 목록 several.
+        assert!(window.get_line_items() > 1, "{mode:?}");
+        assert!(window.get_page_rows() >= 1, "{mode:?}");
+
+        // A click presses and releases the item; a double click opens it.
+        pointer(&window, "move", x_txt);
+        pointer(&window, "press", x_txt);
+        pointer(&window, "release", x_txt);
+        assert_eq!(
+            calls.rows.borrow_mut().drain(..).collect::<Vec<_>>(),
+            [("press", 0, 1), ("release", 0, 1)],
+            "{mode:?}"
+        );
+        // Two clicks at once: the testing backend's time stands still.
+        for _ in 0..2 {
+            pointer(&window, "press", x_txt);
+            pointer(&window, "release", x_txt);
+        }
+        assert_eq!(
+            opened.borrow_mut().drain(..).next_back(),
+            Some((0, 1)),
+            "{mode:?}"
+        );
+        calls.rows.borrow_mut().clear();
+        let item = labelled(&window, "x.txt", AccessibleRole::ListItem).remove(0);
+        // A right click asks for the item's menu first.
+        item.mock_single_click(PointerEventButton::Right);
+        assert_eq!(menus.borrow_mut().drain(..).collect::<Vec<_>>(), [(0, 1)]);
+        press(&window, Key::Escape);
+
+        // A drag onto the other pane's folder drops there, with the payload Rust made.
+        drag_to(&window, x_txt, backup);
+        pointer(&window, "release", backup);
+        assert_eq!(
+            calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
+            [(42, DropPlace::List, 1, 0, DragAction::Move)],
+            "{mode:?}"
+        );
+        // And an item of the other pane onto this pane's folder item asks this list about it.
+        let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+        let y_txt = centre_of(&window, "y.txt", AccessibleRole::ListItem);
+        drag_to(&window, y_txt, docs);
+        assert_eq!(
+            calls.checks.borrow().last().copied(),
+            Some((42, DropPlace::List, 0, 0, DragAction::Move)),
+            "{mode:?}"
+        );
+        pointer(&window, "release", docs);
+        calls.rows.borrow_mut().clear();
+        calls.drops.borrow_mut().clear();
+    }
+}
+
+#[test]
+fn a_long_folder_makes_only_the_items_on_screen_and_scrolls_to_the_cursor() {
+    let window = window();
+    let pressed = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&pressed);
+    window.on_row_clicked(move |_, i, _, _| record.borrow_mut().push(i));
+    let mut pane = listed_pane(
+        (0..100_000)
+            .map(|i| entry(&format!("f{i:05}"), EntryKind::File, 1))
+            .collect(),
+    );
+    let models = PaneModels::default();
+    for mode in [ViewMode::MediumIcons, ViewMode::List] {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        window.invoke_scroll_to(0, 0);
+        // Only the items on screen exist, in either view.
+        assert_eq!(
+            labelled(&window, "f00001", AccessibleRole::ListItem).len(),
+            1
+        );
+        assert_eq!(
+            labelled(&window, "f50000", AccessibleRole::ListItem).len(),
+            0,
+            "{mode:?}"
+        );
+        // Scrolled to an item far away, it is made, and takes a press.
+        window.invoke_scroll_to(0, 50_000);
+        let far = labelled(&window, "f50000", AccessibleRole::ListItem);
+        assert_eq!(far.len(), 1, "{mode:?}");
+        assert_eq!(
+            labelled(&window, "f00001", AccessibleRole::ListItem).len(),
+            0
+        );
+        // Near its top: in the testing backend the bottom of the list is under the status bar.
+        let at = far[0].absolute_position();
+        pointer(
+            &window,
+            "press",
+            LogicalPosition::new(at.x + 8.0, at.y + 8.0),
+        );
+        pointer(
+            &window,
+            "release",
+            LogicalPosition::new(at.x + 8.0, at.y + 8.0),
+        );
+        assert_eq!(
+            pressed.borrow_mut().drain(..).collect::<Vec<_>>(),
+            [50_000],
+            "{mode:?}"
+        );
+    }
+}
+
 #[test]
 fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
     let (window, calls, _models, _tree) = drag_window();
@@ -2840,14 +3127,31 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     press(&window, Key::Escape);
     assert_eq!(calls.take(), ["filter "]);
 
-    // The 보기 menu opens with the keys on it: ↓ goes to its first item, 밝게, and Enter takes it.
+    // The 보기 menu opens with the keys on it: after the 보기 방식, 정렬 and 열 menus, ↓ goes to
+    // the first theme, 밝게, and Enter takes it.
     window.invoke_show_view_menu();
-    press(&window, Key::DownArrow);
+    for _ in 0..4 {
+        press(&window, Key::DownArrow);
+    }
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["theme 1"]);
     // Closed, the keys are the panes' again.
     chord(&window, &["a"]);
     assert_eq!(calls.take(), ["key a"]);
+    // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 큰
+    // 아이콘, and Enter takes it.
+    let record = calls.clone();
+    window.on_command(move |name| record.note(format!("command {name}")));
+    window.invoke_show_view_menu();
+    press(&window, Key::DownArrow);
+    press(&window, Key::RightArrow);
+    press(&window, Key::DownArrow);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["command view-large-icons"]);
+    // The sub-menu and the menu have closed: the panes take the keys again.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    chord(&window, &["b"]);
+    assert_eq!(calls.take(), ["key b"]);
 }
 
 #[test]

@@ -146,7 +146,7 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
     assert_eq!(state.modal(), None);
 
     // F7 copies; the toolbar's buttons and the row menu send the same commands.
-    state.key(Command::CopyTo, NONE, 1, Instant::now());
+    state.key(Command::CopyTo, NONE, Paging::rows(1), Instant::now());
     assert_eq!(picker(&state).request.mode, TransferMode::Copy);
     state.dialog_cancelled();
 

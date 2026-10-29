@@ -6,8 +6,9 @@
 //! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
-//! ([`AppState::drag`]), and the address bar's lists (module `address`: a folder's subfolders
-//! under the `›` of a piece of the path row, and the path field's completions). Its methods
+//! ([`AppState::drag`]), the address bar's lists (module `address`: a folder's subfolders
+//! under the `›` of a piece of the path row, and the path field's completions), and the views
+//! remembered per folder (module `view`: the view modes, the columns and the orders). Its methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -30,8 +31,9 @@ use crate::dialogs::{Failures, Modal};
 use crate::jobs::{History, JobEffect, JobRows};
 use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
-use crate::pane::{Handled, LoadStatus, OpenAction, Pane, Tab, ancestors};
+use crate::pane::{Handled, LoadStatus, OpenAction, Pane, SortRequest, Tab, ancestors};
 use crate::places::Place;
+use crate::selection::Pick;
 use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
@@ -44,6 +46,7 @@ mod layout;
 mod pick;
 mod sidebar;
 mod tabs;
+mod view;
 
 pub use address::{
     Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
@@ -53,6 +56,10 @@ pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use view::{
+    Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
+    MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, ViewMode, ViewStore, target,
+};
 
 /// The left pane's position in [`AppState::panes`].
 pub const LEFT: usize = 0;
@@ -68,6 +75,9 @@ pub const AUTO_RELOAD_GAP: Duration = Duration::from_secs(5);
 pub enum Effect {
     /// List and watch a tab's folder ([`Loader::request`](crate::loader::Loader::request)).
     Load(LoadRequest),
+    /// Put a tab's rows in a new order on a worker thread ([`SortRequest::run`]), then hand them
+    /// to [`AppState::sorted`].
+    Sort(SortRequest),
     /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
     /// gone: find on a worker thread where to go
     /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
@@ -244,6 +254,8 @@ pub struct AppState {
     completion: Option<Completion>,
     /// Where `~` and the variables of a typed path come from.
     environment: Environment,
+    /// The views remembered per folder (module `view`).
+    views: ViewStore,
 }
 
 impl AppState {
@@ -327,6 +339,7 @@ impl AppState {
             subfolders: None,
             completion: None,
             environment: Environment::default(),
+            views: ViewStore::default(),
         };
         (state, effects)
     }
@@ -407,15 +420,16 @@ impl AppState {
         self.active = side.min(RIGHT);
     }
 
-    /// Carries out the shortcut `command`, held with `mods`, on the active pane. `page` is how
-    /// many rows `PageUp` and `PageDown` move. `None` for a command of the shortcut table this
+    /// Carries out the shortcut `command`, held with `mods`, on the active pane. `paging` is how
+    /// the active pane lays its rows out: how many items a line of the view holds and how many
+    /// lines `PageUp` and `PageDown` move. `None` for a command of the shortcut table this
     /// window does not do yet (`docs/ux/keyboard.md` says which task brings each): the key goes
     /// on to the system.
     pub fn key(
         &mut self,
         command: Command,
         mods: Mods,
-        page: usize,
+        paging: Paging,
         now: Instant,
     ) -> Option<Vec<Effect>> {
         // A command of the window closes the list of subfolders under a `›` (the keys of the
@@ -427,7 +441,14 @@ impl AppState {
             return Some(Vec::new());
         }
         let side = self.active;
-        let page = isize::try_from(page.max(1)).unwrap_or(isize::MAX);
+        // Shift selects a range, Ctrl moves the cursor alone (Windows and Linux).
+        let pick = if mods.shift {
+            Pick::Extend
+        } else if mods.ctrl {
+            Pick::Focus
+        } else {
+            Pick::Select
+        };
         let effects = match command {
             // With one pane, Tab stays on it: the other is hidden.
             Command::SwitchPane => {
@@ -447,12 +468,14 @@ impl AppState {
             Command::Up => self.go(side, Step::Up),
             Command::Back => self.go(side, Step::Back),
             Command::Forward => self.go(side, Step::Forward),
-            Command::CursorUp => self.move_cursor(side, -1, mods.shift),
-            Command::CursorDown => self.move_cursor(side, 1, mods.shift),
-            Command::CursorHome => self.move_cursor(side, isize::MIN, mods.shift),
-            Command::CursorEnd => self.move_cursor(side, isize::MAX, mods.shift),
-            Command::PageUp => self.move_cursor(side, -page, mods.shift),
-            Command::PageDown => self.move_cursor(side, page, mods.shift),
+            Command::CursorUp => self.step_cursor(side, KeyMove::Up, pick, paging),
+            Command::CursorDown => self.step_cursor(side, KeyMove::Down, pick, paging),
+            Command::CursorLeft => self.step_cursor(side, KeyMove::Left, pick, paging),
+            Command::CursorRight => self.step_cursor(side, KeyMove::Right, pick, paging),
+            Command::CursorHome => self.step_cursor(side, KeyMove::Home, pick, paging),
+            Command::CursorEnd => self.step_cursor(side, KeyMove::End, pick, paging),
+            Command::PageUp => self.step_cursor(side, KeyMove::PageUp, pick, paging),
+            Command::PageDown => self.step_cursor(side, KeyMove::PageDown, pick, paging),
             Command::ToggleSelect => {
                 let (selection, rows) = self.tab_mut(side).selection_mut();
                 if let Some(cursor) = selection.cursor() {
@@ -498,6 +521,11 @@ impl AppState {
             Command::SwapPanes => self.swap_panes(),
             Command::SameFolderInOther => self.same_folder_in_other(side),
             Command::SyncNavigation => self.toggle_sync(),
+            Command::ViewDetails => self.set_view_mode(side, ViewMode::Details),
+            Command::ViewList => self.set_view_mode(side, ViewMode::List),
+            Command::ViewSmallIcons => self.set_view_mode(side, ViewMode::SmallIcons),
+            Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
+            Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
             Command::Refresh
             | Command::Copy
             | Command::Cut
@@ -606,11 +634,10 @@ impl AppState {
         load(self.navigate_shown(side, folder))
     }
 
-    /// Sorts pane `side` by `key`, the other way round when it already sorts by it.
+    /// Sorts pane `side` by `key` alone, the other way round when it already sorts by it (a
+    /// click on a column head, [`FolderView::sort_by`]); the folder remembers it.
     pub fn sort(&mut self, side: usize, key: SortKey) -> Vec<Effect> {
-        self.activate(side);
-        self.tab_mut(side).set_sort(key);
-        Vec::new()
+        self.sort_by(side, key, false)
     }
 
     /// The toolbar's filter box (이 폴더에서 거르기) changed to `text`: the active pane shows
@@ -1070,16 +1097,6 @@ impl AppState {
             return Vec::new();
         }
         self.open_row(side, row)
-    }
-
-    fn move_cursor(&mut self, side: usize, delta: isize, extend: bool) -> Vec<Effect> {
-        let (selection, rows) = self.tab_mut(side).selection_mut();
-        selection.move_cursor(delta, extend, rows);
-        selection
-            .cursor()
-            .map(|row| Effect::ScrollTo { side, row })
-            .into_iter()
-            .collect()
     }
 
     /// Shows or hides the hidden items in every tab of both panes, and the hidden folders of
