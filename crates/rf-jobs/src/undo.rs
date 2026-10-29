@@ -198,6 +198,16 @@ impl UndoHistory {
         self.undo.pop_back()
     }
 
+    /// Takes `record` off the undo list when it is the one to undo next, for a job that was
+    /// undone another way; the redo list stays as it is. Says whether it was taken off.
+    pub fn forget_undo(&mut self, record: &UndoRecord) -> bool {
+        let next = self.undo.back() == Some(record);
+        if next {
+            self.undo.pop_back();
+        }
+        next
+    }
+
     /// Notes `reverse`, the record an undo left: it redoes what was undone, next.
     pub fn push_undone(&mut self, reverse: UndoRecord) {
         Self::bounded_push(&mut self.redo, reverse, self.limit);

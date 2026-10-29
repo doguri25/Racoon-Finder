@@ -50,7 +50,11 @@
 //! that changed nothing) leaves both lists as they are. [`JobEngine::undo`] and
 //! [`JobEngine::redo`] take the next record off its list and submit it as a
 //! [`JobSpec::Undo`] job, which runs like any other, one at a time: while one is queued or
-//! running, neither starts another. One that never runs puts its record back.
+//! running, neither starts another. One that never runs puts its record back, and so does one
+//! that changed nothing because something stood in its way that can go (the trash refused the
+//! items, an old name is taken), so that the next undo tries it again rather than undo an older
+//! job. [`JobEngine::forget_undo`] drops the next record when the window has undone its job
+//! another way.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -70,7 +74,7 @@ use crate::exec::{ExecEnv, ExecEvent, execute};
 use crate::id::JobId;
 use crate::journal::{self, IncompleteJob, JournalHandle, Record, Recovered};
 use crate::progress::Progress;
-use crate::report::{ItemFailure, JobReport, Outcome, Stage, Totals};
+use crate::report::{FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals};
 use crate::resolver::Resolver;
 use crate::spec::{JobKind, JobSpec};
 use crate::undo::{UNDO_LIMIT, UndoHistory, UndoRecord};
@@ -359,9 +363,13 @@ impl JobEngine {
     /// the record is dropped. One that `shutdown` ended is also recovered from the journal at
     /// the next start, as a job that never started (its record is in its spec). An undo that runs
     /// notes only the reverse of what it did: one that stops partway, or fails for some or all
-    /// of its items, leaves the rest of its record off both lists (it is not rebuilt). And an
-    /// undo that ends after a job the user ran has noted its record leaves no record at all,
-    /// since nothing undone before a new action can be redone.
+    /// of its items, leaves the rest of its record off both lists (it is not rebuilt). Except an
+    /// undo that changed nothing at all and met something a retry may get past (the trash
+    /// refused an item, the old place of one is taken, the system refused the change for now):
+    /// it puts its record back on top, as one that never ran, so that the next undo tries it
+    /// again rather than undo an older job. And an undo that ends after a job the user ran has
+    /// noted its record leaves no record at all, since nothing undone before a new action can be
+    /// redone.
     pub fn undo(&self) -> Option<JobId> {
         let (record, origin) = self.shared.lock().take_record(false)?;
         Some(self.submit_as(JobSpec::Undo(record), origin))
@@ -372,7 +380,8 @@ impl JobEngine {
     /// be undone next. `None` when there is nothing to redo, or when an undo or a redo is
     /// queued or running.
     ///
-    /// A redo that never runs puts its record back on top of the redo list, unless a job the
+    /// A redo that never runs, or that changed nothing as an undo can (see
+    /// [`undo`](Self::undo)), puts its record back on top of the redo list, unless a job the
     /// user ran has noted its record since, after which nothing can be redone: then the record
     /// is dropped. A redo that runs notes only the reverse of what it did, as an undo does, and
     /// none at all when it ends after a job the user ran has noted its record, which is the one
@@ -380,6 +389,16 @@ impl JobEngine {
     pub fn redo(&self) -> Option<JobId> {
         let (record, origin) = self.shared.lock().take_record(true)?;
         Some(self.submit_as(JobSpec::Undo(record), origin))
+    }
+
+    /// Takes `record` off the undo list when it is the one [`undo`](Self::undo) undoes next and
+    /// no undo or redo is queued or running: what it would undo has been undone another way, as
+    /// the user asked (a window deleted for good the copies an undo of a copy could not send to
+    /// the trash). The redo list stays as it is, and nothing is touched on disk. `true` if it
+    /// was taken off.
+    pub fn forget_undo(&self, record: &UndoRecord) -> bool {
+        let mut state = self.shared.lock();
+        !state.undoing && state.history.forget_undo(record)
     }
 
     /// What [`undo`](Self::undo) can undo, the oldest first: the last one is undone next.
@@ -677,6 +696,32 @@ fn cancelled_report(id: JobId, spec: &JobSpec) -> Arc<JobReport> {
     Arc::new(report)
 }
 
+/// Whether trying again the undo or redo that gave `report` may get further than it did: it
+/// changed nothing (no item done, nothing made), and an item failed for something that can go
+/// away. The trash refused it (a window may delete it for good instead, once the user says
+/// so), the place it goes back to is taken, or the system refused the change for now: rights,
+/// a busy file, a read-only or full disk, one too slow to answer. An item that is gone, or one
+/// that the undo leaves where it is by its own rules (it changed after the job), is no such
+/// failure: an undo that met only those is over, and its record stays off both lists.
+fn worth_retrying(report: &JobReport) -> bool {
+    let changed_nothing =
+        report.done.files == 0 && report.done.dirs == 0 && report.outputs.is_empty();
+    changed_nothing
+        && report.failures.iter().any(|failure| match &failure.reason {
+            Some(reason) => *reason == FailureReason::TrashRefused,
+            None => matches!(
+                failure.kind,
+                ErrorKind::AlreadyExists
+                    | ErrorKind::PermissionDenied
+                    | ErrorKind::Busy
+                    | ErrorKind::ReadOnly
+                    | ErrorKind::StorageFull
+                    | ErrorKind::TimedOut
+                    | ErrorKind::Interrupted
+            ),
+        })
+}
+
 /// What the engine and its threads share.
 struct Shared {
     vfs: Vfs,
@@ -739,7 +784,9 @@ impl Shared {
     }
 
     /// Runs the job a worker took, without the state lock, and ends it: its `Finished` record,
-    /// then out of the state and its undo record into the history, then [`JobEvent::Finished`].
+    /// then out of the state and its undo record into the history (or, for an undo or redo that
+    /// changed nothing and is [`worth_retrying`], the record it ran back on its list), then
+    /// [`JobEvent::Finished`].
     ///
     /// A job that ends cancelled when only [`JobEngine::shutdown`] cancelled it gets no
     /// `Finished` record: the app's end cut it off, and the next start recovers it.
@@ -780,7 +827,13 @@ impl Shared {
             });
         }
         state.running.retain(|job| job.id != id);
-        state.note_record(origin, report.undo.as_ref());
+        if origin != Origin::User && report.undo.is_none() && worth_retrying(&report) {
+            // An undo or redo that changed nothing, stopped by something that can go: its
+            // record goes back, as for one that never ran.
+            state.unrun(origin, &spec);
+        } else {
+            state.note_record(origin, report.undo.as_ref());
+        }
         let report = Arc::new(report);
         state.broadcast(&JobEvent::Finished { id, report });
     }
@@ -1029,7 +1082,8 @@ impl State {
     }
 
     /// Ends the job `spec` of `origin` that never ran (cancelled while queued, submitted after
-    /// the shutdown, or without a worker). An undo or redo puts its record back on its list,
+    /// the shutdown, or without a worker), or that ran and changed nothing for something a
+    /// retry may get past ([`worth_retrying`]). An undo or redo puts its record back on its list,
     /// unless a job the user ran has noted a record since it was taken off (see
     /// `UndoHistory::put_back_undo`), and the next undo or redo may start.
     fn unrun(&mut self, origin: Origin, spec: &JobSpec) {
@@ -1648,5 +1702,53 @@ mod tests {
         let names = asked.0.lock().unwrap().clone();
         assert_eq!(names, [Some("rf-jobs-lane-7".to_owned())]);
         assert!(e.shutdown(WAIT));
+    }
+
+    #[test]
+    fn only_an_undo_that_changed_nothing_and_can_get_further_is_retried() {
+        let spec = JobSpec::Undo(UndoRecord::Renamed {
+            from: v(&std::env::temp_dir().join("a")),
+            to: v(&std::env::temp_dir().join("b")),
+        });
+        let failed = |kind: ErrorKind, reason: Option<FailureReason>| {
+            let mut report = JobReport::new(JobId(1), &spec);
+            report.outcome = Outcome::CompletedWithErrors;
+            report.failures.push(ItemFailure {
+                source: None,
+                target: None,
+                stage: Stage::Undo,
+                kind,
+                message: String::new(),
+                reason,
+            });
+            report
+        };
+        let trash = Some(FailureReason::TrashRefused);
+        for kind in [
+            ErrorKind::AlreadyExists,
+            ErrorKind::Busy,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(worth_retrying(&failed(kind, None)), "{kind:?}");
+        }
+        assert!(worth_retrying(&failed(
+            ErrorKind::Unsupported,
+            trash.clone()
+        )));
+        // Gone, or left in place by the undo's own rules: over.
+        assert!(!worth_retrying(&failed(ErrorKind::NotFound, None)));
+        let changed = Some(FailureReason::ChangedSinceCopy);
+        assert!(!worth_retrying(&failed(ErrorKind::Unsupported, changed)));
+        // Warnings alone (the files a copy overwrote) give nothing to retry.
+        let mut warned = JobReport::new(JobId(1), &spec);
+        warned.warnings = failed(ErrorKind::Unsupported, trash.clone()).failures;
+        assert!(!worth_retrying(&warned));
+        // An undo that did something is never run again from its old record.
+        let mut partly = failed(ErrorKind::Unsupported, trash.clone());
+        partly.done.files = 1;
+        assert!(!worth_retrying(&partly));
+        let mut made = failed(ErrorKind::Unsupported, trash);
+        made.outputs.push(v(&std::env::temp_dir().join("a")));
+        assert!(!worth_retrying(&made));
     }
 }

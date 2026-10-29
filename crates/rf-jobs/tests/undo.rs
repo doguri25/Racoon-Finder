@@ -238,6 +238,95 @@ fn undo_of_a_copy_without_trash_deletes_nothing() {
         )
     );
     assert!(f.dst.join("a.txt").exists());
+    // It changed nothing, and the trash stood in its way: its record is the one to undo next
+    // still, for a retry (or the window's offer to delete the copy for good).
+    let history = e.undo_history();
+    assert!(matches!(history.as_slice(), [UndoRecord::Copied { .. }]));
+    assert_eq!(e.redo_history(), Vec::new());
+    assert_eq!(undo(&e, &rx).spec, JobSpec::Undo(history[0].clone()));
+    assert!(f.dst.join("a.txt").exists());
+    assert_eq!(e.undo_history(), history);
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn an_undo_that_a_taken_name_stopped_keeps_its_record() {
+    let f = fx();
+    std::fs::write(f.src.join("a"), "A").unwrap();
+    std::fs::write(f.src.join("c"), "C").unwrap();
+    let (e, rx) = engine_on(Vfs::with_local());
+    done(&e, &rx, rename(&f, "c", "d"));
+    done(&e, &rx, rename(&f, "a", "b"));
+    let history = e.undo_history();
+    assert_eq!(history.len(), 2);
+    // Another item takes the old name: the undo refuses and changes nothing.
+    std::fs::write(f.src.join("a"), "another a").unwrap();
+    let rep = undo(&e, &rx);
+    assert_eq!(
+        (rep.outcome, rep.undo.clone()),
+        (Outcome::CompletedWithErrors, None)
+    );
+    assert_eq!(rep.failures[0].kind, rf_core::ErrorKind::AlreadyExists);
+    // The record stays the one to undo next: the next undo tries it again rather than undo
+    // the older rename, which nobody asked for.
+    assert_eq!(
+        (e.undo_history(), e.redo_history()),
+        (history.clone(), Vec::new())
+    );
+    assert_eq!(undo(&e, &rx).spec, JobSpec::Undo(history[1].clone()));
+    assert!(f.src.join("d").exists() && f.src.join("b").exists());
+    // Once the name is free, the undo goes through, and the older rename is next.
+    std::fs::remove_file(f.src.join("a")).unwrap();
+    assert_eq!(undo(&e, &rx).outcome, Outcome::Completed);
+    assert_eq!(std::fs::read_to_string(f.src.join("a")).unwrap(), "A");
+    assert_eq!(e.undo_history(), &history[..1]);
+    assert_eq!(e.redo_history().len(), 1);
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn an_undo_whose_item_is_gone_drops_its_record() {
+    let f = fx();
+    std::fs::write(f.src.join("a"), "A").unwrap();
+    std::fs::write(f.src.join("c"), "C").unwrap();
+    let (e, rx) = engine_on(Vfs::with_local());
+    done(&e, &rx, rename(&f, "c", "d"));
+    done(&e, &rx, rename(&f, "a", "b"));
+    let history = e.undo_history();
+    // The renamed item is gone: no retry can bring it back, so the undo is over.
+    std::fs::remove_file(f.src.join("b")).unwrap();
+    let rep = undo(&e, &rx);
+    assert_eq!(rep.failures[0].kind, rf_core::ErrorKind::NotFound);
+    assert_eq!(
+        (e.undo_history(), e.redo_history()),
+        (history[..1].to_vec(), Vec::new())
+    );
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn forget_undo_takes_off_only_the_next_record() {
+    let f = fx();
+    std::fs::write(f.src.join("a"), "A").unwrap();
+    std::fs::write(f.src.join("c"), "C").unwrap();
+    std::fs::write(f.src.join("x"), "X").unwrap();
+    let (e, rx) = engine_on(Vfs::with_local());
+    done(&e, &rx, rename(&f, "x", "y"));
+    undo(&e, &rx);
+    done(&e, &rx, rename(&f, "c", "d"));
+    done(&e, &rx, rename(&f, "a", "b"));
+    let (undos, redos) = (e.undo_history(), e.redo_history());
+    assert_eq!((undos.len(), redos.len()), (2, 0));
+    // A record that is not the next one stays where it is.
+    assert!(!e.forget_undo(&undos[0]));
+    assert_eq!(e.undo_history(), undos);
+    // The next one goes, and changes nothing on disk; the one before it is next.
+    assert!(e.forget_undo(&undos[1]));
+    assert_eq!(e.undo_history(), &undos[..1]);
+    assert!(f.src.join("b").exists() && !f.src.join("a").exists());
+    assert!(!e.forget_undo(&undos[1]));
+    assert_eq!(undo(&e, &rx).spec, JobSpec::Undo(undos[0].clone()));
+    assert!(f.src.join("c").exists());
     assert!(e.shutdown(WAIT));
 }
 
@@ -1009,6 +1098,22 @@ mod one_at_a_time {
         assert_eq!((after.len(), &after[0]), (2, &undos[0]));
         assert!(matches!(after[1], UndoRecord::Renamed { .. }));
         assert_eq!(e.redo_history(), Vec::new());
+        finish(&p, &e, &rx, held);
+    }
+
+    #[test]
+    fn nothing_is_forgotten_while_an_undo_is_under_way() {
+        let f = fx();
+        let (p, e, rx) = engine(&f);
+        move_a(&f, &e, &rx);
+        move_one(&f, &e, &rx, "b.txt");
+        let history = e.undo_history();
+        let held = hold_the_main_lane(&f, &p, &e);
+        let first = e.undo().expect("something to undo");
+        // The undo has taken the last record; the one under it is next but stays.
+        assert!(!e.forget_undo(&history[0]));
+        cancel(&e, &rx, first);
+        assert_eq!(e.undo_history(), history);
         finish(&p, &e, &rx, held);
     }
 

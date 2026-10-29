@@ -113,8 +113,10 @@ fn warn_overwritten(ctx: &mut Ctx<'_>, overwritten: u64, job: &str) {
 /// gone is skipped. The plan counts the items it made.
 ///
 /// Without a trash (Linux, a network share, a USB stick) nothing is deleted at all: each item
-/// fails as `Stage::Delete` with the trash's error and stays. The undo's record puts back what
-/// went to the trash (`UndoRecord::Trashed`); `None` when nothing did.
+/// fails as `Stage::Delete` with the trash's error (`TrashRefused`) and stays. Only the user may
+/// have such copies deleted for good, through a job of their own; the engine keeps the record of
+/// an undo that changed nothing meanwhile. The undo's record puts back what went to the trash
+/// (`UndoRecord::Trashed`); `None` when nothing did.
 fn undo_copy(ctx: &mut Ctx<'_>, created: &[CreatedItem], overwritten: u64, at: Option<SystemTime>) {
     let mut totals = Totals::default();
     for item in created {
