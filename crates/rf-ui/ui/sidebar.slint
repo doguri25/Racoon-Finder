@@ -214,6 +214,8 @@ export component Sidebar inherits Rectangle {
     in property <string> label: "폴더 트리";
     // Whether the rows take dragged rows into their folders.
     in property <bool> accepts-drops;
+    // Why the row under a drag does not take it ("여기에 놓을 수 없습니다: …"); empty otherwise.
+    in property <string> refusal;
     // A click on row `index`: show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
@@ -296,6 +298,27 @@ export component Sidebar inherits Rectangle {
         triggered => {
             root.scroll-target = -1;
             self.stop();
+        }
+    }
+
+    if root.refusal != "": Rectangle {
+        x: 8px;
+        y: parent.height - self.height - 10px;
+        width: parent.width - 16px;
+        height: refused.preferred-height + 12px;
+        border-radius: 12px;
+        background: Theme.toast-bg;
+
+        refused := Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.refusal;
+            color: Theme.toast-text;
+            font-size: Theme.font-small;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
         }
     }
 }

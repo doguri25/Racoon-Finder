@@ -76,7 +76,9 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let lock = match instance::InstanceLock::acquire(paths.data_dir()) {
         Ok(lock) => lock,
         Err(instance::InstanceError::AlreadyRunning(_)) => {
-            show_notice(words::already_running())?;
+            // The theme of the instance that runs, read only: that one writes the settings.
+            let theme = settings::peek_theme(paths.config_dir());
+            show_notice(words::already_running(), theme)?;
             return Err(RunError::AlreadyRunning);
         }
         Err(error) => return Err(RunError::Lock(error)),
@@ -154,7 +156,10 @@ pub fn report_startup_failure(error: &RunError) {
         RunError::Thread(_) => words::background_failed().to_owned(),
     };
     let message = format!("{}: {reason}", words::startup_failed());
-    if show_notice(&message).is_ok() {
+    let theme = rf_core::AppPaths::detect()
+        .map(|paths| settings::peek_theme(paths.config_dir()))
+        .unwrap_or_default();
+    if show_notice(&message, theme).is_ok() {
         return;
     }
     if let Ok(paths) = rf_core::AppPaths::detect() {
@@ -172,9 +177,10 @@ fn io_kind(path: &std::path::Path, source: &std::io::Error) -> rf_core::ErrorKin
     }
 }
 
-/// Shows `message` in a small window of its own until it is closed.
-fn show_notice(message: &str) -> Result<(), slint::PlatformError> {
+/// Shows `message` in a small window of its own, in `theme`, until it is closed.
+fn show_notice(message: &str, theme: settings::ThemeChoice) -> Result<(), slint::PlatformError> {
     let window = NoticeWindow::new()?;
+    window.set_theme_choice(controller::theme_number(theme));
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     window.set_heading(rf_core::identity::DISPLAY_NAME.into());
     window.set_message(message.into());

@@ -38,8 +38,9 @@ use crate::{DialogKind, DropPlace, JobRowView, MainWindow, open, words};
 
 mod persist;
 
+pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
-use persist::{SaveLedger, logical, look_for, theme_number, theme_of, wait_for};
+use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -638,6 +639,21 @@ impl Controller {
         self.update(|state| state.set_places(found));
     }
 
+    /// The free space of the drive at `path`, read again after a job: the sidebar's place
+    /// shows it from now on.
+    fn drive_space(&self, path: &VPath, space: rf_platform::DiskSpace) {
+        for place in self.places.borrow_mut().iter_mut() {
+            if place.kind == places::PlaceKind::Drive && place.path == *path {
+                place.space = Some(space);
+            }
+        }
+        self.tree_rows.invalidate();
+        self.update(|state| {
+            state.drive_space(path, space);
+            Vec::new()
+        });
+    }
+
     /// A key; `true` when the window used it.
     fn key(&self, text: &str, mods: Mods) -> bool {
         let Some(command) = keys::command_for(text, mods) else {
@@ -674,19 +690,25 @@ impl Controller {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
-        let offer = self
-            .state
-            .borrow_mut()
-            .as_mut()
-            .and_then(|state| state.drop_offer(id, spot));
+        let (offer, refused) = match self.state.borrow_mut().as_mut() {
+            Some(state) => match state.drop_offer(id, spot) {
+                Some(offer) => (Some(offer), None),
+                None => (None, state.drop_refused(id, spot)),
+            },
+            None => (None, None),
+        };
+        let Some(window) = self.window.upgrade() else {
+            return DragAction::None;
+        };
+        // Why the place does not take them, beside it; nothing where it does.
+        let why = refused.map(words::drop_refused).unwrap_or_default();
+        window.invoke_drop_refused(place, side, why.into());
         let Some(offer) = offer else {
             return DragAction::None;
         };
-        if let Some(window) = self.window.upgrade() {
-            let label = words::drag_label(offer.count, mode, &folder_label(&offer.folder));
-            if window.get_drag_label() != label.as_str() {
-                window.set_drag_label(label.into());
-            }
+        let label = words::drag_label(offer.count, mode, &folder_label(&offer.folder));
+        if window.get_drag_label() != label.as_str() {
+            window.set_drag_label(label.into());
         }
         action
     }
@@ -785,7 +807,8 @@ impl Controller {
                 Effect::CheckTrash { .. }
                 | Effect::CheckOriginals { .. }
                 | Effect::FindExisting { .. }
-                | Effect::InspectTarget { .. } => self.on_worker(effect),
+                | Effect::InspectTarget { .. }
+                | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
                 Effect::Load(request) => {
                     let generation = request.generation;
@@ -864,6 +887,25 @@ impl Controller {
                     post(move |c| c.update(|state| state.originals_checked(token, &found)));
                 });
             }
+            Effect::ReadSpace { tabs, drives } => {
+                let loader = self.loader.clone();
+                spawn_worker("rf-ui-space", move || {
+                    for (generation, path) in tabs {
+                        if let Some(available) = loader.free_space(&path) {
+                            let event = LoadEvent::Space {
+                                generation,
+                                available,
+                            };
+                            post(move |c| c.loaded(event));
+                        }
+                    }
+                    for drive in drives {
+                        if let Ok(space) = rf_platform::disk_space(&drive) {
+                            post(move |c| c.drive_space(&drive, space));
+                        }
+                    }
+                });
+            }
             Effect::FindExisting { generation, path } => {
                 let loader = self.loader.clone();
                 spawn_worker("rf-ui-vanished", move || {
@@ -935,6 +977,7 @@ impl Controller {
             | Effect::CheckTrash { .. }
             | Effect::CheckOriginals { .. }
             | Effect::InspectTarget { .. }
+            | Effect::ReadSpace { .. }
             | Effect::Quit => {}
         }
     }

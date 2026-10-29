@@ -28,11 +28,15 @@ fn keys_move_the_cursor_and_select() {
     let names = ["a", "b", "c", "d", "e"];
     let mut state = ready(names.iter().copied().map(file).collect(), vec![]);
     let down = special(Key::DownArrow);
+    // A folder just listed has the cursor on its first row, nothing selected.
+    assert_eq!(
+        (cursor(&state, LEFT), selected(&state, LEFT)),
+        (Some(0), vec![])
+    );
     assert_eq!(
         press(&mut state, &down, NONE),
-        Some(vec![Effect::ScrollTo { side: LEFT, row: 0 }])
+        Some(vec![Effect::ScrollTo { side: LEFT, row: 1 }])
     );
-    press(&mut state, &down, NONE);
     assert_eq!(
         (cursor(&state, LEFT), selected(&state, LEFT)),
         (Some(1), vec![1])
@@ -185,10 +189,35 @@ fn a_vanished_folder_goes_to_the_nearest_parent() {
         Instant::now(),
     );
     assert_eq!(the_load(&effects).path, parent);
+    // The user is told why the pane moved.
+    assert!(
+        effects.contains(&Effect::Notice(
+            "‘a’ 폴더가 없어져 상위 폴더로 옮겼습니다".to_owned()
+        )),
+        "{effects:?}"
+    );
     // A second answer for the same generation is late.
     assert_eq!(
         state.found_existing(generation, &folder("a"), Some(parent), Instant::now()),
         []
+    );
+
+    // A tab that does not show moves without a word: its pane shows another one.
+    let effects = state.add_tab(LEFT);
+    let shown = the_load(&effects).generation;
+    state.loaded(LoadEvent::Listed {
+        generation: shown,
+        entries: Vec::new(),
+    });
+    state.select_tab(LEFT, 0);
+    let behind = state.panes()[LEFT].tabs()[1].generation();
+    let effects = state.found_existing(behind, &folder("x"), Some(folder("y")), Instant::now());
+    assert_eq!(the_load(&effects).path, folder("y"));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Notice(_))),
+        "{effects:?}"
     );
 }
 
@@ -297,6 +326,12 @@ fn a_folder_with_nothing_left_goes_home() {
     let generation = state.panes()[RIGHT].active_tab().generation();
     let effects = state.found_existing(generation, &folder("b"), None, Instant::now());
     assert_eq!(the_load(&effects).path, folder("home"));
+    assert!(
+        effects.contains(&Effect::Notice(
+            "‘b’ 폴더가 없어져 홈 폴더로 옮겼습니다".to_owned()
+        )),
+        "{effects:?}"
+    );
     assert_eq!(
         state.panes()[RIGHT].active_tab().location(),
         &folder("home")
@@ -693,4 +728,44 @@ fn the_filter_box_filters_the_active_pane() {
     state.filter_edited("");
     assert_eq!(rows(&state, LEFT).len(), 3);
     assert_eq!(state.filter_text(), "");
+}
+
+#[test]
+fn up_puts_the_cursor_on_the_folder_it_came_from_and_a_new_folder_starts_at_its_top() {
+    let mut state = ready(vec![dir("x"), dir("y")], vec![]);
+    // Into `y`: its rows come with the cursor on the first one, nothing selected.
+    let effects = state.open_row(LEFT, 1);
+    let request = the_load(&effects);
+    assert_eq!(request.path, folder("a").join("y").expect("a name"));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("p"), file("q")],
+    });
+    assert_eq!(cursor(&state, LEFT), Some(0));
+    assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
+    // An empty folder has no row for it.
+    let effects = state.open_row(LEFT, 0);
+    let empty = the_load(&effects);
+    state.loaded(LoadEvent::Listed {
+        generation: empty.generation,
+        entries: Vec::new(),
+    });
+    assert_eq!(cursor(&state, LEFT), None);
+
+    // Backspace twice: back in `a`, the cursor is on `y`, which shows.
+    let request = the_load(&press(&mut state, &special(Key::Backspace), NONE).expect("used"));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("p"), file("q")],
+    });
+    assert_eq!(selected(&state, LEFT), [0], "back in `y`, on `p`");
+    let request = the_load(&press(&mut state, &special(Key::Backspace), NONE).expect("used"));
+    assert_eq!(request.path, folder("a"));
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("x"), dir("y")],
+    });
+    assert_eq!(cursor(&state, LEFT), Some(1));
+    assert_eq!(selected(&state, LEFT), [1]);
+    assert_eq!(effects, [Effect::ScrollTo { side: LEFT, row: 1 }]);
 }

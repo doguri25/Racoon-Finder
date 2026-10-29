@@ -28,6 +28,8 @@ export struct ConflictView {
     existing-dir: bool,
     can-overwrite: bool,
     overwrite-hint: string,
+    // What skipping leaves out: "이 파일은 복사하지 않습니다".
+    skip-hint: string,
     rename-hint: string,
     // What overwriting does to the file that is there, for this conflict and for all of them.
     warning-once: string,
@@ -286,7 +288,7 @@ export component ConflictDialog inherits DialogFrame {
                 }
                 ChoiceRow {
                     text: "건너뛰기";
-                    hint: "이 파일은 옮기지 않습니다";
+                    hint: root.view.skip-hint;
                     chosen: root.choice == 1;
                     clicked => {
                         root.pick(1);

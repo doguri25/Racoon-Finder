@@ -48,6 +48,15 @@ fn the_load(effects: &[Effect]) -> LoadRequest {
     }
 }
 
+/// `effects` without the read of the free space that the end of every job asks for (a test
+/// of its own looks at that).
+fn without_space_reads(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .filter(|effect| !matches!(effect, Effect::ReadSpace { .. }))
+        .collect()
+}
+
 /// A window state whose left pane at `a` lists `left` and whose right pane at `b` lists
 /// `right`.
 fn ready(left: Vec<Entry>, right: Vec<Entry>) -> AppState {

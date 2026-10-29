@@ -290,6 +290,12 @@ impl TreeRows {
         self.replace(tree_rows(&tree.rows(), places));
     }
 
+    /// Has the next [`TreeRows::sync`] draw its tree again, whatever its revision: the places
+    /// changed without a new tree (a drive's free space).
+    pub fn invalidate(&self) {
+        self.revision.set(None);
+    }
+
     /// Makes the rows `rows`, whatever a tree's revision says (the picker's tree, marked for
     /// its items, or what its filter found), and tells the list what changed.
     pub fn show(&self, rows: Vec<(NodeId, TreeRow)>) {
@@ -932,14 +938,14 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
             &folder_of(&conflict.target, SENTENCE_PLACE_CHARS),
         )
         .into(),
-        incoming_label: words::conflict_card(true, conflict.incoming.kind).into(),
+        incoming_label: words::conflict_card(true, conflict.incoming.kind, question.work).into(),
         incoming_name: name_of(&conflict.source).into(),
         incoming_place: folder_of(&conflict.source, CARD_PLACE_CHARS).into(),
         incoming_size: size(&conflict.incoming).into(),
         incoming_time: time(&conflict.incoming).into(),
         incoming_newer,
         incoming_dir: conflict.incoming.kind == EntryKind::Dir,
-        existing_label: words::conflict_card(false, conflict.existing.kind).into(),
+        existing_label: words::conflict_card(false, conflict.existing.kind, question.work).into(),
         existing_name: existing_name.as_str().into(),
         existing_place: existing_folder.as_str().into(),
         existing_size: size(&conflict.existing).into(),
@@ -947,7 +953,8 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
         existing_newer,
         existing_dir: conflict.existing.kind == EntryKind::Dir,
         can_overwrite,
-        overwrite_hint: words::overwrite_hint(can_overwrite).into(),
+        overwrite_hint: words::overwrite_hint(can_overwrite, question.work).into(),
+        skip_hint: words::skip_hint(conflict.incoming.kind, question.work).into(),
         rename_hint: words::rename_hint(&question.numbered_name()).into(),
         warning_once: words::overwrite_warning(false).into(),
         warning_all: words::overwrite_warning(true).into(),

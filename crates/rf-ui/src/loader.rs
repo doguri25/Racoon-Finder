@@ -185,6 +185,15 @@ impl Loader {
         None
     }
 
+    /// The bytes free for writing on the drive of the folder `path`, when it can be told: what
+    /// a listing reports after its entries ([`LoadEvent::Space`]), read again. Blocks; call it
+    /// on a worker thread.
+    pub fn free_space(&self, path: &VPath) -> Option<u64> {
+        let provider = self.vfs.provider(path).ok()?;
+        let space = provider.space(path).ok()??;
+        Some(space.available)
+    }
+
     /// How `original` is now beside `copy`, a copy of it that an undo could not send to the
     /// trash: whether deleting the copy for good would lose nothing that is not still in the
     /// original.

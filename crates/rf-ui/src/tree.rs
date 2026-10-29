@@ -113,9 +113,10 @@ pub struct Tree {
     relisted: HashSet<NodeId>,
     /// The listings on their way, by generation.
     loads: HashMap<u64, NodeId>,
-    /// The nodes whose listing was on its way when a pane's listing of their folder changed
-    /// ([`Tree::sync_folder`] leaves them to their own listing, which may have been read
-    /// before the change).
+    /// The nodes whose listing was on its way when a pane's listing or change of their folder
+    /// landed ([`Tree::sync_folder`] leaves them to their own listing, which may have been read
+    /// before it). Any such update marks them, a change the pane skipped or one that changed
+    /// nothing as well: this only says that the pane's rows may be newer than the listing.
     behind: HashSet<NodeId>,
     /// The nodes the rows show, in order.
     visible: Vec<NodeId>,
@@ -240,9 +241,9 @@ impl Tree {
         Some(&self.nodes[id].path)
     }
 
-    /// Whether a pane's listing of the folder changed while the listing `generation` was on
-    /// its way: that listing may have been read before the change, and the pane's rows are
-    /// newer once it has come.
+    /// Whether a pane's listing or change of the folder landed while the listing `generation`
+    /// was on its way, whether or not it changed anything: that listing may have been read
+    /// before it, and the pane's rows are newer once it has come.
     pub fn listing_is_behind(&self, generation: u64) -> bool {
         self.loads
             .get(&generation)
@@ -341,7 +342,7 @@ impl Tree {
     /// nothing changes, not even the revision, since a watch reports often while a copy runs.
     /// Otherwise the listings the change needs: a reveal that ended at one of these nodes
     /// goes on. A node whose listing is on its way is left to it, and noted as behind
-    /// ([`Tree::listing_is_behind`]).
+    /// ([`Tree::listing_is_behind`]), whatever `entries` hold.
     pub fn sync_folder(&mut self, path: &VPath, entries: &[Entry]) -> Option<Vec<LoadRequest>> {
         let (loading, ids): (Vec<NodeId>, Vec<NodeId>) = self
             .reachable()

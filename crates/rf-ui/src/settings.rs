@@ -440,6 +440,17 @@ pub fn load(config_dir: &Path) -> Loaded {
     }
 }
 
+/// The theme of `settings.toml` in `config_dir`, for a window shown while another instance
+/// runs (it says so): the file is only read. Without a file, or with one [`load`] would not
+/// take, it is the default theme. A small local file; the UI thread may call it.
+pub fn peek_theme(config_dir: &Path) -> ThemeChoice {
+    read_small(&config_dir.join(FILE_NAME))
+        .ok()
+        .and_then(|text| toml::from_str::<Settings>(&text).ok())
+        .map(|settings| settings.theme)
+        .unwrap_or_default()
+}
+
 /// The text of the file at `path`; `InvalidData` for one larger than [`MAX_FILE_SIZE`] or not
 /// UTF-8.
 fn read_small(path: &Path) -> io::Result<String> {
@@ -647,6 +658,22 @@ mod tests {
         assert!(!dir.path().join(BAD_FILE_NAME).exists());
         assert_eq!(Settings::default().theme, ThemeChoice::System);
         assert_eq!(Settings::default().window_size(), None);
+    }
+
+    #[test]
+    fn the_theme_is_peeked_at_without_touching_the_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+        assert!(!file.exists());
+        std::fs::write(&file, "theme = \"dark\"\nshow_hidden = true\n").expect("written");
+        assert_eq!(peek_theme(dir.path()), ThemeChoice::Dark);
+        // A broken file stays where it is, for the instance that runs to look at.
+        let broken = "theme = \"dark\"\npanes = [[[[\n";
+        std::fs::write(&file, broken).expect("written");
+        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), broken);
+        assert!(!dir.path().join(BAD_FILE_NAME).exists());
     }
 
     #[test]

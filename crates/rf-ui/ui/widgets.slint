@@ -94,6 +94,8 @@ export component PrimaryButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     in property <length> button-height: 32px;
+    // The keys of the dialog are on this button: a ring shows it.
+    in property <bool> focused: false;
     callback clicked();
 
     height: root.button-height;
@@ -120,6 +122,16 @@ export component PrimaryButton inherits Rectangle {
             font-weight: 600;
             vertical-alignment: center;
         }
+    }
+
+    if root.focused: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        border-radius: root.border-radius + 3px;
     }
 
     touch := TouchArea {
@@ -198,13 +210,17 @@ component ToastButton inherits Rectangle {
 }
 
 // Notice in the lower right corner: a message, an optional action (`action` is its
-// label; empty hides it) and a close button.
+// label; empty hides it) and a close button. `hovered` while the pointer is over it, its
+// buttons included.
 export component Toast inherits Rectangle {
     in property <string> message;
     in property <string> action;
+    out property <bool> hovered: hover.has-hover;
     callback action-clicked();
     callback closed();
 
+    preferred-width: layout.preferred-width;
+    preferred-height: layout.preferred-height;
     border-radius: 12px;
     background: Theme.toast-bg;
     drop-shadow-blur: 24px;
@@ -213,29 +229,32 @@ export component Toast inherits Rectangle {
     accessible-role: text;
     accessible-label: root.message;
 
-    HorizontalLayout {
-        padding-left: 18px;
-        padding-right: 6px;
-        padding-top: 6px;
-        padding-bottom: 6px;
-        spacing: Theme.gap-s;
+    // Under the buttons, which are inside it: it keeps its hover over them.
+    hover := TouchArea {
+        layout := HorizontalLayout {
+            padding-left: 18px;
+            padding-right: 6px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: Theme.gap-s;
 
-        Text {
-            text: root.message;
-            color: Theme.toast-text;
-            vertical-alignment: center;
-        }
-        if root.action != "": ToastButton {
-            text: root.action;
-            clicked => {
-                root.action-clicked();
+            Text {
+                text: root.message;
+                color: Theme.toast-text;
+                vertical-alignment: center;
             }
-        }
-        ToastButton {
-            icon: "close";
-            label: "알림 닫기";
-            clicked => {
-                root.closed();
+            if root.action != "": ToastButton {
+                text: root.action;
+                clicked => {
+                    root.action-clicked();
+                }
+            }
+            ToastButton {
+                icon: "close";
+                label: "알림 닫기";
+                clicked => {
+                    root.closed();
+                }
             }
         }
     }
@@ -246,13 +265,15 @@ export component OutlineButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     in property <length> button-height: 36px;
+    // The keys of the dialog are on this button: its border shows it.
+    in property <bool> focused: false;
     callback clicked();
 
     height: root.button-height;
     min-width: 64px;
     horizontal-stretch: 0;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-width: root.focused ? 2px : 1px;
+    border-color: root.focused ? Theme.accent : Theme.border;
     border-radius: 10px;
     background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;

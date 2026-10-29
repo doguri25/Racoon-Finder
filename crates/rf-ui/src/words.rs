@@ -161,6 +161,17 @@ pub fn drop_moved() -> &'static str {
     "목록이 바뀌어 놓을 곳이 달라졌습니다. 다시 끌어다 놓으세요"
 }
 
+/// The notice when the folder `name` a pane showed is gone and the pane went to the nearest
+/// folder above it that is left (`to_parent`), or home when none is.
+pub fn folder_vanished(name: &str, to_parent: bool) -> String {
+    let to = if to_parent {
+        "상위 폴더"
+    } else {
+        "홈 폴더"
+    };
+    format!("‘{name}’ 폴더가 없어져 {to}로 옮겼습니다")
+}
+
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {
@@ -888,13 +899,49 @@ pub fn conflict_description(name: &str, folder: &str) -> String {
     )
 }
 
-/// The head of a conflict card: the item that would come, or the one that is there.
-pub fn conflict_card(incoming: bool, kind: EntryKind) -> &'static str {
-    match (incoming, kind) {
-        (true, EntryKind::Dir) => "옮겨 올 폴더",
-        (true, _) => "옮겨 올 파일",
-        (false, EntryKind::Dir) => "이미 있는 폴더",
-        (false, _) => "이미 있는 파일",
+/// The head of a conflict card: the item that would come, by what `work` does with it (`복사해
+/// 올 파일`, `옮겨 올 폴더`), or the one that is there (`이미 있는 파일`), by its `kind`.
+pub fn conflict_card(incoming: bool, kind: EntryKind, work: JobWork) -> String {
+    let what = item_kind(kind);
+    if incoming {
+        format!("{} {what}", coming(work))
+    } else {
+        format!("이미 있는 {what}")
+    }
+}
+
+/// The hint of the skip choice of a conflict: what `work` leaves out (`이 파일은 복사하지
+/// 않습니다`), by the `kind` of the item that would come.
+pub fn skip_hint(kind: EntryKind, work: JobWork) -> String {
+    let (what, particle) = match kind {
+        EntryKind::File => ("파일", "은"),
+        EntryKind::Dir => ("폴더", "는"),
+        EntryKind::Symlink | EntryKind::Other => ("항목", "은"),
+    };
+    let verb = match work {
+        JobWork::Copy => "복사하지",
+        JobWork::Move => "옮기지",
+        _ => "가져오지",
+    };
+    format!("이 {what}{particle} {verb} 않습니다")
+}
+
+/// How the item that would come is called by what `work` does with it.
+fn coming(work: JobWork) -> &'static str {
+    match work {
+        JobWork::Copy => "복사해 올",
+        JobWork::Move => "옮겨 올",
+        // A job this window did not start.
+        _ => "가져올",
+    }
+}
+
+/// An item of `kind` as a conflict names it.
+fn item_kind(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::File => "파일",
+        EntryKind::Dir => "폴더",
+        EntryKind::Symlink | EntryKind::Other => "항목",
     }
 }
 
@@ -916,13 +963,13 @@ pub fn exact_size(bytes: u64) -> String {
     format!("{rounded} ({grouped} 바이트)")
 }
 
-/// The hint of the overwrite choice, or why there is none: a file and a folder never replace
-/// each other.
-pub fn overwrite_hint(can_overwrite: bool) -> &'static str {
+/// The hint of the overwrite choice, the file that would come named by what `work` does with
+/// it, or why there is none: a file and a folder never replace each other.
+pub fn overwrite_hint(can_overwrite: bool, work: JobWork) -> String {
     if can_overwrite {
-        "있던 파일을 옮겨 올 파일로 바꿉니다"
+        format!("있던 파일을 {} 파일로 바꿉니다", coming(work))
     } else {
-        "파일과 폴더는 서로 덮어쓸 수 없습니다"
+        "파일과 폴더는 서로 덮어쓸 수 없습니다".to_owned()
     }
 }
 
@@ -1114,6 +1161,21 @@ pub fn drag_label(count: usize, mode: TransferMode, folder: &str) -> String {
     format!("{} {what} → {folder}", item_count(count))
 }
 
+/// What the window says while a drag of items hovers over a place that does not take them
+/// (the pointer says so too): why, for the reason `validity` gives.
+pub fn drop_refused(validity: Validity) -> String {
+    let why = match validity {
+        Validity::IntoSource => "끌고 있는 폴더 자신이거나 그 안입니다",
+        Validity::SameFolder => "항목이 이미 이 폴더에 있습니다",
+        Validity::NotAFolder => "폴더가 아닙니다",
+        // A place that takes them with a warning is no refusal.
+        Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => {
+            return "여기에 놓을 수 없습니다".to_owned();
+        }
+    };
+    format!("여기에 놓을 수 없습니다: {why}")
+}
+
 /// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
 /// Hangul is read by its last syllable, digits and Latin letters by their Korean names
 /// (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else takes `가`.
@@ -1249,14 +1311,23 @@ mod tests {
 
     #[test]
     fn a_gone_start_folder_is_named_by_its_end() {
-        let gone = path("작업").join("없는 폴더").expect("a name");
+        // Eight folders of ten characters: far past the 60 a notice shows of a path, wherever
+        // the system's temporary folder is.
+        let names: Vec<String> = (0..8).map(|i| format!("긴-폴더-이름-{i:02}")).collect();
+        let gone = names
+            .iter()
+            .try_fold(path("작업"), |folder, name| folder.join(name))
+            .expect("plain names");
         let notice = start_folder_gone(&gone);
-        assert!(
-            notice.starts_with("열려던 폴더를 찾을 수 없습니다: "),
-            "{notice}"
-        );
-        assert!(notice.ends_with("없는 폴더"), "{notice}");
-        assert!(notice.chars().count() <= "열려던 폴더를 찾을 수 없습니다: ".chars().count() + 60);
+        let shown = notice
+            .strip_prefix("열려던 폴더를 찾을 수 없습니다: ")
+            .unwrap_or_else(|| panic!("{notice}"));
+        // The middle goes; the root, and the last five folders that fit, stay.
+        let sep = std::path::MAIN_SEPARATOR.to_string();
+        let end = names[3..].join(&sep);
+        assert!(shown.ends_with(&format!("…{sep}{end}")), "{shown}");
+        assert!(!shown.contains(&names[2]), "{shown}");
+        assert!(shown.chars().count() <= 60, "{shown}");
     }
 
     #[test]
@@ -1776,13 +1847,59 @@ mod tests {
             conflict_title(EntryKind::Dir),
             "같은 이름의 폴더가 이미 있습니다"
         );
-        assert_eq!(conflict_card(true, EntryKind::File), "옮겨 올 파일");
-        assert_eq!(conflict_card(false, EntryKind::Dir), "이미 있는 폴더");
+        // The item that would come is named by what the job does with it, and by its kind.
+        assert_eq!(
+            conflict_card(true, EntryKind::File, JobWork::Move),
+            "옮겨 올 파일"
+        );
+        assert_eq!(
+            conflict_card(true, EntryKind::File, JobWork::Copy),
+            "복사해 올 파일"
+        );
+        assert_eq!(
+            conflict_card(true, EntryKind::Dir, JobWork::Copy),
+            "복사해 올 폴더"
+        );
+        assert_eq!(
+            conflict_card(true, EntryKind::Symlink, JobWork::Move),
+            "옮겨 올 항목"
+        );
+        assert_eq!(
+            conflict_card(false, EntryKind::Dir, JobWork::Copy),
+            "이미 있는 폴더"
+        );
+        assert_eq!(
+            conflict_card(false, EntryKind::File, JobWork::Move),
+            "이미 있는 파일"
+        );
+        assert_eq!(
+            skip_hint(EntryKind::File, JobWork::Copy),
+            "이 파일은 복사하지 않습니다"
+        );
+        assert_eq!(
+            skip_hint(EntryKind::Dir, JobWork::Move),
+            "이 폴더는 옮기지 않습니다"
+        );
+        assert_eq!(
+            skip_hint(EntryKind::Dir, JobWork::Copy),
+            "이 폴더는 복사하지 않습니다"
+        );
+        assert_eq!(
+            skip_hint(EntryKind::Symlink, JobWork::Move),
+            "이 항목은 옮기지 않습니다"
+        );
+        assert_eq!(
+            overwrite_hint(true, JobWork::Copy),
+            "있던 파일을 복사해 올 파일로 바꿉니다"
+        );
         assert_eq!(
             rename_hint("설계안 (2).pdf"),
             "‘설계안 (2).pdf’처럼 번호를 붙여 저장합니다"
         );
-        assert_eq!(overwrite_hint(true), "있던 파일을 옮겨 올 파일로 바꿉니다");
+        assert_eq!(
+            overwrite_hint(true, JobWork::Move),
+            "있던 파일을 옮겨 올 파일로 바꿉니다"
+        );
         assert!(overwrite_warning(true).contains("남은 충돌도 모두 덮어씁니다"));
         assert_eq!(names_line(&[path("a")]), "‘a’");
     }

@@ -242,10 +242,14 @@ impl Tab {
         Some(self.load(next))
     }
 
-    /// Goes to the parent folder, like [`Tab::navigate`]; `None` at a root.
+    /// Goes to the parent folder, like [`Tab::navigate`]; `None` at a root. The folder it
+    /// came from is selected, with the cursor, once it shows ([`Tab::select_name`]).
     pub fn go_up(&mut self) -> Option<LoadRequest> {
         let parent = self.location.parent()?;
-        Some(self.navigate(parent))
+        let came_from = self.location.file_name().map(std::ffi::OsStr::to_os_string);
+        let request = self.navigate(parent);
+        self.pending_select = came_from;
+        Some(request)
     }
 
     /// Takes one batch of the listing of request `generation`, unsorted. The rows change only
@@ -483,7 +487,9 @@ impl Tab {
         }
     }
 
-    /// Makes the sorted `entries`, with the changes that came before them, the rows.
+    /// Makes the sorted `entries`, with the changes that came before them, the rows. A list
+    /// without a cursor (a folder just opened) gets it on its first row, nothing selected, so
+    /// that the keys start from there.
     fn show_listing(&mut self, entries: Vec<Entry>) {
         self.all = entries;
         let pending = std::mem::take(&mut self.pending);
@@ -492,6 +498,9 @@ impl Tab {
         }
         self.status = LoadStatus::Ready;
         self.refresh_visible();
+        if self.selection.cursor().is_none() && self.pending_select.is_none() {
+            self.selection.set_cursor(0, &self.visible);
+        }
     }
 
     /// Filters `all` into `visible` again and carries the selection over.

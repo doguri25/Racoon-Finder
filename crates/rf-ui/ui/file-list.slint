@@ -85,6 +85,9 @@ export component FileList inherits Rectangle {
     // What a drop here would do ("항목 3개 이동 → 백업"), as Rust last said while the drag
     // hovered; shown while this list takes the drag.
     in property <string> drag-label;
+    // Why the place under the pointer does not take the drag ("여기에 놓을 수 없습니다: …"), while
+    // a drag hovers there; empty otherwise.
+    in property <string> refusal;
 
     callback sort(column: int);
     // A left press on row `index`, and its release when no drag came of it (a click).
@@ -100,6 +103,8 @@ export component FileList inherits Rectangle {
     // `action`: the action this list takes, or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
     callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag of this list's rows ended, dropped or not.
+    callback drag-ended();
 
     // Scrolls as little as needed to show row `index` whole.
     //
@@ -276,6 +281,9 @@ export component FileList inherits Rectangle {
                                 data: root.drag-data;
                                 allow-move: true;
                                 allow-copy: true;
+                                drag-finished(action) => {
+                                    root.drag-ended();
+                                }
 
                                 row-menu := ContextMenuArea {
                                     Menu {
@@ -422,6 +430,25 @@ export component FileList inherits Rectangle {
                 border-width: 2px;
                 border-color: Theme.accent;
                 border-radius: Theme.radius;
+            }
+            // Why the drag cannot go where the pointer is.
+            if !drop.has-drag && root.refusal != "": Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 14px;
+                width: min(refused.preferred-width + 28px, parent.width - 24px);
+                height: 30px;
+                border-radius: 15px;
+                background: Theme.toast-bg;
+
+                refused := Text {
+                    width: parent.width - 28px;
+                    text: root.refusal;
+                    color: Theme.toast-text;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
             // What the drop would do.
             if drop.has-drag && root.drag-label != "": Rectangle {

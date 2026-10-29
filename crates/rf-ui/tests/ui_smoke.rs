@@ -15,8 +15,8 @@ use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, NameView, PaneView,
-    PickTarget, PickView, Theme,
+    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, NameView,
+    NoticeWindow, PaneView, PickTarget, PickView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -68,6 +68,18 @@ fn labelled(window: &MainWindow, label: &str, role: AccessibleRole) -> Vec<Eleme
     ElementHandle::find_by_accessible_label(window, label)
         .filter(|element| element.accessible_role() == Some(role))
         .collect()
+}
+
+#[test]
+fn the_notice_window_shows_the_theme_it_is_given() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (choice, dark) in [(1, false), (2, true)] {
+        let notice = NoticeWindow::new().expect("NoticeWindow builds");
+        notice.set_theme_choice(choice);
+        notice.show().expect("the notice shows");
+        assert_eq!(notice.global::<Theme<'_>>().get_dark(), dark, "{choice}");
+        notice.hide().expect("the notice hides");
+    }
 }
 
 #[test]
@@ -427,6 +439,38 @@ fn the_job_panel_shows_its_rows_and_buttons() {
 }
 
 #[test]
+fn a_toast_stays_while_the_pointer_is_over_it() {
+    let window = window();
+    let shown = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+    let pointer = |position: LogicalPosition| {
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        // Runs the toast's `changed` handlers.
+        slint::platform::update_timers_and_animations();
+    };
+    window.invoke_show_toast("항목 1개를 복사했습니다".into(), "되돌리기".into(), 3);
+    slint::platform::update_timers_and_animations();
+    let toast = labelled(&window, "항목 1개를 복사했습니다", AccessibleRole::Text)
+        .into_iter()
+        .next()
+        .expect("the toast shows");
+    let (at, size) = (toast.absolute_position(), toast.size());
+    let over = LogicalPosition::new(at.x + 8.0, at.y + size.height / 2.0);
+
+    // Over it, its time does not run out.
+    pointer(over);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(20));
+    assert!(shown("항목 1개를 복사했습니다"));
+    // Once the pointer leaves, it has its 8 seconds again in full.
+    pointer(LogicalPosition::new(10.0, 10.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(7));
+    assert!(shown("항목 1개를 복사했습니다"));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1500));
+    assert!(!shown("항목 1개를 복사했습니다"));
+}
+
+#[test]
 fn a_toast_button_answers_with_its_token() {
     let window = window();
     let clicked = Rc::new(RefCell::new(Vec::new()));
@@ -492,25 +536,100 @@ fn a_dialog_takes_the_keys_until_it_closes() {
     let message =
         "휴지통을 쓸 수 없는 위치입니다.\n항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다.";
     assert_eq!(labelled(&window, message, AccessibleRole::Text).len(), 1);
-    // The panes get no key while it shows, and Enter does not delete.
+    // The panes get no key while it shows, and Enter does not delete: it is on 취소.
     let down = char::from(Key::DownArrow).to_string();
     let enter = char::from(Key::Return).to_string();
     chord(&window, &[&down]);
-    chord(&window, &[&enter]);
     assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
     assert_eq!(answers.borrow().as_slice(), Vec::<&str>::new());
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), ["cancelled"]);
     // Esc is No.
     chord(&window, &[&char::from(Key::Escape).to_string()]);
-    assert_eq!(answers.borrow().as_slice(), ["cancelled"]);
-    // Only the button deletes.
+    assert_eq!(answers.borrow().as_slice(), ["cancelled", "cancelled"]);
+    // The button deletes.
     let delete: Vec<ElementHandle> = labelled(&window, "영구 삭제", AccessibleRole::Button);
     delete[0].invoke_accessible_default_action();
-    assert_eq!(answers.borrow().as_slice(), ["cancelled", "accepted"]);
+    assert_eq!(
+        answers.borrow().as_slice(),
+        ["cancelled", "cancelled", "accepted"]
+    );
 
     // Closed, the panes have the keys again.
     window.set_dialog(DialogKind::None);
     chord(&window, &[&down]);
     assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn a_confirm_is_answered_from_the_keyboard_on_the_button_it_is_on() {
+    let window = window();
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&answers);
+    window.on_confirm_accepted(move || record.borrow_mut().push("accepted"));
+    let record = Rc::clone(&answers);
+    window.on_dialog_cancelled(move || record.borrow_mut().push("cancelled"));
+    let show = |danger: bool, count: usize| {
+        window.set_dialog(DialogKind::None);
+        window.set_confirm_view(ConfirmView {
+            title: "영구 삭제".into(),
+            message: format!("항목 {count}개를 영구 삭제할까요? 되돌릴 수 없습니다.").into(),
+            ok_text: "영구 삭제".into(),
+            danger,
+            ..ConfirmView::default()
+        });
+        window.set_dialog(DialogKind::Confirm);
+        // Runs the dialog's `changed` handlers.
+        slint::platform::update_timers_and_animations();
+    };
+    let key = |key: Key| char::from(key).to_string();
+    let (tab, back, space, enter) = (
+        key(Key::Tab),
+        key(Key::Backtab),
+        " ".to_owned(),
+        key(Key::Return),
+    );
+
+    // A danger confirm starts on 취소: Space and Enter answer No there.
+    show(true, 1);
+    chord(&window, &[&space]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), ["cancelled", "cancelled"]);
+    // Tab goes to the delete button, and Space or Enter there deletes.
+    chord(&window, &[&tab]);
+    chord(&window, &[&space]);
+    assert_eq!(answers.borrow().last(), Some(&"accepted"));
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().len(), 4);
+    assert_eq!(answers.borrow().last(), Some(&"accepted"));
+    // Tab past the last button and Shift+Tab come round to 취소.
+    chord(&window, &[&tab]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().last(), Some(&"cancelled"));
+    chord(&window, &[&back]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().last(), Some(&"accepted"));
+    chord(&window, &[&back]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().last(), Some(&"cancelled"));
+
+    // A new confirm starts on 취소 again.
+    chord(&window, &[&tab]);
+    answers.borrow_mut().clear();
+    show(true, 2);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), ["cancelled"]);
+
+    // Any other confirm is on no button: Enter is Yes, Space nothing, until Tab picks one.
+    answers.borrow_mut().clear();
+    show(false, 3);
+    chord(&window, &[&space]);
+    assert_eq!(answers.borrow().as_slice(), Vec::<&str>::new());
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), ["accepted"]);
+    chord(&window, &[&tab]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), ["accepted", "cancelled"]);
 }
 
 #[test]

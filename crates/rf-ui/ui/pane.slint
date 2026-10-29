@@ -205,6 +205,8 @@ export component Pane inherits Rectangle {
     // The payload of a drag of the rows, and what a drop on the list would do (`FileList`).
     in property <data-transfer> drag-data;
     in property <string> drag-label;
+    // Why the place of the pane under a drag does not take it (`FileList.refusal`).
+    in property <string> refusal;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     out property <int> page-rows: files.page-rows;
@@ -235,6 +237,8 @@ export component Pane inherits Rectangle {
     callback list-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
     callback tab-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
     callback tab-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag of the pane's rows ended.
+    callback drag-ended();
 
     // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs), all of it
     // selected and the cursor at its end, which shows: that is where a path is edited.
@@ -522,6 +526,10 @@ export component Pane inherits Rectangle {
                 active: root.view.active;
                 drag-data: root.drag-data;
                 drag-label: root.drag-label;
+                refusal: root.refusal;
+                drag-ended => {
+                    root.drag-ended();
+                }
                 sort(column) => {
                     root.sort(column);
                 }

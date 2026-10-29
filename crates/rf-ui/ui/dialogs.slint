@@ -4,7 +4,7 @@
 // Enter does its main action unless that action destroys something. `NoticeWindow` is a
 // window of its own, for a message before or instead of the main window.
 
-import { ListView } from "std-widgets.slint";
+import { ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { PrimaryButton, OutlineButton, DialogFrame } from "widgets.slint";
 
@@ -224,8 +224,27 @@ export component ConfirmDialog inherits DialogFrame {
     accessible-label: root.view.title;
     accessible-description: root.view.message;
 
+    // The button the keys are on: 0 취소, 1 the other, -1 neither. A danger confirm starts on
+    // 취소, so Enter answers No until Tab moves to the button that deletes; any other starts
+    // on neither, and Enter there is Yes. The keys stay with the dialog's FocusScope (the
+    // buttons take no focus), which answers for the button it is on.
+    property <int> on-button: -1;
+
     init => {
+        root.on-button = root.view.danger ? 0 : -1;
         keys.focus();
+    }
+    // Another confirm in the same dialog starts again.
+    changed view => {
+        root.on-button = root.view.danger ? 0 : -1;
+    }
+
+    function press(button: int) {
+        if (button == 0) {
+            root.cancelled();
+        } else if (button == 1) {
+            root.accepted();
+        }
     }
 
     keys := FocusScope {
@@ -234,8 +253,24 @@ export component ConfirmDialog inherits DialogFrame {
                 root.cancelled();
                 return accept;
             }
-            if (event.text == Key.Return && !root.view.danger) {
-                root.accepted();
+            if (event.text == Key.Tab || event.text == Key.RightArrow) {
+                root.on-button = root.on-button == 0 ? 1 : 0;
+                return accept;
+            }
+            if (event.text == Key.Backtab || event.text == Key.LeftArrow) {
+                root.on-button = root.on-button == 1 ? 0 : 1;
+                return accept;
+            }
+            if (event.text == " " && root.on-button >= 0) {
+                root.press(root.on-button);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                if (root.on-button >= 0) {
+                    root.press(root.on-button);
+                } else if (!root.view.danger) {
+                    root.accepted();
+                }
                 return accept;
             }
             reject
@@ -274,6 +309,7 @@ export component ConfirmDialog inherits DialogFrame {
 
                 OutlineButton {
                     text: "취소";
+                    focused: root.on-button == 0;
                     clicked => {
                         root.cancelled();
                     }
@@ -281,6 +317,7 @@ export component ConfirmDialog inherits DialogFrame {
                 PrimaryButton {
                     button-height: 36px;
                     text: root.view.ok-text;
+                    focused: root.on-button == 1;
                     clicked => {
                         root.accepted();
                     }
@@ -527,6 +564,9 @@ export component NoticeWindow inherits Window {
     in property <string> app-title;
     in property <string> heading;
     in property <string> message;
+    // The theme of the settings, numbered as the main window's `theme-choice`: 0 follows the
+    // system, 1 is light, 2 dark.
+    in property <int> theme-choice;
     callback closed();
 
     title: root.app-title;
@@ -535,7 +575,23 @@ export component NoticeWindow inherits Window {
     background: Theme.panel;
     default-font-size: Theme.font-body;
 
+    // As in the main window: the widgets' scheme, and the app's colors from it when the system's
+    // setting is followed.
+    private property <color> widget-background: Palette.background;
+    private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
+    function show-theme() {
+        Palette.color-scheme = root.theme-choice == 1 ? ColorScheme.light : root.theme-choice == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        Theme.dark = root.theme-choice == 2 || (root.theme-choice == 0 && root.system-dark);
+    }
+    changed system-dark => {
+        root.show-theme();
+    }
+    changed theme-choice => {
+        root.show-theme();
+    }
+
     init => {
+        root.show-theme();
         keys.focus();
     }
 

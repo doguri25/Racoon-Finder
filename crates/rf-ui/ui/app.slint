@@ -195,6 +195,23 @@ export component MainWindow inherits Window {
         }
     }
 
+    // The place under a drag (`place`, of pane `side`) does not take it, for the reason `text`;
+    // an empty one says it does. The reason shows by the place while the drag hovers there, and
+    // goes with a moment without news, or when the drag ends.
+    public function drop-refused(place: DropPlace, side: int, text: string) {
+        root.refusal = text;
+        root.refusal-place = place;
+        root.refusal-side = side;
+        if (text != "") {
+            refusal-timer.restart();
+        }
+    }
+
+    private property <string> refusal;
+    private property <DropPlace> refusal-place;
+    private property <int> refusal-side;
+    private property <bool> refusal-in-tree: root.refusal-place == DropPlace.tree;
+
     // Scrolls the tree so that row `index` shows.
     public function tree-scroll-to(index: int) {
         sidebar.scroll-to(index);
@@ -209,7 +226,7 @@ export component MainWindow inherits Window {
     private property <int> pick-scroll-row;
     private property <int> pick-scroll-serial;
 
-    // A notice in the lower right corner for 5 seconds.
+    // A notice in the lower right corner for 8 seconds, longer while the pointer is over it.
     public function show-notice(text: string) {
         root.show-toast(text, "", 0);
     }
@@ -538,6 +555,7 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 0.1;
                     rows: root.tree;
                     accepts-drops: true;
+                    refusal: root.refusal-in-tree ? root.refusal : "";
                     row-clicked(index) => {
                         root.tree-clicked(index);
                         keys.focus();
@@ -564,6 +582,10 @@ export component MainWindow inherits Window {
                     view: root.left-pane;
                     drag-data: root.drag-data;
                     drag-label: root.drag-label;
+                    refusal: !root.refusal-in-tree && root.refusal-side == 0 ? root.refusal : "";
+                    drag-ended => {
+                        root.refusal = "";
+                    }
                     activated => {
                         root.pane-activated(0);
                         keys.focus();
@@ -640,6 +662,10 @@ export component MainWindow inherits Window {
                     view: root.right-pane;
                     drag-data: root.drag-data;
                     drag-label: root.drag-label;
+                    refusal: !root.refusal-in-tree && root.refusal-side == 1 ? root.refusal : "";
+                    drag-ended => {
+                        root.refusal = "";
+                    }
                     activated => {
                         root.pane-activated(1);
                         keys.focus();
@@ -727,13 +753,21 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Above the job panel, when it shows.
+    // Above the job panel, when it shows, and above the panes' status lines. Its time stops
+    // while the pointer is over it, and starts again in full when the pointer leaves.
     if root.notice != "": Toast {
         width: min(self.preferred-width, root.width - 48px);
         height: self.preferred-height;
         x: root.width - self.width - 24px;
-        y: root.height - self.height - 24px - jobs.height;
+        y: root.height - self.height - jobs.height - Theme.gap-m - 32px - 12px;
         message: root.notice;
+        changed hovered => {
+            if (self.hovered) {
+                notice-timer.stop();
+            } else {
+                notice-timer.restart();
+            }
+        }
         action: root.notice-action-live ? root.notice-action-text : "";
         action-clicked => {
             root.notice = "";
@@ -747,8 +781,17 @@ export component MainWindow inherits Window {
         }
     }
 
+    refusal-timer := Timer {
+        interval: 1500ms;
+        running: false;
+        triggered => {
+            root.refusal = "";
+            self.stop();
+        }
+    }
+
     notice-timer := Timer {
-        interval: 5s;
+        interval: 8s;
         running: false;
         triggered => {
             root.notice = "";

@@ -12,7 +12,6 @@ use rf_core::VPath;
 use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
-use crate::loader::holds_volumes;
 use crate::pane::ancestors;
 use crate::settings::{Found, Settings, ThemeChoice};
 use crate::ui_bridge::post;
@@ -98,32 +97,62 @@ fn by_volume(folders: Vec<VPath>) -> Vec<Vec<VPath>> {
 }
 
 /// The volume `folder` is on, as far as its path tells, as the folder of its root, and whether
-/// it is a removable or network one (`true`) rather than one of the system's own disks: below
-/// where the system puts removable and network volumes ([`holds_volumes`]), the folder right
-/// below that place; a Windows share, or a location of another kind, its root. On the
-/// system's own disk a path cannot tell a network share mounted at a folder (`/srv/nas`) from
-/// a folder, so each folder right below the root counts as a volume of its own.
+/// it is a removable or network one (`true`) rather than one of the system's own disks
+/// ([`volume_in`], for the user and the system's drive this process runs with).
 fn volume_of(folder: &VPath) -> (bool, VPath) {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok();
+    let system_drive = std::env::var("SystemDrive").ok();
+    volume_in(folder, user.as_deref(), system_drive.as_deref())
+}
+
+/// [`volume_of`] for the user named `user` and the system's drive `system_drive` (`C:` when
+/// not known):
+///
+/// - on Windows a drive is a volume, removable unless it is the system's drive (a USB stick
+///   at `E:`, a share mapped at `Z:`), and a server's share is one, on the network;
+/// - below where the system mounts removable and network volumes, the folder of the volume:
+///   `/Volumes/<name>`, `/mnt/<name>`, `/run/media/<user>/<label>`, and `/media/<user>/<label>`
+///   for `user`'s own folder there, `/media/<label>` otherwise;
+/// - a location of another kind, its root;
+/// - anywhere else on the system's own disk, the folder right below the root: a path cannot
+///   tell a network share mounted at a folder (`/srv/nas`) from a folder, so each counts as a
+///   volume of its own.
+fn volume_in(folder: &VPath, user: Option<&str>, system_drive: Option<&str>) -> (bool, VPath) {
     let chain = ancestors(folder);
-    let mounted = chain
-        .windows(2)
-        .rev()
-        .find(|pair| pair[0].as_local().is_some_and(holds_volumes));
-    if let Some([_, volume]) = mounted {
-        return (true, volume.clone());
-    }
     let root = chain.first().unwrap_or(folder);
-    let shared = root.as_local().is_none_or(|path| {
-        matches!(
-            path.components().next(),
-            Some(Component::Prefix(prefix))
-                if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-        )
-    });
-    if shared {
+    let Some(path) = folder.as_local() else {
         return (true, root.clone());
+    };
+    let mut parts = path.components();
+    match parts.next() {
+        Some(Component::Prefix(prefix)) => {
+            let removable = match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    let system = system_drive
+                        .and_then(|drive| drive.bytes().next())
+                        .unwrap_or(b'C');
+                    !letter.eq_ignore_ascii_case(&system)
+                }
+                _ => true,
+            };
+            return (removable, root.clone());
+        }
+        Some(Component::RootDir) => {}
+        _ => return (true, root.clone()),
     }
-    (false, chain.get(1).unwrap_or(root).clone())
+    let names: Vec<Option<&str>> = parts.map(|part| part.as_os_str().to_str()).collect();
+    let depth = match names.as_slice() {
+        [Some("run"), Some("media"), Some(_), Some(_), ..] => Some(4),
+        [Some("media"), Some(owner), Some(_), ..] if Some(*owner) == user => Some(3),
+        [Some("Volumes" | "mnt" | "media"), Some(_), ..] => Some(2),
+        _ => None,
+    };
+    match depth.and_then(|depth| chain.get(depth)) {
+        Some(volume) => (true, volume.clone()),
+        None => (false, chain.get(1).unwrap_or(root).clone()),
+    }
 }
 
 /// The answers of `checks` that come within `wait`, until there are `count`.
@@ -166,8 +195,9 @@ fn whole_pixels(length: f32) -> Option<u32> {
         .then_some(rounded as u32)
 }
 
-/// The number the 보기 menu uses for `theme` (`theme-choice` of the window).
-pub(super) fn theme_number(theme: ThemeChoice) -> i32 {
+/// The number the 보기 menu uses for `theme` (`theme-choice` of the window, and of the notice
+/// window).
+pub(crate) fn theme_number(theme: ThemeChoice) -> i32 {
     match theme {
         ThemeChoice::System => 0,
         ThemeChoice::Light => 1,
@@ -434,11 +464,71 @@ mod tests {
     #[test]
     fn folders_go_by_their_volume() {
         assert_eq!(volume_of(&folder("a")), volume_of(&folder("b")));
-        assert!(!volume_of(&folder("a")).0);
         let nas = volume_of(&on_the_nas("a"));
         assert!(nas.0);
         assert_eq!(nas, volume_of(&on_the_nas("b")));
         assert_ne!(nas, volume_of(&folder("a")));
+    }
+
+    /// The local folder at `path`.
+    fn at(path: &str) -> VPath {
+        VPath::local(path).expect("a local path")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_volume_is_where_the_system_mounts_it() {
+        let volume = |path: &str| volume_in(&at(path), Some("alice"), None);
+        // A removable or network volume is one, however deep the folder and wherever in it.
+        for (path, mounted) in [
+            ("/media/USB/a/b", "/media/USB"),
+            ("/media/USB/c", "/media/USB"),
+            ("/media/USB", "/media/USB"),
+            ("/media/alice/USB/a/b", "/media/alice/USB"),
+            ("/media/alice/Other/a", "/media/alice/Other"),
+            ("/media/bob/x/y", "/media/bob"),
+            ("/run/media/alice/USB/a", "/run/media/alice/USB"),
+            ("/mnt/nas/a/b", "/mnt/nas"),
+            ("/Volumes/Stick/a/b", "/Volumes/Stick"),
+        ] {
+            assert_eq!(volume(path), (true, at(mounted)), "{path}");
+        }
+        // Without a known user, `/media/<name>` is the volume.
+        assert_eq!(
+            volume_in(&at("/media/alice/USB/a"), None, None),
+            (true, at("/media/alice"))
+        );
+        // On the system's own disk, each folder right below the root counts as one (a share
+        // mounted at `/srv/nas` looks like a folder).
+        assert_eq!(volume("/home/alice/a"), (false, at("/home")));
+        assert_eq!(volume("/home"), (false, at("/home")));
+        assert_eq!(volume("/srv/nas/a"), (false, at("/srv")));
+        assert_eq!(volume("/"), (false, at("/")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_volume_is_a_drive_or_a_share() {
+        let volume = |path: &str| volume_in(&at(path), None, Some("C:"));
+        // A drive is one volume, the system's own first, whatever its folders.
+        assert_eq!(volume(r"C:\Users\a\b"), (false, at(r"C:\")));
+        assert_eq!(volume(r"C:\Windows"), (false, at(r"C:\")));
+        assert_eq!(volume(r"C:\"), (false, at(r"C:\")));
+        assert_eq!(volume(r"E:\photos\2024"), (true, at(r"E:\")));
+        assert_eq!(volume(r"E:\photos"), volume(r"E:\music\a"));
+        assert_eq!(volume(r"Z:\a"), (true, at(r"Z:\")));
+        assert_ne!(volume(r"Z:\a"), volume(r"E:\a"));
+        // The system's drive may have another letter.
+        assert_eq!(
+            volume_in(&at(r"D:\a"), None, Some("d:")),
+            (false, at(r"D:\"))
+        );
+        assert!(volume_in(&at(r"C:\a"), None, Some("D:")).0);
+        // A share is one volume, on the network.
+        let share = volume(r"\\nas\share\a\b");
+        assert!(share.0);
+        assert_eq!(share, volume(r"\\nas\share\c"));
+        assert_ne!(share, volume(r"\\nas\other\a"));
     }
 
     #[test]

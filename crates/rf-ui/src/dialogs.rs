@@ -18,7 +18,7 @@ use rf_jobs::{
 
 use crate::pick::Picker;
 use crate::resolver::QuestionId;
-use crate::words;
+use crate::words::{self, JobWork};
 
 /// A window over the main window. While one shows, the main window takes no keys or clicks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -354,6 +354,8 @@ pub struct ConflictQuestion {
     pub conflict: Box<Conflict>,
     /// The items the job has still to do after this one.
     pub items_left: u64,
+    /// What the job does with the items (a copy or a move), as far as the window knows it.
+    pub work: JobWork,
 }
 
 /// What the user chose in the conflict window.
@@ -604,6 +606,7 @@ mod tests {
                 existing: Entry::new("설계안.pdf", existing),
             }),
             items_left: 0,
+            work: JobWork::Copy,
         }
     }
 

@@ -81,10 +81,15 @@ fn new_folder_asks_for_a_name_then_creates_it() {
 
 #[test]
 fn rename_starts_from_the_cursor_row() {
+    // In an empty folder F2 has nothing to rename.
+    let mut empty = ready(vec![], vec![]);
+    assert_eq!(press(&mut empty, &special(Key::F2), NONE), Some(vec![]));
+    assert_eq!(empty.modal(), None);
+    // A folder just listed has the cursor on its first row: F2 renames that.
     let mut state = ready(vec![dir("docs"), file("설계안.pdf")], vec![]);
-    // Nothing under the cursor: F2 does nothing.
-    assert_eq!(press(&mut state, &special(Key::F2), NONE), Some(vec![]));
-    assert_eq!(state.modal(), None);
+    press(&mut state, &special(Key::F2), NONE);
+    assert!(matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.initial == "docs"));
+    state.dialog_cancelled();
     state.click_row(LEFT, 1, false, false);
     press(&mut state, &special(Key::F2), NONE);
     let Some(Modal::Name(dialog)) = state.modal() else {
@@ -165,6 +170,17 @@ fn delete_checks_for_a_trash_and_never_deletes_for_good_unasked() {
 /// Ends the job `id` that `spec` describes and the state followed as `work`, with the
 /// report `edit` makes, and gives what the state asks for.
 fn finish(
+    state: &mut AppState,
+    id: u64,
+    spec: &JobSpec,
+    work: JobWork,
+    edit: impl FnOnce(&mut JobReport),
+) -> Vec<Effect> {
+    without_space_reads(finish_all(state, id, spec, work, edit))
+}
+
+/// [`finish`] with every effect, the read of the free space among them.
+fn finish_all(
     state: &mut AppState,
     id: u64,
     spec: &JobSpec,
@@ -270,13 +286,14 @@ fn the_toast(effects: &[Effect]) -> (u64, String, String) {
 
 #[test]
 fn a_finished_move_offers_its_undo_while_it_is_next() {
-    let mut state = ready(vec![file("a.txt")], vec![]);
-    // Nothing to move without a selection or a cursor.
+    // Nothing to move in an empty folder.
     let options = TransferOptions::default();
+    let mut empty = ready(vec![], vec![]);
     assert_eq!(
-        state.transfer(LEFT, TransferMode::Move, &folder("b"), options),
+        empty.transfer(LEFT, TransferMode::Move, &folder("b"), options),
         []
     );
+    let mut state = ready(vec![file("a.txt")], vec![]);
     state.click_row(LEFT, 0, false, false);
     let effects = state.transfer(LEFT, TransferMode::Move, &folder("b"), options);
     let (spec, origin) = the_submit(&effects);
@@ -1026,5 +1043,136 @@ fn the_same_confirmation_asks_once() {
     assert_eq!(
         confirm.purpose,
         ConfirmPurpose::DeletePermanently(vec![in_a("b.txt")])
+    );
+}
+
+#[test]
+fn a_conflict_question_knows_what_its_job_does() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[in_a("a.txt")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    state.track(Started {
+        id: JobId(1),
+        spec: Some(Arc::new(spec)),
+        work: JobWork::Copy,
+        origin: Some(LEFT),
+        via_history: false,
+    });
+    state.question(conflict_question(5));
+    let Some(Modal::Conflict(question)) = state.modal() else {
+        panic!("the question shows");
+    };
+    // The window words its cards and choices for a copy ("복사해 올 파일").
+    assert_eq!(question.work, JobWork::Copy);
+    // A job the window does not follow is named in neutral words.
+    state.dialog_cancelled();
+    let mut other = conflict_question(6);
+    other.job = JobId(9);
+    state.question(other);
+    let Some(Modal::Conflict(question)) = state.modal() else {
+        panic!("the question shows");
+    };
+    assert_eq!(question.work, JobWork::Other);
+}
+
+#[test]
+fn an_undo_or_redo_selects_what_it_brought_back() {
+    let mut state = ready(vec![file("x"), file("작업폴더")], vec![]);
+    // The undo of a rename gives the item its old name back; the window's pane shows it.
+    let record = UndoRecord::Renamed {
+        from: in_a("작업폴더"),
+        to: in_a("보관함"),
+    };
+    let spec = JobSpec::Undo(record);
+    let effects = finish(&mut state, 1, &spec, JobWork::Undo, |report| {
+        report.outputs.push(in_a("작업폴더"));
+    });
+    assert!(
+        effects.contains(&Effect::ScrollTo { side: LEFT, row: 1 }),
+        "{effects:?}"
+    );
+    assert_eq!(selected(&state, LEFT), [1]);
+    // A redo the same, also of an item not listed yet.
+    let spec = JobSpec::Undo(UndoRecord::Removed {
+        path: in_a("새 폴더"),
+        kind: rf_jobs::CreateKind::Dir,
+    });
+    finish(&mut state, 2, &spec, JobWork::Redo, |report| {
+        report.outputs.push(in_a("새 폴더"));
+    });
+    let generation = state.panes()[LEFT].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Upsert(dir("새 폴더"))],
+    });
+    assert_eq!(rows(&state, LEFT)[selected(&state, LEFT)[0]], "새 폴더");
+}
+
+#[test]
+fn a_job_that_ends_reads_the_free_space_of_the_drives_it_touched() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let temp = VPath::local(std::env::temp_dir()).expect("a local path");
+    let elsewhere = VPath::local(if cfg!(windows) {
+        r"Q:\"
+    } else {
+        "/rf-ui-other-drive"
+    })
+    .expect("a local path");
+    let drive = |label: &str, path: &VPath| Place {
+        label: label.to_owned(),
+        path: path.clone(),
+        kind: PlaceKind::Drive,
+        space: None,
+    };
+    state.set_places(&[drive("임시", &temp), drive("다른 드라이브", &elsewhere)]);
+    // A third tab, on the other drive, is left out.
+    state.add_tab(RIGHT);
+    let request = the_load(&state.go_to(elsewhere.join("x").expect("a name")));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: Vec::new(),
+    });
+    let other_tab = state.panes()[RIGHT].tabs()[1].generation();
+    state.select_tab(RIGHT, 0);
+
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[in_a("a.txt")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    let effects = finish_all(&mut state, 1, &spec, JobWork::Copy, |_| {});
+    let reads: Vec<&Effect> = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::ReadSpace { .. }))
+        .collect();
+    let [Effect::ReadSpace { tabs, drives }] = reads.as_slice() else {
+        panic!("one read of the free space: {effects:?}");
+    };
+    let left = state.panes()[LEFT].active_tab().generation();
+    let right = state.panes()[RIGHT].active_tab().generation();
+    assert_eq!(tabs, &[(left, folder("a")), (right, folder("b"))]);
+    assert_eq!(drives, &[temp]);
+    assert!(!tabs.iter().any(|(generation, _)| *generation == other_tab));
+    // What the worker finds is taken in by the tab that asked, while it still shows that folder.
+    state.loaded(LoadEvent::Space {
+        generation: right,
+        available: 5 * 1024 * 1024 * 1024,
+    });
+    assert!(
+        state.panes()[RIGHT]
+            .active_tab()
+            .status_line()
+            .ends_with("남은 공간 5 GB")
     );
 }

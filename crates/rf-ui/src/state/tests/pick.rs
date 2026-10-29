@@ -150,10 +150,11 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
     assert_eq!(picker(&state).request.mode, TransferMode::Copy);
     state.dialog_cancelled();
 
-    // Without a selection the cursor's row is the item; without either, nothing opens.
+    // Without a selection the cursor's row is the item; in an empty folder, nothing opens.
+    let mut empty = ready(vec![], vec![]);
+    assert_eq!(press(&mut empty, &special(Key::F5), NONE), Some(vec![]));
+    assert_eq!(empty.modal(), None);
     let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
-    assert_eq!(press(&mut state, &special(Key::F5), NONE), Some(vec![]));
-    assert_eq!(state.modal(), None);
     state.click_row(LEFT, 1, false, false);
     state.click_row(LEFT, 1, true, false);
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());

@@ -9,7 +9,7 @@ use rf_jobs::{
     JobSpec, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 
-use super::{AppState, Effect, ToastAction};
+use super::{AppState, Effect, RIGHT, ToastAction};
 use crate::dialogs::{
     Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
     NameCheck, NameDialog, NamePurpose, PreflightQuestion, Recovery,
@@ -120,6 +120,7 @@ impl AppState {
                 job,
                 conflict,
                 items_left: self.jobs.items_left(job),
+                work: self.jobs.work(job).unwrap_or(JobWork::Other),
             }),
             Asked::Preflight(issues) => Modal::Preflight(PreflightQuestion { id, job, issues }),
         };
@@ -414,8 +415,13 @@ impl AppState {
             report,
             ..
         } = ended;
-        let mut effects = self.folders_changed(&touched_folders(&report.spec, &report.outputs));
+        let touched = touched_folders(&report.spec, &report.outputs);
+        let mut effects = self.folders_changed(&touched);
         effects.extend(self.pick_made(&report));
+        // Whatever it did, a cancelled job too, it may have changed the room left.
+        if !self.quitting {
+            effects.push(self.space_to_read(&touched));
+        }
         // Before the end of a cancelled copy, which may have made some of its items.
         self.note_copies(&report);
         if let Some(done) = self.copies_deleted(&report) {
@@ -430,6 +436,18 @@ impl AppState {
             && let (Some(side), Some(output)) = (origin, report.outputs.first())
         {
             effects.extend(self.select_output(side, output));
+        }
+        // What an undo or a redo brought back (a name, a folder, an item from the trash) is
+        // selected where a pane shows its folder, the active one first.
+        if matches!(work, JobWork::Undo | JobWork::Redo)
+            && let Some(output) = report.outputs.first()
+        {
+            let side = [self.active, RIGHT - self.active]
+                .into_iter()
+                .find(|&side| Some(self.tab(side).location().clone()) == output.parent());
+            if let Some(side) = side {
+                effects.extend(self.select_output(side, output));
+            }
         }
 
         // A trash job offers to delete for good what its trash refused, and so does the undo of
@@ -719,6 +737,21 @@ fn top_level_count(spec: &JobSpec) -> usize {
     }
 }
 
+/// The paths of the items the job that left `record` worked on.
+fn record_paths(record: &UndoRecord) -> Vec<&VPath> {
+    match record {
+        UndoRecord::Copied { created, .. } => created.iter().map(|item| &item.path).collect(),
+        UndoRecord::Moved { moves, .. } => moves.iter().flat_map(|m| [&m.from, &m.to]).collect(),
+        UndoRecord::Renamed { from, to } => vec![from, to],
+        UndoRecord::Created { path, .. } | UndoRecord::Removed { path, .. } => vec![path],
+        UndoRecord::Trashed { items } | UndoRecord::Restored { items } => {
+            items.iter().map(|item| &item.original).collect()
+        }
+        // A record added after this was written.
+        _ => Vec::new(),
+    }
+}
+
 /// The folders a job of `spec` changed, with `outputs`, the paths it made: the folders of its
 /// sources and targets, each once, and a transfer's targets themselves, which it merged into
 /// where a folder of the same name was there (the tree lists again only the folders it has
@@ -736,8 +769,10 @@ fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
         }
         JobSpec::Delete(delete) => paths.extend(&delete.paths),
         JobSpec::Rename { from, to } => paths.extend([from, to]),
-        // A create's output is the item it made, and an undo's what it put back; a kind of
-        // job added after this was written has its outputs.
+        // What an undo took away is in its record; what it put back is in its outputs.
+        JobSpec::Undo(record) => paths.extend(record_paths(record)),
+        // A create's output is the item it made; a kind of job added after this was written
+        // has its outputs.
         _ => {}
     }
     for folder in paths.into_iter().filter_map(VPath::parent) {

@@ -6,6 +6,7 @@ use rf_jobs::{ConflictPolicy, JobSpec, TransferItem, TransferMode};
 use super::*;
 use crate::dialogs::Modal;
 use crate::jobs::{JobEffect, Started};
+use crate::pick::Validity;
 use crate::words::JobWork;
 
 fn in_a(name: &str) -> VPath {
@@ -427,4 +428,66 @@ fn a_dragged_move_tells_what_it_moved_and_offers_its_undo() {
         ("항목 1개를 이동했습니다", "되돌리기")
     );
     assert_eq!(state.toast_clicked(token), [Effect::Job(JobEffect::Undo)]);
+}
+
+#[test]
+fn a_drop_where_the_rows_changed_to_a_folder_that_refuses_says_so() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    // The right pane shows the parent of `a`, which has only `b` yet.
+    state.activate(RIGHT);
+    let parent = folder("a").parent().expect("a has a parent");
+    let request = the_load(&state.go_to(parent));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("b")],
+    });
+    let first_row = DropSpot::Pane {
+        side: RIGHT,
+        row: Some(0),
+    };
+    assert_eq!(offer(&mut state, first_row), Some(folder("b")));
+    // `a` comes first under the still pointer: the folder the item is in, which takes nothing.
+    state.loaded(LoadEvent::Changes {
+        generation: request.generation,
+        changes: vec![rf_vfs::Change::Upsert(dir("a"))],
+    });
+    assert_eq!(
+        state.drop_items(id, first_row, TransferMode::Move),
+        [Effect::Notice(words::drop_moved().to_owned())]
+    );
+    // A drop the window never offered says nothing.
+    assert_eq!(state.drop_items(id, first_row, TransferMode::Move), []);
+}
+
+#[test]
+fn a_place_that_refuses_the_items_says_why() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 0, false, false);
+    let id = state.drag_id();
+    let on_left = |row| DropSpot::Pane {
+        side: LEFT,
+        row: Some(row),
+    };
+    // The folder the items are in, and the dragged folder itself.
+    assert_eq!(
+        state.drop_refused(id, LEFT_LIST),
+        Some(Validity::SameFolder)
+    );
+    assert_eq!(
+        state.drop_refused(id, on_left(0)),
+        Some(Validity::IntoSource)
+    );
+    // A place that takes them refuses nothing, and neither does a payload of another drag.
+    assert_eq!(state.drop_refused(id, RIGHT_LIST), None);
+    assert_eq!(state.drop_refused(id + 1, LEFT_LIST), None);
+    assert_eq!(
+        words::drop_refused(Validity::SameFolder),
+        "여기에 놓을 수 없습니다: 항목이 이미 이 폴더에 있습니다"
+    );
+    assert_eq!(
+        words::drop_refused(Validity::IntoSource),
+        "여기에 놓을 수 없습니다: 끌고 있는 폴더 자신이거나 그 안입니다"
+    );
 }

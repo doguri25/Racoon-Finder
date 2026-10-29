@@ -68,10 +68,10 @@ fn finish(
     });
     let mut report = JobReport::new(JobId(id), spec);
     edit(&mut report);
-    state.job_event(JobEvent::Finished {
+    without_space_reads(state.job_event(JobEvent::Finished {
         id: JobId(id),
         report: Arc::new(report),
-    })
+    }))
 }
 
 fn refused(path: VPath) -> ItemFailure {

@@ -212,8 +212,15 @@ fn quit_with_a_question_open_leaves_the_job_for_recovery() {
     assert_eq!(question.job, started.id);
 
     // The window closes with the question open: the engine shuts down first, then the question
-    // is released. The job waits for its answer, so the shutdown waits its whole time.
-    assert!(!app.close_down(Duration::from_millis(300)));
+    // is released. The job waits for its answer and cannot stop before, so the shutdown waits
+    // a little only, not its whole time.
+    let closing = Instant::now();
+    assert!(!app.close_down(rf_ui::jobs::QUIT_TIMEOUT));
+    assert!(
+        closing.elapsed() < rf_ui::jobs::QUIT_TIMEOUT,
+        "{:?}",
+        closing.elapsed()
+    );
     assert!(app.is_closed());
     assert_eq!(outcome_of(&events, started.id), Outcome::Cancelled);
     assert_eq!(read(&dst.join("a.txt")), "old");

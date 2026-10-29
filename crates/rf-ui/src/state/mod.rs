@@ -104,6 +104,14 @@ pub enum Effect {
     /// Find on a worker thread whether the location of `folder` has a trash
     /// (`rf_platform::trash_supported`), then call [`AppState::trash_checked`] with `paths`.
     CheckTrash { folder: VPath, paths: Vec<VPath> },
+    /// Read again on a worker thread the free space of the folders of `tabs` (with each tab's
+    /// generation, for [`AppState::loaded`] as a [`LoadEvent::Space`], which only a tab that
+    /// still has that generation takes) and of the drives `drives` (for
+    /// [`AppState::drive_space`]): a job that ended has changed it.
+    ReadSpace {
+        tabs: Vec<(u64, VPath)>,
+        drives: Vec<VPath>,
+    },
     /// Find on a worker thread how the original of each copy of `pairs` (the copy, then its
     /// original) is beside it
     /// ([`Loader::compare_with_original`](crate::loader::Loader::compare_with_original)), then
@@ -536,6 +544,62 @@ impl AppState {
         effects
     }
 
+    /// The free space of the drive at `path`, as a worker read it again
+    /// ([`Effect::ReadSpace`]): the sidebar shows it from now on. Nothing for a drive that is no
+    /// longer among the places.
+    pub fn drive_space(&mut self, path: &VPath, space: rf_platform::DiskSpace) {
+        for place in &mut self.places {
+            if place.kind == crate::places::PlaceKind::Drive && place.path == *path {
+                place.space = Some(space);
+            }
+        }
+    }
+
+    /// What a job that changed the folders `folders` has to have read again: the free space of
+    /// the drives they are on (the deepest drive of the places that holds each), and of every
+    /// listed tab on those drives, with its generation. Without known drives, a tab counts as on
+    /// the drive of a folder when both have one root.
+    fn space_to_read(&self, folders: &[VPath]) -> Effect {
+        let drives: Vec<&VPath> = self
+            .places
+            .iter()
+            .filter(|place| place.kind == crate::places::PlaceKind::Drive)
+            .map(|place| &place.path)
+            .collect();
+        let drive_of = |path: &VPath| -> Option<VPath> {
+            let deepest = drives
+                .iter()
+                .filter(|drive| path.starts_with(drive))
+                .max_by_key(|drive| ancestors(drive).len())
+                .map(|drive| (*drive).clone());
+            if drives.is_empty() {
+                ancestors(path).into_iter().next()
+            } else {
+                deepest
+            }
+        };
+        let mut touched: Vec<VPath> = Vec::new();
+        for drive in folders.iter().filter_map(drive_of) {
+            if !touched.contains(&drive) {
+                touched.push(drive);
+            }
+        }
+        let tabs = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .filter(|tab| tab.status() == LoadStatus::Ready)
+            .filter(|tab| drive_of(tab.location()).is_some_and(|drive| touched.contains(&drive)))
+            .map(|tab| (tab.generation(), tab.location().clone()))
+            .collect();
+        let drives = if drives.is_empty() {
+            Vec::new()
+        } else {
+            touched
+        };
+        Effect::ReadSpace { tabs, drives }
+    }
+
     /// Shows the folder of row `row` of the tree in the active pane (a click on the row). The
     /// row is the tree's selection from then on, even when another row shows the same folder.
     pub fn open_tree_row(&mut self, row: usize) -> Vec<Effect> {
@@ -618,7 +682,8 @@ impl AppState {
     /// or only its watch failed), the folder is listed again; within [`AUTO_RELOAD_GAP`] of
     /// its last automatic reload, that waits for the gap to pass ([`Effect::ReloadLater`]),
     /// so a watch that keeps failing cannot reload it in a loop and a folder replaced twice
-    /// in quick succession still shows the second one. Otherwise the tab goes to `found`.
+    /// in quick succession still shows the second one. Otherwise the tab goes to `found`, and
+    /// when its pane shows it, a notice says why.
     pub fn found_existing(
         &mut self,
         generation: u64,
@@ -650,10 +715,24 @@ impl AppState {
             }
             return self.auto_reload(generation, path, now);
         }
-        match self.tab_by_generation(generation) {
-            Some(tab) => vec![Effect::Load(tab.navigate(target))],
-            None => Vec::new(),
+        let shown = self
+            .panes
+            .iter()
+            .any(|pane| pane.active_tab().generation() == generation);
+        let Some(tab) = self.tab_by_generation(generation) else {
+            return Vec::new();
+        };
+        let to_parent = path.starts_with(&target);
+        let mut effects = vec![Effect::Load(tab.navigate(target))];
+        // The pane that shows it moves: the user is told why.
+        if shown {
+            let name = path.file_name().map_or_else(
+                || path.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            effects.push(Effect::Notice(words::folder_vanished(&name, to_parent)));
         }
+        effects
     }
 
     /// The time of the reload [`Effect::ReloadLater`] asked for has come: the tab with

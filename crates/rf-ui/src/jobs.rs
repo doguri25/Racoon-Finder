@@ -31,6 +31,11 @@ use crate::words::{self, JobWork};
 /// questions and ends (see [`close_down`]).
 pub const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the app's end waits instead when every job a worker runs waits for an answer
+/// (and paused ones, which a cancel wakes): none can stop before its question is released, so
+/// a longer wait only keeps the window up.
+pub const QUIT_TIMEOUT_ASKING: Duration = Duration::from_millis(500);
+
 /// The engine of the app and the resolver that asks the window. Clones share them.
 #[derive(Clone, Debug)]
 pub struct Jobs {
@@ -242,11 +247,22 @@ impl Jobs {
 
 /// What ends the engine: `JobEngine::shutdown`.
 pub trait Shutdown {
+    /// Whether a job waits for an answer and every other job a worker has taken up is paused
+    /// or waits too: then no worker ends before the questions are released.
+    fn only_asking(&self) -> bool;
+
     /// Ends every job and waits up to `timeout` for the workers; `true` if they all ended.
     fn shutdown(&self, timeout: Duration) -> bool;
 }
 
 impl Shutdown for JobEngine {
+    fn only_asking(&self) -> bool {
+        let jobs = self.jobs();
+        let taken_up = || jobs.iter().filter(|job| job.state != JobState::Queued);
+        taken_up().any(|job| job.state == JobState::Waiting)
+            && taken_up().all(|job| matches!(job.state, JobState::Waiting | JobState::Paused))
+    }
+
     fn shutdown(&self, timeout: Duration) -> bool {
         JobEngine::shutdown(self, timeout)
     }
@@ -267,13 +283,20 @@ impl ReleaseQuestions for UiResolver {
 /// running job as cut off by the app's end, then the questions still open are answered with
 /// their cancelling choice. In the other order a job waiting for an answer would take the
 /// cancel for the user's, end for good, and not be offered again at the next start. A job
-/// that waits for an answer cannot stop until it has one, so with a question open the
-/// shutdown waits its whole `timeout`; the job is then left in the journal, to be recovered.
+/// that waits for an answer cannot stop until it has one, so it is left in the journal, to be
+/// recovered. With only such jobs (and paused ones) under way, the shutdown waits
+/// [`QUIT_TIMEOUT_ASKING`] at most rather than `timeout`, as no wait lets them end; with a
+/// job running beside them it waits the whole `timeout` for that one.
 pub fn close_down(
     engine: &dyn Shutdown,
     questions: &dyn ReleaseQuestions,
     timeout: Duration,
 ) -> bool {
+    let timeout = if engine.only_asking() {
+        timeout.min(QUIT_TIMEOUT_ASKING)
+    } else {
+        timeout
+    };
     let ended = engine.shutdown(timeout);
     questions.release_all();
     ended
@@ -453,6 +476,11 @@ impl JobRows {
         })
     }
 
+    /// What the job `id` does, while the window follows it.
+    pub fn work(&self, id: JobId) -> Option<JobWork> {
+        self.find(id).map(|job| job.work)
+    }
+
     /// The id of row `row` of [`JobRows::rows`].
     pub fn row_id(&self, row: usize) -> Option<JobId> {
         self.rows().get(row).map(|view| view.id)
@@ -516,10 +544,14 @@ fn row(job: &Tracked, queued: usize) -> JobRow {
         fraction(items(*done), items(*total))
     };
     let waiting = job.state == JobState::Waiting;
+    let paused = job.state == JobState::Paused;
     let progress = if waiting {
         words::job_waiting().to_owned()
     } else if job.state == JobState::Planning {
         words::job_planning().to_owned()
+    } else if paused {
+        // Nothing moves while it is paused: no speed, and no time left.
+        words::job_progress(items(*done), items(*total), 0, None, queued)
     } else {
         words::job_progress(items(*done), items(*total), *bytes_per_sec, *eta, queued)
     };
@@ -533,7 +565,7 @@ fn row(job: &Tracked, queued: usize) -> JobRow {
             .unwrap_or_default(),
         fraction,
         progress,
-        paused: job.state == JobState::Paused,
+        paused,
         waiting,
     }
 }
@@ -635,10 +667,13 @@ mod tests {
         );
         assert_eq!(rows.items_left(JobId(1)), 8);
 
-        // Pausing changes the title and the button; a question shows as waiting.
+        // Pausing changes the title and the button, and the speed and the time left, which
+        // no longer hold, go.
         rows.apply(state(1, JobState::Paused));
         assert_eq!(rows.rows()[0].title, "일시정지됨");
         assert!(rows.rows()[0].paused);
+        assert_eq!(rows.rows()[0].progress, "3 / 12 항목 · 대기 중인 작업 1개");
+        // A question shows as waiting.
         rows.apply(state(1, JobState::Waiting));
         let shown = rows.rows();
         assert!(shown[0].waiting && !shown[0].paused);
@@ -718,28 +753,44 @@ mod tests {
         assert!(!rows.undo_running());
     }
 
-    /// Records the order of the calls [`close_down`] makes.
-    struct Recorder<'a>(&'a RefCell<Vec<&'static str>>);
+    /// Records the order of the calls [`close_down`] makes, and the time it gives the
+    /// shutdown; its jobs wait only for answers when `.1` says so.
+    struct Recorder<'a>(&'a RefCell<Vec<String>>, bool);
 
     impl Shutdown for Recorder<'_> {
+        fn only_asking(&self) -> bool {
+            self.1
+        }
+
         fn shutdown(&self, timeout: Duration) -> bool {
-            assert_eq!(timeout, QUIT_TIMEOUT);
-            self.0.borrow_mut().push("shutdown");
+            self.0.borrow_mut().push(format!("shutdown {timeout:?}"));
             true
         }
     }
 
     impl ReleaseQuestions for Recorder<'_> {
         fn release_all(&self) {
-            self.0.borrow_mut().push("release");
+            self.0.borrow_mut().push("release".to_owned());
         }
     }
 
     #[test]
     fn close_shuts_engine_down_before_releasing_questions() {
         let calls = RefCell::new(Vec::new());
-        let recorder = Recorder(&calls);
+        let recorder = Recorder(&calls, false);
         assert!(close_down(&recorder, &recorder, QUIT_TIMEOUT));
-        assert_eq!(calls.into_inner(), ["shutdown", "release"]);
+        assert_eq!(calls.into_inner(), ["shutdown 5s", "release"]);
+    }
+
+    #[test]
+    fn close_waits_little_for_jobs_that_only_wait_for_answers() {
+        let calls = RefCell::new(Vec::new());
+        let recorder = Recorder(&calls, true);
+        assert!(close_down(&recorder, &recorder, QUIT_TIMEOUT));
+        assert_eq!(calls.take(), ["shutdown 500ms", "release"]);
+        // A shorter time stays as it is.
+        let short = Duration::from_millis(100);
+        assert!(close_down(&recorder, &recorder, short));
+        assert_eq!(calls.into_inner(), ["shutdown 100ms", "release"]);
     }
 }
