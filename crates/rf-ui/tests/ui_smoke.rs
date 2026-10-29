@@ -562,6 +562,63 @@ fn the_failures_window_shows_whole_paths_wrapped() {
     );
 }
 
+/// The list among the window's lists that holds `line`.
+fn list_around(window: &MainWindow, line: &ElementHandle) -> ElementHandle {
+    window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .find_all()
+        .into_iter()
+        .find(|list| {
+            let (at, size) = (list.absolute_position(), list.size());
+            let line = line.absolute_position();
+            (at.x..at.x + size.width).contains(&line.x)
+                && (at.y..at.y + size.height).contains(&line.y)
+        })
+        .expect("the list of the window")
+}
+
+#[test]
+fn the_preflight_window_fits_its_list_to_wrapped_lines() {
+    let window = window();
+    // A name with no place to break wraps onto several lines; a short one takes two (its
+    // problem, and what happens to it).
+    let long_name = format!("{}.txt", "VeryLongFileNameWithoutBreaks".repeat(8));
+    let issue = |name: &str| rf_jobs::Issue {
+        target: VPath::local(std::env::temp_dir().join(name)).expect("a local path"),
+        kind: rf_jobs::IssueKind::NameTooLong { len: 300, max: 255 },
+    };
+    let question = rf_ui::dialogs::PreflightQuestion {
+        id: 1,
+        job: rf_jobs::JobId(1),
+        issues: vec![issue(&long_name), issue("a.txt")],
+    };
+    let lines = question.lines();
+    window.set_preflight_view(ui_bridge::preflight_view(&question));
+    window.set_dialog(DialogKind::Preflight);
+
+    // Each line shows once: the copy the window measures is out of sight.
+    let long_line = labelled(&window, &lines[0], AccessibleRole::Text);
+    let short_line = labelled(&window, &lines[1], AccessibleRole::Text);
+    assert_eq!((long_line.len(), short_line.len()), (1, 1));
+    let (long_line, short_line) = (&long_line[0], &short_line[0]);
+    let list = list_around(&window, long_line);
+    let (list_at, list_size) = (list.absolute_position(), list.size());
+    let right = long_line.absolute_position().x + long_line.size().width;
+    assert!(
+        right <= list_at.x + list_size.width,
+        "{right} past the list"
+    );
+    assert!(long_line.size().height > short_line.size().height);
+    // The list is as tall as both lines: nothing to scroll to.
+    let bottom = short_line.absolute_position().y + short_line.size().height;
+    assert!(
+        bottom <= list_at.y + list_size.height,
+        "{bottom} below the list"
+    );
+}
+
 #[test]
 fn the_name_dialog_replaces_the_stem() {
     let window = window();

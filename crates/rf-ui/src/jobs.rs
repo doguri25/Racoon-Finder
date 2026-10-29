@@ -77,7 +77,9 @@ pub struct Started {
     pub spec: Option<Arc<JobSpec>>,
     pub work: JobWork,
     pub origin: Option<usize>,
-    /// Whether it is an undo or a redo of the history: while one runs, no other starts.
+    /// Whether it is an undo or a redo of the history: while one runs, no other starts. A
+    /// recovered undo run again is not one: the engine runs it as a job the user ran
+    /// (`JobEngine::resubmit_recovered`), which its undo and redo do not wait for.
     pub via_history: bool,
 }
 
@@ -160,6 +162,7 @@ impl Jobs {
                     work: JobWork::of(&spec),
                     spec: Some(Arc::new(spec)),
                     origin: None,
+                    // Even for an undo: see `Started::via_history`.
                     via_history: false,
                 })
             }
@@ -428,7 +431,7 @@ impl JobRows {
     }
 
     /// Whether an undo or a redo of the history is queued or running: then neither starts
-    /// another.
+    /// another. As in the engine, a recovered undo run again does not count ([`Started`]).
     pub fn undo_running(&self) -> bool {
         self.jobs.iter().any(|job| job.via_history)
     }
@@ -693,6 +696,18 @@ mod tests {
             })
             .expect("ended");
         assert_eq!(ended.work, JobWork::Redo);
+        assert!(!rows.undo_running());
+
+        // A recovered undo run again is a job the user ran: the engine's undo does not wait for
+        // it, and neither does the window's.
+        rows.track(Started {
+            id: JobId(4),
+            spec: Some(Arc::new(spec)),
+            work: JobWork::Undo,
+            origin: None,
+            via_history: false,
+        });
+        assert_eq!(rows.active(), 1);
         assert!(!rows.undo_running());
     }
 

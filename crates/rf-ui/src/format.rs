@@ -89,11 +89,12 @@ pub fn format_time_in(t: SystemTime, tz: &TimeZone) -> String {
     }
 }
 
-/// `path`, as the screen shows it, shortened in the middle to about `max` characters: its start
-/// (the root or the drive) and as many of its last parts as fit, with `…` between them
-/// (`C:\…\문서\백업`, `/…/작업/백업`). The end of the path, where it differs from its
-/// neighbours, stays in view. A path that fits is returned as it is; the last part is kept
-/// whole, even when it alone is longer.
+/// `path`, as the screen shows it, shortened in the middle to about `max` characters: its root
+/// (`/`, the drive, or the server and share of a network path) and as many of its last parts as
+/// fit, with `…` between them (`C:\…\문서\백업`, `/…/작업/백업`, `\\서버\공유\…\백업`). The end
+/// of the path, where it differs from its neighbours, stays in view. A path that fits is
+/// returned as it is; the root and the last part are kept whole, even when they alone are
+/// longer.
 pub fn short_path(path: &str, max: usize) -> String {
     if path.chars().count() <= max {
         return path.to_owned();
@@ -104,10 +105,17 @@ pub fn short_path(path: &str, max: usize) -> String {
         '/'
     };
     let parts: Vec<&str> = path.split(sep).collect();
-    let Some((first, rest)) = parts.split_first() else {
-        return path.to_owned();
+    // `\\server\share` splits into two empty parts, the server and the share.
+    let root_parts = if sep == '\\' && path.starts_with(r"\\") {
+        4
+    } else {
+        1
     };
-    let head = format!("{first}{sep}…");
+    if parts.len() <= root_parts {
+        return path.to_owned();
+    }
+    let (root, rest) = parts.split_at(root_parts);
+    let head = format!("{}{sep}…", root.join(&sep.to_string()));
     let mut length = head.chars().count();
     let mut kept: Vec<&str> = Vec::new();
     for part in rest.iter().rev() {
@@ -208,6 +216,22 @@ mod tests {
             short_path("/abcdefghijklmnopqrstuvwxyz", 5),
             "/abcdefghijklmnopqrstuvwxyz"
         );
+    }
+
+    #[test]
+    fn a_network_path_keeps_its_server_and_share() {
+        assert_eq!(
+            short_path(r"\\server\share\팀\2026\보고서\최종", 24),
+            r"\\server\share\…\보고서\최종"
+        );
+        // However short the room, the root and the last part stay.
+        assert_eq!(
+            short_path(r"\\server\share\팀\2026\보고서\최종", 5),
+            r"\\server\share\…\최종"
+        );
+        // A root alone, or with one part, has nothing to leave out.
+        assert_eq!(short_path(r"\\server\share", 5), r"\\server\share");
+        assert_eq!(short_path(r"\\server\share\팀", 5), r"\\server\share\팀");
     }
 
     #[test]

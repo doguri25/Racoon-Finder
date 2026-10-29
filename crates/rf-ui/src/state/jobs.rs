@@ -438,7 +438,7 @@ impl AppState {
             .filter(|failure| !refusal(failure))
             .collect();
         if !failures.is_empty() {
-            effects.push(self.failure_notice(work, &failures));
+            effects.push(self.failure_notice(work, &failures, &report));
         } else if work == JobWork::Trash {
             effects.extend(self.trash_toast(&report));
         } else {
@@ -456,20 +456,28 @@ impl AppState {
     }
 
     /// The notice of a job some items of which failed: why, for a rename or a create (one
-    /// item); for the others a toast whose button lists the items and why.
-    fn failure_notice(&mut self, work: JobWork, failures: &[&ItemFailure]) -> Effect {
+    /// item); for the others a toast whose button lists the items and why, and after them the
+    /// items of `report` the location deleted for good instead of trashing them.
+    fn failure_notice(
+        &mut self,
+        work: JobWork,
+        failures: &[&ItemFailure],
+        report: &JobReport,
+    ) -> Effect {
         if matches!(work, JobWork::Create | JobWork::Rename) {
             return Effect::Notice(words::name_refused(work, failures[0]));
         }
+        let gone: Vec<&ItemFailure> = deleted_for_good(report).collect();
         let shown = Failures {
             title: words::failures_title().to_owned(),
             lines: failures
                 .iter()
+                .chain(&gone)
                 .map(|failure| words::failure_line(failure))
                 .collect(),
         };
         self.toast(
-            words::items_failed(failures.len()),
+            words::and_gone(words::items_failed(failures.len()), gone.len()),
             Some(ToastAction::Details(shown)),
         )
     }
@@ -479,11 +487,7 @@ impl AppState {
     /// nothing brings back (a `DeletedNotTrashed` warning).
     fn trash_toast(&mut self, report: &JobReport) -> Option<Effect> {
         let trashed = report.undo.as_ref().map_or(0, UndoRecord::item_count);
-        let gone = report
-            .warnings
-            .iter()
-            .filter(|warning| warning.reason == Some(FailureReason::DeletedNotTrashed))
-            .count();
+        let gone = deleted_for_good(report).count();
         if trashed == 0 && gone == 0 {
             return (report.outcome == Outcome::Aborted)
                 .then(|| self.toast(words::outcome(Outcome::Aborted, JobWork::Trash), None));
@@ -496,9 +500,11 @@ impl AppState {
         Some(self.toast(words::trash_done(trashed, gone), action))
     }
 
-    /// The toast of a job other than a trash that ended without failures.
+    /// The toast of a job other than a trash that ended without failures. An undo or a redo
+    /// trashes too (what it takes back): it also tells what the location deleted for good
+    /// instead.
     fn done_toast(&mut self, work: JobWork, report: &JobReport) -> Option<Effect> {
-        match (report.outcome, work) {
+        let (text, action) = match (report.outcome, work) {
             (Outcome::Completed, JobWork::Copy | JobWork::Move) => {
                 let work = if report.copied_instead_of_moved {
                     JobWork::Copy
@@ -508,19 +514,18 @@ impl AppState {
                 let done = report.done.files.saturating_add(report.done.dirs);
                 let count = top_level_count(&report.spec);
                 let text = words::items_done(work, count, done, report.skipped);
-                let action = report.undo.clone().map(ToastAction::Undo);
-                Some(self.toast(text, action))
+                (text, report.undo.clone().map(ToastAction::Undo))
             }
             (Outcome::Completed, JobWork::Undo) => match &report.spec {
-                JobSpec::Undo(record) => Some(self.toast(words::undone(record), None)),
-                _ => None,
+                JobSpec::Undo(record) => (words::undone(record), None),
+                _ => return None,
             },
-            (Outcome::Completed, JobWork::Redo) => {
-                Some(self.toast(words::outcome(Outcome::Completed, work), None))
-            }
-            (Outcome::Aborted, _) => Some(self.toast(words::outcome(Outcome::Aborted, work), None)),
-            _ => None,
-        }
+            (Outcome::Completed, JobWork::Redo) => (words::outcome(Outcome::Completed, work), None),
+            (Outcome::Aborted, _) => (words::outcome(Outcome::Aborted, work), None),
+            _ => return None,
+        };
+        let gone = deleted_for_good(report).count();
+        Some(self.toast(words::and_gone(text, gone), action))
     }
 
     /// Selects `output`, the item a create or a rename made, in pane `side` if it still shows
@@ -668,6 +673,15 @@ impl AppState {
 /// The effect that submits `spec`, asked for in pane `origin`.
 pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
     Effect::Job(JobEffect::Submit { spec, origin })
+}
+
+/// The warnings of `report` for the items the location deleted for good when they were to go
+/// to the trash (`DeletedNotTrashed`): nothing brings them back.
+fn deleted_for_good(report: &JobReport) -> impl Iterator<Item = &ItemFailure> {
+    report
+        .warnings
+        .iter()
+        .filter(|warning| warning.reason == Some(FailureReason::DeletedNotTrashed))
 }
 
 /// The number of items a job was asked to act on at its top level: the items of a transfer,

@@ -582,6 +582,17 @@ pub fn items_failed(count: usize) -> String {
     format!("항목 {count}개를 처리하지 못했습니다")
 }
 
+/// `text`, the notice of a job that ended, and how many of its items (`gone`) the location
+/// deleted for good when they were to go to the trash, which nothing brings back: `복사를
+/// 되돌렸습니다 · 1개는 휴지통 대신 영구 삭제되었습니다`. `text` as it is for none.
+pub fn and_gone(text: String, gone: usize) -> String {
+    if gone == 0 {
+        text
+    } else {
+        format!("{text} · {gone}개는 휴지통 대신 영구 삭제되었습니다")
+    }
+}
+
 /// The notice of an undo that ended as asked, naming the work it reversed from its record:
 /// `이동을 되돌렸습니다`.
 pub fn undone(record: &UndoRecord) -> String {

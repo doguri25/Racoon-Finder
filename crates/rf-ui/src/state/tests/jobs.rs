@@ -755,18 +755,22 @@ fn a_partly_refused_trash_tells_what_went_and_asks_about_the_rest() {
     assert_eq!(state.toast_clicked(token), [Effect::Job(JobEffect::Undo)]);
 }
 
-#[test]
-fn what_was_deleted_instead_of_trashed_has_no_undo() {
-    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
-    let spec = delete(vec![in_a("a.txt"), in_a("b.txt")], DeleteMethod::Trash);
-    let gone = |path: VPath| ItemFailure {
+/// The warning of an item at `path` the location deleted for good instead of trashing it.
+fn gone(path: VPath) -> ItemFailure {
+    ItemFailure {
         source: Some(path),
         target: None,
         stage: rf_jobs::Stage::Delete,
         kind: ErrorKind::Unsupported,
         message: String::new(),
         reason: Some(FailureReason::DeletedNotTrashed),
-    };
+    }
+}
+
+#[test]
+fn what_was_deleted_instead_of_trashed_has_no_undo() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = delete(vec![in_a("a.txt"), in_a("b.txt")], DeleteMethod::Trash);
     let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
         report.warnings.push(gone(in_a("a.txt")));
         report.warnings.push(gone(in_a("b.txt")));
@@ -791,6 +795,78 @@ fn what_was_deleted_instead_of_trashed_has_no_undo() {
             "항목 1개를 휴지통으로 보냈고, 1개는 휴지통 대신 영구 삭제되었습니다",
             "되돌리기"
         )
+    );
+}
+
+#[test]
+fn a_trash_with_failures_also_lists_what_it_deleted_for_good() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = delete(vec![in_a("a.txt"), in_a("b.txt")], DeleteMethod::Trash);
+    let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report
+            .failures
+            .push(failure(in_a("a.txt"), ErrorKind::PermissionDenied, None));
+        report.warnings.push(gone(in_a("b.txt")));
+    });
+    let (token, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        (
+            "항목 1개를 처리하지 못했습니다 · 1개는 휴지통 대신 영구 삭제되었습니다",
+            "자세히"
+        )
+    );
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!(
+        failures.lines,
+        [
+            format!("{}: 권한이 없습니다", in_a("a.txt")),
+            format!(
+                "{}: 휴지통 대신 영구 삭제되어 되살릴 수 없습니다",
+                in_a("b.txt")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn an_undo_tells_what_it_deleted_for_good() {
+    // An undo of a copy trashes the copies; a location that deletes them for good instead
+    // leaves warnings, which the toast tells of.
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let spec = JobSpec::Undo(UndoRecord::Copied {
+        created: Vec::new(),
+        overwritten: 0,
+        at: None,
+    });
+    let effects = finish(&mut state, 1, &spec, JobWork::Undo, |report| {
+        report
+            .warnings
+            .push(gone(folder("b").join("a.txt").expect("a name")));
+    });
+    let (_, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        (
+            "복사를 되돌렸습니다 · 1개는 휴지통 대신 영구 삭제되었습니다",
+            ""
+        )
+    );
+    // Without such warnings, as before.
+    let effects = finish(&mut state, 2, &spec, JobWork::Undo, |_| {});
+    assert_eq!(the_toast(&effects).1, "복사를 되돌렸습니다");
+    // A redo of a trash, which trashes again, the same.
+    let spec = JobSpec::Undo(trashed(&[in_a("a.txt")]));
+    let effects = finish(&mut state, 3, &spec, JobWork::Redo, |report| {
+        report.warnings.push(gone(in_a("a.txt")));
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "다시 실행했습니다 · 1개는 휴지통 대신 영구 삭제되었습니다"
     );
 }
 

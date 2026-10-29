@@ -44,6 +44,8 @@ export struct RecoveryView {
 export struct PreflightView {
     title: string,
     lines: [string],
+    // The first lines, which the window lays out out of sight to fit its list to them.
+    head: [string],
     has-blocked: bool,
 }
 
@@ -218,9 +220,9 @@ export component ConfirmDialog inherits DialogFrame {
     }
 }
 
-// One line of the list of failed items: an item's whole path and why, wrapped. A line breaks
-// between words, and inside a word too long for a line: a Windows path has no place to break
-// at its `\`, and would otherwise run past the list.
+// One line of a list of items: an item's whole path or name and what about it, wrapped. A
+// line breaks between words, and inside a word too long for a line: a Windows path has no
+// place to break at its `\`, and would otherwise run past the list.
 component MessageLine inherits Rectangle {
     in property <string> text;
 
@@ -235,6 +237,38 @@ component MessageLine inherits Rectangle {
             color: Theme.text;
             wrap: word-wrap;
             min-width: 0px;
+        }
+    }
+}
+
+// A framed list of `lines`, each wrapped, as tall as they are once wrapped, up to
+// `tallest`; it scrolls past that. The list makes only the rows it shows, so `head`, the
+// first lines, are laid out out of sight (hidden from screen readers too), as wide as the
+// list, to tell their height.
+component LineList inherits Rectangle {
+    in property <[string]> lines;
+    in property <[string]> head;
+    in property <length> tallest;
+
+    height: min(root.tallest, max(48px, measured.preferred-height + 2px));
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+
+    Rectangle {
+        visible: false;
+        width: list.visible-width;
+
+        measured := VerticalLayout {
+            for line in root.head: MessageLine {
+                text: line;
+            }
+        }
+    }
+
+    list := ListView {
+        for line in root.lines: MessageLine {
+            text: line;
         }
     }
 }
@@ -268,32 +302,10 @@ export component MessageDialog inherits DialogFrame {
             Heading {
                 text: root.view.title;
             }
-            // As tall as the lines are once wrapped, up to 360px; the list scrolls past that.
-            // The list makes only the rows it shows, so the first lines are laid out out of
-            // sight (hidden from screen readers too), as wide as the list, to tell their
-            // height.
-            Rectangle {
-                height: min(360px, max(48px, measured.preferred-height + 2px));
-                border-width: 1px;
-                border-color: Theme.border;
-                border-radius: Theme.radius;
-
-                Rectangle {
-                    visible: false;
-                    width: list.visible-width;
-
-                    measured := VerticalLayout {
-                        for line in root.view.head: MessageLine {
-                            text: line;
-                        }
-                    }
-                }
-
-                list := ListView {
-                    for line in root.view.lines: MessageLine {
-                        text: line;
-                    }
-                }
+            LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 360px;
             }
             HorizontalLayout {
                 alignment: end;
@@ -442,28 +454,10 @@ export component PreflightDialog inherits DialogFrame {
             Heading {
                 text: root.view.title;
             }
-            Rectangle {
-                height: min(320px, max(48px, root.view.lines.length * 44px));
-                border-width: 1px;
-                border-color: Theme.border;
-                border-radius: Theme.radius;
-
-                ListView {
-                    for line in root.view.lines: Rectangle {
-                        HorizontalLayout {
-                            padding-left: Theme.gap-m;
-                            padding-right: Theme.gap-m;
-                            padding-top: 6px;
-                            padding-bottom: 6px;
-
-                            Text {
-                                text: line;
-                                color: Theme.text;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                }
+            LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 320px;
             }
             HorizontalLayout {
                 alignment: end;

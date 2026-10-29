@@ -21,11 +21,6 @@ use crate::dialogs::{
     Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
 };
 use crate::format::{folder_label, format_size, format_time_in, kind_label, short_path};
-
-/// How many characters the folder of a conflict card shows, and the folder in its sentence;
-/// the middle of a longer path is left out, so that its end stays in view.
-const CARD_PLACE_CHARS: usize = 36;
-const SENTENCE_PLACE_CHARS: usize = 48;
 use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, Picker, validate};
@@ -38,10 +33,15 @@ use crate::{
     PaneView, PickTarget, PickView, PreflightView, RecoveryView, SectionHead, TabItem, TreeRow,
 };
 
+/// How many characters the folder of a conflict card shows, and the folder in its sentence;
+/// the middle of a longer path is left out, so that its end stays in view.
+const CARD_PLACE_CHARS: usize = 36;
+const SENTENCE_PLACE_CHARS: usize = 48;
 /// How many characters the folder beside a folder the picker's filter found shows.
 const FOUND_PLACE_CHARS: usize = 40;
-/// How many of its first lines the window of failed items lays out to fit its list to them:
-/// enough to fill the list's 360px even when each takes one text line (32px).
+/// How many of its first lines the window of failed items, and the pre-flight window, lay out
+/// to fit their lists to them: enough to fill a list of 360px even when each takes one text
+/// line (32px).
 const MEASURED_LINES: usize = 12;
 /// How many names of the items the picker shows before "외 N개".
 const PICK_CHIPS: usize = 3;
@@ -811,15 +811,19 @@ pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
     }
 }
 
-/// The window of failed items. Its first [`MEASURED_LINES`] lines go in `head` too: the window
+/// The window of failed items. Its first `MEASURED_LINES` lines go in `head` too: the window
 /// fits its list to their height once wrapped.
 pub fn message_view(failures: &Failures) -> MessageView {
-    let head = &failures.lines[..failures.lines.len().min(MEASURED_LINES)];
     MessageView {
         title: failures.title.as_str().into(),
         lines: lines_model(&failures.lines),
-        head: lines_model(head),
+        head: lines_model(head(&failures.lines)),
     }
+}
+
+/// The first `MEASURED_LINES` of `lines`.
+fn head(lines: &[String]) -> &[String] {
+    &lines[..lines.len().min(MEASURED_LINES)]
 }
 
 /// The recovery dialog, with the times the jobs were submitted in `tz`.
@@ -839,10 +843,14 @@ pub fn recovery_view(recovery: &Recovery, tz: &TimeZone) -> RecoveryView {
     }
 }
 
+/// The pre-flight window for `question`; its first `MEASURED_LINES` lines go in `head` too, as
+/// in [`message_view`].
 pub fn preflight_view(question: &PreflightQuestion) -> PreflightView {
+    let lines = question.lines();
     PreflightView {
         title: words::preflight_title().into(),
-        lines: lines_model(&question.lines()),
+        lines: lines_model(&lines),
+        head: lines_model(head(&lines)),
         has_blocked: question.has_blocked(),
     }
 }
