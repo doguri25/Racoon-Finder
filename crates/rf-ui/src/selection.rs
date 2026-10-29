@@ -8,7 +8,8 @@
 //! A cursor the list puts on its first row when it shows ([`Selection::place_cursor`]) is
 //! there for the keys to start from, as in the system's file managers: the user has not chosen
 //! that row, and a command that changes files acts on it only once the user has moved the
-//! cursor or clicked ([`Selection::user_cursor`]).
+//! cursor or clicked ([`Selection::user_cursor`]). Nor does one act on a row the user
+//! unselected (Esc, a Ctrl+click): the screen shows it unselected.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -43,7 +44,7 @@ pub struct Selection {
     /// The row the keyboard is on, drawn with a focus frame whether or not it is selected.
     cursor: Option<usize>,
     /// Whether the user put the cursor on its row (a key, a click), rather than the list for
-    /// the keys to start from.
+    /// the keys to start from, and has not unselected it since.
     cursor_by_user: bool,
 }
 
@@ -55,7 +56,8 @@ impl Selection {
 
     /// The row the keyboard is on when the user put the cursor there (a key, a click): the row
     /// a command acts on with nothing selected. `None` for a cursor the list placed
-    /// ([`Selection::place_cursor`]), or one left on another row when its own went.
+    /// ([`Selection::place_cursor`]), one left on another row when its own went, or one whose
+    /// row the user unselected since ([`Selection::clear`], [`Selection::toggle`]).
     pub fn user_cursor(&self) -> Option<usize> {
         self.cursor.filter(|_| self.cursor_by_user)
     }
@@ -90,13 +92,16 @@ impl Selection {
     }
 
     /// A Ctrl+click on row `i`: that row flips between selected and not, the others stay, and
-    /// the cursor and the anchor go to it.
+    /// the cursor and the anchor go to it. A row it unselects shows unselected: no command acts
+    /// on it ([`Selection::user_cursor`]) until the user chooses it again.
     pub fn toggle(&mut self, i: usize, names: &[impl Named]) {
         let Some(row) = names.get(i) else { return };
-        if !self.selected.remove(row.name()) {
+        let unselected = self.selected.remove(row.name());
+        if !unselected {
             self.selected.insert(row.name().to_owned());
         }
         self.put_cursor(i);
+        self.cursor_by_user = !unselected;
     }
 
     /// A Shift+click on row `i`: the rows from the anchor to `i` are selected and no others,
@@ -171,9 +176,12 @@ impl Selection {
         self.selected = names.iter().map(|row| row.name().to_owned()).collect();
     }
 
-    /// Selects nothing; the cursor and the anchor stay, so the keyboard goes on from there.
+    /// Selects nothing (Esc); the cursor and the anchor stay, so the keyboard goes on from
+    /// there, but its row shows unselected: no command acts on it ([`Selection::user_cursor`])
+    /// until the user chooses it again, as in the system's file managers.
     pub fn clear(&mut self) {
         self.selected.clear();
+        self.cursor_by_user = false;
     }
 
     /// Swaps the selected and the unselected rows; the cursor and the anchor stay.
@@ -404,9 +412,17 @@ mod tests {
         // An arrow key moves it from there, and from then on it is where the user put it.
         sel.move_cursor(1, false, &names);
         assert_eq!((sel.cursor(), sel.user_cursor()), (Some(1), Some(1)));
-        // Taking the selection away leaves it the user's.
+        // Taking the selection away (Esc) leaves the cursor there, on a row the screen shows
+        // unselected: nothing acts on it.
         sel.clear();
-        assert_eq!(sel.user_cursor(), Some(1));
+        assert_eq!((sel.cursor(), sel.user_cursor()), (Some(1), None));
+        // So does a Ctrl+click that unselects the row, until one selects it again.
+        sel.toggle(2, &names);
+        assert_eq!(sel.user_cursor(), Some(2));
+        sel.toggle(2, &names);
+        assert_eq!((sel.cursor(), sel.user_cursor()), (Some(2), None));
+        sel.toggle(2, &names);
+        assert_eq!(sel.user_cursor(), Some(2));
 
         // Clicks, Ctrl+clicks, Shift+clicks and right clicks put it there too.
         for put in [
@@ -425,7 +441,6 @@ mod tests {
         // that stays at its place is on a row nobody chose.
         let mut sel = Selection::default();
         sel.click(1, &names);
-        sel.clear();
         let moved = list(&["x", "a", "b", "c", "d", "e"]);
         sel.reconcile(&names, &moved);
         assert_eq!(sel.user_cursor(), Some(2));

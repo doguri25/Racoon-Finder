@@ -122,6 +122,44 @@ fn open_follows_the_row_kind() {
 }
 
 #[test]
+fn enter_launches_only_a_row_the_user_chose() {
+    // A folder just opened has the cursor on its first row for the keys to start from. Enter
+    // goes into a folder there (that only moves the tab).
+    let mut state = ready(vec![dir("sub"), file("notes.txt")], vec![]);
+    let effects = press(&mut state, &special(Key::Return), NONE).expect("used");
+    let request = the_load(&effects);
+    assert_eq!(request.path, folder("a").join("sub").expect("a name"));
+    // The folder's first row is a file nobody chose: Enter launches nothing.
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![file("x.txt"), file("y.txt")],
+    });
+    assert_eq!(cursor(&state, LEFT), Some(0));
+    assert_eq!(press(&mut state, &special(Key::Return), NONE), Some(vec![]));
+    // Down and back up chooses it: Enter opens it.
+    press(&mut state, &special(Key::DownArrow), NONE);
+    press(&mut state, &special(Key::UpArrow), NONE);
+    let x = request.path.join("x.txt").expect("a name");
+    assert_eq!(
+        press(&mut state, &special(Key::Return), NONE),
+        Some(vec![Effect::OpenFile(x)])
+    );
+    // Once Esc has taken the selection away, the row is not chosen any more.
+    press(&mut state, &special(Key::Escape), NONE);
+    assert_eq!(press(&mut state, &special(Key::Return), NONE), Some(vec![]));
+
+    // A link may lead to a file: Enter follows it only once the user chose its row.
+    let mut state = ready(vec![Entry::new("latest", EntryKind::Symlink)], vec![]);
+    assert_eq!(press(&mut state, &special(Key::Return), NONE), Some(vec![]));
+    press(&mut state, &special(Key::DownArrow), NONE);
+    let effects = press(&mut state, &special(Key::Return), NONE).expect("used");
+    assert!(
+        matches!(effects.as_slice(), [Effect::Follow { .. }]),
+        "{effects:?}"
+    );
+}
+
+#[test]
 fn a_late_link_result_is_dropped() {
     let mut state = ready(vec![Entry::new("latest", EntryKind::Symlink)], vec![]);
     let effects = state.open_row(LEFT, 0);

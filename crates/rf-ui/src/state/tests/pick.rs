@@ -150,7 +150,8 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
     assert_eq!(picker(&state).request.mode, TransferMode::Copy);
     state.dialog_cancelled();
 
-    // Without a selection the cursor's row is the item; in an empty folder, nothing opens.
+    // In an empty folder, nothing opens; nor does it for a row the user unselected, which the
+    // screen shows unselected.
     let mut empty = ready(vec![], vec![]);
     assert_eq!(press(&mut empty, &special(Key::F5), NONE), Some(vec![]));
     assert_eq!(empty.modal(), None);
@@ -158,8 +159,8 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
     state.click_row(LEFT, 1, false, false);
     state.click_row(LEFT, 1, true, false);
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
-    press(&mut state, &special(Key::F5), NONE);
-    assert_eq!(picker(&state).request.sources, [in_a("b.txt")]);
+    assert_eq!(press(&mut state, &special(Key::F5), NONE), Some(vec![]));
+    assert_eq!(state.modal(), None);
 }
 
 #[test]

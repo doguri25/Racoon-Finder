@@ -319,14 +319,14 @@ impl Confirm {
         }
     }
 
-    /// The job the confirmation asks for, if it asks for one.
+    /// The job the confirmation asks for, if it asks for one. The copies an undo could not
+    /// trash give none: they go only once a worker has found them as they were once more
+    /// ([`AppState::copies_checked`](crate::state::AppState::copies_checked)), so a yes alone
+    /// never deletes them.
     pub fn job(&self) -> Option<JobSpec> {
         match &self.purpose {
-            ConfirmPurpose::DeletePermanently(paths)
-            | ConfirmPurpose::DeleteCopies { copies: paths, .. } => {
-                Some(permanent_delete(paths.clone()))
-            }
-            ConfirmPurpose::Quit => None,
+            ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
+            ConfirmPurpose::DeleteCopies { .. } | ConfirmPurpose::Quit => None,
         }
     }
 }
@@ -592,6 +592,17 @@ mod tests {
         let refused = Confirm::delete_permanently(paths, DeleteWhy::TrashRefused);
         assert!(refused.message.contains("휴지통이 받지 않은 항목이 4개"));
         assert!(refused.message.ends_with("되돌릴 수 없습니다."));
+
+        // The copies an undo could not trash go only after a worker has looked at them once
+        // more: their confirmation submits no job itself.
+        let record = UndoRecord::Copied {
+            created: Vec::new(),
+            overwritten: 0,
+            at: None,
+        };
+        let copies = Confirm::delete_copies(vec![path("a.txt")], vec![path("b.txt")], record);
+        assert!(copies.danger);
+        assert_eq!(copies.job(), None);
 
         let quit = Confirm::quit(2);
         assert!(!quit.danger);

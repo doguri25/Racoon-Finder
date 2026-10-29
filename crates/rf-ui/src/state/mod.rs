@@ -360,10 +360,7 @@ impl AppState {
                 self.active = RIGHT - side;
                 Vec::new()
             }
-            Command::Open => match self.tab(side).selection().cursor() {
-                Some(row) => self.open_row(side, row),
-                None => Vec::new(),
-            },
+            Command::Open => self.open_cursor(side),
             Command::Up => self.go(side, Tab::go_up),
             Command::Back => self.go(side, Tab::go_back),
             Command::Forward => self.go(side, Tab::go_forward),
@@ -896,6 +893,22 @@ impl AppState {
             .map(Effect::Load)
             .into_iter()
             .collect()
+    }
+
+    /// Enter: opens the cursor's row of pane `side`. A folder opens from a cursor the list
+    /// placed, which only moves the tab, so the keys go down folder by folder; a file, or a
+    /// link that may lead to one, is launched only from a row the user chose
+    /// ([`Selection::user_cursor`](crate::selection::Selection::user_cursor)).
+    fn open_cursor(&mut self, side: usize) -> Vec<Effect> {
+        let tab = self.tab(side);
+        let Some(row) = tab.selection().cursor() else {
+            return Vec::new();
+        };
+        let chosen = tab.selection().user_cursor().is_some();
+        if !chosen && !matches!(tab.open_target(row), Some(OpenAction::Navigate(_))) {
+            return Vec::new();
+        }
+        self.open_row(side, row)
     }
 
     fn move_cursor(&mut self, side: usize, delta: isize, extend: bool) -> Vec<Effect> {

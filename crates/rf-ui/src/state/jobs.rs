@@ -189,28 +189,23 @@ impl AppState {
         let Some(Modal::Confirm(confirm)) = &self.modal else {
             return Vec::new();
         };
-        match (&confirm.purpose, confirm.job()) {
-            (ConfirmPurpose::Quit, _) => self.begin_quit(),
-            (
-                ConfirmPurpose::DeleteCopies {
-                    copies,
-                    originals,
-                    record,
-                },
-                _,
-            ) => {
+        match &confirm.purpose {
+            ConfirmPurpose::Quit => self.begin_quit(),
+            // No job of its own (`Confirm::job`): a worker looks at the copies first.
+            ConfirmPurpose::DeleteCopies {
+                copies,
+                originals,
+                record,
+            } => {
                 let (copies, originals) = (copies.clone(), originals.clone());
                 let record = UndoRecord::clone(record);
                 self.close();
                 self.copies_confirmed(record, copies, originals)
             }
-            (_, Some(spec)) => {
+            ConfirmPurpose::DeletePermanently(_) => {
+                let spec = confirm.job();
                 self.close();
-                vec![submit(spec, None)]
-            }
-            (_, None) => {
-                self.close();
-                Vec::new()
+                spec.map(|spec| submit(spec, None)).into_iter().collect()
             }
         }
     }
@@ -665,8 +660,8 @@ impl AppState {
         Vec::new()
     }
 
-    /// F2: the name window for the cursor's row, once the user put the cursor there (or else
-    /// the first selected row).
+    /// F2: the name window for the cursor's row, once the user put the cursor there and while
+    /// it is not unselected (or else the first selected row).
     pub(super) fn rename(&mut self, side: usize) -> Vec<Effect> {
         let tab = self.tab(side);
         let row = tab

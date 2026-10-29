@@ -288,9 +288,11 @@ impl Loader {
     /// size, and changed when the copy says (a copy keeps its source's time; within
     /// [`rf_jobs::MTIME_TOLERANCE`]), and a link lead where the copy's does. A folder must
     /// hold, under the same names, everything the copy holds, each the same way, down to
-    /// [`rf_jobs::MAX_DEPTH`] levels; what the original has more does not matter. Past
-    /// [`ORIGINAL_ITEMS`] items, after `cancel` (the app ends), or for anything that cannot be
-    /// looked at (the copy among them), it cannot be told.
+    /// [`rf_jobs::MAX_DEPTH`] levels; what the original has more does not matter. An original
+    /// that is, at any level, the copy's own item (the same volume and file ID: a link to the
+    /// copy, a linked folder above it, a hard link) cannot be told, as deleting the copy would
+    /// lose it. Past [`ORIGINAL_ITEMS`] items, after `cancel` (the app ends), or for anything
+    /// that cannot be looked at (the copy among them), it cannot be told either.
     ///
     /// Blocks (a large folder, a slow drive); call it on a worker thread.
     pub fn compare_with_original(
@@ -507,6 +509,35 @@ impl CopyFound {
     };
 }
 
+/// The cancel tokens of the workers' looks at copies and their originals
+/// ([`Loader::check_copy`]). Each look has its own: the next one cancels it, since a newer
+/// check replaces it and its answer would be dropped, and [`CopyChecks::stop`] cancels it and
+/// every look that starts after, as the app ends.
+#[derive(Debug, Default)]
+pub struct CopyChecks {
+    current: CancelToken,
+    stopped: bool,
+}
+
+impl CopyChecks {
+    /// The token of a new look; the look before it stops. Once stopped, it is cancelled
+    /// already.
+    pub fn start(&mut self) -> CancelToken {
+        self.current.cancel();
+        self.current = CancelToken::new();
+        if self.stopped {
+            self.current.cancel();
+        }
+        self.current.clone()
+    }
+
+    /// Stops the look under way, and any that starts later: the app ends.
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.current.cancel();
+    }
+}
+
 /// The provider and the job's end that [`Loader::compare_with_made`] looks under a copied
 /// folder with.
 struct Untouched<'p> {
@@ -608,6 +639,11 @@ impl Compare<'_> {
         if found.kind != copied.kind {
             return Original::Changed;
         }
+        if self.is_the_copy(copy, copied, found) {
+            // The original leads to the copy itself (a link to it, a linked folder above it, a
+            // hard link): deleting the copy would lose what the original holds.
+            return Original::Unknown;
+        }
         match copied.kind {
             EntryKind::File => same_file(copied, found),
             EntryKind::Symlink => {
@@ -621,6 +657,20 @@ impl Compare<'_> {
             // A device or a pipe is never copied.
             EntryKind::Other => Original::Unknown,
         }
+    }
+
+    /// Whether `found`, the original as [`Compare::items`] looks at it, is `copied`, the copy
+    /// at `copy`, itself: both have one identity (volume and file ID). A listing that gives no
+    /// IDs (Windows) leaves the copy's to a `stat`, which only an original with a known
+    /// identity needs.
+    fn is_the_copy(&self, copy: &VPath, copied: &Entry, found: &Entry) -> bool {
+        let Some(original) = found.identity() else {
+            return false;
+        };
+        let copy_identity = copied
+            .identity()
+            .or_else(|| self.copy.stat(copy).ok()?.identity());
+        copy_identity == Some(original)
     }
 
     /// Whether the folder `original` holds everything the folder `copy` holds, as

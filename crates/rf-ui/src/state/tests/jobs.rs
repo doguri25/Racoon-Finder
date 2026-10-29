@@ -156,16 +156,41 @@ fn a_folder_just_opened_changes_no_file_until_the_user_chooses_a_row() {
     press(&mut state, &special(Key::F2), NONE);
     assert!(matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.initial == "a.txt"));
 
-    // The row a click or Ctrl+Space chose stays the one acted on with nothing selected.
+    // A row the screen shows unselected is not acted on, though the user chose it before: once
+    // Ctrl+Space took it away again, or Esc did (as in the system's file managers).
     let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
     press(&mut state, &special(Key::Space), CTRL);
     press(&mut state, &special(Key::Space), CTRL);
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
+    let no_file_command = |state: &mut AppState| {
+        for (key, mods) in [
+            (Key::Delete, NONE),
+            (Key::Delete, SHIFT),
+            (Key::F2, NONE),
+            (Key::F5, NONE),
+            (Key::F6, NONE),
+        ] {
+            assert_eq!(
+                press(state, &special(key), mods),
+                Some(vec![]),
+                "{key:?} {mods:?}"
+            );
+            assert_eq!(state.modal(), None, "{key:?} {mods:?}");
+        }
+    };
+    no_file_command(&mut state);
+    press(&mut state, &special(Key::DownArrow), NONE);
+    assert_eq!(selected(&state, LEFT), [1]);
+    press(&mut state, &special(Key::Escape), NONE);
+    assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
+    no_file_command(&mut state);
+    // Ctrl+Space that selects the row again makes it the one acted on.
+    press(&mut state, &special(Key::Space), CTRL);
     assert_eq!(
         press(&mut state, &special(Key::Delete), NONE),
         Some(vec![Effect::CheckTrash {
             folder: folder("a"),
-            paths: vec![in_a("a.txt")],
+            paths: vec![in_a("b.txt")],
         }])
     );
 }

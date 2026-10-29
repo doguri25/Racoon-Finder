@@ -20,7 +20,6 @@ use jiff::tz::TimeZone;
 use rf_core::VPath;
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use rf_vfs::CancelToken;
 use slint::language::DragAction;
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
@@ -28,7 +27,7 @@ use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
-use crate::loader::{LoadEvent, LoadTicket, Loader};
+use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
@@ -456,8 +455,9 @@ pub struct Controller {
     shown_drag: Cell<u64>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
-    /// Stops the workers' looks at copies and their originals as the app ends.
-    checks: CancelToken,
+    /// Stops a worker's look at copies and their originals once a newer look replaces it, and
+    /// every look as the app ends.
+    checks: RefCell<CopyChecks>,
 }
 
 impl fmt::Debug for Controller {
@@ -510,7 +510,7 @@ impl Controller {
             save_timer: slint::Timer::default(),
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
-            checks: CancelToken::new(),
+            checks: RefCell::new(CopyChecks::default()),
         }
     }
 
@@ -612,7 +612,7 @@ impl Controller {
     /// [`crate::run`], after the event loop.
     fn quit(&self) {
         // The looks at copies stop: the state takes no answer while the app ends.
-        self.checks.cancel();
+        self.checks.borrow_mut().stop();
         let jobs = self.jobs.clone();
         let saver = self.saver.clone();
         let last = self.final_settings();
@@ -887,7 +887,7 @@ impl Controller {
             }
             Effect::CheckCopies { token, copies, at } => {
                 let loader = self.loader.clone();
-                let cancel = self.checks.clone();
+                let cancel = self.checks.borrow_mut().start();
                 spawn_worker("rf-ui-originals", move || {
                     let found: Vec<_> = copies
                         .iter()

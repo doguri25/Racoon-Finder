@@ -888,3 +888,116 @@ fn a_copy_is_checked_against_what_the_copy_left() {
         Original::Unknown
     );
 }
+
+/// Makes `link` a symbolic link to the file or folder `target` (which Windows lets only a user
+/// with the privilege, or in developer mode, do).
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let made = if target.is_dir() {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+    made
+}
+
+#[test]
+fn an_original_that_is_the_copy_itself_cannot_be_told() {
+    use rf_ui::loader::{CopyFound, Original};
+
+    let dir = tempfile::TempDir::new().expect("a temporary folder");
+    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+    let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    std::fs::create_dir_all(dst.join("docs")).expect("folders");
+    std::fs::create_dir(&src).expect("a folder");
+    write_at(&dst.join("a.txt"), "AAAA", at);
+    write_at(&dst.join("docs").join("x.txt"), "X", at);
+    let loader = loader();
+    let go_on = CancelToken::new();
+    let compare = |copy: &Path, original: &Path| {
+        loader.compare_with_original(&local(copy), &local(original), &go_on)
+    };
+
+    // A file of the copy's size and time elsewhere is a copy as it was.
+    write_at(&dir.path().join("real.txt"), "AAAA", at);
+    assert_eq!(
+        compare(&dst.join("a.txt"), &dir.path().join("real.txt")),
+        Original::Same
+    );
+
+    // An original that is a link to its copy: deleting the copy would lose the only data.
+    match symlink(&dst.join("a.txt"), &src.join("a.txt")) {
+        Ok(()) => {}
+        Err(e) if cfg!(windows) => {
+            eprintln!("skipped: cannot create symlinks here: {e}");
+            return;
+        }
+        Err(e) => panic!("a link: {e}"),
+    }
+    assert_eq!(
+        compare(&dst.join("a.txt"), &src.join("a.txt")),
+        Original::Unknown
+    );
+    symlink(&dst.join("docs"), &src.join("docs")).expect("a link");
+    assert_eq!(
+        compare(&dst.join("docs"), &src.join("docs")),
+        Original::Unknown
+    );
+    // Nothing is deleted then, though the copy is as its job left it.
+    assert_eq!(
+        loader.check_copy(
+            &made_at(&dst.join("a.txt")),
+            None,
+            &local(&src.join("a.txt")),
+            &go_on
+        ),
+        CopyFound {
+            copy: Original::Same,
+            original: Original::Unknown,
+        }
+    );
+
+    // Reached through a linked folder, the original is the copy itself.
+    let through = dir.path().join("through");
+    symlink(&dst, &through).expect("a link");
+    assert_eq!(
+        compare(&dst.join("a.txt"), &through.join("a.txt")),
+        Original::Unknown
+    );
+    assert_eq!(
+        compare(&dst.join("docs"), &through.join("docs")),
+        Original::Unknown
+    );
+
+    // A folder whose item leads to the copy's own item, deep down.
+    let holder = dir.path().join("holder");
+    std::fs::create_dir(&holder).expect("a folder");
+    symlink(&dst.join("docs").join("x.txt"), &holder.join("x.txt")).expect("a link");
+    assert_eq!(compare(&dst.join("docs"), &holder), Original::Unknown);
+
+    // A hard link is the copy under another name too: it cannot be told either.
+    std::fs::hard_link(dst.join("a.txt"), dir.path().join("hard.txt")).expect("a hard link");
+    assert_eq!(
+        compare(&dst.join("a.txt"), &dir.path().join("hard.txt")),
+        Original::Unknown
+    );
+}
+
+#[test]
+fn a_newer_look_at_copies_stops_the_one_before() {
+    use rf_ui::loader::CopyChecks;
+
+    let mut checks = CopyChecks::default();
+    let first = checks.start();
+    assert!(!first.is_cancelled());
+    // A newer check replaces it: its answer would be dropped, so it stops looking.
+    let second = checks.start();
+    assert!(first.is_cancelled());
+    assert!(!second.is_cancelled());
+    // The app ends: the look under way stops, and so does any that starts after.
+    checks.stop();
+    assert!(second.is_cancelled());
+    assert!(checks.start().is_cancelled());
+}
