@@ -12,7 +12,9 @@ use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{FileRows, PaneModels, TreeRows};
-use rf_ui::{MainWindow, PaneView, Theme};
+use rf_ui::{
+    ConfirmView, ConflictView, DialogKind, JobRowView, MainWindow, NameView, PaneView, Theme,
+};
 use rf_vfs::VisibilityFilter;
 use slint::platform::{Key, WindowEvent};
 use slint::{Color, ComponentHandle, LogicalSize, Model, ModelRc};
@@ -358,4 +360,231 @@ fn the_tree_shows_places_and_folders() {
     );
     let home_row = labelled(&window, "홈", AccessibleRole::ListItem);
     assert_eq!(home_row[0].accessible_expanded(), Some(true));
+}
+
+#[test]
+fn the_job_panel_shows_its_rows_and_buttons() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    for (name, record) in [("pause", Rc::clone(&calls)), ("cancel", Rc::clone(&calls))] {
+        let record = Rc::clone(&record);
+        if name == "pause" {
+            window.on_job_pause(move |i| record.borrow_mut().push(("pause", i)));
+        } else {
+            window.on_job_cancel(move |i| record.borrow_mut().push(("cancel", i)));
+        }
+    }
+    assert!(labelled(&window, "일시정지", AccessibleRole::Button).is_empty());
+    let rows = Rc::new(slint::VecModel::from(vec![JobRowView {
+        title: "복사 중".into(),
+        detail: "assets → /home/me/백업".into(),
+        progress: 0.25,
+        progress_text: "3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 · 대기 중인 작업 1개".into(),
+        paused: false,
+        waiting: false,
+    }]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    assert_eq!(labelled(&window, "복사 중", AccessibleRole::Text).len(), 1);
+    assert_eq!(
+        labelled(
+            &window,
+            "3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 · 대기 중인 작업 1개",
+            AccessibleRole::Text
+        )
+        .len(),
+        1
+    );
+    labelled(&window, "일시정지", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    labelled(&window, "취소", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.borrow().as_slice(), [("pause", 0), ("cancel", 0)]);
+    // A paused job offers to go on.
+    rows.set_row_data(
+        0,
+        JobRowView {
+            paused: true,
+            title: "일시정지됨".into(),
+            ..rows.row_data(0).expect("a row")
+        },
+    );
+    assert_eq!(labelled(&window, "계속", AccessibleRole::Button).len(), 1);
+}
+
+#[test]
+fn a_toast_button_answers_with_its_token() {
+    let window = window();
+    let clicked = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&clicked);
+    window.on_notice_action(move |token| record.borrow_mut().push(("action", token)));
+    let record = Rc::clone(&clicked);
+    window.on_notice_closed(move |token| record.borrow_mut().push(("closed", token)));
+    window.invoke_show_toast("항목 3개를 이동했습니다".into(), "되돌리기".into(), 7);
+    assert!(!labelled(&window, "항목 3개를 이동했습니다", AccessibleRole::Text).is_empty());
+    labelled(&window, "되돌리기", AccessibleRole::Button)
+        .into_iter()
+        .find(|button| button.accessible_enabled() != Some(false))
+        .expect("the toast's button")
+        .invoke_accessible_default_action();
+    assert_eq!(clicked.borrow().as_slice(), [("action", 7)]);
+    // A plain notice has no button; replacing a toast tells the old one is gone.
+    window.invoke_show_toast("다른 알림".into(), "자세히".into(), 8);
+    window.invoke_show_notice("알림".into());
+    assert_eq!(clicked.borrow().as_slice(), [("action", 7), ("closed", 8)]);
+    assert!(labelled(&window, "자세히", AccessibleRole::Button).is_empty());
+}
+
+#[test]
+fn a_dialog_takes_the_keys_until_it_closes() {
+    let window = window();
+    let keys = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&keys);
+    window.on_key(move |text, _, _, _| {
+        record.borrow_mut().push(text.to_string());
+        true
+    });
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&answers);
+    window.on_confirm_accepted(move || record.borrow_mut().push("accepted"));
+    let record = Rc::clone(&answers);
+    window.on_dialog_cancelled(move || record.borrow_mut().push("cancelled"));
+
+    window.set_confirm_view(ConfirmView {
+        title: "영구 삭제".into(),
+        message: "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
+            .into(),
+        detail: "‘a.txt’".into(),
+        ok_text: "영구 삭제".into(),
+        danger: true,
+    });
+    window.set_dialog(DialogKind::Confirm);
+    let message = "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다.";
+    assert_eq!(labelled(&window, message, AccessibleRole::Text).len(), 1);
+    // The panes get no key while it shows, and Enter does not delete.
+    let down = char::from(Key::DownArrow).to_string();
+    let enter = char::from(Key::Return).to_string();
+    chord(&window, &[&down]);
+    chord(&window, &[&enter]);
+    assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
+    assert_eq!(answers.borrow().as_slice(), Vec::<&str>::new());
+    // Esc is No.
+    chord(&window, &[&char::from(Key::Escape).to_string()]);
+    assert_eq!(answers.borrow().as_slice(), ["cancelled"]);
+    // Only the button deletes.
+    let delete: Vec<ElementHandle> = labelled(&window, "영구 삭제", AccessibleRole::Button);
+    delete[0].invoke_accessible_default_action();
+    assert_eq!(answers.borrow().as_slice(), ["cancelled", "accepted"]);
+
+    // Closed, the panes have the keys again.
+    window.set_dialog(DialogKind::None);
+    chord(&window, &[&down]);
+    assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn the_name_dialog_replaces_the_stem() {
+    let window = window();
+    let edits = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&edits);
+    window.on_name_edited(move |text| record.borrow_mut().push(("edited", text.to_string())));
+    let record = Rc::clone(&edits);
+    window.on_name_accepted(move |text| record.borrow_mut().push(("accepted", text.to_string())));
+    window.set_name_view(NameView {
+        title: "이름 바꾸기".into(),
+        initial: "설계안.pdf".into(),
+        select_end: i32::try_from("설계안".len()).expect("short"),
+        warning: "".into(),
+        ok_enabled: false,
+    });
+    window.set_dialog(DialogKind::Name);
+    // Typing replaces the selected stem and keeps the extension; Enter hands the name over.
+    chord(&window, &["x"]);
+    chord(&window, &[&char::from(Key::Return).to_string()]);
+    assert_eq!(
+        edits.borrow().as_slice(),
+        [
+            ("edited", "x.pdf".to_owned()),
+            ("accepted", "x.pdf".to_owned())
+        ]
+    );
+    // OK is off until Rust says the name can be used.
+    let ok = labelled(&window, "확인", AccessibleRole::Button);
+    assert_eq!(ok[0].accessible_enabled(), Some(false));
+}
+
+fn conflict_view() -> ConflictView {
+    ConflictView {
+        serial: 1,
+        title: "같은 이름의 파일이 이미 있습니다".into(),
+        description: "‘설계안.pdf’가 /home/me/백업 에 이미 있습니다.".into(),
+        incoming_label: "옮겨 올 파일".into(),
+        incoming_name: "설계안.pdf".into(),
+        incoming_place: "/home/me/프로젝트".into(),
+        incoming_size: "1.2 MB (1,258,291 바이트)".into(),
+        incoming_time: "2026-10-25 16:20".into(),
+        incoming_newer: true,
+        existing_label: "이미 있는 파일".into(),
+        existing_name: "설계안.pdf".into(),
+        existing_place: "/home/me/백업".into(),
+        existing_size: "980 KB (1,003,520 바이트)".into(),
+        existing_time: "2026-08-02 11:04".into(),
+        can_overwrite: true,
+        overwrite_hint: "있던 파일을 옮겨 올 파일로 바꿉니다".into(),
+        rename_hint: "‘설계안 (2).pdf’처럼 번호를 붙여 저장합니다".into(),
+        warning_once: "있던 파일의 내용은 되살릴 수 없습니다.".into(),
+        warning_all: "남은 충돌도 모두 덮어씁니다. 있던 파일의 내용은 되살릴 수 없습니다.".into(),
+        ..ConflictView::default()
+    }
+}
+
+#[test]
+fn the_conflict_dialog_keeps_both_unless_overwrite_is_clicked() {
+    let window = window();
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&answers);
+    window.on_conflict_answered(move |choice, all| record.borrow_mut().push((choice, all)));
+    window.set_conflict_view(conflict_view());
+    window.set_dialog(DialogKind::Conflict);
+    assert_eq!(labelled(&window, "더 최근", AccessibleRole::Text).len(), 1);
+    // Keeping both is chosen at first; Enter takes it.
+    let rename = labelled(&window, "이름 바꿔 둘 다 두기", AccessibleRole::RadioButton);
+    assert_eq!(rename[0].accessible_checked(), Some(true));
+    chord(&window, &[&char::from(Key::Return).to_string()]);
+    assert_eq!(answers.borrow().as_slice(), [(2, false)]);
+
+    // Overwrite says what it does, and only its button confirms it.
+    labelled(&window, "덮어쓰기", AccessibleRole::RadioButton)[0]
+        .invoke_accessible_default_action();
+    assert_eq!(
+        labelled(
+            &window,
+            "있던 파일의 내용은 되살릴 수 없습니다.",
+            AccessibleRole::Text
+        )
+        .len(),
+        1
+    );
+    chord(&window, &[&char::from(Key::Return).to_string()]);
+    assert_eq!(answers.borrow().len(), 1);
+    labelled(
+        &window,
+        "남은 충돌에도 같은 선택 적용",
+        AccessibleRole::Checkbox,
+    )[0]
+    .invoke_accessible_default_action();
+    labelled(&window, "덮어쓰기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(answers.borrow().as_slice(), [(2, false), (0, true)]);
+
+    // A new question starts again from keeping both; a file and a folder offer no overwrite.
+    window.set_conflict_view(ConflictView {
+        serial: 2,
+        can_overwrite: false,
+        existing_dir: true,
+        ..conflict_view()
+    });
+    let overwrite = labelled(&window, "덮어쓰기", AccessibleRole::RadioButton);
+    assert_eq!(overwrite[0].accessible_enabled(), Some(false));
+    assert_eq!(
+        labelled(&window, "이름 바꿔 둘 다 두기", AccessibleRole::RadioButton)[0]
+            .accessible_checked(),
+        Some(true)
+    );
 }

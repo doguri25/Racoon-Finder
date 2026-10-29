@@ -1,0 +1,115 @@
+// The job panel under the panes: one row for each job a worker runs, with its title, what it
+// works on, its bar and its progress line, and its pause and cancel buttons. It takes room
+// only while a job runs (the window gives it no height otherwise).
+
+import { Theme } from "theme.slint";
+import { ProgressBar, OutlineButton } from "widgets.slint";
+
+// One row, as Rust words it.
+export struct JobRowView {
+    title: string,
+    detail: string,
+    // 0 to 1.
+    progress: float,
+    progress-text: string,
+    paused: bool,
+    // The job waits for the answer to its question.
+    waiting: bool,
+}
+
+export component JobPanel inherits Rectangle {
+    in property <[JobRowView]> rows;
+    callback pause(index: int);
+    callback resume(index: int);
+    callback cancel(index: int);
+
+    background: Theme.panel;
+    accessible-role: groupbox;
+    accessible-label: "작업";
+
+    VerticalLayout {
+        for row[i] in root.rows: Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 24px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+                    alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        Text {
+                            horizontal-stretch: 0;
+                            text: row.title;
+                            font-weight: 700;
+                            color: Theme.text;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: row.detail;
+                            color: Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    ProgressBar {
+                        value: row.progress;
+                        bar-color: row.paused ? Theme.muted : Theme.accent;
+                        accessible-label: row.title;
+                    }
+                    Text {
+                        text: row.progress-text;
+                        font-size: Theme.font-small;
+                        color: Theme.muted;
+                        overflow: elide;
+                    }
+                }
+
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: Theme.gap-s;
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 44px;
+                            text: row.paused ? "계속" : "일시정지";
+                            clicked => {
+                                if (row.paused) {
+                                    root.resume(i);
+                                } else {
+                                    root.pause(i);
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 44px;
+                            text: "취소";
+                            clicked => {
+                                root.cancel(i);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A line between rows, and above the first one.
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+    }
+}

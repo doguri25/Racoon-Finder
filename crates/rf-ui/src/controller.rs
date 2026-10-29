@@ -1,8 +1,9 @@
 //! Carries out the main window's [`AppState`] changes: Slint's callbacks, the loader's
-//! tickets, the worker threads, and what the screen shows.
+//! tickets, the worker threads, the job engine, and what the screen shows.
 //!
 //! The [`Controller`] lives in a thread-local of the UI thread: Slint's callbacks reach it
-//! there, and so do the results of worker threads, through [`post`].
+//! there, and so do the results of worker threads, through [`post`], and the events and
+//! questions of the job engine, through [`job_event`] and [`post_question`].
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,16 +12,26 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use jiff::tz::TimeZone;
 use rf_core::VPath;
+use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use slint::{ComponentHandle, ModelRc};
+use slint::{CloseRequestResponse, ComponentHandle, ModelRc, VecModel};
 
+use crate::dialogs::{ConflictChoice, Modal};
+use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{LoadEvent, LoadTicket, Loader};
 use crate::places::{self, Place};
+use crate::resolver::Question;
 use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
 use crate::ui_bridge::{self, PaneModels, TreeRows, post};
-use crate::{MainWindow, open, words};
+use crate::{DialogKind, JobRowView, MainWindow, open, words};
+
+/// The environment variable that, set to `1` in a debug build, makes F5 and F6 copy and move
+/// the active pane's items straight into the other pane's folder, until the destination
+/// picker comes. A release build ignores it.
+pub const DIRECT_TRANSFER_VAR: &str = "RF_DEBUG_DIRECT_TRANSFER";
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -37,11 +48,28 @@ pub fn with<R>(f: impl FnOnce(&Controller) -> R) -> Option<R> {
     Some(f(&controller))
 }
 
-/// Connects the window's callbacks to a new controller, starts finding the folders to show
-/// and the sidebar's places, and returns the controller. It stays reachable through [`with`]
-/// until it is dropped with [`end`].
-pub fn begin(window: &MainWindow, start: Option<PathBuf>) -> Rc<Controller> {
-    let controller = Rc::new(Controller::new(window));
+/// Hands an event of the job engine to the controller, from any thread (the bridge thread of
+/// [`Jobs::start`]).
+pub fn job_event(event: JobEvent) {
+    post(move |c| c.job_event(event));
+}
+
+/// Hands a question of a job to the controller, from the job's worker thread; `false` when the
+/// event loop has ended, and nobody is left to answer it.
+pub fn post_question(question: Question) -> bool {
+    slint::invoke_from_event_loop(move || {
+        // Without a controller (the window has closed) the question stays open until the
+        // engine's end releases it.
+        with(|c| c.question(question));
+    })
+    .is_ok()
+}
+
+/// Connects the window's callbacks to a new controller with the job engine `jobs`, starts
+/// finding the folders to show and the sidebar's places, and returns the controller. It stays
+/// reachable through [`with`] until it is dropped with [`end`].
+pub fn begin(window: &MainWindow, start: Option<PathBuf>, jobs: Jobs) -> Rc<Controller> {
+    let controller = Rc::new(Controller::new(window, jobs));
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
 
@@ -52,7 +80,7 @@ pub fn begin(window: &MainWindow, start: Option<PathBuf>) -> Rc<Controller> {
             .ok()
             .and_then(|path| VPath::local(path).ok());
         let current_dir = std::env::current_dir().ok();
-        let tz = jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC);
+        let tz = TimeZone::try_system().unwrap_or(TimeZone::UTC);
         let folders = start_folders(
             start.as_deref(),
             current_dir.as_deref(),
@@ -150,6 +178,78 @@ fn connect(window: &MainWindow) {
     window.on_tree_toggled(|i| {
         with(|c| c.update_at(i, AppState::toggle_tree_row));
     });
+    connect_jobs(window);
+}
+
+/// The callbacks of the dialogs, the job panel and the toast, and the close button.
+fn connect_jobs(window: &MainWindow) {
+    window.on_row_menu(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.row_menu(side(s), i)));
+    });
+    window.on_name_edited(|text| {
+        with(|c| {
+            c.update(|state| {
+                state.name_edited(&text);
+                Vec::new()
+            });
+        });
+    });
+    window.on_name_accepted(|text| {
+        with(|c| c.update(|state| state.name_confirmed(&text)));
+    });
+    window.on_dialog_cancelled(|| {
+        with(|c| c.update(AppState::dialog_cancelled));
+    });
+    window.on_confirm_accepted(|| {
+        with(|c| c.update(AppState::confirm_accepted));
+    });
+    window.on_conflict_answered(|choice, apply_all| {
+        let choice = match choice {
+            0 => ConflictChoice::Overwrite,
+            1 => ConflictChoice::Skip,
+            _ => ConflictChoice::Rename,
+        };
+        with(|c| c.update(|state| state.conflict_answered(choice, apply_all)));
+    });
+    window.on_preflight_answered(|choice| {
+        with(|c| c.update(|state| state.preflight_answered(choice)));
+    });
+    window.on_recovery_chosen(|i, run_again| {
+        with(|c| c.update_at(i, |state, i| state.recovery_chosen(i, run_again)));
+    });
+    window.on_job_pause(|i| {
+        with(|c| c.update_at(i, |state, i| state.job_control(i, 0)));
+    });
+    window.on_job_resume(|i| {
+        with(|c| c.update_at(i, |state, i| state.job_control(i, 1)));
+    });
+    window.on_job_cancel(|i| {
+        with(|c| c.update_at(i, |state, i| state.job_control(i, 2)));
+    });
+    window.on_notice_action(|token| {
+        if let Ok(token) = u64::try_from(token) {
+            with(|c| c.update(|state| state.toast_clicked(token)));
+        }
+    });
+    window.on_notice_closed(|token| {
+        if let Ok(token) = u64::try_from(token) {
+            with(|c| {
+                c.update(|state| {
+                    state.toast_closed(token);
+                    Vec::new()
+                });
+            });
+        }
+    });
+    // The window stays until the jobs have stopped (carry-m1-03 "quit order"); the controller
+    // ends the event loop then. Without a controller nothing holds it.
+    window.window().on_close_requested(|| {
+        if with(Controller::close_requested).is_some() {
+            CloseRequestResponse::KeepWindowShown
+        } else {
+            CloseRequestResponse::HideWindow
+        }
+    });
 }
 
 /// Carries out the [`AppState`]'s effects for the window: the loader's tickets, the worker
@@ -157,8 +257,20 @@ fn connect(window: &MainWindow) {
 pub struct Controller {
     window: slint::Weak<MainWindow>,
     loader: Loader,
+    jobs: Jobs,
     /// `None` until the folders to start at are known.
     state: RefCell<Option<AppState>>,
+    /// The engine's events and questions that came before the state; it takes them when it
+    /// comes (the journal's recovery is announced at once).
+    early: RefCell<Vec<Early>>,
+    /// The time zone of the dates the dialogs show, once known.
+    tz: RefCell<TimeZone>,
+    job_rows: Rc<VecModel<JobRowView>>,
+    /// The dialog the screen shows, as it was last handed over: a view is set again only when
+    /// it changed, so a list in it keeps its scroll position while the jobs report progress.
+    shown_modal: RefCell<Option<(DialogKind, Option<Modal>)>>,
+    /// Whether F5 and F6 transfer straight into the other pane ([`DIRECT_TRANSFER_VAR`]).
+    direct_transfer: bool,
     /// The running loads of the tabs and the tree, by the generation of their request.
     tickets: RefCell<HashMap<u64, LoadTicket>>,
     /// The sidebar's places, the roots of the tree, once found.
@@ -179,14 +291,31 @@ impl fmt::Debug for Controller {
     }
 }
 
+/// What the job engine told before the state was there.
+#[derive(Debug)]
+enum Early {
+    Event(JobEvent),
+    Question(Question),
+}
+
 impl Controller {
-    fn new(window: &MainWindow) -> Controller {
+    fn new(window: &MainWindow, jobs: Jobs) -> Controller {
         let tree_rows = Rc::new(TreeRows::default());
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
+        let job_rows = Rc::new(VecModel::default());
+        window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
+        let direct_transfer = cfg!(debug_assertions)
+            && std::env::var_os(DIRECT_TRANSFER_VAR).is_some_and(|value| value == "1");
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
+            jobs,
             state: RefCell::new(None),
+            early: RefCell::new(Vec::new()),
+            tz: RefCell::new(TimeZone::UTC),
+            job_rows,
+            shown_modal: RefCell::new(None),
+            direct_transfer,
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
             tree_rows,
@@ -197,18 +326,99 @@ impl Controller {
 
     /// Shows `left` and `right` in the panes, with dates in `tz`, once they are known, and the
     /// tree of the places if they came first.
-    fn open(&self, left: VPath, right: VPath, home: Option<VPath>, tz: &jiff::tz::TimeZone) {
+    fn open(&self, left: VPath, right: VPath, home: Option<VPath>, tz: &TimeZone) {
         for pane in &self.panes {
             pane.set_time_zone(tz.clone());
         }
+        *self.tz.borrow_mut() = tz.clone();
         let (mut state, mut effects) = AppState::new(left, right, home);
         let places = self.places.borrow().clone();
         if !places.is_empty() {
             effects.extend(state.set_places(&places));
         }
         effects.extend(state.follow_active());
+        state.set_history(self.jobs.history());
+        for early in self.early.take() {
+            effects.extend(match early {
+                Early::Event(event) => state.job_event(event),
+                Early::Question(question) => state.question(question),
+            });
+        }
         *self.state.borrow_mut() = Some(state);
         self.apply(effects);
+    }
+
+    /// An event of the job engine. Progress only redraws the job panel; an end, the journal's
+    /// news and the like change the state and the whole window.
+    fn job_event(&self, event: JobEvent) {
+        if self.state.borrow().is_none() {
+            self.early.borrow_mut().push(Early::Event(event));
+            return;
+        }
+        let quiet = matches!(
+            event,
+            JobEvent::Progress { .. }
+                | JobEvent::Planned { .. }
+                | JobEvent::State { .. }
+                | JobEvent::Queue { .. }
+        );
+        if quiet {
+            let effects = match self.state.borrow_mut().as_mut() {
+                Some(state) => state.job_event(event),
+                None => return,
+            };
+            if effects.is_empty() {
+                self.redraw_jobs();
+            } else {
+                self.apply(effects);
+            }
+            return;
+        }
+        // The engine notes a job's record before its end is announced, so the history is up
+        // to date now.
+        let history = self.jobs.history();
+        self.update(|state| {
+            state.set_history(history);
+            state.job_event(event)
+        });
+    }
+
+    /// A question of a job.
+    fn question(&self, question: Question) {
+        if self.state.borrow().is_none() {
+            self.early.borrow_mut().push(Early::Question(question));
+            return;
+        }
+        self.update(|state| state.question(question));
+    }
+
+    /// The window's close button: the state asks first if jobs run, or ends the app.
+    fn close_requested(&self) {
+        if self.state.borrow().is_none() {
+            // Nothing shows yet, so nothing can be under way.
+            self.quit();
+            return;
+        }
+        self.update(AppState::request_close);
+    }
+
+    /// Ends the app: on a worker thread the engine shuts down and the questions are released
+    /// ([`Jobs::close_down`]), and then the event loop ends. The window shows the closing note
+    /// meanwhile. A worker that cannot start leaves the shutdown to [`crate::run`], after the
+    /// event loop.
+    fn quit(&self) {
+        let jobs = self.jobs.clone();
+        let started = std::thread::Builder::new()
+            .name("rf-ui-quit".to_owned())
+            .spawn(move || {
+                jobs.close_down(QUIT_TIMEOUT);
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+            });
+        if started.is_err() {
+            let _ = slint::quit_event_loop();
+        }
     }
 
     /// Makes `found` the places of the sidebar: the roots of the tree, now or once the panes'
@@ -223,6 +433,10 @@ impl Controller {
         let Some(command) = keys::command_for(text, mods) else {
             return false;
         };
+        if let Some(mode) = self.direct_mode(&command) {
+            self.update(|state| state.transfer_to_other_pane(mode));
+            return true;
+        }
         let page = self
             .window
             .upgrade()
@@ -237,7 +451,7 @@ impl Controller {
         used
     }
 
-    /// A toolbar button: the same command as its key.
+    /// A toolbar button or a menu item: the same command as its key.
     fn command(&self, name: &str) {
         let command = match name {
             "back" => Command::Back,
@@ -247,15 +461,34 @@ impl Controller {
             "copy" => Command::CopyTo,
             "move" => Command::MoveTo,
             "delete" => Command::Trash,
+            "delete-permanently" => Command::DeletePermanently,
             "rename" => Command::Rename,
+            "open" => Command::Open,
             "undo" => Command::Undo,
+            "redo" => Command::Redo,
             _ => return,
         };
+        if let Some(mode) = self.direct_mode(&command) {
+            self.update(|state| state.transfer_to_other_pane(mode));
+            return;
+        }
         self.update(|state| {
             state
                 .key(command, Mods::default(), 1, Instant::now())
                 .unwrap_or_default()
         });
+    }
+
+    /// The transfer F5 or F6 makes at once in a debug build with [`DIRECT_TRANSFER_VAR`].
+    fn direct_mode(&self, command: &Command) -> Option<TransferMode> {
+        if !self.direct_transfer {
+            return None;
+        }
+        match command {
+            Command::CopyTo => Some(TransferMode::Copy),
+            Command::MoveTo => Some(TransferMode::Move),
+            _ => None,
+        }
     }
 
     /// Changes the state with `f`, lets the tree follow the active pane, then carries out what
@@ -286,8 +519,24 @@ impl Controller {
 
     fn apply(&self, effects: Vec<Effect>) {
         let mut on_screen = Vec::new();
+        let mut job_asked = false;
         for effect in effects {
             match effect {
+                Effect::Job(effect) => {
+                    job_asked = true;
+                    if let Some(started) = self.jobs.carry_out(effect)
+                        && let Some(state) = self.state.borrow_mut().as_mut()
+                    {
+                        state.track(started);
+                    }
+                }
+                Effect::CheckTrash { folder, paths } => {
+                    spawn_worker("rf-ui-trash", move || {
+                        let supported = rf_platform::trash_supported(&folder);
+                        post(move |c| c.update(|state| state.trash_checked(paths, supported)));
+                    });
+                }
+                Effect::Quit => self.quit(),
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
@@ -332,36 +581,64 @@ impl Controller {
                 Effect::Notice(_)
                 | Effect::EditPath(_)
                 | Effect::ScrollTo { .. }
-                | Effect::ScrollTree(_) => {
+                | Effect::ScrollTree(_)
+                | Effect::Toast { .. } => {
                     on_screen.push(effect);
                 }
+            }
+        }
+        if job_asked {
+            // An undo or a redo took its record off the history; a new job will note one when
+            // it ends.
+            let history = self.jobs.history();
+            if let Some(state) = self.state.borrow_mut().as_mut() {
+                state.set_history(history);
             }
         }
         self.drop_stale_tickets();
         self.redraw();
         // After the redraw, so that the rows to scroll to are there.
         for effect in on_screen {
-            match effect {
-                Effect::Notice(text) => self.notice(&text),
-                Effect::EditPath(side) => {
-                    if let Some(window) = self.window.upgrade() {
-                        window.invoke_edit_path(side_number(side));
-                    }
+            self.show(effect);
+        }
+    }
+
+    /// Does an effect that shows on the screen.
+    fn show(&self, effect: Effect) {
+        match effect {
+            Effect::Notice(text) => self.notice(&text),
+            Effect::EditPath(side) => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_edit_path(side_number(side));
                 }
-                Effect::ScrollTo { side, row } => self.scroll_to(side, row),
-                Effect::ScrollTree(row) => {
-                    if let Some(window) = self.window.upgrade() {
-                        window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
-                    }
-                }
-                // Carried out above.
-                Effect::Load(_)
-                | Effect::LoadChildren(_)
-                | Effect::FindExisting { .. }
-                | Effect::Follow { .. }
-                | Effect::ReloadLater { .. }
-                | Effect::OpenFile(_) => {}
             }
+            Effect::ScrollTo { side, row } => self.scroll_to(side, row),
+            Effect::ScrollTree(row) => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
+                }
+            }
+            Effect::Toast {
+                token,
+                text,
+                action,
+            } => {
+                if let Some(window) = self.window.upgrade() {
+                    // A token past the range of a Slint int has no button to click.
+                    let token = i32::try_from(token).unwrap_or(0);
+                    window.invoke_show_toast(text.into(), action.into(), token);
+                }
+            }
+            // Carried out by `apply`.
+            Effect::Load(_)
+            | Effect::LoadChildren(_)
+            | Effect::FindExisting { .. }
+            | Effect::Follow { .. }
+            | Effect::ReloadLater { .. }
+            | Effect::OpenFile(_)
+            | Effect::Job(_)
+            | Effect::CheckTrash { .. }
+            | Effect::Quit => {}
         }
     }
 
@@ -430,10 +707,66 @@ impl Controller {
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
             self.tree_rows.sync(state.tree(), &self.places.borrow());
+            self.show_jobs(&window, state);
+            self.show_dialog(&window, state);
         }
         for (side, row) in scrolls {
             self.scroll_to(side, row);
         }
+    }
+
+    /// Shows the job panel and the toolbar's Undo, after a job's progress or state changed.
+    fn redraw_jobs(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if let Some(state) = self.state.borrow().as_ref() {
+            self.show_jobs(&window, state);
+        }
+    }
+
+    fn show_jobs(&self, window: &MainWindow, state: &AppState) {
+        let rows = state.job_rows();
+        ui_bridge::set_rows(
+            &self.job_rows,
+            rows.iter().map(ui_bridge::job_row_view).collect(),
+        );
+        window.set_can_undo(state.can_undo());
+    }
+
+    /// Shows the dialog of the state, setting its view before its kind (the dialog reads the
+    /// view when it opens), and only when it changed.
+    fn show_dialog(&self, window: &MainWindow, state: &AppState) {
+        let kind = ui_bridge::dialog_kind(state.modal(), state.quitting());
+        let now = (kind, state.modal().cloned());
+        if self.shown_modal.borrow().as_ref() == Some(&now) {
+            return;
+        }
+        let tz = self.tz.borrow();
+        match &now.1 {
+            _ if kind == DialogKind::Closing => {
+                window.set_closing_text(words::closing().into());
+            }
+            Some(Modal::Name(dialog)) => window.set_name_view(ui_bridge::name_view(dialog)),
+            Some(Modal::Confirm(confirm)) => {
+                window.set_confirm_view(ui_bridge::confirm_view(confirm));
+            }
+            Some(Modal::Failures(failures)) => {
+                window.set_message_view(ui_bridge::message_view(failures));
+            }
+            Some(Modal::Recovery(recovery)) => {
+                window.set_recovery_view(ui_bridge::recovery_view(recovery, &tz));
+            }
+            Some(Modal::Conflict(question)) => {
+                window.set_conflict_view(ui_bridge::conflict_view(question, &tz));
+            }
+            Some(Modal::Preflight(question)) => {
+                window.set_preflight_view(ui_bridge::preflight_view(question));
+            }
+            None => {}
+        }
+        window.set_dialog(kind);
+        *self.shown_modal.borrow_mut() = Some(now);
     }
 }
 

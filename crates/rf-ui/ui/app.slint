@@ -1,5 +1,7 @@
-// Main window: toolbar on top, the sidebar and the two panes below, notices in the lower
-// right corner. Every key goes to Rust first (`key`), except while a text field has focus.
+// Main window: toolbar on top, the sidebar and the two panes below, the job panel under them
+// while a job runs, notices in the lower right corner, and a dialog over all of it when one
+// is open. Every key goes to Rust first (`key`), except while a text field or a dialog has
+// focus.
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -8,8 +10,30 @@ import { ToolButton, TextButton, Toast } from "widgets.slint";
 import { FileRow } from "file-list.slint";
 import { Pane, PaneView, TabItem, Crumb } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
+import { JobPanel, JobRowView } from "job-panel.slint";
+import {
+    NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
+    RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow
+} from "dialogs.slint";
+import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 
-export { Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead }
+export {
+    Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead, JobRowView, NameView,
+    ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, NoticeWindow
+}
+
+// Which dialog is open over the main window.
+export enum DialogKind {
+    none,
+    name,
+    confirm,
+    message,
+    recovery,
+    conflict,
+    preflight,
+    // The jobs stop before the app ends.
+    closing,
+}
 
 export component MainWindow inherits Window {
     // Window title and the name beside the logo; Rust passes the product name.
@@ -30,13 +54,27 @@ export component MainWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <bool> can-up;
+    // Whether Undo can start: something to undo, and no undo or redo under way.
+    in property <bool> can-undo;
+    // The rows of the job panel; the panel shows while there is one.
+    in property <[JobRowView]> job-rows;
+    // The dialog that is open, and what each kind shows. Rust sets the view before the kind.
+    in property <DialogKind> dialog: DialogKind.none;
+    in property <NameView> name-view;
+    in property <ConfirmView> confirm-view;
+    in property <MessageView> message-view;
+    in property <RecoveryView> recovery-view;
+    in property <PreflightView> preflight-view;
+    in property <ConflictView> conflict-view;
+    in property <string> closing-text;
     // How many rows PageUp and PageDown move (the panes are equally tall).
     out property <int> page-rows: left.page-rows;
 
     // A key pressed while no text field has focus: the key's text (a character of
     // `Key` for a special key) and the modifiers. `true` when Rust used it.
     callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
-    // A toolbar button: back, forward, up, new-folder, copy, move, delete, rename, undo.
+    // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
+    // rename, undo, open, delete-permanently.
     callback command(name: string);
     callback pane-activated(side: int);
     callback tab-selected(side: int, index: int);
@@ -47,7 +85,27 @@ export component MainWindow inherits Window {
     callback sort(side: int, column: int);
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
     callback row-activated(side: int, index: int);
+    // A right click on row `index` of pane `side`, before its menu opens.
+    callback row-menu(side: int, index: int);
     callback retry(side: int);
+    // The dialogs: the name changed or was confirmed, the dialog closed without its main
+    // action (Esc, Cancel), the confirmation was accepted, a conflict was answered (`choice`:
+    // 0 overwrite, 1 skip, 2 keep both), the pre-flight check was answered (0 go on, 1 leave
+    // out the blocked items, 2 cancel), recovered job `index` was run again or dropped.
+    callback name-edited(text: string);
+    callback name-accepted(text: string);
+    callback dialog-cancelled();
+    callback confirm-accepted();
+    callback conflict-answered(choice: int, apply-all: bool);
+    callback preflight-answered(choice: int);
+    callback recovery-chosen(index: int, run-again: bool);
+    // The buttons of row `index` of the job panel.
+    callback job-pause(index: int);
+    callback job-resume(index: int);
+    callback job-cancel(index: int);
+    // The button of the toast `token`, and its end (closed, or its time ran out).
+    callback notice-action(token: int);
+    callback notice-closed(token: int);
     // A click on row `index` of the tree, or on its chevron.
     callback tree-clicked(index: int);
     callback tree-toggled(index: int);
@@ -77,12 +135,31 @@ export component MainWindow inherits Window {
 
     // A notice in the lower right corner for 5 seconds.
     public function show-notice(text: string) {
+        root.show-toast(text, "", 0);
+    }
+
+    // A notice with the button `action` (empty for none), whose click and end come back with
+    // `token`.
+    public function show-toast(text: string, action: string, token: int) {
+        if (root.notice != "" && root.notice-token != token) {
+            root.notice-closed(root.notice-token);
+        }
         root.notice = text;
+        root.notice-action-text = action;
+        root.notice-token = token;
         notice-timer.start();
         notice-timer.restart();
     }
 
     private property <string> notice;
+    private property <string> notice-action-text;
+    private property <int> notice-token;
+    // The keyboard goes back to the panes when a dialog closes.
+    changed dialog => {
+        if (root.dialog == DialogKind.none) {
+            keys.focus();
+        }
+    }
     // The standard widgets (scroll bars) follow the app's theme, not the system's.
     private property <bool> dark: Theme.dark;
     changed dark => {
@@ -110,8 +187,8 @@ export component MainWindow inherits Window {
     keys := FocusScope {
         key-pressed(event) => {
             // A text field that has focus passes up the keys it does not use; they are not
-            // shortcuts while it is open.
-            if (left.editing || right.editing) {
+            // shortcuts while it is open, nor while a dialog is.
+            if (left.editing || right.editing || root.dialog != DialogKind.none) {
                 return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt)) {
@@ -238,6 +315,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "undo";
                             text: "되돌리기";
+                            enabled: root.can-undo;
                             clicked => {
                                 root.command("undo");
                             }
@@ -357,6 +435,15 @@ export component MainWindow inherits Window {
                     row-activated(index) => {
                         root.row-activated(0, index);
                     }
+                    row-menu(index) => {
+                        root.row-menu(0, index);
+                        keys.focus();
+                    }
+                    menu-command(name) => {
+                        root.pane-activated(0);
+                        root.command(name);
+                        keys.focus();
+                    }
                     retry => {
                         root.retry(0);
                         keys.focus();
@@ -406,6 +493,15 @@ export component MainWindow inherits Window {
                     row-activated(index) => {
                         root.row-activated(1, index);
                     }
+                    row-menu(index) => {
+                        root.row-menu(1, index);
+                        keys.focus();
+                    }
+                    menu-command(name) => {
+                        root.pane-activated(1);
+                        root.command(name);
+                        keys.focus();
+                    }
                     retry => {
                         root.retry(1);
                         keys.focus();
@@ -413,22 +509,41 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Place of the job panel: it takes room only while a job runs.
-            Rectangle {
-                height: 0px;
+            // The job panel takes room only while a job runs.
+            jobs := JobPanel {
+                height: root.job-rows.length > 0 ? self.preferred-height : 0px;
+                visible: root.job-rows.length > 0;
+                rows: root.job-rows;
+                pause(index) => {
+                    root.job-pause(index);
+                }
+                resume(index) => {
+                    root.job-resume(index);
+                }
+                cancel(index) => {
+                    root.job-cancel(index);
+                }
             }
         }
     }
 
+    // Above the job panel, when it shows.
     if root.notice != "": Toast {
         width: min(self.preferred-width, root.width - 48px);
         height: self.preferred-height;
         x: root.width - self.width - 24px;
-        y: root.height - self.height - 24px;
+        y: root.height - self.height - 24px - jobs.height;
         message: root.notice;
+        action: root.notice-action-text;
+        action-clicked => {
+            root.notice = "";
+            notice-timer.stop();
+            root.notice-action(root.notice-token);
+        }
         closed => {
             root.notice = "";
             notice-timer.stop();
+            root.notice-closed(root.notice-token);
         }
     }
 
@@ -438,6 +553,84 @@ export component MainWindow inherits Window {
         triggered => {
             root.notice = "";
             self.stop();
+            root.notice-closed(root.notice-token);
+        }
+    }
+
+    // A dialog over a dark scrim that takes every click: the window behind it is not to be
+    // used until it closes.
+    if root.dialog != DialogKind.none: Rectangle {
+        background: #00000059;
+
+        TouchArea { }
+
+        if root.dialog == DialogKind.name: NameDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.name-view;
+            edited(text) => {
+                root.name-edited(text);
+            }
+            accepted(text) => {
+                root.name-accepted(text);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.confirm: ConfirmDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.confirm-view;
+            accepted => {
+                root.confirm-accepted();
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.message: MessageDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.message-view;
+            closed => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.recovery: RecoveryDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.recovery-view;
+            chosen(index, run-again) => {
+                root.recovery-chosen(index, run-again);
+            }
+            closed => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.preflight: PreflightDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.preflight-view;
+            answered(choice) => {
+                root.preflight-answered(choice);
+            }
+        }
+        if root.dialog == DialogKind.conflict: ConflictDialog {
+            x: (parent.width - self.width) / 2;
+            y: max(0px, (parent.height - self.height) / 2);
+            view: root.conflict-view;
+            answered(choice, apply-all) => {
+                root.conflict-answered(choice, apply-all);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.closing: ClosingNote {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.closing-text;
         }
     }
 }

@@ -193,6 +193,9 @@ export component Pane inherits Rectangle {
     callback sort(column: int);
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-activated(index: int);
+    // A right click on row `index`, before its menu opens; a command of the list's menus.
+    callback row-menu(index: int);
+    callback menu-command(name: string);
     callback retry();
 
     // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs).
@@ -405,6 +408,12 @@ export component Pane inherits Rectangle {
                 }
                 row-activated(index) => {
                     root.row-activated(index);
+                }
+                row-menu(index) => {
+                    root.row-menu(index);
+                }
+                menu-command(name) => {
+                    root.menu-command(name);
                 }
             }
 

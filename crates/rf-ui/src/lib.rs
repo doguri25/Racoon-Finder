@@ -5,13 +5,17 @@ use std::path::PathBuf;
 use slint::ComponentHandle;
 
 pub mod controller;
+pub mod dialogs;
 pub mod format;
 pub mod history;
+pub mod instance;
+pub mod jobs;
 pub mod keys;
 pub mod loader;
 pub mod open;
 pub mod pane;
 pub mod places;
+pub mod resolver;
 pub mod selection;
 pub mod state;
 pub mod tree;
@@ -36,23 +40,122 @@ pub enum RunError {
     /// The window system or the renderer failed.
     #[error("UI platform: {0}")]
     Platform(#[from] slint::PlatformError),
-    /// The app's data folders could not be located.
+    /// The app's data folders could not be located or made.
     #[error("app folders: {0}")]
     Paths(#[from] rf_core::Error),
+    /// Another instance of the app runs and holds the job journal; it was told to the user.
+    #[error("another instance of the app is running")]
+    AlreadyRunning,
+    /// The single-instance lock of the job journal's folder could not be taken.
+    #[error("{0}")]
+    Lock(instance::InstanceError),
+    /// A thread the app needs could not be started.
+    #[error("cannot start a thread: {0}")]
+    Thread(std::io::Error),
 }
 
-/// Shows the main window and runs the event loop until the window closes.
+/// Shows the main window and runs the event loop until the app ends.
 ///
 /// `start` is the folder the left pane opens first (the app's first argument); without it the
 /// left pane opens the home folder. The right pane opens the documents folder, or home.
+///
+/// One instance of the app runs at a time: it takes the lock in the folder of the job
+/// journal ([`instance`]) before anything else, and a second one only says so, in a small
+/// window, and ends with [`RunError::AlreadyRunning`]. The job engine keeps its journal in
+/// that folder. When the window closes, the engine is shut down and the jobs' questions are
+/// released ([`jobs::close_down`]) before this returns.
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
+    let paths = rf_core::AppPaths::detect()?;
+    paths.ensure_dirs()?;
+    let lock = match instance::InstanceLock::acquire(paths.data_dir()) {
+        Ok(lock) => lock,
+        Err(instance::InstanceError::AlreadyRunning(_)) => {
+            show_notice(words::already_running())?;
+            return Err(RunError::AlreadyRunning);
+        }
+        Err(error) => return Err(RunError::Lock(error)),
+    };
     let window = MainWindow::new()?;
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
-    let controller = controller::begin(&window, start);
+    let jobs = jobs::Jobs::start(
+        paths.data_dir(),
+        controller::job_event,
+        controller::post_question,
+    )
+    .map_err(RunError::Thread)?;
+    let controller = controller::begin(&window, start, jobs.clone());
     let result = window.run();
     // Stops the listings and the watches before the window goes.
     drop(controller);
     controller::end();
+    if !jobs.is_closed() {
+        // The event loop ended some other way than the window's close button: end the engine
+        // here, on a thread of its own as everywhere, and wait for it.
+        let closing = jobs.clone();
+        match std::thread::Builder::new()
+            .name("rf-ui-quit".to_owned())
+            .spawn(move || closing.close_down(jobs::QUIT_TIMEOUT))
+        {
+            Ok(thread) => {
+                let _ = thread.join();
+            }
+            Err(_) => {
+                jobs.close_down(jobs::QUIT_TIMEOUT);
+            }
+        }
+    }
+    drop(lock);
     result?;
     Ok(())
+}
+
+/// Tells the user that the app could not start, when `error` says so: in a small window, or,
+/// when no window can open, in `startup-error.log` in the app's log folder. A release build on
+/// Windows has no console, so this is the only place the user sees why. Nothing for
+/// [`RunError::AlreadyRunning`], which was told already.
+pub fn report_startup_failure(error: &RunError) {
+    let reason = match error {
+        RunError::AlreadyRunning => return,
+        RunError::Platform(_) => words::no_window().to_owned(),
+        RunError::Paths(error) => words::no_app_folders(error.kind()),
+        RunError::Lock(instance::InstanceError::Io { path, source }) => {
+            words::lock_failed(io_kind(path, source))
+        }
+        RunError::Lock(instance::InstanceError::AlreadyRunning(_)) => {
+            words::already_running().to_owned()
+        }
+        RunError::Thread(_) => words::background_failed().to_owned(),
+    };
+    let message = format!("{}: {reason}", words::startup_failed());
+    if show_notice(&message).is_ok() {
+        return;
+    }
+    if let Ok(paths) = rf_core::AppPaths::detect() {
+        let log = paths.log_dir().join("startup-error.log");
+        let _ = std::fs::create_dir_all(paths.log_dir());
+        let _ = std::fs::write(log, format!("{error}\n"));
+    }
+}
+
+/// The kind of the error `source` of the lock file `path`, for its words.
+fn io_kind(path: &std::path::Path, source: &std::io::Error) -> rf_core::ErrorKind {
+    match rf_core::VPath::local(path) {
+        Ok(path) => rf_core::Error::io("lock", path, std::io::Error::from(source.kind())).kind(),
+        Err(_) => rf_core::ErrorKind::Other,
+    }
+}
+
+/// Shows `message` in a small window of its own until it is closed.
+fn show_notice(message: &str) -> Result<(), slint::PlatformError> {
+    let window = NoticeWindow::new()?;
+    window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
+    window.set_heading(rf_core::identity::DISPLAY_NAME.into());
+    window.set_message(message.into());
+    let weak = window.as_weak();
+    window.on_closed(move || {
+        if let Some(window) = weak.upgrade() {
+            let _ = window.hide();
+        }
+    });
+    window.run()
 }

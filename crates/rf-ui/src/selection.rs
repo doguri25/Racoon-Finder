@@ -126,6 +126,15 @@ impl Selection {
         }
     }
 
+    /// Puts the cursor and the anchor on row `i` and leaves the selection as it is: a right
+    /// click on a row that is selected already, whose menu acts on the whole selection.
+    pub fn set_cursor(&mut self, i: usize, names: &[impl Named]) {
+        if i < names.len() {
+            self.anchor = Some(i);
+            self.cursor = Some(i);
+        }
+    }
+
     /// Selects every row; the cursor and the anchor stay.
     pub fn select_all(&mut self, names: &[impl Named]) {
         self.selected = names.iter().map(|row| row.name().to_owned()).collect();

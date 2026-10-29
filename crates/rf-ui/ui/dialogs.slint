@@ -1,0 +1,536 @@
+// The dialogs over the main window: a name, a confirmation, a list of failed items, the jobs
+// the last run left unfinished, the pre-flight check of a transfer, and the note that shows
+// while the app ends. Each one takes the keyboard when it opens: Esc closes it (Cancel), and
+// Enter does its main action unless that action destroys something. `NoticeWindow` is a
+// window of its own, for a message before or instead of the main window.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { PrimaryButton, OutlineButton, DialogFrame } from "widgets.slint";
+
+export struct NameView {
+    title: string,
+    // The text the field starts with, and where its first selection ends (a byte offset).
+    initial: string,
+    select-end: int,
+    // Why the name cannot be used, as it is typed; empty when it can.
+    warning: string,
+    ok-enabled: bool,
+}
+
+export struct ConfirmView {
+    title: string,
+    message: string,
+    // The items it is about; empty for none.
+    detail: string,
+    ok-text: string,
+    // Destroys something: Enter does not confirm.
+    danger: bool,
+}
+
+export struct MessageView {
+    title: string,
+    lines: [string],
+}
+
+export struct RecoveryView {
+    title: string,
+    note: string,
+    rows: [string],
+}
+
+export struct PreflightView {
+    title: string,
+    lines: [string],
+    has-blocked: bool,
+}
+
+component Heading inherits Text {
+    font-size: Theme.font-title;
+    font-weight: 700;
+    color: Theme.text;
+    wrap: word-wrap;
+}
+
+component Body inherits Text {
+    color: Theme.muted;
+    wrap: word-wrap;
+}
+
+// Asks for the name of a new folder or a rename. The field starts with `view.initial`, the
+// part before the extension selected; Rust checks each edit and sends the warning back.
+export component NameDialog inherits DialogFrame {
+    in property <NameView> view;
+    callback edited(text: string);
+    callback accepted(text: string);
+    callback cancelled();
+
+    width: 440px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    init => {
+        input.text = root.view.initial;
+        input.focus();
+        input.set-selection-offsets(0, root.view.select-end);
+    }
+
+    layout := VerticalLayout {
+        padding: 24px;
+        spacing: Theme.gap-m;
+
+        Heading {
+            text: root.view.title;
+        }
+        Rectangle {
+            height: 38px;
+            border-width: 1px;
+            border-color: root.view.warning == "" ? Theme.accent : Theme.muted;
+            border-radius: Theme.radius;
+            background: Theme.bg;
+
+            input := TextInput {
+                x: 10px;
+                width: parent.width - 20px;
+                height: parent.height;
+                color: Theme.text;
+                selection-background-color: Theme.selection;
+                selection-foreground-color: Theme.text;
+                vertical-alignment: center;
+                single-line: true;
+                accessible-role: text-input;
+                accessible-label: root.view.title;
+                edited => {
+                    root.edited(self.text);
+                }
+                // Rust decides: a name that cannot be used keeps the dialog open.
+                accepted => {
+                    root.accepted(self.text);
+                }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.cancelled();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+        }
+        if root.view.warning != "": Body {
+            text: root.view.warning;
+            font-size: Theme.font-small;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.gap-s;
+            padding-top: Theme.gap-s;
+
+            OutlineButton {
+                text: "취소";
+                clicked => {
+                    root.cancelled();
+                }
+            }
+            PrimaryButton {
+                button-height: 36px;
+                text: "확인";
+                enabled: root.view.ok-enabled;
+                clicked => {
+                    root.accepted(input.text);
+                }
+            }
+        }
+    }
+}
+
+// Asks before something happens that cannot be taken back. Its text says what will happen.
+export component ConfirmDialog inherits DialogFrame {
+    in property <ConfirmView> view;
+    callback accepted();
+    callback cancelled();
+
+    width: 500px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+    accessible-description: root.view.message;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            if (event.text == Key.Return && !root.view.danger) {
+                root.accepted();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Text {
+                text: root.view.message;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.view.detail != "": Body {
+                text: root.view.detail;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: root.view.ok-text;
+                    clicked => {
+                        root.accepted();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The items a job could not process, and why.
+export component MessageDialog inherits DialogFrame {
+    in property <MessageView> view;
+    callback closed();
+
+    width: 600px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == Key.Return) {
+                root.closed();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Rectangle {
+                height: min(360px, max(48px, root.view.lines.length * 44px));
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+
+                ListView {
+                    for line in root.view.lines: Rectangle {
+                        HorizontalLayout {
+                            padding-left: Theme.gap-m;
+                            padding-right: Theme.gap-m;
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+
+                            Text {
+                                text: line;
+                                color: Theme.text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The jobs the last run of the app left unfinished: each can be run again or dropped. One
+// that is neither stays for the next start.
+export component RecoveryDialog inherits DialogFrame {
+    in property <RecoveryView> view;
+    callback chosen(index: int, run-again: bool);
+    callback closed();
+
+    width: 680px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.closed();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Body {
+                text: root.view.note;
+            }
+            Rectangle {
+                height: min(320px, root.view.rows.length * 57px);
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+
+                ListView {
+                    for row[i] in root.view.rows: Rectangle {
+                        height: 56px;
+
+                        HorizontalLayout {
+                            padding-left: Theme.gap-m;
+                            padding-right: Theme.gap-s;
+                            spacing: Theme.gap-s;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: row;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+
+                                OutlineButton {
+                                    text: "버리기";
+                                    clicked => {
+                                        root.chosen(i, false);
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+
+                                PrimaryButton {
+                                    button-height: 36px;
+                                    text: "다시 실행";
+                                    clicked => {
+                                        root.chosen(i, true);
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            y: parent.height - self.height;
+                            height: 1px;
+                            background: Theme.border;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+
+                OutlineButton {
+                    text: "닫기";
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The problems the pre-flight check of a transfer found on the target, before anything was
+// written: go on as it is, leave out the items that cannot be written, or cancel.
+export component PreflightDialog inherits DialogFrame {
+    in property <PreflightView> view;
+    // 0 go on, 1 leave out the blocked items, 2 cancel.
+    callback answered(choice: int);
+
+    width: 640px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.answered(2);
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Rectangle {
+                height: min(320px, max(48px, root.view.lines.length * 44px));
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+
+                ListView {
+                    for line in root.view.lines: Rectangle {
+                        HorizontalLayout {
+                            padding-left: Theme.gap-m;
+                            padding-right: Theme.gap-m;
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+
+                            Text {
+                                text: line;
+                                color: Theme.text;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    clicked => {
+                        root.answered(2);
+                    }
+                }
+                if root.view.has-blocked: OutlineButton {
+                    text: "막힌 항목 건너뛰기";
+                    clicked => {
+                        root.answered(1);
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "계속";
+                    clicked => {
+                        root.answered(0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// What shows while the jobs stop before the app ends.
+export component ClosingNote inherits DialogFrame {
+    in property <string> text;
+
+    width: 360px;
+    height: 88px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    Text {
+        text: root.text;
+        color: Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A small window of its own with one message and an OK button: for a second instance of the
+// app, or an app that could not start.
+export component NoticeWindow inherits Window {
+    in property <string> app-title;
+    in property <string> heading;
+    in property <string> message;
+    callback closed();
+
+    title: root.app-title;
+    preferred-width: 440px;
+    min-width: 320px;
+    background: Theme.panel;
+    default-font-size: Theme.font-body;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == Key.Return) {
+                root.closed();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Text {
+                text: root.heading;
+                font-size: 16px;
+                font-weight: 700;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.message;
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                padding-top: Theme.gap-s;
+
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}

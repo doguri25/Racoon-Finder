@@ -14,13 +14,20 @@ use rf_vfs::{SortKey, SortOrder};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::controller::{self, Controller};
+use crate::dialogs::{
+    Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
+};
 use crate::format::{format_size, format_time_in, kind_label};
+use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
-use crate::{Crumb, FileRow, PaneView, SectionHead, TabItem, TreeRow};
+use crate::{
+    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, JobRowView, MessageView, NameView,
+    PaneView, PreflightView, RecoveryView, SectionHead, TabItem, TreeRow,
+};
 
 /// Runs `f` with the controller on the UI thread, from any thread, and returns at once. Once
 /// the window has closed nothing runs and `f` is dropped.
@@ -491,6 +498,160 @@ pub fn sort_key(column: i32) -> Option<SortKey> {
         3 => SortKey::Kind,
         _ => return None,
     })
+}
+
+/// A row of the job panel.
+pub fn job_row_view(row: &JobRow) -> JobRowView {
+    JobRowView {
+        title: row.title.as_str().into(),
+        detail: row.detail.as_str().into(),
+        progress: row.fraction,
+        progress_text: row.progress.as_str().into(),
+        paused: row.paused,
+        waiting: row.waiting,
+    }
+}
+
+/// Which dialog shows for `modal`, or the closing note while the app ends.
+pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
+    if quitting {
+        return DialogKind::Closing;
+    }
+    match modal {
+        None => DialogKind::None,
+        Some(Modal::Name(_)) => DialogKind::Name,
+        Some(Modal::Confirm(_)) => DialogKind::Confirm,
+        Some(Modal::Failures(_)) => DialogKind::Message,
+        Some(Modal::Recovery(_)) => DialogKind::Recovery,
+        Some(Modal::Conflict(_)) => DialogKind::Conflict,
+        Some(Modal::Preflight(_)) => DialogKind::Preflight,
+    }
+}
+
+/// What the name dialog shows: the warning of the name typed so far, and whether OK takes it.
+pub fn name_view(dialog: &NameDialog) -> NameView {
+    let check = dialog.check();
+    NameView {
+        title: dialog.title().into(),
+        initial: dialog.initial.as_str().into(),
+        select_end: i32::try_from(dialog.select_end).unwrap_or(i32::MAX),
+        ok_enabled: check == NameCheck::Ready,
+        warning: match check {
+            NameCheck::Invalid(warning) => warning.into(),
+            NameCheck::Ready | NameCheck::Empty | NameCheck::Unchanged => SharedString::new(),
+        },
+    }
+}
+
+pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
+    ConfirmView {
+        title: confirm.title.as_str().into(),
+        message: confirm.message.as_str().into(),
+        detail: confirm.detail.as_str().into(),
+        ok_text: confirm.ok.as_str().into(),
+        danger: confirm.danger,
+    }
+}
+
+pub fn message_view(failures: &Failures) -> MessageView {
+    MessageView {
+        title: failures.title.as_str().into(),
+        lines: lines_model(&failures.lines),
+    }
+}
+
+/// The recovery dialog, with the times the jobs were submitted in `tz`.
+pub fn recovery_view(recovery: &Recovery, tz: &TimeZone) -> RecoveryView {
+    let rows: Vec<String> = recovery
+        .jobs
+        .iter()
+        .map(|job| {
+            let submitted = format_time_in(job.submitted, tz);
+            words::recovered_job(&job.spec, &submitted, job.started)
+        })
+        .collect();
+    RecoveryView {
+        title: words::recovery_title(recovery.jobs.len()).into(),
+        note: words::recovery_note().into(),
+        rows: lines_model(&rows),
+    }
+}
+
+pub fn preflight_view(question: &PreflightQuestion) -> PreflightView {
+    PreflightView {
+        title: words::preflight_title().into(),
+        lines: lines_model(&question.lines()),
+        has_blocked: question.has_blocked(),
+    }
+}
+
+/// The conflict dialog for `question`, with dates in `tz`.
+pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView {
+    let conflict = &question.conflict;
+    let (incoming_newer, existing_newer) = question.newer();
+    let name_of = |path: &VPath| {
+        path.file_name().map_or_else(
+            || path.to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    };
+    let folder_of = |path: &VPath| {
+        path.parent()
+            .map(|folder| folder.to_string())
+            .unwrap_or_default()
+    };
+    let size = |entry: &Entry| {
+        if entry.kind == EntryKind::Dir {
+            "-".to_owned()
+        } else {
+            words::exact_size(entry.size)
+        }
+    };
+    let time = |entry: &Entry| {
+        entry
+            .modified
+            .map(|t| format_time_in(t, tz))
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "-".to_owned())
+    };
+    let existing_name = name_of(&conflict.target);
+    let existing_folder = folder_of(&conflict.target);
+    let can_overwrite = question.can_overwrite();
+    ConflictView {
+        serial: i32::try_from(question.id % 0x7FFF_FFFF).unwrap_or(0),
+        title: words::conflict_title(conflict.existing.kind).into(),
+        description: words::conflict_description(&existing_name, &existing_folder).into(),
+        incoming_label: words::conflict_card(true, conflict.incoming.kind).into(),
+        incoming_name: name_of(&conflict.source).into(),
+        incoming_place: folder_of(&conflict.source).into(),
+        incoming_size: size(&conflict.incoming).into(),
+        incoming_time: time(&conflict.incoming).into(),
+        incoming_newer,
+        incoming_dir: conflict.incoming.kind == EntryKind::Dir,
+        existing_label: words::conflict_card(false, conflict.existing.kind).into(),
+        existing_name: existing_name.as_str().into(),
+        existing_place: existing_folder.as_str().into(),
+        existing_size: size(&conflict.existing).into(),
+        existing_time: time(&conflict.existing).into(),
+        existing_newer,
+        existing_dir: conflict.existing.kind == EntryKind::Dir,
+        can_overwrite,
+        overwrite_hint: words::overwrite_hint(can_overwrite).into(),
+        rename_hint: words::rename_hint(&question.numbered_name()).into(),
+        warning_once: words::overwrite_warning(false).into(),
+        warning_all: words::overwrite_warning(true).into(),
+        items_left: if question.items_left > 0 {
+            words::items_left(question.items_left).into()
+        } else {
+            SharedString::new()
+        },
+    }
+}
+
+/// `lines` as a list model of text.
+fn lines_model(lines: &[String]) -> ModelRc<SharedString> {
+    let lines: Vec<SharedString> = lines.iter().map(|line| line.as_str().into()).collect();
+    ModelRc::new(VecModel::from(lines))
 }
 
 /// Makes `model` hold `rows`, telling the screen only about the rows that differ.

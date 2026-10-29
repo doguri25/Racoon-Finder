@@ -96,6 +96,10 @@ pub struct Tab {
     pending: Vec<Change>,
     /// The order the listing in progress was asked for in.
     requested_sort: SortSpec,
+    /// The name [`Tab::select_name`] waits for: it is selected when it shows.
+    pending_select: Option<OsString>,
+    /// The row a waiting [`Tab::select_name`] selected, until [`Tab::take_revealed`].
+    revealed: Option<usize>,
 }
 
 impl Tab {
@@ -116,6 +120,8 @@ impl Tab {
             incoming: Vec::new(),
             pending: Vec::new(),
             requested_sort: sort,
+            pending_select: None,
+            revealed: None,
         };
         let request = tab.load(location);
         (tab, request)
@@ -373,6 +379,25 @@ impl Tab {
         Some(row)
     }
 
+    /// Selects the row called `name` alone and puts the cursor on it: the item a job has just
+    /// made or renamed. A name that does not show yet is selected when it comes (by the
+    /// listing or the watch), unless the tab moves to another folder first. Gives the row when
+    /// it shows already.
+    pub fn select_name(&mut self, name: OsString) -> Option<usize> {
+        let Some(row) = self.visible.iter().position(|entry| entry.name == name) else {
+            self.pending_select = Some(name);
+            return None;
+        };
+        self.selection.click(row, &self.visible);
+        self.pending_select = None;
+        Some(row)
+    }
+
+    /// The row a waiting [`Tab::select_name`] has selected since the last call, to scroll to.
+    pub fn take_revealed(&mut self) -> Option<usize> {
+        self.revealed.take()
+    }
+
     /// Whether the listing of request `generation` is still awaited.
     fn is_loading(&self, generation: u64) -> bool {
         generation == self.generation && self.status == LoadStatus::Loading
@@ -385,6 +410,8 @@ impl Tab {
         self.visible.clear();
         self.selection = Selection::default();
         self.free = None;
+        self.pending_select = None;
+        self.revealed = None;
         self.start_request()
     }
 
@@ -424,6 +451,15 @@ impl Tab {
             .cloned()
             .collect();
         self.selection.reconcile(&old, &self.visible);
+        let waited = self
+            .pending_select
+            .as_ref()
+            .and_then(|name| self.visible.iter().position(|entry| entry.name == *name));
+        if let Some(row) = waited {
+            self.selection.click(row, &self.visible);
+            self.pending_select = None;
+            self.revealed = Some(row);
+        }
     }
 }
 

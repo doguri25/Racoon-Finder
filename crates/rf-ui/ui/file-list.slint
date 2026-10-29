@@ -1,6 +1,7 @@
 // The column heads and the rows of a folder listing. The rows are a virtualized ListView:
 // only the rows on screen exist as elements, so a folder of 100,000 items scrolls as freely
-// as one of ten.
+// as one of ten. A right click opens the menu of the row (move and copy first, OPS-05), or of
+// the empty part of the list.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -76,6 +77,11 @@ export component FileList inherits Rectangle {
     callback sort(column: int);
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-activated(index: int);
+    // A right click on row `index`, just before its menu opens.
+    callback row-menu(index: int);
+    // A menu item: the name of the toolbar command it runs (move, copy, open, rename, delete,
+    // delete-permanently, new-folder).
+    callback menu-command(name: string);
 
     // Scrolls as little as needed to show row `index` whole.
     public function scroll-to(index: int) {
@@ -163,89 +169,159 @@ export component FileList inherits Rectangle {
             }
         }
 
-        list := ListView {
-            accessible-label: "항목 목록";
+        Rectangle {
+            vertical-stretch: 1;
 
-            for row[i] in root.rows: Rectangle {
-                height: Theme.row-height;
-                background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
-                accessible-role: list-item;
-                accessible-label: row.name;
-                accessible-item-index: i;
-                accessible-item-selectable: true;
-                accessible-item-selected: row.selected;
-                accessible-action-default => {
-                    root.row-activated(i);
-                }
+            // The menu of the part of the list below the rows.
+            ContextMenuArea {
+                width: parent.width;
+                height: parent.height;
 
-                touch := TouchArea {
-                    pointer-event(event) => {
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                            root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                Menu {
+                    MenuItem {
+                        title: "새 폴더";
+                        activated => {
+                            root.menu-command("new-folder");
                         }
                     }
-                    double-clicked => {
-                        root.row-activated(i);
-                    }
                 }
 
-                // Hidden items show at half strength.
-                Rectangle {
-                    opacity: row.hidden ? 0.5 : 1;
+                list := ListView {
+                    width: parent.width;
+                    height: parent.height;
+                    accessible-label: "항목 목록";
 
-                    Icon {
-                        x: root.pad;
-                        y: (parent.height - self.height) / 2;
-                        width: 18px;
-                        height: 18px;
-                        name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
-                        color: row.is-dir ? Theme.folder : Theme.muted;
-                    }
-                    Text {
-                        x: root.pad + root.icon-room;
-                        width: root.name-end - self.x;
-                        height: parent.height;
-                        text: row.name;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    if root.show-size: Text {
-                        x: root.size-x;
-                        width: root.size-w;
-                        height: parent.height;
-                        text: row.size;
-                        color: Theme.muted;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    if root.show-date: Text {
-                        x: root.date-x;
-                        width: root.date-w;
-                        height: parent.height;
-                        text: row.modified;
-                        color: Theme.muted;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    if root.show-kind: Text {
-                        x: root.kind-x;
-                        width: root.kind-w;
-                        height: parent.height;
-                        text: row.kind;
-                        color: Theme.muted;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
+                    for row[i] in root.rows: Rectangle {
+                        height: Theme.row-height;
+                        background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                        accessible-role: list-item;
+                        accessible-label: row.name;
+                        accessible-item-index: i;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: row.selected;
+                        accessible-action-default => {
+                            root.row-activated(i);
+                        }
 
-                if root.active && i == root.cursor: Rectangle {
-                    x: 2px;
-                    width: parent.width - 4px;
-                    border-width: 1px;
-                    border-color: Theme.accent;
-                    border-radius: 4px;
+                        row-menu := ContextMenuArea {
+                            Menu {
+                                MenuItem {
+                                    title: "이동…";
+                                    activated => {
+                                        root.menu-command("move");
+                                    }
+                                }
+                                MenuItem {
+                                    title: "복사…";
+                                    activated => {
+                                        root.menu-command("copy");
+                                    }
+                                }
+                                MenuSeparator { }
+                                MenuItem {
+                                    title: "열기";
+                                    activated => {
+                                        root.menu-command("open");
+                                    }
+                                }
+                                MenuItem {
+                                    title: "이름 바꾸기";
+                                    activated => {
+                                        root.menu-command("rename");
+                                    }
+                                }
+                                MenuSeparator { }
+                                MenuItem {
+                                    title: "휴지통으로 보내기";
+                                    activated => {
+                                        root.menu-command("delete");
+                                    }
+                                }
+                                MenuItem {
+                                    title: "영구 삭제";
+                                    activated => {
+                                        root.menu-command("delete-permanently");
+                                    }
+                                }
+                            }
+
+                            // It takes the right click itself, so the row is selected before its
+                            // menu opens.
+                            touch := TouchArea {
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                        root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                        root.row-menu(i);
+                                        row-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                    }
+                                }
+                                double-clicked => {
+                                    root.row-activated(i);
+                                }
+                            }
+                        }
+
+                        // Hidden items show at half strength.
+                        Rectangle {
+                            opacity: row.hidden ? 0.5 : 1;
+
+                            Icon {
+                                x: root.pad;
+                                y: (parent.height - self.height) / 2;
+                                width: 18px;
+                                height: 18px;
+                                name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
+                                color: row.is-dir ? Theme.folder : Theme.muted;
+                            }
+                            Text {
+                                x: root.pad + root.icon-room;
+                                width: root.name-end - self.x;
+                                height: parent.height;
+                                text: row.name;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            if root.show-size: Text {
+                                x: root.size-x;
+                                width: root.size-w;
+                                height: parent.height;
+                                text: row.size;
+                                color: Theme.muted;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            if root.show-date: Text {
+                                x: root.date-x;
+                                width: root.date-w;
+                                height: parent.height;
+                                text: row.modified;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            if root.show-kind: Text {
+                                x: root.kind-x;
+                                width: root.kind-w;
+                                height: parent.height;
+                                text: row.kind;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        if root.active && i == root.cursor: Rectangle {
+                            x: 2px;
+                            width: parent.width - 4px;
+                            border-width: 1px;
+                            border-color: Theme.accent;
+                            border-radius: 4px;
+                        }
+                    }
                 }
             }
         }

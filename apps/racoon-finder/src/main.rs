@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 #[expect(
     clippy::print_stderr,
-    reason = "the only place a startup failure can still be reported"
+    reason = "a startup failure also goes to the terminal it was started from"
 )]
 fn main() -> ExitCode {
     let start = std::env::args_os().nth(1).map(PathBuf::from);
@@ -14,6 +14,8 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
+            // A release build on Windows has no console: the user sees why in a window.
+            rf_ui::report_startup_failure(&error);
             ExitCode::FAILURE
         }
     }

@@ -5,9 +5,13 @@
 //! screens show these words instead. They say what happened to the user's item, not how the
 //! engine works.
 
-use rf_core::ErrorKind;
+use std::fmt::Write as _;
+use std::time::Duration;
+
+use rf_core::{EntryKind, ErrorKind, VPath};
 use rf_jobs::{
-    DeleteMethod, FailureReason, IssueKind, JobKind, JobSpec, JobState, Outcome, Severity,
+    DeleteMethod, FailureReason, IssueKind, ItemFailure, JobKind, JobSpec, JobState, Outcome,
+    Severity, UndoRecord,
 };
 use rf_platform::KnownFolder;
 
@@ -58,26 +62,43 @@ impl JobWork {
 
     /// The pieces the job sentences are made of.
     fn phrases(self) -> Phrases {
-        let (doing, done, object) = match self {
-            JobWork::Copy => ("복사 중", "복사했", "복사를"),
-            JobWork::Move => ("이동 중", "이동했", "이동을"),
+        let (doing, done, object, noun) = match self {
+            JobWork::Copy => ("복사 중", "복사했", "복사를", "복사"),
+            JobWork::Move => ("이동 중", "이동했", "이동을", "이동"),
             JobWork::Trash => (
                 "휴지통으로 보내는 중",
                 "휴지통으로 보냈",
                 "휴지통으로 보내기를",
+                "휴지통으로 보내기",
             ),
-            JobWork::Delete => ("삭제 중", "삭제했", "삭제를"),
-            JobWork::Rename => ("이름 바꾸는 중", "이름을 바꿨", "이름 바꾸기를"),
-            JobWork::Create => ("만드는 중", "만들었", "만들기를"),
-            JobWork::Undo => ("되돌리는 중", "되돌렸", "되돌리기를"),
-            JobWork::Redo => ("다시 실행하는 중", "다시 실행했", "다시 실행을"),
-            JobWork::Other => ("작업 중", "작업을 마쳤", "작업을"),
+            JobWork::Delete => ("삭제 중", "삭제했", "삭제를", "영구 삭제"),
+            JobWork::Rename => (
+                "이름 바꾸는 중",
+                "이름을 바꿨",
+                "이름 바꾸기를",
+                "이름 바꾸기",
+            ),
+            JobWork::Create => ("만드는 중", "만들었", "만들기를", "새로 만들기"),
+            JobWork::Undo => ("되돌리는 중", "되돌렸", "되돌리기를", "되돌리기"),
+            JobWork::Redo => (
+                "다시 실행하는 중",
+                "다시 실행했",
+                "다시 실행을",
+                "다시 실행",
+            ),
+            JobWork::Other => ("작업 중", "작업을 마쳤", "작업을", "작업"),
         };
         Phrases {
             doing,
             done,
             object,
+            noun,
         }
+    }
+
+    /// The name of the work on its own, as a recovered job's line starts: `복사`, `이동`.
+    pub fn noun(self) -> &'static str {
+        self.phrases().noun
     }
 }
 
@@ -89,6 +110,8 @@ struct Phrases {
     done: &'static str,
     /// The work as the object of a verb, with its particle: `복사를`.
     object: &'static str,
+    /// The work on its own: `복사`.
+    noun: &'static str,
 }
 
 /// What went wrong, for an error of the system or of a provider (an item with no
@@ -348,6 +371,452 @@ pub fn job_title(work: JobWork, state: JobState) -> String {
     }
 }
 
+/// The notice of a second instance of the app: the first one keeps the job journal, so the
+/// second one ends.
+pub fn already_running() -> &'static str {
+    "이미 실행 중입니다. 먼저 연 창을 쓰세요."
+}
+
+/// The title of the window that says the app could not start.
+pub fn startup_failed() -> &'static str {
+    "앱을 시작하지 못했습니다"
+}
+
+/// Why the app could not start: the window system or the renderer failed.
+pub fn no_window() -> &'static str {
+    "창을 열 수 없습니다. 화면이나 그래픽 드라이버 설정을 확인해 주세요"
+}
+
+/// Why the app could not start: the folders it keeps its settings and job journal in cannot
+/// be found or made.
+pub fn no_app_folders(kind: ErrorKind) -> String {
+    format!(
+        "설정과 작업 기록을 둘 폴더를 쓸 수 없습니다: {}",
+        error_kind(kind)
+    )
+}
+
+/// Why the app could not start: the lock of the job journal's folder could not be taken.
+pub fn lock_failed(kind: ErrorKind) -> String {
+    format!("작업 기록 폴더를 잠글 수 없습니다: {}", error_kind(kind))
+}
+
+/// The notice when the job journal could not be read or written: the jobs run on, but one
+/// that a crash cuts off may not be offered again.
+pub fn journal_error() -> &'static str {
+    "작업 기록을 저장하지 못했습니다. 작업은 계속되지만 앱이 갑자기 꺼지면 이어서 할 수 없습니다"
+}
+
+/// What the job panel shows under a job's bar: `3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 ·
+/// 대기 중인 작업 1개`. Each part shows only when it is known: the items once the plan has
+/// counted them, the speed once it is measured, the time left once the speed is, and the
+/// queue when jobs wait in it.
+pub fn job_progress(
+    done_items: u64,
+    total_items: u64,
+    bytes_per_sec: u64,
+    eta: Option<Duration>,
+    queued: usize,
+) -> String {
+    let mut parts = Vec::new();
+    if total_items > 0 {
+        parts.push(format!(
+            "{} / {total_items} 항목",
+            done_items.min(total_items)
+        ));
+    }
+    if bytes_per_sec > 0 {
+        parts.push(format!("{}/s", format_size(bytes_per_sec)));
+        if let Some(eta) = eta.filter(|eta| !eta.is_zero()) {
+            parts.push(time_left(eta));
+        }
+    }
+    if queued > 0 {
+        parts.push(format!("대기 중인 작업 {queued}개"));
+    }
+    parts.join(" · ")
+}
+
+/// `남은 시간 약 20초`, `약 3분`, `약 1시간 5분`: rounded up, so that the time never reads as
+/// shorter than it is.
+pub fn time_left(eta: Duration) -> String {
+    let secs = eta.as_secs() + u64::from(eta.subsec_nanos() > 0);
+    let about = if secs < 60 {
+        format!("{secs}초")
+    } else if secs < 3600 {
+        format!("{}분", secs.div_ceil(60))
+    } else {
+        let minutes = secs.div_ceil(60);
+        match minutes % 60 {
+            0 => format!("{}시간", minutes / 60),
+            rest => format!("{}시간 {rest}분", minutes / 60),
+        }
+    };
+    format!("남은 시간 약 {about}")
+}
+
+/// The progress line of a job that is still counting what it will do.
+pub fn job_planning() -> &'static str {
+    "준비 중"
+}
+
+/// The progress line of a job that waits for the user to answer its question.
+pub fn job_waiting() -> &'static str {
+    "답을 기다리는 중"
+}
+
+/// What a job works on, beside its title in the job panel and in the recovery window:
+/// `assets → /home/me/백업` for a transfer (the item, or `항목 3개`, and the target folder),
+/// the item or the count for a delete, `a.txt → b.txt` for a rename, the new item's path for a
+/// create, and the count for an undo.
+pub fn job_detail(spec: &JobSpec) -> String {
+    match spec {
+        JobSpec::Transfer(transfer) => {
+            let names: Vec<&VPath> = transfer.items.iter().map(|item| &item.source).collect();
+            let target = transfer
+                .items
+                .first()
+                .and_then(|item| item.target.parent())
+                .map(|folder| folder.to_string());
+            match target {
+                Some(target) => format!("{} → {target}", items_named(&names)),
+                None => items_named(&names),
+            }
+        }
+        JobSpec::Delete(delete) => items_named(&delete.paths.iter().collect::<Vec<_>>()),
+        JobSpec::Rename { from, to } => format!("{} → {}", name_of(from), name_of(to)),
+        JobSpec::Create { parent, name, .. } => parent.join(name).map_or_else(
+            |_| name.to_string_lossy().into_owned(),
+            |path| path.to_string(),
+        ),
+        JobSpec::Undo(record) => item_count(record.item_count()),
+        // A kind of job added after this was written.
+        _ => String::new(),
+    }
+}
+
+/// The notice when items cannot be copied or moved at all (a volume root, a name the target
+/// cannot take): `복사하거나 옮길 수 없습니다: 쓸 수 없는 이름이나 경로입니다`.
+pub fn cannot_transfer(kind: ErrorKind) -> String {
+    format!("복사하거나 옮길 수 없습니다: {}", error_kind(kind))
+}
+
+/// `항목 3개`.
+pub fn item_count(count: usize) -> String {
+    format!("항목 {count}개")
+}
+
+/// The name of the one item in `paths`, or the count of them.
+fn items_named(paths: &[&VPath]) -> String {
+    match paths {
+        [one] => name_of(one),
+        many => item_count(many.len()),
+    }
+}
+
+/// The last part of `path`, or the whole path for a root.
+fn name_of(path: &VPath) -> String {
+    path.file_name().map_or_else(
+        || path.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The notice of a transfer or a trash that ended as asked: `항목 3개를 이동했습니다`, with
+/// `· 건너뛴 항목 1개` when the conflict policy left items out.
+pub fn items_done(work: JobWork, count: usize, skipped: u64) -> String {
+    let done = format!("항목 {count}개를 {}습니다", work.phrases().done);
+    if skipped == 0 {
+        done
+    } else {
+        format!("{done} · 건너뛴 항목 {skipped}개")
+    }
+}
+
+/// The notice of a job some items of which failed: `항목 2개를 처리하지 못했습니다`.
+pub fn items_failed(count: usize) -> String {
+    format!("항목 {count}개를 처리하지 못했습니다")
+}
+
+/// The notice of an undo that ended as asked, naming the work it reversed from its record:
+/// `이동을 되돌렸습니다`.
+pub fn undone(record: &UndoRecord) -> String {
+    let work = match record {
+        UndoRecord::Copied { .. } => JobWork::Copy,
+        UndoRecord::Moved { .. } => JobWork::Move,
+        UndoRecord::Trashed { .. } => JobWork::Trash,
+        UndoRecord::Renamed { .. } => JobWork::Rename,
+        UndoRecord::Created { .. } => JobWork::Create,
+        // The record of an undo, or one added after this was written.
+        _ => JobWork::Other,
+    };
+    format!("{} 되돌렸습니다", work.phrases().object)
+}
+
+/// The notice of a rename or a create that failed, with why: `이름을 바꾸지 못했습니다: 같은
+/// 이름의 항목이 이미 있습니다`.
+pub fn name_refused(work: JobWork, failure: &ItemFailure) -> String {
+    let what = match work {
+        JobWork::Create => "새 폴더를 만들지 못했습니다",
+        _ => "이름을 바꾸지 못했습니다",
+    };
+    format!("{what}: {}", item_failure(failure))
+}
+
+/// Why one item failed: its [`failure_reason`] when the job refused it, else the
+/// [`error_kind`] of the error.
+pub fn item_failure(failure: &ItemFailure) -> String {
+    match &failure.reason {
+        Some(reason) => failure_reason(reason),
+        None => error_kind(failure.kind).to_owned(),
+    }
+}
+
+/// One line of the window of failed items: the item and why (`/home/me/a.txt: 권한이
+/// 없습니다`). The item is the source, or the target when there is no source.
+pub fn failure_line(failure: &ItemFailure) -> String {
+    let why = item_failure(failure);
+    match failure.source.as_ref().or(failure.target.as_ref()) {
+        Some(path) => format!("{path}: {why}"),
+        None => why,
+    }
+}
+
+/// The title of the window of failed items.
+pub fn failures_title() -> &'static str {
+    "처리하지 못한 항목"
+}
+
+/// The label of the toast's button that undoes the job it tells of.
+pub fn undo_action() -> &'static str {
+    "되돌리기"
+}
+
+/// The label of the toast's button that shows the failed items.
+pub fn details_action() -> &'static str {
+    "자세히"
+}
+
+/// The notice when the toast's job is no longer the next one to undo.
+pub fn undo_order() -> &'static str {
+    "나중에 한 작업이 있어 먼저 그 작업을 되돌려야 합니다"
+}
+
+/// The default name of a new folder.
+pub fn new_folder_name() -> &'static str {
+    "새 폴더"
+}
+
+/// The title of the window that asks for a new folder's name.
+pub fn new_folder_title() -> &'static str {
+    "새 폴더"
+}
+
+/// The title of the window that asks for an item's new name.
+pub fn rename_title() -> &'static str {
+    "이름 바꾸기"
+}
+
+/// The warning under a name that holds a character no name may have on this system.
+pub fn name_has_character(c: char) -> String {
+    format!("이름에 {} 문자를 쓸 수 없습니다", quote_char(c))
+}
+
+/// The warning under `.` or `..`, which name the folder itself and its parent.
+pub fn name_is_dots() -> &'static str {
+    "‘.’과 ‘..’은 이름으로 쓸 수 없습니다"
+}
+
+/// The title of the confirmation before a permanent delete.
+pub fn delete_permanently_title() -> &'static str {
+    "영구 삭제"
+}
+
+/// The label of the button that deletes for good.
+pub fn delete_permanently_button() -> &'static str {
+    "영구 삭제"
+}
+
+/// The question before a permanent delete the user asked for (Shift+Delete): what goes and
+/// that nothing brings it back.
+pub fn delete_permanently(count: usize) -> String {
+    format!("항목 {count}개를 영구 삭제할까요? 휴지통을 거치지 않으며 되돌릴 수 없습니다.")
+}
+
+/// The question when the folder's location has no trash (OPS-03): the items would go for
+/// good, which only the user may choose.
+pub fn trash_unavailable(count: usize) -> String {
+    format!("휴지통을 쓸 수 없는 위치입니다. 항목 {count}개를 영구 삭제할까요? 되돌릴 수 없습니다.")
+}
+
+/// The question when the trash refused some items of a trash job: they are still there, and
+/// would go for good.
+pub fn trash_refused(count: usize) -> String {
+    format!(
+        "휴지통이 받지 않은 항목이 {count}개 있습니다. 이 항목을 영구 삭제할까요? 되돌릴 수 없습니다."
+    )
+}
+
+/// The names of the items a confirmation is about: up to three, in quotes, and how many more.
+pub fn names_line(paths: &[VPath]) -> String {
+    const SHOWN: usize = 3;
+    let names: Vec<String> = paths
+        .iter()
+        .take(SHOWN)
+        .map(|path| format!("‘{}’", name_of(path)))
+        .collect();
+    let mut line = names.join(", ");
+    if paths.len() > SHOWN {
+        let _ = write!(line, " 외 {}개", paths.len() - SHOWN);
+    }
+    line
+}
+
+/// The title of the confirmation before the window closes while jobs run.
+pub fn quit_title() -> &'static str {
+    "끝낼까요?"
+}
+
+/// The label of the button that ends the app while jobs run.
+pub fn quit_button() -> &'static str {
+    "끝내기"
+}
+
+/// The question before the window closes while jobs run: they stop, and the next start offers
+/// them again.
+pub fn quit_with_jobs(count: usize) -> String {
+    format!("진행 중인 작업 {count}개가 있습니다. 끝내면 다음 실행 때 이어서 할 수 있습니다.")
+}
+
+/// What the window shows while the jobs stop before the app ends.
+pub fn closing() -> &'static str {
+    "작업을 멈추고 있습니다…"
+}
+
+/// The title of the window of the jobs that the last run did not finish.
+pub fn recovery_title(count: usize) -> String {
+    format!("지난번에 끝나지 않은 작업이 {count}개 있습니다")
+}
+
+/// What running a recovered job again may do (carry-m1-03 2): it starts over from the first
+/// item and meets what it had finished.
+pub fn recovery_note() -> &'static str {
+    "다시 실행하면 처음부터 다시 합니다. 이미 끝난 항목은 건너뛰거나 번호를 붙인 사본이 생길 수 있고, 이미 옮긴 항목은 찾을 수 없다고 나올 수 있습니다."
+}
+
+/// One recovered job: `복사 · assets → /home/me/백업 · 2026-10-28 22:08`, with `(시작 전)` when
+/// it never started and so changed nothing.
+pub fn recovered_job(spec: &JobSpec, submitted: &str, started: bool) -> String {
+    let mut line = format!("{} · {}", JobWork::of(spec).noun(), job_detail(spec));
+    if !submitted.is_empty() {
+        let _ = write!(line, " · {submitted}");
+    }
+    if !started {
+        line.push_str(" (시작 전)");
+    }
+    line
+}
+
+/// The title of the conflict window, by what is at the target already.
+pub fn conflict_title(existing: EntryKind) -> &'static str {
+    match existing {
+        EntryKind::File => "같은 이름의 파일이 이미 있습니다",
+        EntryKind::Dir => "같은 이름의 폴더가 이미 있습니다",
+        EntryKind::Symlink | EntryKind::Other => "같은 이름의 항목이 이미 있습니다",
+    }
+}
+
+/// What the conflict is about: `‘설계안.pdf’가 C:\…\백업 에 이미 있습니다.`
+pub fn conflict_description(name: &str, folder: &str) -> String {
+    format!(
+        "‘{name}’{} {folder} 에 이미 있습니다.",
+        subject_particle(name)
+    )
+}
+
+/// The head of a conflict card: the item that would come, or the one that is there.
+pub fn conflict_card(incoming: bool, kind: EntryKind) -> &'static str {
+    match (incoming, kind) {
+        (true, EntryKind::Dir) => "옮겨 올 폴더",
+        (true, _) => "옮겨 올 파일",
+        (false, EntryKind::Dir) => "이미 있는 폴더",
+        (false, _) => "이미 있는 파일",
+    }
+}
+
+/// The size of a conflict card: `1.2 MB (1,258,291 바이트)`, and the rounded size alone
+/// below 1 KB.
+pub fn exact_size(bytes: u64) -> String {
+    let rounded = format_size(bytes);
+    if bytes < 1024 {
+        return rounded;
+    }
+    let digits = bytes.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{rounded} ({grouped} 바이트)")
+}
+
+/// The hint of the overwrite choice, or why there is none: a file and a folder never replace
+/// each other.
+pub fn overwrite_hint(can_overwrite: bool) -> &'static str {
+    if can_overwrite {
+        "있던 파일을 옮겨 올 파일로 바꿉니다"
+    } else {
+        "파일과 폴더는 서로 덮어쓸 수 없습니다"
+    }
+}
+
+/// The hint of the rename choice, with the first numbered name the job tries.
+pub fn rename_hint(numbered: &str) -> String {
+    format!("‘{numbered}’처럼 번호를 붙여 저장합니다")
+}
+
+/// The warning while overwrite is chosen: what it does to the file that is there.
+pub fn overwrite_warning(apply_all: bool) -> &'static str {
+    if apply_all {
+        "남은 충돌도 모두 덮어씁니다. 있던 파일의 내용은 되살릴 수 없습니다."
+    } else {
+        "있던 파일의 내용은 되살릴 수 없습니다."
+    }
+}
+
+/// The items still to come in a job that asks about a conflict.
+pub fn items_left(count: u64) -> String {
+    format!("이 작업에 남은 항목 {count}개")
+}
+
+/// The title of the window of the pre-flight check.
+pub fn preflight_title() -> &'static str {
+    "대상 위치에 맞지 않는 항목이 있습니다"
+}
+
+/// One line of the pre-flight window: the item's name and its [`preflight_issue`].
+pub fn preflight_line(target: &VPath, issue: &IssueKind) -> String {
+    format!("{}: {}", name_of(target), preflight_issue(issue))
+}
+
+/// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
+/// Hangul is read by its last syllable, digits and Latin letters by their Korean names
+/// (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else takes `가`.
+fn subject_particle(word: &str) -> &'static str {
+    let Some(last) = word.chars().last() else {
+        return "가";
+    };
+    let final_consonant = match last {
+        '가'..='힣' => (u32::from(last) - u32::from('가')) % 28 != 0,
+        '0' | '1' | '3' | '6' | '7' | '8' => true,
+        c if c.is_ascii_alphabetic() => matches!(c.to_ascii_lowercase(), 'l' | 'm' | 'n' | 'r'),
+        _ => false,
+    };
+    if final_consonant { "이" } else { "가" }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -356,7 +825,6 @@ mod tests {
     use rf_core::VPath;
     use rf_jobs::{
         CreateKind, DeleteSpec, ErrorPolicy, TransferMode, TransferOptions, TransferSpec,
-        UndoRecord,
     };
 
     use super::*;
@@ -772,6 +1240,148 @@ mod tests {
             job_title(JobWork::Move, JobState::Finished(Outcome::Completed)),
             "이동했습니다"
         );
+    }
+
+    #[test]
+    fn job_progress_shows_what_is_known() {
+        assert_eq!(
+            job_progress(3, 12, 48 * 1024 * 1024, Some(Duration::from_secs(20)), 1),
+            "3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 · 대기 중인 작업 1개"
+        );
+        // Before the speed is measured there is no time left either.
+        assert_eq!(
+            job_progress(0, 12, 0, Some(Duration::from_secs(20)), 0),
+            "0 / 12 항목"
+        );
+        assert_eq!(job_progress(0, 0, 0, None, 2), "대기 중인 작업 2개");
+        assert_eq!(job_progress(0, 0, 0, None, 0), "");
+        // Never more done than planned.
+        assert_eq!(job_progress(13, 12, 0, None, 0), "12 / 12 항목");
+        assert_eq!(
+            time_left(Duration::from_millis(19_200)),
+            "남은 시간 약 20초"
+        );
+        assert_eq!(time_left(Duration::from_secs(150)), "남은 시간 약 3분");
+        assert_eq!(time_left(Duration::from_hours(1)), "남은 시간 약 1시간");
+        assert_eq!(time_left(Duration::from_mins(65)), "남은 시간 약 1시간 5분");
+    }
+
+    #[test]
+    fn job_details_name_the_items_and_the_target() {
+        let copy = JobSpec::Transfer(
+            TransferSpec::into_dir(
+                TransferMode::Copy,
+                &[path("assets")],
+                &path("백업"),
+                TransferOptions::default(),
+            )
+            .expect("a transfer"),
+        );
+        assert_eq!(job_detail(&copy), format!("assets → {}", path("백업")));
+        let delete = JobSpec::Delete(DeleteSpec {
+            paths: vec![path("a"), path("b")],
+            method: DeleteMethod::Trash,
+            errors: ErrorPolicy::default(),
+        });
+        assert_eq!(job_detail(&delete), "항목 2개");
+        let rename = JobSpec::Rename {
+            from: path("a.txt"),
+            to: path("b.txt"),
+        };
+        assert_eq!(job_detail(&rename), "a.txt → b.txt");
+        assert_eq!(
+            recovered_job(&copy, "2026-10-28 22:08", true),
+            format!("복사 · assets → {} · 2026-10-28 22:08", path("백업"))
+        );
+        assert_eq!(
+            recovered_job(&delete, "", false),
+            "휴지통으로 보내기 · 항목 2개 (시작 전)"
+        );
+    }
+
+    #[test]
+    fn toasts_tell_what_happened() {
+        assert_eq!(items_done(JobWork::Move, 3, 0), "항목 3개를 이동했습니다");
+        assert_eq!(
+            items_done(JobWork::Copy, 3, 1),
+            "항목 3개를 복사했습니다 · 건너뛴 항목 1개"
+        );
+        assert_eq!(
+            items_done(JobWork::Trash, 1, 0),
+            "항목 1개를 휴지통으로 보냈습니다"
+        );
+        assert_eq!(items_failed(2), "항목 2개를 처리하지 못했습니다");
+        let moved = UndoRecord::Moved {
+            moves: Vec::new(),
+            created_dirs: Vec::new(),
+            removed_dirs: Vec::new(),
+            overwritten: 0,
+            copied_dirs: Vec::new(),
+        };
+        assert_eq!(undone(&moved), "이동을 되돌렸습니다");
+        assert_eq!(
+            undone(&UndoRecord::Trashed { items: Vec::new() }),
+            "휴지통으로 보내기를 되돌렸습니다"
+        );
+        let failure = ItemFailure {
+            source: Some(path("a.txt")),
+            target: Some(path("b.txt")),
+            stage: rf_jobs::Stage::Rename,
+            kind: ErrorKind::AlreadyExists,
+            message: String::new(),
+            reason: None,
+        };
+        assert_eq!(
+            name_refused(JobWork::Rename, &failure),
+            "이름을 바꾸지 못했습니다: 같은 이름의 항목이 이미 있습니다"
+        );
+        assert_eq!(
+            failure_line(&failure),
+            format!("{}: 같은 이름의 항목이 이미 있습니다", path("a.txt"))
+        );
+        let refused = ItemFailure {
+            reason: Some(FailureReason::Issue(IssueKind::ReservedName)),
+            kind: ErrorKind::InvalidPath,
+            ..failure
+        };
+        assert_eq!(
+            name_refused(JobWork::Create, &refused),
+            "새 폴더를 만들지 못했습니다: Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등). 이 이름은 쓸 수 없습니다"
+        );
+    }
+
+    #[test]
+    fn conflict_words_follow_the_mockup() {
+        assert_eq!(
+            conflict_description("설계안.pdf", "C:\\사용자\\문서\\백업"),
+            "‘설계안.pdf’가 C:\\사용자\\문서\\백업 에 이미 있습니다."
+        );
+        // The particle follows how the name ends.
+        assert!(conflict_description("사진", "x").starts_with("‘사진’이"));
+        assert!(conflict_description("보고서", "x").starts_with("‘보고서’가"));
+        assert!(conflict_description("data.xml", "x").starts_with("‘data.xml’이"));
+        assert!(conflict_description("v3", "x").starts_with("‘v3’이"));
+        assert!(conflict_description("v2", "x").starts_with("‘v2’가"));
+        assert_eq!(exact_size(1_258_291), "1.2 MB (1,258,291 바이트)");
+        assert_eq!(exact_size(1_003_520), "980 KB (1,003,520 바이트)");
+        assert_eq!(exact_size(512), "512 바이트");
+        assert_eq!(
+            conflict_title(EntryKind::File),
+            "같은 이름의 파일이 이미 있습니다"
+        );
+        assert_eq!(
+            conflict_title(EntryKind::Dir),
+            "같은 이름의 폴더가 이미 있습니다"
+        );
+        assert_eq!(conflict_card(true, EntryKind::File), "옮겨 올 파일");
+        assert_eq!(conflict_card(false, EntryKind::Dir), "이미 있는 폴더");
+        assert_eq!(
+            rename_hint("설계안 (2).pdf"),
+            "‘설계안 (2).pdf’처럼 번호를 붙여 저장합니다"
+        );
+        assert_eq!(overwrite_hint(true), "있던 파일을 옮겨 올 파일로 바꿉니다");
+        assert!(overwrite_warning(true).contains("남은 충돌도 모두 덮어씁니다"));
+        assert_eq!(names_line(&[path("a")]), "‘a’");
     }
 
     #[test]
