@@ -732,6 +732,7 @@ impl Controller {
             rows.iter().map(ui_bridge::job_row_view).collect(),
         );
         window.set_can_undo(state.can_undo());
+        window.set_notice_action_live(state.toast_button_live());
     }
 
     /// Shows the dialog of the state, setting its view before its kind (the dialog reads the

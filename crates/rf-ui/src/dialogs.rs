@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{
     Conflict, ConflictAction, ConflictAnswer, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy,
-    IncompleteJob, Issue, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer, Severity,
+    IncompleteJob, Issue, IssueKind, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer, Severity,
     numbered_name,
 };
 
@@ -368,10 +368,13 @@ impl PreflightQuestion {
     }
 
     /// Whether an item cannot be written at all, which makes "skip the blocked items" a choice.
+    /// Too little space is no such item: the engine leaves nothing out for it, so the choice
+    /// would do what "go on" does.
     pub fn has_blocked(&self) -> bool {
-        self.issues
-            .iter()
-            .any(|issue| issue.kind.severity() == Severity::Blocking)
+        self.issues.iter().any(|issue| {
+            issue.kind.severity() == Severity::Blocking
+                && !matches!(issue.kind, IssueKind::NotEnoughSpace { .. })
+        })
     }
 
     /// The answer for the button `choice`: 0 go on as it is, 1 leave out the blocked items,
@@ -476,13 +479,13 @@ mod tests {
         assert_eq!(asked.ok, "영구 삭제");
         assert_eq!(
             asked.message,
-            "항목 4개를 영구 삭제할까요? 휴지통을 거치지 않으며 되돌릴 수 없습니다."
+            "항목 4개를 영구 삭제할까요?\n휴지통을 거치지 않으며 되돌릴 수 없습니다."
         );
         assert_eq!(asked.detail, "‘a.txt’, ‘b’, ‘c’ 외 1개");
         let no_trash = Confirm::delete_permanently(paths[..1].to_vec(), DeleteWhy::NoTrash);
         assert_eq!(
             no_trash.message,
-            "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
+            "휴지통을 쓸 수 없는 위치입니다.\n항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
         );
         assert_eq!(no_trash.detail, "‘a.txt’");
         assert_eq!(
@@ -502,7 +505,7 @@ mod tests {
         assert_eq!(quit.job(), None);
         assert_eq!(
             quit.message,
-            "진행 중인 작업 2개가 있습니다. 끝내면 다음 실행 때 이어서 할 수 있습니다."
+            "진행 중인 작업 2개가 있습니다.\n끝내면 다음 실행 때 이어서 할 수 있습니다."
         );
     }
 
@@ -572,14 +575,34 @@ mod tests {
             job: JobId(1),
             issues: vec![Issue {
                 target: path("CON"),
-                kind: rf_jobs::IssueKind::ReservedName,
+                kind: IssueKind::ReservedName,
             }],
         };
         assert!(!question.has_blocked());
+        // Too little space lets the job start; leaving out "blocked" items changes nothing.
+        let space = PreflightQuestion {
+            issues: vec![Issue {
+                target: path("백업"),
+                kind: IssueKind::NotEnoughSpace {
+                    needed: 2048,
+                    available: 1024,
+                },
+            }],
+            ..question.clone()
+        };
+        assert!(!space.has_blocked());
+        let long = PreflightQuestion {
+            issues: vec![Issue {
+                target: path("a"),
+                kind: IssueKind::NameTooLong { len: 300, max: 255 },
+            }],
+            ..question.clone()
+        };
+        assert!(long.has_blocked());
         assert_eq!(
             question.lines(),
             [
-                "CON: Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등). 그대로 두면 Windows에서 열기 어려울 수 있습니다"
+                "CON: Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등).\n그대로 두면 Windows에서 열기 어려울 수 있습니다"
             ]
         );
     }

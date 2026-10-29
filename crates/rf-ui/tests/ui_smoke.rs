@@ -425,10 +425,25 @@ fn a_toast_button_answers_with_its_token() {
         .expect("the toast's button")
         .invoke_accessible_default_action();
     assert_eq!(clicked.borrow().as_slice(), [("action", 7)]);
+    // A button that would no longer do what it says is hidden.
+    window.invoke_show_toast("항목 1개를 이동했습니다".into(), "되돌리기".into(), 9);
+    assert_eq!(
+        labelled(&window, "되돌리기", AccessibleRole::Button).len(),
+        2
+    );
+    window.set_notice_action_live(false);
+    assert_eq!(
+        labelled(&window, "되돌리기", AccessibleRole::Button).len(),
+        1
+    );
+    window.set_notice_action_live(true);
     // A plain notice has no button; replacing a toast tells the old one is gone.
     window.invoke_show_toast("다른 알림".into(), "자세히".into(), 8);
     window.invoke_show_notice("알림".into());
-    assert_eq!(clicked.borrow().as_slice(), [("action", 7), ("closed", 8)]);
+    assert_eq!(
+        clicked.borrow().as_slice(),
+        [("action", 7), ("closed", 9), ("closed", 8)]
+    );
     assert!(labelled(&window, "자세히", AccessibleRole::Button).is_empty());
 }
 
@@ -449,14 +464,15 @@ fn a_dialog_takes_the_keys_until_it_closes() {
 
     window.set_confirm_view(ConfirmView {
         title: "영구 삭제".into(),
-        message: "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
+        message: "휴지통을 쓸 수 없는 위치입니다.\n항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
             .into(),
         detail: "‘a.txt’".into(),
         ok_text: "영구 삭제".into(),
         danger: true,
     });
     window.set_dialog(DialogKind::Confirm);
-    let message = "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다.";
+    let message =
+        "휴지통을 쓸 수 없는 위치입니다.\n항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다.";
     assert_eq!(labelled(&window, message, AccessibleRole::Text).len(), 1);
     // The panes get no key while it shows, and Enter does not delete.
     let down = char::from(Key::DownArrow).to_string();

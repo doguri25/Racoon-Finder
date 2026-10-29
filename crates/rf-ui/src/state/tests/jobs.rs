@@ -144,7 +144,7 @@ fn delete_checks_for_a_trash_and_never_deletes_for_good_unasked() {
     };
     assert_eq!(
         confirm.message,
-        "휴지통을 쓸 수 없는 위치입니다. 항목 2개를 영구 삭제할까요? 되돌릴 수 없습니다."
+        "휴지통을 쓸 수 없는 위치입니다.\n항목 2개를 영구 삭제할까요? 되돌릴 수 없습니다."
     );
     assert!(confirm.danger);
     // No keeps the items.
@@ -167,7 +167,7 @@ fn delete_checks_for_a_trash_and_never_deletes_for_good_unasked() {
     };
     assert_eq!(
         confirm.message,
-        "항목 2개를 영구 삭제할까요? 휴지통을 거치지 않으며 되돌릴 수 없습니다."
+        "항목 2개를 영구 삭제할까요?\n휴지통을 거치지 않으며 되돌릴 수 없습니다."
     );
     assert_eq!(confirm.purpose, ConfirmPurpose::DeletePermanently(paths));
 }
@@ -489,7 +489,7 @@ fn closing_with_jobs_asks_first_then_leaves_questions_for_the_release() {
     assert_eq!(confirm.purpose, ConfirmPurpose::Quit);
     assert_eq!(
         confirm.message,
-        "진행 중인 작업 1개가 있습니다. 끝내면 다음 실행 때 이어서 할 수 있습니다."
+        "진행 중인 작업 1개가 있습니다.\n끝내면 다음 실행 때 이어서 할 수 있습니다."
     );
     // Staying brings the question back, still unanswered.
     assert_eq!(state.dialog_cancelled(), []);
@@ -677,5 +677,237 @@ fn the_job_panel_buttons_reach_their_job() {
     assert_eq!(
         state.job_control(0, 2),
         [Effect::Job(JobEffect::Cancel(JobId(4)))]
+    );
+}
+
+fn trashed(paths: &[VPath]) -> UndoRecord {
+    UndoRecord::Trashed {
+        items: paths
+            .iter()
+            .map(|path| rf_jobs::TrashedItem {
+                original: path.clone(),
+                location: None,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn an_undo_never_offers_a_permanent_delete() {
+    // An undo of a copy trashes the copies; where the trash refuses one, the undo has failed
+    // for it, and that is all: an undo never deletes anything for good.
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let spec = JobSpec::Undo(UndoRecord::Copied {
+        created: Vec::new(),
+        overwritten: 0,
+        at: None,
+    });
+    let effects = finish(&mut state, 1, &spec, JobWork::Undo, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(failure(
+            in_a("a.txt"),
+            ErrorKind::Unsupported,
+            Some(FailureReason::TrashRefused),
+        ));
+    });
+    assert_eq!(state.modal(), None);
+    let (token, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        ("항목 1개를 처리하지 못했습니다", "자세히")
+    );
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed item and why");
+    };
+    assert!(
+        failures.lines[0].ends_with("휴지통으로 보낼 수 없습니다"),
+        "{:?}",
+        failures.lines
+    );
+}
+
+#[test]
+fn a_partly_refused_trash_tells_what_went_and_asks_about_the_rest() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = delete(vec![in_a("a.txt"), in_a("b.txt")], DeleteMethod::Trash);
+    let record = trashed(&[in_a("a.txt")]);
+    state.set_history(History {
+        top: Some(record.clone()),
+        can_redo: false,
+    });
+    let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.undo = Some(record.clone());
+        report.failures.push(failure(
+            in_a("b.txt"),
+            ErrorKind::Unsupported,
+            Some(FailureReason::TrashRefused),
+        ));
+    });
+    // What went can come back...
+    let (token, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        ("항목 1개를 휴지통으로 보냈습니다", "되돌리기")
+    );
+    // ...and what stayed is asked about.
+    let Some(Modal::Confirm(confirm)) = state.modal() else {
+        panic!("the refused item is asked about");
+    };
+    assert_eq!(
+        confirm.purpose,
+        ConfirmPurpose::DeletePermanently(vec![in_a("b.txt")])
+    );
+    // Once the question is answered, the toast's button still undoes the trash.
+    state.dialog_cancelled();
+    assert!(state.toast_button_live());
+    assert_eq!(state.toast_clicked(token), [Effect::Job(JobEffect::Undo)]);
+}
+
+#[test]
+fn what_was_deleted_instead_of_trashed_has_no_undo() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = delete(vec![in_a("a.txt"), in_a("b.txt")], DeleteMethod::Trash);
+    let gone = |path: VPath| ItemFailure {
+        source: Some(path),
+        target: None,
+        stage: rf_jobs::Stage::Delete,
+        kind: ErrorKind::Unsupported,
+        message: String::new(),
+        reason: Some(FailureReason::DeletedNotTrashed),
+    };
+    let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
+        report.warnings.push(gone(in_a("a.txt")));
+        report.warnings.push(gone(in_a("b.txt")));
+    });
+    let (_, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        ("항목 2개가 휴지통에 들어가지 않고 영구 삭제되었습니다", "")
+    );
+    assert!(!state.toast_button_live());
+
+    // One trashed, one deleted for good: the button brings back the one that can come back.
+    let record = trashed(&[in_a("a.txt")]);
+    let effects = finish(&mut state, 2, &spec, JobWork::Trash, |report| {
+        report.undo = Some(record.clone());
+        report.warnings.push(gone(in_a("b.txt")));
+    });
+    let (_, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        (
+            "항목 1개를 휴지통으로 보냈고, 1개는 휴지통 대신 영구 삭제되었습니다",
+            "되돌리기"
+        )
+    );
+}
+
+#[test]
+fn skipped_items_are_not_counted_as_done() {
+    let mut state = ready(vec![file("a"), file("b"), file("c")], vec![]);
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[in_a("a"), in_a("b"), in_a("c")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.done.files = 1;
+        report.skipped = 2;
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "항목 3개 중 1개를 복사했습니다 · 2개 건너뜀"
+    );
+    // All of them skipped: nothing was copied, and there is nothing to undo.
+    let effects = finish(&mut state, 2, &spec, JobWork::Copy, |report| {
+        report.skipped = 3;
+    });
+    let (_, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        ("항목 3개를 건너뛰었습니다", "")
+    );
+}
+
+#[test]
+fn the_toast_button_hides_once_it_would_not_undo() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let spec = delete(vec![in_a("a.txt")], DeleteMethod::Trash);
+    let record = moved("a.txt");
+    state.set_history(History {
+        top: Some(record.clone()),
+        can_redo: false,
+    });
+    let effects = finish(&mut state, 1, &spec, JobWork::Move, |report| {
+        report.undo = Some(record.clone());
+    });
+    let (token, _, _) = the_toast(&effects);
+    assert!(state.toast_button_live());
+
+    // An undo under way (a recovered one, say): the button hides; a click that came first is
+    // told why.
+    state.track(Started {
+        id: JobId(2),
+        spec: None,
+        work: JobWork::Undo,
+        origin: None,
+        via_history: true,
+    });
+    assert!(!state.toast_button_live());
+    assert_eq!(
+        state.toast_clicked(token),
+        [Effect::Notice(
+            "되돌리기나 다시 실행이 진행 중입니다. 끝난 뒤에 다시 해 보세요".to_owned()
+        )]
+    );
+
+    // A later job is next to undo: hidden too, and told so.
+    let effects = finish(&mut state, 3, &spec, JobWork::Move, |report| {
+        report.undo = Some(record.clone());
+    });
+    state.job_event(JobEvent::Finished {
+        id: JobId(2),
+        report: Arc::new(JobReport::new(JobId(2), &spec)),
+    });
+    let (token, _, _) = the_toast(&effects);
+    state.set_history(History {
+        top: Some(moved("other.txt")),
+        can_redo: false,
+    });
+    assert!(!state.toast_button_live());
+    assert_eq!(
+        state.toast_clicked(token),
+        [Effect::Notice(
+            "나중에 한 작업이 있어 먼저 그 작업을 되돌려야 합니다".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn the_same_confirmation_asks_once() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let paths = vec![in_a("a.txt")];
+    // Delete pressed twice before the first answer came from the worker.
+    state.trash_checked(paths.clone(), false);
+    state.trash_checked(paths.clone(), false);
+    assert!(matches!(state.modal(), Some(Modal::Confirm(_))));
+    assert_eq!(state.dialog_cancelled(), []);
+    assert_eq!(state.modal(), None);
+    // Another question about other items still comes.
+    state.trash_checked(paths, false);
+    state.trash_checked(vec![in_a("b.txt")], false);
+    state.dialog_cancelled();
+    let Some(Modal::Confirm(confirm)) = state.modal() else {
+        panic!("the second question");
+    };
+    assert_eq!(
+        confirm.purpose,
+        ConfirmPurpose::DeletePermanently(vec![in_a("b.txt")])
     );
 }

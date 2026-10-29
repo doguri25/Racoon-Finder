@@ -67,6 +67,9 @@ export component MainWindow inherits Window {
     in property <PreflightView> preflight-view;
     in property <ConflictView> conflict-view;
     in property <string> closing-text;
+    // Whether the toast's button still does what it says; it hides when it does not (an undo
+    // whose job is no longer the next one to undo, or while an undo runs).
+    in property <bool> notice-action-live: true;
     // How many rows PageUp and PageDown move (the panes are equally tall).
     out property <int> page-rows: left.page-rows;
 
@@ -534,7 +537,7 @@ export component MainWindow inherits Window {
         x: root.width - self.width - 24px;
         y: root.height - self.height - 24px - jobs.height;
         message: root.notice;
-        action: root.notice-action-text;
+        action: root.notice-action-live ? root.notice-action-text : "";
         action-clicked => {
             root.notice = "";
             notice-timer.stop();

@@ -15,6 +15,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use rf_jobs::{
@@ -94,33 +95,36 @@ impl Jobs {
     /// every event of the engine to `on_event`. The engine's questions go to `on_question`
     /// (see [`UiResolver::new`]). Both are called on threads of their own and must not block.
     ///
-    /// Fails when the bridge thread cannot start; the engine is then ended again.
+    /// The bridge thread starts first and waits for the engine's receiver, so a bridge that
+    /// cannot start fails this before any engine runs: there is nothing to shut down then, and
+    /// nothing here waits for the engine.
     pub fn start(
         journal_dir: &Path,
         on_event: impl Fn(JobEvent) + Send + 'static,
         on_question: impl Fn(Question) -> bool + Send + Sync + 'static,
     ) -> std::io::Result<Jobs> {
+        let (hand_over, handed) = mpsc::channel::<Receiver<JobEvent>>();
+        std::thread::Builder::new()
+            .name("rf-ui-jobs".to_owned())
+            .spawn(move || {
+                // Without a receiver (the engine never started) there is nothing to bridge.
+                if let Ok(events) = handed.recv() {
+                    for event in events {
+                        on_event(event);
+                    }
+                }
+            })?;
         let resolver = Arc::new(UiResolver::new(on_question));
         let config = EngineConfig::new(Vfs::with_local(), Arc::clone(&resolver) as _)
             .with_journal(journal_dir);
         let (engine, events) = JobEngine::start(config);
-        let bridge = std::thread::Builder::new()
-            .name("rf-ui-jobs".to_owned())
-            .spawn(move || {
-                for event in events {
-                    on_event(event);
-                }
-            });
-        let jobs = Jobs {
+        // The bridge waits for it; it ends only after this.
+        let _ = hand_over.send(events);
+        Ok(Jobs {
             engine,
             resolver,
             closed: Arc::new(AtomicBool::new(false)),
-        };
-        if let Err(error) = bridge {
-            jobs.close_down(Duration::ZERO);
-            return Err(error);
-        }
-        Ok(jobs)
+        })
     }
 
     pub fn engine(&self) -> &JobEngine {
@@ -582,8 +586,8 @@ mod tests {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].title, "복사 중");
         assert_eq!(shown[0].progress, "준비 중");
-        let target = path("백업").to_string();
-        assert_eq!(shown[0].detail, format!("assets → {target}"));
+        // The target folder by its name, as the 화면 사양 shows it.
+        assert_eq!(shown[0].detail, "assets → 백업");
 
         rows.apply(JobEvent::Planned {
             id: JobId(1),

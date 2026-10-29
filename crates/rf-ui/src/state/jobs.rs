@@ -5,8 +5,8 @@
 
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
-    DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobSpec, Outcome,
-    TransferMode, TransferOptions, TransferSpec,
+    DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
+    JobSpec, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 
 use super::{AppState, Effect, RIGHT, ToastAction};
@@ -282,17 +282,33 @@ impl AppState {
             return Vec::new();
         };
         match action {
-            ToastAction::Undo(record) => {
-                if self.history.top.as_ref() == Some(&record) && self.can_undo() {
-                    vec![Effect::Job(JobEffect::Undo)]
-                } else {
-                    vec![Effect::Notice(words::undo_order().to_owned())]
-                }
+            // The window hides the button when it would not undo; a click that came first is
+            // told why.
+            ToastAction::Undo(_) if self.jobs.undo_running() => {
+                vec![Effect::Notice(words::undo_busy().to_owned())]
             }
+            ToastAction::Undo(record) if self.history.top.as_ref() != Some(&record) => {
+                vec![Effect::Notice(words::undo_order().to_owned())]
+            }
+            ToastAction::Undo(_) => vec![Effect::Job(JobEffect::Undo)],
             ToastAction::Details(failures) => {
                 self.open(Modal::Failures(failures));
                 Vec::new()
             }
+        }
+    }
+
+    /// Whether the button of the toast on screen still does what it says. The window hides it
+    /// once it does not: an undo whose job is no longer the next one to undo, or while an undo
+    /// or a redo runs; and any button once the history has moved on from the toast (an undo
+    /// from the keyboard drops the toast's action).
+    pub fn toast_button_live(&self) -> bool {
+        match &self.toast {
+            None => false,
+            Some((_, ToastAction::Undo(record))) => {
+                !self.jobs.undo_running() && self.history.top.as_ref() == Some(record)
+            }
+            Some((_, ToastAction::Details(_))) => true,
         }
     }
 
@@ -406,69 +422,107 @@ impl AppState {
             effects.extend(self.select_output(side, output));
         }
 
-        // The items the trash refused are still there; only the user may delete them for good.
+        // Only a trash job offers to delete for good what its trash refused. An undo also
+        // trashes (the copies it takes back), but an undo never deletes anything for good
+        // (the undo contract of rf-jobs): its refusals are failures like any other.
+        let refusal = |failure: &&ItemFailure| {
+            work == JobWork::Trash && failure.reason == Some(FailureReason::TrashRefused)
+        };
         let refused: Vec<VPath> = report
             .failures
             .iter()
-            .filter(|failure| failure.reason == Some(FailureReason::TrashRefused))
+            .filter(refusal)
             .filter_map(|failure| failure.source.clone())
             .collect();
+        let failures: Vec<&ItemFailure> = report
+            .failures
+            .iter()
+            .filter(|failure| !refusal(failure))
+            .collect();
+        if !failures.is_empty() {
+            effects.push(self.failure_notice(work, &failures));
+        } else if work == JobWork::Trash {
+            effects.extend(self.trash_toast(&report));
+        } else {
+            effects.extend(self.done_toast(work, &report));
+        }
+        // The items the trash refused are still there; only the user may delete them for good,
+        // after what did go to the trash has been told.
         if !refused.is_empty() {
             self.open(Modal::Confirm(Confirm::delete_permanently(
                 refused,
                 DeleteWhy::TrashRefused,
             )));
         }
-        let failures: Vec<&ItemFailure> = report
-            .failures
+        effects
+    }
+
+    /// The notice of a job some items of which failed: why, for a rename or a create (one
+    /// item); for the others a toast whose button lists the items and why.
+    fn failure_notice(&mut self, work: JobWork, failures: &[&ItemFailure]) -> Effect {
+        if matches!(work, JobWork::Create | JobWork::Rename) {
+            return Effect::Notice(words::name_refused(work, failures[0]));
+        }
+        let shown = Failures {
+            title: words::failures_title().to_owned(),
+            lines: failures
+                .iter()
+                .map(|failure| words::failure_line(failure))
+                .collect(),
+        };
+        self.toast(
+            words::items_failed(failures.len()),
+            Some(ToastAction::Details(shown)),
+        )
+    }
+
+    /// The toast of a trash job without failures other than refusals: what went to the trash,
+    /// which its button brings back, and what the location deleted for good instead, which
+    /// nothing brings back (a `DeletedNotTrashed` warning).
+    fn trash_toast(&mut self, report: &JobReport) -> Option<Effect> {
+        let trashed = report.undo.as_ref().map_or(0, UndoRecord::item_count);
+        let gone = report
+            .warnings
             .iter()
-            .filter(|failure| failure.reason != Some(FailureReason::TrashRefused))
-            .collect();
-        if let Some(first) = failures.first() {
-            if matches!(work, JobWork::Create | JobWork::Rename) {
-                effects.push(Effect::Notice(words::name_refused(work, first)));
-            } else {
-                let lines = failures.iter().map(|failure| words::failure_line(failure));
-                let failures_shown = Failures {
-                    title: words::failures_title().to_owned(),
-                    lines: lines.collect(),
-                };
-                effects.push(self.toast(
-                    words::items_failed(failures.len()),
-                    Some(ToastAction::Details(failures_shown)),
-                ));
-            }
-            return effects;
+            .filter(|warning| warning.reason == Some(FailureReason::DeletedNotTrashed))
+            .count();
+        if trashed == 0 && gone == 0 {
+            return (report.outcome == Outcome::Aborted)
+                .then(|| self.toast(words::outcome(Outcome::Aborted, JobWork::Trash), None));
         }
-        if !report.failures.is_empty() {
-            // Only refusals of the trash, which the confirmation tells of.
-            return effects;
-        }
+        let action = report
+            .undo
+            .clone()
+            .filter(|_| trashed > 0)
+            .map(ToastAction::Undo);
+        Some(self.toast(words::trash_done(trashed, gone), action))
+    }
+
+    /// The toast of a job other than a trash that ended without failures.
+    fn done_toast(&mut self, work: JobWork, report: &JobReport) -> Option<Effect> {
         match (report.outcome, work) {
-            (Outcome::Completed, JobWork::Copy | JobWork::Move | JobWork::Trash) => {
+            (Outcome::Completed, JobWork::Copy | JobWork::Move) => {
                 let work = if report.copied_instead_of_moved {
                     JobWork::Copy
                 } else {
                     work
                 };
-                let text = words::items_done(work, top_level_count(&report.spec), report.skipped);
+                let done = report.done.files.saturating_add(report.done.dirs);
+                let count = top_level_count(&report.spec);
+                let text = words::items_done(work, count, done, report.skipped);
                 let action = report.undo.clone().map(ToastAction::Undo);
-                effects.push(self.toast(text, action));
+                Some(self.toast(text, action))
             }
-            (Outcome::Completed, JobWork::Undo) => {
-                if let JobSpec::Undo(record) = &report.spec {
-                    effects.push(self.toast(words::undone(record), None));
-                }
-            }
+            (Outcome::Completed, JobWork::Undo) => match &report.spec {
+                JobSpec::Undo(record) => Some(self.toast(words::undone(record), None)),
+                _ => None,
+            },
             (Outcome::Completed, JobWork::Redo) => {
-                effects.push(self.toast(words::outcome(Outcome::Completed, work), None));
+                Some(self.toast(words::outcome(Outcome::Completed, work), None))
             }
-            (Outcome::Aborted, _) => {
-                effects.push(self.toast(words::outcome(Outcome::Aborted, work), None));
-            }
-            _ => {}
+            (Outcome::Aborted, _) => Some(self.toast(words::outcome(Outcome::Aborted, work), None)),
+            _ => None,
         }
-        effects
     }
 
     /// Selects `output`, the item a create or a rename made, in pane `side` if it still shows
@@ -509,6 +563,14 @@ impl AppState {
     fn open(&mut self, modal: Modal) {
         if self.quitting {
             return;
+        }
+        // The same confirmation twice (Delete pressed again before the first one showed, or a
+        // refusal of items already asked about) asks once.
+        if let Modal::Confirm(confirm) = &modal {
+            let asks_the_same = |other: &Modal| matches!(other, Modal::Confirm(other) if other.purpose == confirm.purpose);
+            if self.modal.iter().chain(&self.later).any(asks_the_same) {
+                return;
+            }
         }
         if self.modal.is_none() {
             self.modal = Some(modal);

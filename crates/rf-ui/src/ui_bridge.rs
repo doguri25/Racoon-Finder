@@ -17,7 +17,12 @@ use crate::controller::{self, Controller};
 use crate::dialogs::{
     Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
 };
-use crate::format::{format_size, format_time_in, kind_label};
+use crate::format::{format_size, format_time_in, kind_label, short_path};
+
+/// How many characters the folder of a conflict card shows, and the folder in its sentence;
+/// the middle of a longer path is left out, so that its end stays in view.
+const CARD_PLACE_CHARS: usize = 36;
+const SENTENCE_PLACE_CHARS: usize = 48;
 use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::places::{Place, PlaceKind};
@@ -595,9 +600,9 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
             |name| name.to_string_lossy().into_owned(),
         )
     };
-    let folder_of = |path: &VPath| {
+    let folder_of = |path: &VPath, max: usize| {
         path.parent()
-            .map(|folder| folder.to_string())
+            .map(|folder| short_path(&folder.to_string(), max))
             .unwrap_or_default()
     };
     let size = |entry: &Entry| {
@@ -615,15 +620,19 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
             .unwrap_or_else(|| "-".to_owned())
     };
     let existing_name = name_of(&conflict.target);
-    let existing_folder = folder_of(&conflict.target);
+    let existing_folder = folder_of(&conflict.target, CARD_PLACE_CHARS);
     let can_overwrite = question.can_overwrite();
     ConflictView {
         serial: i32::try_from(question.id % 0x7FFF_FFFF).unwrap_or(0),
         title: words::conflict_title(conflict.existing.kind).into(),
-        description: words::conflict_description(&existing_name, &existing_folder).into(),
+        description: words::conflict_description(
+            &existing_name,
+            &folder_of(&conflict.target, SENTENCE_PLACE_CHARS),
+        )
+        .into(),
         incoming_label: words::conflict_card(true, conflict.incoming.kind).into(),
         incoming_name: name_of(&conflict.source).into(),
-        incoming_place: folder_of(&conflict.source).into(),
+        incoming_place: folder_of(&conflict.source, CARD_PLACE_CHARS).into(),
         incoming_size: size(&conflict.incoming).into(),
         incoming_time: time(&conflict.incoming).into(),
         incoming_newer,

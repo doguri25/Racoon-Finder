@@ -89,6 +89,43 @@ pub fn format_time_in(t: SystemTime, tz: &TimeZone) -> String {
     }
 }
 
+/// `path`, as the screen shows it, shortened in the middle to about `max` characters: its start
+/// (the root or the drive) and as many of its last parts as fit, with `…` between them
+/// (`C:\…\문서\백업`, `/…/작업/백업`). The end of the path, where it differs from its
+/// neighbours, stays in view. A path that fits is returned as it is; the last part is kept
+/// whole, even when it alone is longer.
+pub fn short_path(path: &str, max: usize) -> String {
+    if path.chars().count() <= max {
+        return path.to_owned();
+    }
+    let sep = if path.contains('\\') && !path.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let parts: Vec<&str> = path.split(sep).collect();
+    let Some((first, rest)) = parts.split_first() else {
+        return path.to_owned();
+    };
+    let head = format!("{first}{sep}…");
+    let mut length = head.chars().count();
+    let mut kept: Vec<&str> = Vec::new();
+    for part in rest.iter().rev() {
+        let more = part.chars().count() + 1;
+        if !kept.is_empty() && length + more > max {
+            break;
+        }
+        kept.push(part);
+        length += more;
+    }
+    if kept.len() == rest.len() {
+        return path.to_owned();
+    }
+    kept.reverse();
+    let sep = sep.to_string();
+    format!("{head}{sep}{}", kept.join(&sep))
+}
+
 /// The kind column of `entry`: what a folder, a link and a special file are, and for a file
 /// the kind its extension names (`PDF 문서`, `PNG 이미지`, `CSV 파일`), or `파일` without one.
 /// A folder named `….app` is a macOS app bundle and reads `응용 프로그램`.
@@ -136,6 +173,27 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn long_paths_lose_their_middle() {
+        assert_eq!(short_path("/home/me/작업/백업", 40), "/home/me/작업/백업");
+        assert_eq!(
+            short_path("/tmp/claude-0/scratchpad/t6/home/작업/백업", 24),
+            "/…/t6/home/작업/백업"
+        );
+        assert_eq!(
+            short_path("C:\\Users\\me\\Documents\\프로젝트\\백업", 20),
+            "C:\\…\\프로젝트\\백업"
+        );
+        // The last part stays whole, however long.
+        let long = format!("/a/{}", "x".repeat(50));
+        assert_eq!(short_path(&long, 10), format!("/…/{}", "x".repeat(50)));
+        // Nothing to leave out: as it is.
+        assert_eq!(
+            short_path("/abcdefghijklmnopqrstuvwxyz", 5),
+            "/abcdefghijklmnopqrstuvwxyz"
+        );
+    }
 
     #[test]
     fn sizes_round_like_the_mockup() {

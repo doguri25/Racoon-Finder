@@ -247,7 +247,7 @@ struct Harness {
     tickets: Vec<LoadTicket>,
     /// Whether the jobs' questions go to the state; while not, they wait in their channel.
     feed_questions: bool,
-    _journal: TempDir,
+    journal: TempDir,
 }
 
 impl Harness {
@@ -262,7 +262,7 @@ impl Harness {
             loads: mpsc::channel(),
             tickets: Vec::new(),
             feed_questions: true,
-            _journal: journal,
+            journal,
         }
     }
 
@@ -477,7 +477,7 @@ fn trash_refused_asks_before_permanent_delete() {
     };
     assert_eq!(
         confirm.message,
-        "휴지통을 쓸 수 없는 위치입니다. 항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
+        "휴지통을 쓸 수 없는 위치입니다.\n항목 1개를 영구 삭제할까요? 되돌릴 수 없습니다."
     );
     assert_eq!(state.active_jobs(), 0);
     assert!(
@@ -641,4 +641,56 @@ fn undo_disabled_while_running() {
         state.key(rf_ui::keys::Command::Redo, ctrl, 10, Instant::now()),
         Some(vec![Effect::Job(JobEffect::Redo)])
     );
+}
+
+#[test]
+fn a_question_during_shutdown_waits_for_the_release_and_the_job_is_recovered() {
+    let (_dir, left, right) = folders();
+    write(&left.join("a.txt"), "new");
+    write(&right.join("a.txt"), "old");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+
+    // A copy that meets a conflict; its question is on its way to the window.
+    harness.feed_questions = false;
+    click(&mut state, LEFT, "a.txt");
+    let dest = local(&right);
+    let effects = state.transfer(LEFT, TransferMode::Copy, &dest, TransferOptions::default());
+    harness.carry_out(&mut state, effects);
+    let question = harness.questions.recv_timeout(WAIT).expect("the copy asks");
+    let job = question.job;
+
+    // The user closes the window meanwhile: a job runs, so the window asks, and the user ends.
+    assert_eq!(state.request_close(), []);
+    assert_eq!(state.confirm_accepted(), [Effect::Quit]);
+    // The question reaches the window during the shutdown: it does not show, and nothing
+    // answers it here.
+    assert_eq!(state.question(question), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(harness.jobs.resolver().open_questions(), 1);
+
+    // What `Effect::Quit` does: the engine shuts down first (the job waits for its answer, so
+    // the whole time), then the release answers the question.
+    assert!(!harness.jobs.close_down(Duration::from_millis(300)));
+    assert_eq!(harness.jobs.resolver().open_questions(), 0);
+    assert_eq!(outcome_of(&harness.events, job), Outcome::Cancelled);
+    assert_eq!(read(&right.join("a.txt")), "old");
+    assert_eq!(std::fs::read_dir(&right).expect("right").count(), 1);
+
+    // The next start offers the job again: it was cut off, not cancelled by the user.
+    let (next, events, _questions) = jobs(harness.journal.path());
+    let deadline = Instant::now() + WAIT;
+    let recovered = loop {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .expect("the journal is read in time");
+        if let Ok(JobEvent::Recovered { jobs, .. }) = events.recv_timeout(left) {
+            break jobs;
+        }
+    };
+    assert_eq!(
+        recovered.iter().map(|job| job.id).collect::<Vec<_>>(),
+        [job]
+    );
+    assert!(next.close_down(WAIT));
 }
