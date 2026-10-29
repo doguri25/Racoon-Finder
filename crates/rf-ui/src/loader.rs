@@ -188,8 +188,9 @@ impl Loader {
     /// What is at `path`, a folder of the last run that a tab is to show again: the folder (or
     /// a link to one); nothing, while the folders that held it are there; or nothing because
     /// its drive, share or volume is not there ([`Found::Offline`]): no folder above it is there
-    /// (a Windows drive or share that is not connected), or the nearest one is where the system
-    /// puts removable and network volumes ([`holds_volumes`]: an unplugged one's folder goes).
+    /// (a Windows drive or share that is not connected), or it lies where the system puts
+    /// removable and network volumes and the nearest folder there is at or above that place
+    /// ([`volume_not_there`]: an unplugged one's folder goes).
     ///
     /// Blocks (a slow or sleeping drive, a network folder); call it on a worker thread.
     pub fn look_at(&self, path: &VPath) -> Found {
@@ -202,7 +203,10 @@ impl Loader {
         let mut above = path.parent();
         while let Some(folder) = above {
             if is_folder(provider.as_ref(), &folder) {
-                let mounts = folder.as_local().is_some_and(holds_volumes);
+                let mounts = match (path.as_local(), folder.as_local()) {
+                    (Some(path), Some(nearest)) => volume_not_there(path, nearest),
+                    _ => false,
+                };
                 return if mounts { Found::Offline } else { Found::Gone };
             }
             above = folder.parent();
@@ -347,6 +351,16 @@ pub fn holds_volumes(folder: &Path) -> bool {
             | [Some("media"), Some(_)]
             | [Some("run"), Some("media"), Some(_)]
     )
+}
+
+/// Whether `path`, missing, whose nearest folder that is there is `nearest`, is on a
+/// removable or network volume that is not there: a folder where the system puts such volumes
+/// ([`holds_volumes`]) holds it, and is `nearest` or is missing too (after a restart,
+/// `/run/media/<user>` is made only once a volume is).
+pub fn volume_not_there(path: &Path, nearest: &Path) -> bool {
+    path.ancestors()
+        .skip(1)
+        .any(|folder| holds_volumes(folder) && folder.starts_with(nearest))
 }
 
 /// The running work of one [`Loader::request`]. Dropping it cancels the work.

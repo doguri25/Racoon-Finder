@@ -180,7 +180,9 @@ fn a_tab_stops_standing_in_once_the_user_moves_it() {
 fn a_start_folder_opens_as_a_new_left_tab() {
     let start = folder("start");
     // A new tab after the left pane's tabs, which keeps the keyboard.
-    let opened = session(&["a", "b"], 0, &["c"], 1).with_start(start.clone(), &[]);
+    let opened = session(&["a", "b"], 0, &["c"], 1)
+        .with_start(start.clone(), None, &mut Vec::new())
+        .0;
     let (state, effects) = AppState::restore(folder("l"), folder("r"), opened, &[], None);
     assert_eq!(
         locations(&state, LEFT),
@@ -192,23 +194,66 @@ fn a_start_folder_opens_as_a_new_left_tab() {
     assert_eq!(state.session().panes[LEFT].tabs.len(), 3);
 
     // A left tab that shows it already shows: no second one.
-    let opened = session(&["a", "start"], 0, &["c"], 1).with_start(start.clone(), &[]);
+    let opened = session(&["a", "start"], 0, &["c"], 1)
+        .with_start(start.clone(), None, &mut Vec::new())
+        .0;
     let (state, _) = AppState::restore(folder("l"), folder("r"), opened, &[], None);
     assert_eq!(locations(&state, LEFT), [folder("a"), start.clone()]);
     assert_eq!(state.panes()[LEFT].active(), 1);
     assert_eq!(state.active(), LEFT);
 
-    // A tab that shows it only standing in for another folder is not it.
-    let waiting = [Waiting {
+    // A tab that shows it only standing in for another folder is not it: that tab goes to
+    // its own folder once it is found.
+    let mut waiting = vec![Waiting {
         side: LEFT,
         tab: 0,
         path: folder("usb"),
     }];
-    let opened = session(&["start"], 0, &[], 0).with_start(start.clone(), &waiting);
-    assert_eq!(opened.panes[LEFT].tabs, [start.clone(), start]);
+    let (opened, shown) =
+        session(&["start"], 0, &[], 0).with_start(start.clone(), None, &mut waiting);
+    assert!(shown);
+    assert_eq!(opened.panes[LEFT].tabs, [start.clone(), start.clone()]);
     assert_eq!(opened.panes[LEFT].active, 1);
+    assert_eq!(waiting.len(), 1);
+
+    // A tab that stands in for the start folder itself (not known in time: a slow drive)
+    // shows it at once, as asked, instead of a second tab of it, which would come at every
+    // start; it no longer waits.
+    let mut waiting = vec![
+        Waiting {
+            side: LEFT,
+            tab: 1,
+            path: start.clone(),
+        },
+        Waiting {
+            side: RIGHT,
+            tab: 0,
+            path: start.clone(),
+        },
+    ];
+    let (opened, shown) =
+        session(&["a", "home"], 0, &["home"], 1).with_start(start.clone(), None, &mut waiting);
+    assert!(shown);
+    assert_eq!(opened.panes[LEFT].tabs, [folder("a"), start.clone()]);
+    assert_eq!((opened.panes[LEFT].active, opened.active_pane), (1, LEFT));
+    assert_eq!(waiting.iter().map(|w| w.side).collect::<Vec<_>>(), [RIGHT]);
+
+    // A start folder that is gone adds no tab to the saved ones: it would add one at every
+    // start, each showing where the gone folder's tab went.
+    let (opened, shown) =
+        session(&["a"], 0, &["c"], 1).with_start(start.clone(), Some(Found::Gone), &mut Vec::new());
+    assert!(!shown);
+    assert_eq!(opened.panes[LEFT].tabs, [folder("a")]);
+    assert_eq!(opened.active_pane, 1);
+    // Unless the pane has no tab: then it is the pane's, which goes where it can.
+    let (opened, shown) =
+        Session::default().with_start(start.clone(), Some(Found::Gone), &mut Vec::new());
+    assert!(shown);
+    assert_eq!(opened.panes[LEFT].tabs, [start]);
 
     // Without saved tabs the left pane has the start folder alone.
-    let opened = Session::default().with_start(folder("only"), &[]);
+    let opened = Session::default()
+        .with_start(folder("only"), None, &mut Vec::new())
+        .0;
     assert_eq!(opened.panes[LEFT].tabs, [folder("only")]);
 }

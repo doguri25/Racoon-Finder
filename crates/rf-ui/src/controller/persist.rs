@@ -3,6 +3,7 @@
 //! saves after a change and as the app ends ([`SaveLedger`] decides when).
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Component, Prefix};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -11,6 +12,8 @@ use rf_core::VPath;
 use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
+use crate::loader::holds_volumes;
+use crate::pane::ancestors;
 use crate::settings::{Found, Settings, ThemeChoice};
 use crate::ui_bridge::post;
 use crate::words;
@@ -23,26 +26,28 @@ pub const SAVE_DELAY: Duration = Duration::from_millis(500);
 /// A tab whose folder is not known by then (a slow or sleeping drive) shows home meanwhile.
 pub const RESTORE_WAIT: Duration = Duration::from_millis(300);
 
-/// How many folders of the last run's tabs are looked at together at the start: a file with
-/// hundreds of tabs does not start hundreds of threads.
+/// How many volumes the folders of the last run's tabs are looked at on together at the start
+/// (one worker each): a file with hundreds of tabs does not start hundreds of threads.
 pub const RESTORE_WORKERS: usize = 4;
 
 /// How long the app's end waits for the last save of the settings before it goes on: a disk
 /// that hangs (a network home that stopped answering) does not keep the window from closing.
 pub const FINAL_SAVE_WAIT: Duration = Duration::from_secs(2);
 
-/// Looks at `folders` with `look` on at most `workers` worker threads, which take the folders
-/// in turn; the answers come on the receiver as they are found. A folder on a drive that hangs
-/// holds its worker, not the others. When no worker can start, every folder counts as there:
-/// its tab's listing tells.
+/// Looks at `folders` with `look` on at most `workers` worker threads; the answers come on the
+/// receiver as they are found. A worker takes the folders of one volume ([`volume_of`]) in
+/// turn, and the volumes of the system's own disks go first: a volume that hangs holds one
+/// worker, and neither the others nor the folders of other volumes behind it. When no worker
+/// can start, every folder counts as there: its tab's listing tells.
 pub(super) fn look_for(
     folders: Vec<VPath>,
     workers: usize,
     look: impl Fn(&VPath) -> Found + Send + Sync + 'static,
 ) -> Receiver<(VPath, Found)> {
     let (sent, answers) = mpsc::channel();
-    let count = workers.min(folders.len());
-    let queue = Arc::new(Mutex::new(VecDeque::from(folders)));
+    let volumes = by_volume(folders);
+    let count = workers.min(volumes.len());
+    let queue = Arc::new(Mutex::new(VecDeque::from(volumes)));
     let look = Arc::new(look);
     let mut started = 0;
     for _ in 0..count {
@@ -55,12 +60,14 @@ pub(super) fn look_for(
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .pop_front();
-                    let Some(folder) = next else {
+                    let Some(volume) = next else {
                         break;
                     };
-                    let found = look(&folder);
-                    if sent.send((folder, found)).is_err() {
-                        break;
+                    for folder in volume {
+                        let found = look(&folder);
+                        if sent.send((folder, found)).is_err() {
+                            return;
+                        }
                     }
                 }
             });
@@ -68,11 +75,55 @@ pub(super) fn look_for(
     }
     if started == 0 {
         let left = std::mem::take(&mut *queue.lock().unwrap_or_else(PoisonError::into_inner));
-        for folder in left {
+        for folder in left.into_iter().flatten() {
             let _ = sent.send((folder, Found::Folder));
         }
     }
     answers
+}
+
+/// `folders` by their volume ([`volume_of`]), each volume's in the order they come, and the
+/// volumes in the order their first folder comes, the system's own disks first.
+fn by_volume(folders: Vec<VPath>) -> Vec<Vec<VPath>> {
+    let mut volumes: Vec<((bool, VPath), Vec<VPath>)> = Vec::new();
+    for folder in folders {
+        let volume = volume_of(&folder);
+        match volumes.iter_mut().find(|(known, _)| *known == volume) {
+            Some((_, on_it)) => on_it.push(folder),
+            None => volumes.push((volume, vec![folder])),
+        }
+    }
+    volumes.sort_by_key(|((removable, _), _)| *removable);
+    volumes.into_iter().map(|(_, on_it)| on_it).collect()
+}
+
+/// The volume `folder` is on, as far as its path tells, as the folder of its root, and whether
+/// it is a removable or network one (`true`) rather than one of the system's own disks: below
+/// where the system puts removable and network volumes ([`holds_volumes`]), the folder right
+/// below that place; a Windows share, or a location of another kind, its root. On the
+/// system's own disk a path cannot tell a network share mounted at a folder (`/srv/nas`) from
+/// a folder, so each folder right below the root counts as a volume of its own.
+fn volume_of(folder: &VPath) -> (bool, VPath) {
+    let chain = ancestors(folder);
+    let mounted = chain
+        .windows(2)
+        .rev()
+        .find(|pair| pair[0].as_local().is_some_and(holds_volumes));
+    if let Some([_, volume]) = mounted {
+        return (true, volume.clone());
+    }
+    let root = chain.first().unwrap_or(folder);
+    let shared = root.as_local().is_none_or(|path| {
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+        )
+    });
+    if shared {
+        return (true, root.clone());
+    }
+    (false, chain.get(1).unwrap_or(root).clone())
 }
 
 /// The answers of `checks` that come within `wait`, until there are `count`.
@@ -323,6 +374,71 @@ mod tests {
 
     fn folder(name: &str) -> VPath {
         VPath::local(std::env::temp_dir().join(name)).expect("a local path")
+    }
+
+    /// A folder on a network volume: on a server's share on Windows, below `/Volumes`
+    /// elsewhere.
+    fn on_the_nas(name: &str) -> VPath {
+        let path = if cfg!(windows) {
+            format!(r"\\nas\share\{name}")
+        } else {
+            format!("/Volumes/NAS/{name}")
+        };
+        VPath::local(path).expect("a local path")
+    }
+
+    #[test]
+    fn a_volume_that_hangs_holds_one_worker() {
+        // The network volume hangs: a look at one of its folders ends only with the test.
+        let (release, hang) = mpsc::channel::<()>();
+        let hang = Mutex::new(hang);
+        let on_nas = Arc::new(AtomicUsize::new(0));
+        let looks = Arc::clone(&on_nas);
+        let mut folders: Vec<VPath> = (0..6).map(|i| on_the_nas(&format!("t{i}"))).collect();
+        folders.extend([folder("here"), folder("there")]);
+        let local = [folder("here"), folder("there")];
+        let answers = look_for(folders, RESTORE_WORKERS, move |path| {
+            if local.contains(path) {
+                return Found::Folder;
+            }
+            looks.fetch_add(1, Ordering::SeqCst);
+            let _ = hang.lock().unwrap_or_else(PoisonError::into_inner).recv();
+            Found::Offline
+        });
+
+        // The folders of the system's own disk are answered, though they come after the
+        // volume's, which takes one worker and holds it.
+        let mut found = HashMap::new();
+        while found.len() < 2 {
+            let (path, what) = answers
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the local folders are answered");
+            found.insert(path, what);
+        }
+        assert_eq!(
+            found,
+            HashMap::from([
+                (folder("here"), Found::Folder),
+                (folder("there"), Found::Folder)
+            ])
+        );
+        let started = Instant::now();
+        while on_nas.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(on_nas.load(Ordering::SeqCst), 1);
+        drop(release);
+    }
+
+    #[test]
+    fn folders_go_by_their_volume() {
+        assert_eq!(volume_of(&folder("a")), volume_of(&folder("b")));
+        assert!(!volume_of(&folder("a")).0);
+        let nas = volume_of(&on_the_nas("a"));
+        assert!(nas.0);
+        assert_eq!(nas, volume_of(&on_the_nas("b")));
+        assert_ne!(nas, volume_of(&folder("a")));
     }
 
     #[test]

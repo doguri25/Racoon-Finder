@@ -126,16 +126,27 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         let (Some((left, right)), Some(fallback)) = (folders, home.clone().or(root)) else {
             return;
         };
-        let folders = session.folders();
+        let mut folders = session.folders();
+        // `left` is the folder asked for: a gone one adds no tab (`Session::with_start`).
+        if started_at && !folders.contains(&left) {
+            folders.push(left.clone());
+        }
         let count = folders.len();
         let checks = look_for(folders, RESTORE_WORKERS, move |path| loader.look_at(path));
         let found = wait_for(&checks, count, RESTORE_WAIT);
-        let (mut session, waiting) = session.resolve(&fallback, |path| found.get(path).copied());
+        let (mut session, mut waiting) =
+            session.resolve(&fallback, |path| found.get(path).copied());
+        let mut left_out = None;
         if started_at {
-            // `left` is the folder asked for.
-            session = session.with_start(left.clone(), &waiting);
+            let shown;
+            (session, shown) =
+                session.with_start(left.clone(), found.get(&left).copied(), &mut waiting);
+            left_out = (!shown).then(|| left.clone());
         }
         post(move |c| c.open(left, right, session, &waiting, home, &tz));
+        if let Some(folder) = left_out {
+            post(move |c| c.notice(&words::start_folder_gone(&folder)));
+        }
         // The folders not known in time, as they come.
         for (path, what) in checks {
             post(move |c| c.update(|state| state.restored_folder(&path, what)));

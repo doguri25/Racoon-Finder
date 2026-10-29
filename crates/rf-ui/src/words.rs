@@ -24,6 +24,9 @@ use crate::pick::Validity;
 /// ([`failure_line`]).
 const ROW_PLACE_CHARS: usize = 24;
 
+/// How many characters a path takes at most in a notice, which is one line.
+const NOTICE_PLACE_CHARS: usize = 60;
+
 /// What a job does, as the user sees it: a [`JobKind`] with a delete told apart by where the
 /// items go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -150,6 +153,15 @@ pub fn error_kind(kind: ErrorKind) -> &'static str {
 /// `열 수 없습니다: 권한이 없습니다`.
 pub fn cannot_open(kind: ErrorKind) -> String {
     format!("열 수 없습니다: {}", error_kind(kind))
+}
+
+/// The notice when the folder the app was asked to open at its start is gone: the tabs of
+/// the last run show instead. A long path loses its middle ([`short_path`]).
+pub fn start_folder_gone(folder: &VPath) -> String {
+    format!(
+        "열려던 폴더를 찾을 수 없습니다: {}",
+        short_path(&folder.to_string(), NOTICE_PLACE_CHARS)
+    )
 }
 
 /// The notice when the system could not start the work behind part of the window (it is out
@@ -1156,6 +1168,18 @@ mod tests {
         assert_eq!(drive_space(212 * GB, 1024 * GB), "212 GB 남음 / 1 TB");
         // Free space just below 10 GB does not round up to 10 GB.
         assert_eq!(drive_space(10 * GB - 1, 64 * GB), "9.9 GB 남음 / 64 GB");
+    }
+
+    #[test]
+    fn a_gone_start_folder_is_named_by_its_end() {
+        let gone = path("작업").join("없는 폴더").expect("a name");
+        let notice = start_folder_gone(&gone);
+        assert!(
+            notice.starts_with("열려던 폴더를 찾을 수 없습니다: "),
+            "{notice}"
+        );
+        assert!(notice.ends_with("없는 폴더"), "{notice}");
+        assert!(notice.chars().count() <= "열려던 폴더를 찾을 수 없습니다: ".chars().count() + 60);
     }
 
     #[test]

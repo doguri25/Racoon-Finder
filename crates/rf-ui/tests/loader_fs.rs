@@ -711,3 +711,26 @@ fn a_folder_of_the_last_run_is_there_gone_or_offline() {
         assert!(!holds_volumes(Path::new(other)), "{other}");
     }
 }
+
+#[test]
+fn a_volume_is_not_there_when_the_folders_that_hold_it_are_missing_too() {
+    use rf_ui::loader::volume_not_there;
+
+    let not_there =
+        |path: &str, nearest: &str| volume_not_there(Path::new(path), Path::new(nearest));
+    // The nearest folder there is where the volumes go: the volume is not there.
+    assert!(not_there("/Volumes/USB/docs", "/Volumes"));
+    assert!(not_there("/run/media/kim/USB/docs", "/run/media/kim"));
+    // After a restart `/run/media/kim` is made only once a volume is: a folder above where
+    // the volumes go is the nearest one there.
+    assert!(not_there("/run/media/kim/USB/docs", "/run/media"));
+    assert!(not_there("/run/media/kim/USB", "/run"));
+    assert!(not_there("/media/kim/USB/docs", "/media"));
+    assert!(not_there("/mnt/nas/share", "/"));
+    // The volume is there, and the folder on it is gone.
+    assert!(!not_there("/run/media/kim/USB/docs", "/run/media/kim/USB"));
+    assert!(!not_there("/Volumes/USB/a/b", "/Volumes/USB/a"));
+    // Nowhere near where the volumes go.
+    assert!(!not_there("/home/kim/docs", "/home"));
+    assert!(!not_there("/run/user/docs", "/run"));
+}

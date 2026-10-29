@@ -217,11 +217,20 @@ impl Session {
     }
 
     /// The session with `folder`, the folder the app was asked to open, showing in the left
-    /// pane, which gets the keyboard: in the left tab that shows it already, or else in a new
-    /// tab after the others. The tabs of `waiting` show home in place of their folder, so they
-    /// are not taken for it.
+    /// pane, which gets the keyboard: in the left tab that shows it already, in the one that
+    /// stands in for it (it shows the folder now, as asked, and no longer waits in `waiting`),
+    /// or else in a new tab after the others. The other tabs of `waiting` show home in place of
+    /// their folder, so they are not taken for it. `found` is what a look at `folder` found, if
+    /// it was looked at in time: a folder that is gone adds no tab to a pane that has some
+    /// (asked for at every start, it would add one each time), and leaves the session as it is.
+    /// `true` when the session shows the folder.
     #[must_use]
-    pub fn with_start(mut self, folder: VPath, waiting: &[Waiting]) -> Session {
+    pub fn with_start(
+        mut self,
+        folder: VPath,
+        found: Option<Found>,
+        waiting: &mut Vec<Waiting>,
+    ) -> (Session, bool) {
         let left = &mut self.panes[0];
         let standing_in = |tab: usize| waiting.iter().any(|w| w.side == 0 && w.tab == tab);
         let shown = left
@@ -229,12 +238,28 @@ impl Session {
             .iter()
             .enumerate()
             .position(|(tab, path)| *path == folder && !standing_in(tab));
-        left.active = shown.unwrap_or_else(|| {
-            left.tabs.push(folder);
-            left.tabs.len() - 1
-        });
+        let stand_in = || {
+            waiting
+                .iter()
+                .position(|w| w.side == 0 && w.path == folder && w.tab < left.tabs.len())
+        };
+        left.active = match (shown, stand_in()) {
+            (Some(tab), _) => tab,
+            (None, Some(index)) => {
+                let tab = waiting.remove(index).tab;
+                left.tabs[tab] = folder;
+                tab
+            }
+            (None, None) if found == Some(Found::Gone) && !left.tabs.is_empty() => {
+                return (self, false);
+            }
+            (None, None) => {
+                left.tabs.push(folder);
+                left.tabs.len() - 1
+            }
+        };
         self.active_pane = 0;
-        self
+        (self, true)
     }
 }
 
