@@ -25,3 +25,4 @@ slint-build = "1.18.1"
 
 [dev-dependencies]
 i-slint-backend-testing = "1.18.1"
+tempfile = "3.27.0"
