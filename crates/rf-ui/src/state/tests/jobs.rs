@@ -871,6 +871,53 @@ fn an_undo_tells_what_it_deleted_for_good() {
 }
 
 #[test]
+fn a_copy_into_a_folder_of_the_same_name_lists_that_folder_again() {
+    let mut state = ready(vec![dir("docs")], vec![dir("docs")]);
+    let temp = VPath::local(std::env::temp_dir()).expect("a local path");
+    state.set_places(&[Place {
+        label: "임시".to_owned(),
+        path: temp.clone(),
+        kind: PlaceKind::Drive,
+        space: None,
+    }]);
+    // The tree lists the temporary folder, `b` and `b/docs`.
+    let list = |state: &mut AppState, row: usize, entries: Vec<Entry>| {
+        let effects = state.toggle_tree_row(row);
+        let [Effect::LoadChildren(request)] = effects.as_slice() else {
+            panic!("one tree listing in {effects:?}");
+        };
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries,
+        });
+    };
+    list(&mut state, 0, vec![dir("a"), dir("b")]);
+    list(&mut state, 2, vec![dir("docs")]);
+    list(&mut state, 3, vec![dir("old")]);
+
+    // `a/docs` is copied into `b`, which has a `docs`: the copy merges into it. The panes show
+    // `a` and `b` and follow them; `b/docs`, which no pane shows, is listed again.
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[in_a("docs")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |_| {});
+    let relisted: Vec<&VPath> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::LoadChildren(request) => Some(&request.path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(relisted, [&folder("b").join("docs").expect("a name")]);
+}
+
+#[test]
 fn skipped_items_are_not_counted_as_done() {
     let mut state = ready(vec![file("a"), file("b"), file("c")], vec![]);
     let spec = JobSpec::Transfer(

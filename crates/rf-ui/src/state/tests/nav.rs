@@ -580,6 +580,63 @@ fn the_tree_follows_folder_changes() {
     assert_eq!(tree_labels(&state), ["임시", "a", "made", "new"]);
 }
 
+/// A window state whose left pane at `a` lists nothing and whose right pane at the temporary
+/// folder lists `right`, with the temporary folder as the tree's place; and the generation of
+/// the right pane's listing, which its watch's changes carry.
+fn right_at_temp(right: Vec<Entry>) -> (AppState, u64) {
+    let (mut state, effects) = AppState::new(folder("a"), temp(), Some(folder("home")));
+    let requests: Vec<LoadRequest> = loads(&effects).into_iter().cloned().collect();
+    for (request, entries) in requests.iter().zip([vec![], right]) {
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries,
+        });
+    }
+    assert_eq!(state.set_places(&[drive("임시", &temp())]), []);
+    (state, requests[1].generation)
+}
+
+#[test]
+fn a_change_the_tree_misses_while_it_lists_a_folder_comes_from_the_pane() {
+    let (mut state, right) = right_at_temp(vec![dir("x")]);
+    let request = the_tree_load(&state.toggle_tree_row(0));
+    // The right pane's watch tells of a new folder while the tree's listing is on its way, and
+    // that listing was read before the folder was made.
+    state.loaded(LoadEvent::Changes {
+        generation: right,
+        changes: vec![rf_vfs::Change::Upsert(dir("new"))],
+    });
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(tree_labels(&state), ["임시", "new", "x"]);
+}
+
+#[test]
+fn the_tree_goes_on_when_a_pane_lists_the_folder_it_lacked() {
+    // The left pane shows `a`, made after the right pane listed the temporary folder.
+    let (mut state, right) = right_at_temp(vec![dir("x")]);
+    let request = the_tree_load(&state.follow_active());
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("x")],
+    });
+    // The way ends there: that listing is new, so it is not made again.
+    assert_eq!(effects, []);
+    assert_eq!(state.tree().selected(), None);
+    assert_eq!(state.tree().generations().count(), 0);
+
+    // The right pane's watch tells of `a`: the tree finds it, and scrolls to it.
+    let effects = state.loaded(LoadEvent::Changes {
+        generation: right,
+        changes: vec![rf_vfs::Change::Upsert(dir("a"))],
+    });
+    assert_eq!(effects, [Effect::ScrollTree(1)]);
+    assert_eq!(tree_labels(&state), ["임시", "a", "x"]);
+    assert_eq!(state.tree().selected_row(), Some(1));
+}
+
 #[test]
 fn start_folders_fall_back_to_home() {
     let (home, docs, root) = (folder("home"), folder("docs"), folder("root"));

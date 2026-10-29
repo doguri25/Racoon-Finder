@@ -696,14 +696,18 @@ fn top_level_count(spec: &JobSpec) -> usize {
 }
 
 /// The folders a job of `spec` changed, with `outputs`, the paths it made: the folders of its
-/// sources and targets, each once.
+/// sources and targets, each once, and a transfer's targets themselves, which it merged into
+/// where a folder of the same name was there (the tree lists again only the folders it has
+/// listed, so a target that is a file, or a folder the job made, costs nothing).
 fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
     let mut paths: Vec<&VPath> = outputs.iter().collect();
+    let mut folders: Vec<VPath> = Vec::new();
     match spec {
         JobSpec::Transfer(transfer) => {
             for item in &transfer.items {
                 paths.push(&item.source);
                 paths.push(&item.target);
+                folders.push(item.target.clone());
             }
         }
         JobSpec::Delete(delete) => paths.extend(&delete.paths),
@@ -712,7 +716,6 @@ fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
         // job added after this was written has its outputs.
         _ => {}
     }
-    let mut folders: Vec<VPath> = Vec::new();
     for folder in paths.into_iter().filter_map(VPath::parent) {
         if !folders.contains(&folder) {
             folders.push(folder);

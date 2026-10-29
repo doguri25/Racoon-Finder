@@ -358,10 +358,18 @@ impl AppState {
         f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>,
     ) -> Vec<Effect> {
         let before = self.pick_tree.selected();
-        let mut effects: Vec<Effect> = f(&mut self.pick_tree)
-            .into_iter()
-            .map(Effect::LoadChildren)
-            .collect();
+        let requests = f(&mut self.pick_tree);
+        self.pick_tree_effects(before, requests)
+    }
+
+    /// The effects of `requests`, the listings the picker's tree asked for in a change whose
+    /// selection was `before` it: see [`AppState::with_pick_tree`].
+    pub(super) fn pick_tree_effects(
+        &self,
+        before: Option<NodeId>,
+        requests: Vec<LoadRequest>,
+    ) -> Vec<Effect> {
+        let mut effects: Vec<Effect> = requests.into_iter().map(Effect::LoadChildren).collect();
         if self.pick_tree.selected() != before
             && self.pick_found().is_none()
             && let Some(row) = self.pick_tree.selected_row()

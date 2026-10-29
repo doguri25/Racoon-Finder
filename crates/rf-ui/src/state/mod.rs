@@ -29,7 +29,7 @@ use crate::loader::{Followed, LoadEvent, LoadRequest};
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, Tab, ancestors};
 use crate::places::Place;
 use crate::settings::{Found, Session, SessionPane, Waiting};
-use crate::tree::Tree;
+use crate::tree::{NodeId, Tree};
 use crate::words;
 
 mod drag;
@@ -555,19 +555,26 @@ impl AppState {
             Handled::Stale => Vec::new(),
             // A row a job made may have come: it was selected, and shows.
             Handled::Applied { tab } => {
-                // The trees' nodes of the folder take its folders, once the listing is whole.
+                // The trees' nodes of the folder take its folders, once the listing is whole;
+                // a reveal that lacked one of them may go on.
+                let mut effects = Vec::new();
                 let listed = &self.panes[side].tabs()[tab];
                 if new_rows && listed.status() == LoadStatus::Ready {
-                    self.tree.sync_folder(listed.location(), listed.all());
-                    self.pick_tree.sync_folder(listed.location(), listed.all());
+                    let (folder, entries) = (listed.location(), listed.all());
+                    let before = (self.tree.selected(), self.pick_tree.selected());
+                    let tree = self.tree.sync_folder(folder, entries);
+                    let pick = self.pick_tree.sync_folder(folder, entries);
+                    effects.extend(self.tree_effects(before.0, tree.unwrap_or_default()));
+                    effects.extend(self.pick_tree_effects(before.1, pick.unwrap_or_default()));
                 }
                 let shows = tab == self.panes[side].active();
-                self.panes[side].tabs_mut()[tab]
-                    .take_revealed()
-                    .filter(|_| shows)
-                    .map(|row| Effect::ScrollTo { side, row })
-                    .into_iter()
-                    .collect()
+                effects.extend(
+                    self.panes[side].tabs_mut()[tab]
+                        .take_revealed()
+                        .filter(|_| shows)
+                        .map(|row| Effect::ScrollTo { side, row }),
+                );
+                effects
             }
             Handled::Reload { request, .. } => vec![Effect::Load(request)],
             Handled::Vanished {
@@ -662,9 +669,26 @@ impl AppState {
 
     /// Takes an event of a listing of a folder tree: the picker's, when it waits for it, or
     /// else the sidebar's. One that no node waits for is dropped. A listing that failed leaves
-    /// the node empty, with no notice.
+    /// the node empty, with no notice. Then a tab that shows the folder, whole, gives the node
+    /// its folders as they are now when the tree's listing failed, or when the tab's watch
+    /// told of a change while that listing was on its way ([`Tree::listing_is_behind`]),
+    /// which may have been read before it.
     fn tree_loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
         let generation = event.generation();
+        let in_picker = self
+            .pick_tree
+            .generations()
+            .any(|waited| waited == generation);
+        let tree = if in_picker {
+            &self.pick_tree
+        } else {
+            &self.tree
+        };
+        let failed = matches!(event, LoadEvent::Failed { .. });
+        let folder = tree
+            .listing_of(generation)
+            .filter(|_| failed || tree.listing_is_behind(generation))
+            .cloned();
         let take = |tree: &mut Tree| match event {
             LoadEvent::Listed {
                 generation,
@@ -680,26 +704,47 @@ impl AppState {
             | LoadEvent::Vanished { .. }
             | LoadEvent::Space { .. } => Vec::new(),
         };
-        if self
-            .pick_tree
-            .generations()
-            .any(|waited| waited == generation)
-        {
+        let mut effects = if in_picker {
             self.with_pick_tree(take)
         } else {
             self.with_tree(take)
+        };
+        let Some(folder) = folder else {
+            return effects;
+        };
+        let Some(shown) = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .find(|tab| tab.status() == LoadStatus::Ready && *tab.location() == folder)
+        else {
+            return effects;
+        };
+        if in_picker {
+            let before = self.pick_tree.selected();
+            let requests = self.pick_tree.sync_folder(&folder, shown.all());
+            effects.extend(self.pick_tree_effects(before, requests.unwrap_or_default()));
+        } else {
+            let before = self.tree.selected();
+            let requests = self.tree.sync_folder(&folder, shown.all());
+            effects.extend(self.tree_effects(before, requests.unwrap_or_default()));
         }
+        effects
     }
 
-    /// Changes the tree with `f` and turns what it asks for into effects: the listings to
-    /// start, and a scroll to the row of the active pane's folder when the tree has just
-    /// found it.
+    /// Changes the tree with `f` and turns what it asks for into effects
+    /// ([`AppState::tree_effects`]).
     fn with_tree(&mut self, f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>) -> Vec<Effect> {
         let before = self.tree.selected();
-        let mut effects: Vec<Effect> = f(&mut self.tree)
-            .into_iter()
-            .map(Effect::LoadChildren)
-            .collect();
+        let requests = f(&mut self.tree);
+        self.tree_effects(before, requests)
+    }
+
+    /// The effects of `requests`, the listings the tree asked for in a change: those listings,
+    /// and a scroll to the row of the active pane's folder when the tree has just found it
+    /// (its selection was `before` the change).
+    fn tree_effects(&self, before: Option<NodeId>, requests: Vec<LoadRequest>) -> Vec<Effect> {
+        let mut effects: Vec<Effect> = requests.into_iter().map(Effect::LoadChildren).collect();
         if self.tree.selected() != before
             && let Some(row) = self.tree.selected_row()
         {

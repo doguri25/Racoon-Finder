@@ -10,17 +10,18 @@
 //!
 //! A node is listed the first time it opens and keeps its children, hidden ones too; the rows
 //! show them as the panes' [`VisibilityFilter`] says. A listing that failed leaves the node
-//! without a chevron, and the next opening or reveal through it tries again. The children
-//! follow the folder afterwards: a pane's listing of the same folder reconciles them
-//! ([`Tree::sync_folder`]), and a folder a job changed is listed again
-//! ([`Tree::relist_folder`]). A reconciled node keeps the nodes of the children that are still
-//! there, with what is open below them.
+//! without a chevron, and the next opening or reveal through it tries again, as does a pane's
+//! listing of its folder. The children follow the folder afterwards: a pane's listing of the
+//! same folder reconciles them ([`Tree::sync_folder`]), and a folder a job changed is listed
+//! again ([`Tree::relist_folder`]). A reconciled node keeps the nodes of the children that are
+//! still there, with what is open below them.
 //!
 //! [`Tree::reveal`] follows the folder of the active pane: it opens only the folders on the
 //! way to it, below the deepest root that holds it, and lists each of them in turn as the
 //! listing above it comes, so a far folder costs one listing per level and nothing else. A
 //! folder on the way that its parent's listing lacks (made since) has the parent listed again,
-//! once per reveal.
+//! once per reveal, unless the reveal has just listed it the first time; still missing, it ends
+//! the way until a later listing of the parent has it.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -101,10 +102,19 @@ pub struct Tree {
     selected: Option<NodeId>,
     /// The node whose listing the reveal of `target` waits for, to go on below it.
     waiting: Option<NodeId>,
-    /// The nodes the current reveal has listed again because the next folder was missing.
+    /// The node where the reveal of `target` ended because its listing lacked the next folder
+    /// of the way, or failed: a later listing of it that changes its children (a pane's, a
+    /// job's) goes on from there, as the folder may have come.
+    missed: Option<NodeId>,
+    /// The nodes the current reveal has listed, the first time or again because the next
+    /// folder was missing: a listing it made is new, and is not made again.
     relisted: HashSet<NodeId>,
     /// The listings on their way, by generation.
     loads: HashMap<u64, NodeId>,
+    /// The nodes whose listing was on its way when a pane's listing of their folder changed
+    /// ([`Tree::sync_folder`] leaves them to their own listing, which may have been read
+    /// before the change).
+    behind: HashSet<NodeId>,
     /// The nodes the rows show, in order.
     visible: Vec<NodeId>,
     /// Changes with every change of the rows ([`next_revision`]).
@@ -121,8 +131,10 @@ impl Tree {
             target: None,
             selected: None,
             waiting: None,
+            missed: None,
             relisted: HashSet::new(),
             loads: HashMap::new(),
+            behind: HashSet::new(),
             visible: Vec::new(),
             revision: next_revision(),
         }
@@ -137,7 +149,9 @@ impl Tree {
     ) -> Vec<LoadRequest> {
         self.nodes.clear();
         self.loads.clear();
+        self.behind.clear();
         self.relisted.clear();
+        self.missed = None;
         self.roots.clear();
         for (index, (label, path)) in roots.into_iter().enumerate() {
             self.roots.push(self.nodes.len());
@@ -216,10 +230,26 @@ impl Tree {
         self.loads.keys().copied()
     }
 
+    /// The folder the listing `generation` is on its way for; `None` for one that no node
+    /// waits for.
+    pub fn listing_of(&self, generation: u64) -> Option<&VPath> {
+        let &id = self.loads.get(&generation)?;
+        Some(&self.nodes[id].path)
+    }
+
+    /// Whether a pane's listing of the folder changed while the listing `generation` was on
+    /// its way: that listing may have been read before the change, and the pane's rows are
+    /// newer once it has come.
+    pub fn listing_is_behind(&self, generation: u64) -> bool {
+        self.loads
+            .get(&generation)
+            .is_some_and(|id| self.behind.contains(id))
+    }
+
     /// Opens node `id`, or closes it. Opening a node that has not been listed (or whose
     /// listing failed) asks for its listing; a listed node, or one whose listing is on its
     /// way, asks for nothing. Closing a node on the way to the folder the tree follows stops
-    /// looking for that folder there. `None` too for a node past the end.
+    /// looking for that folder there, for good. `None` too for a node past the end.
     pub fn toggle(&mut self, id: NodeId) -> Option<LoadRequest> {
         let node = self.nodes.get_mut(id)?;
         // A node whose listing failed shows closed, whatever its flag says.
@@ -234,6 +264,13 @@ impl Tree {
             {
                 self.waiting = None;
             }
+            // Nor does a folder that comes later open it again.
+            if self
+                .missed
+                .is_some_and(|missed| within(&self.nodes, missed, id))
+            {
+                self.missed = None;
+            }
             None
         };
         self.refresh();
@@ -243,12 +280,14 @@ impl Tree {
     /// Takes the listing of request `generation`, in the natural order the worker sorted it
     /// in: its folders become the node's children, reconciled with the ones it had (as
     /// [`Tree::sync_folder`] does), and files and links are left out. If the folder the tree
-    /// follows waited for this listing, the tree goes on toward it and returns the listing
-    /// that needs next. A listing that no node waits for any more is dropped.
+    /// follows waited for this listing, or its reveal ended at this node and the children
+    /// changed, the tree goes on toward it and returns the listing that needs next. A listing
+    /// that no node waits for any more is dropped.
     pub fn apply_children(&mut self, generation: u64, entries: Vec<Entry>) -> Vec<LoadRequest> {
         let Some(id) = self.loads.remove(&generation) else {
             return Vec::new();
         };
+        self.behind.remove(&id);
         let folders: Vec<Entry> = entries
             .into_iter()
             .filter(|entry| entry.kind == EntryKind::Dir)
@@ -256,10 +295,12 @@ impl Tree {
         let node = &mut self.nodes[id];
         node.loading = false;
         node.failed = false;
-        self.set_children(id, folders);
+        let changed = self.set_children(id, folders);
         let requests = if self.waiting == Some(id) {
             self.waiting = None;
             self.reveal_from(id)
+        } else if changed && self.missed == Some(id) {
+            self.resume_reveal(id)
         } else {
             Vec::new()
         };
@@ -268,42 +309,48 @@ impl Tree {
     }
 
     /// The listing of request `generation` failed. A node never listed keeps no children
-    /// and shows no chevron, until the next opening or reveal through it tries again; a node
-    /// listed before keeps the children it had. `false`, and no change, for a listing that no
-    /// node waits for any more.
+    /// and shows no chevron, until the next opening or reveal through it tries again, or a
+    /// pane lists its folder ([`Tree::sync_folder`]); a node listed before keeps the children
+    /// it had. `false`, and no change, for a listing that no node waits for any more.
     pub fn listing_failed(&mut self, generation: u64) -> bool {
         let Some(id) = self.loads.remove(&generation) else {
             return false;
         };
+        self.behind.remove(&id);
         let node = &mut self.nodes[id];
         node.loading = false;
         node.failed = true;
         if self.waiting == Some(id) {
             self.waiting = None;
+            self.missed = Some(id);
         }
         self.refresh();
         true
     }
 
     /// Takes `entries`, the listing of the folder `path` that a pane shows (in its own order,
-    /// files and hidden items too): every node of that folder that has been listed and has no
-    /// listing on its way (a place and a folder below another place can both be it) gets its
-    /// child folders from it. A child still there keeps its node, with what is open below it
-    /// and its attributes brought up to date; a new one comes in natural order; one that went
-    /// takes along the selection, the reveal's wait and the listings inside it. `true` when
-    /// the children changed; when the folders and their attributes are the same, nothing
-    /// changes, not even the revision, since a watch reports often while a copy runs.
-    pub fn sync_folder(&mut self, path: &VPath, entries: &[Entry]) -> bool {
-        let ids: Vec<NodeId> = self
+    /// files and hidden items too): every node of that folder that has been listed, or whose
+    /// listing failed, and has no listing on its way (a place and a folder below another place
+    /// can both be it) gets its child folders from it. A child still there keeps its node,
+    /// with what is open below it and its attributes brought up to date; a new one comes in
+    /// natural order; one that went takes along the selection, the reveal's wait and the
+    /// listings inside it. `None` when the folders and their attributes are the same: then
+    /// nothing changes, not even the revision, since a watch reports often while a copy runs.
+    /// Otherwise the listings the change needs: a reveal that ended at one of these nodes
+    /// goes on. A node whose listing is on its way is left to it, and noted as behind
+    /// ([`Tree::listing_is_behind`]).
+    pub fn sync_folder(&mut self, path: &VPath, entries: &[Entry]) -> Option<Vec<LoadRequest>> {
+        let (loading, ids): (Vec<NodeId>, Vec<NodeId>) = self
             .reachable()
             .into_iter()
             .filter(|&id| {
                 let node = &self.nodes[id];
-                node.path == *path && node.children.is_some() && !node.loading
+                node.path == *path && (node.children.is_some() || node.failed || node.loading)
             })
-            .collect();
+            .partition(|&id| self.nodes[id].loading);
+        self.behind.extend(loading);
         if ids.is_empty() {
-            return false;
+            return None;
         }
         let mut folders: Vec<Entry> = entries
             .iter()
@@ -312,13 +359,19 @@ impl Tree {
             .collect();
         sort_entries(&mut folders, &SortSpec::default());
         let mut changed = false;
-        for id in ids {
+        for &id in &ids {
+            self.nodes[id].failed = false;
             changed |= self.set_children(id, folders.clone());
         }
-        if changed {
-            self.refresh();
+        if !changed {
+            return None;
         }
-        changed
+        let requests = match self.missed {
+            Some(missed) if ids.contains(&missed) => self.resume_reveal(missed),
+            _ => Vec::new(),
+        };
+        self.refresh();
+        Some(requests)
     }
 
     /// The folder `path` changed through a job: every node of it that has been listed, with
@@ -362,6 +415,7 @@ impl Tree {
         self.target = Some(node.path.clone());
         self.selected = Some(id);
         self.waiting = None;
+        self.missed = None;
         self.refresh();
         true
     }
@@ -509,8 +563,12 @@ impl Tree {
         if self.waiting.is_some_and(|id| within(&self.nodes, id, gone)) {
             self.waiting = None;
         }
+        if self.missed.is_some_and(|id| within(&self.nodes, id, gone)) {
+            self.missed = None;
+        }
         let nodes = &self.nodes;
         self.loads.retain(|_, &mut id| !within(nodes, id, gone));
+        self.behind.retain(|&id| !within(nodes, id, gone));
         let mut stack = vec![gone];
         while let Some(id) = stack.pop() {
             let node = &mut self.nodes[id];
@@ -525,6 +583,7 @@ impl Tree {
     fn reveal_target(&mut self) -> Vec<LoadRequest> {
         self.selected = None;
         self.waiting = None;
+        self.missed = None;
         let Some(target) = &self.target else {
             return Vec::new();
         };
@@ -545,7 +604,7 @@ impl Tree {
     /// Goes on toward the target from node `id`, which is on its way: opens each folder above
     /// the target until it reaches the target's node (selected), a folder that is not listed
     /// yet (listed, and `waiting` for), or one without the next folder of the way (listed
-    /// again once per reveal, and `waiting` for, or the end of the way).
+    /// again once per reveal, and `waiting` for, or the end of the way, `missed`).
     fn reveal_from(&mut self, mut id: NodeId) -> Vec<LoadRequest> {
         let Some(target) = self.target.clone() else {
             return Vec::new();
@@ -558,7 +617,12 @@ impl Tree {
             self.nodes[id].expanded = true;
             let Some(children) = &self.nodes[id].children else {
                 self.waiting = Some(id);
-                return self.request(id).into_iter().collect();
+                let request = self.request(id);
+                if request.is_some() {
+                    // This listing is new: a folder it lacks is not listed again.
+                    self.relisted.insert(id);
+                }
+                return request.into_iter().collect();
             };
             let next = children
                 .iter()
@@ -575,10 +639,22 @@ impl Tree {
                     }
                     return vec![self.list(id)];
                 }
-                // There but out of sight, or still missing.
-                Some(_) | None => return Vec::new(),
+                // Still missing.
+                None => {
+                    self.missed = Some(id);
+                    return Vec::new();
+                }
+                // There but out of sight: showing hidden folders goes on.
+                Some(_) => return Vec::new(),
             }
         }
+    }
+
+    /// Goes on toward the target from node `id`, where its reveal ended, after a listing
+    /// changed its children.
+    fn resume_reveal(&mut self, id: NodeId) -> Vec<LoadRequest> {
+        self.missed = None;
+        self.reveal_from(id)
     }
 
     /// The deepest root that holds `path`; the first of them when two are the same folder.
@@ -957,6 +1033,117 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_folder_takes_the_listing_of_a_pane_that_shows_it() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        assert!(tree.listing_failed(request.generation));
+        assert!(!row(&tree, 0).has_children_unknown);
+
+        // A click on the row shows the folder in a pane, whose listing worked this time: the
+        // node takes its folders, as one listed before would.
+        assert!(tree.select(0));
+        assert_eq!(
+            tree.sync_folder(&home, &[dir("a"), file("x.txt")]),
+            Some(vec![])
+        );
+        assert!(tree.node(0).is_some_and(|node| !node.failed));
+        assert_eq!(shown(&tree), rows(&[(0, "*홈"), (1, "a")]));
+        // A node never listed, which did not fail, still waits for its own first listing.
+        let a = under(&home, &["a"]);
+        assert_eq!(tree.sync_folder(&a, &[dir("y")]), None);
+    }
+
+    #[test]
+    fn a_folder_the_reveal_lists_first_is_not_listed_again_at_once() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        // Home's first listing lacks the way (a link to a folder, which the tree leaves out):
+        // that listing is new already, so the way ends there, without a second one.
+        let request = the_request(tree.reveal(&under(&home, &["link", "inner"])));
+        assert_eq!(tree.apply_children(request.generation, vec![dir("a")]), []);
+        assert_eq!(tree.generations().count(), 0);
+        assert_eq!(tree.selected(), None);
+    }
+
+    #[test]
+    fn a_reveal_that_ended_on_the_way_goes_on_when_the_folder_comes() {
+        let home = folder("home");
+        let target = under(&home, &["new", "deeper"]);
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = the_request(tree.reveal(&target));
+        // Home's listing lacks `new`, made since: the way ends.
+        assert_eq!(tree.apply_children(request.generation, vec![dir("a")]), []);
+        assert_eq!(tree.selected(), None);
+        // A pane's listing of another folder changes nothing on the way.
+        assert_eq!(tree.sync_folder(&folder("other"), &[dir("new")]), None);
+
+        // The pane's listing of home has it now: the tree goes on toward the folder.
+        let request = the_request(
+            tree.sync_folder(&home, &[dir("a"), dir("new")])
+                .expect("the children changed"),
+        );
+        assert_eq!(request.path, under(&home, &["new"]));
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("deeper")]),
+            []
+        );
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (1, "new"), (2, "*deeper")])
+        );
+
+        // So does a listing a job asked for, and one of a folder whose listing had failed.
+        let target = under(&home, &["a", "made"]);
+        let request = the_request(tree.reveal(&target));
+        assert!(tree.listing_failed(request.generation));
+        assert_eq!(
+            tree.sync_folder(&under(&home, &["a"]), &[dir("made")]),
+            Some(vec![])
+        );
+        assert_eq!(tree.selected_row(), Some(2));
+        let later = under(&target, &["later"]);
+        let request = the_request(tree.reveal(&later));
+        assert_eq!(request.path, target);
+        assert_eq!(tree.apply_children(request.generation, vec![]), []);
+        let request = the_request(tree.relist_folder(&target));
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("later")]),
+            []
+        );
+        assert_eq!(
+            shown(&tree),
+            rows(&[
+                (0, "홈"),
+                (1, "a"),
+                (2, "made"),
+                (3, "*later"),
+                (1, "new"),
+                (2, "deeper")
+            ])
+        );
+    }
+
+    #[test]
+    fn a_reveal_the_user_stopped_stays_stopped() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = the_request(tree.reveal(&under(&home, &["new", "deeper"])));
+        assert_eq!(tree.apply_children(request.generation, vec![dir("a")]), []);
+        // The user closes home: the folder that comes later does not open it again.
+        assert_eq!(tree.toggle(0), None);
+        assert_eq!(
+            tree.sync_folder(&home, &[dir("a"), dir("new")]),
+            Some(vec![])
+        );
+        assert_eq!(shown(&tree), rows(&[(0, "홈")]));
+    }
+
+    #[test]
     fn hidden_folders_follow_the_setting() {
         let home = folder("home");
         let mut tree = Tree::new(VisibilityFilter::default());
@@ -1063,7 +1250,10 @@ mod tests {
         // folders take their place in natural order, and a keeps its node and what is open
         // below it.
         let before = tree.revision();
-        assert!(tree.sync_folder(&home, &[file("z.txt"), dir("b10"), dir("b2"), dir("a")]));
+        assert_eq!(
+            tree.sync_folder(&home, &[file("z.txt"), dir("b10"), dir("b2"), dir("a")]),
+            Some(vec![])
+        );
         assert_ne!(tree.revision(), before);
         assert_eq!(
             shown(&tree),
@@ -1078,7 +1268,10 @@ mod tests {
         );
 
         // A folder that became hidden goes out of sight; its node is kept.
-        assert!(tree.sync_folder(&home, &[dir("a"), hidden(dir("b2")), dir("b10")]));
+        assert_eq!(
+            tree.sync_folder(&home, &[dir("a"), hidden(dir("b2")), dir("b10")]),
+            Some(vec![])
+        );
         assert_eq!(
             shown(&tree),
             rows(&[(0, "홈"), (1, "a"), (2, "x"), (1, "b10")])
@@ -1095,7 +1288,7 @@ mod tests {
         let place = tree.node_at(2).expect("the documents place");
         let request = tree.toggle(place).expect("the documents place is listed");
         tree.apply_children(request.generation, vec![]);
-        assert!(tree.sync_folder(&docs, &[dir("새 폴더")]));
+        assert_eq!(tree.sync_folder(&docs, &[dir("새 폴더")]), Some(vec![]));
         assert_eq!(
             shown(&tree),
             rows(&[
@@ -1125,7 +1318,7 @@ mod tests {
         assert_eq!(tree.generations().count(), 2);
 
         // Another app removes a, b and c.
-        assert!(tree.sync_folder(&home, &[dir("d")]));
+        assert_eq!(tree.sync_folder(&home, &[dir("d")]), Some(vec![]));
         assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "d")]));
         assert_eq!(tree.selected(), None);
         assert_eq!(tree.generations().count(), 0);
@@ -1137,7 +1330,7 @@ mod tests {
         // A selected folder that goes away leaves nothing selected.
         assert_eq!(tree.reveal(&under(&home, &["d"])), []);
         assert_eq!(tree.selected_row(), Some(1));
-        assert!(tree.sync_folder(&home, &[]));
+        assert_eq!(tree.sync_folder(&home, &[]), Some(vec![]));
         assert_eq!(tree.selected(), None);
         assert_eq!(tree.selected_row(), None);
     }
@@ -1197,19 +1390,29 @@ mod tests {
 
         // The same folders in another order, with files: nothing changes (a watch reports
         // often while a copy runs).
-        assert!(!tree.sync_folder(&home, &[dir("b"), file("x.txt"), dir("a")]));
+        assert_eq!(
+            tree.sync_folder(&home, &[dir("b"), file("x.txt"), dir("a")]),
+            None
+        );
         assert_eq!(tree.revision(), before);
         // Nor for a folder the tree has not listed, or one whose new listing is on its way
         // (that listing brings the change).
-        assert!(!tree.sync_folder(&folder("other"), &[dir("y")]));
-        assert!(!tree.sync_folder(&under(&home, &["a"]), &[dir("y")]));
+        assert_eq!(tree.sync_folder(&folder("other"), &[dir("y")]), None);
+        assert_eq!(tree.sync_folder(&under(&home, &["a"]), &[dir("y")]), None);
         let again = the_request(tree.relist_folder(&home));
-        assert!(!tree.sync_folder(&home, &[dir("c")]));
+        assert!(!tree.listing_is_behind(again.generation));
+        assert_eq!(tree.sync_folder(&home, &[dir("c")]), None);
         assert_eq!(tree.revision(), before);
         assert!(
             tree.generations()
                 .any(|generation| generation == again.generation)
         );
+        // That listing may have been read before the pane's: it is behind until it comes.
+        assert!(tree.listing_is_behind(again.generation));
+        assert_eq!(tree.listing_of(again.generation), Some(&home));
+        tree.apply_children(again.generation, vec![dir("a"), dir("b")]);
+        assert_eq!(tree.listing_of(again.generation), None);
+        assert!(!tree.listing_is_behind(again.generation));
     }
 
     #[test]
