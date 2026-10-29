@@ -89,14 +89,22 @@ impl PaneModels {
     pub fn view(&self, pane: &Pane, active: bool) -> PaneView {
         let tab = pane.active_tab();
         self.rows.sync(tab.visible(), tab.selection());
+        // The last tab that is not pinned: the menu of a tab before it can close tabs to its
+        // right, and the menu of any other tab, when there is one, can close others.
+        let unpinned: Vec<usize> = (0..pane.tabs().len())
+            .filter(|&i| !pane.tabs()[i].pinned())
+            .collect();
         set_rows(
             &self.tabs,
             pane.tabs()
                 .iter()
-                .zip(0..)
-                .map(|(each, i)| TabItem {
+                .enumerate()
+                .map(|(i, each)| TabItem {
                     title: folder_label(each.location()).into(),
                     active: i == pane.active(),
+                    pinned: each.pinned(),
+                    can_close_others: unpinned.iter().any(|&other| other != i),
+                    can_close_right: unpinned.last().is_some_and(|&last| last > i),
                 })
                 .collect(),
         );
@@ -126,6 +134,7 @@ impl PaneModels {
                 LoadStatus::Loading | LoadStatus::Ready => SharedString::new(),
             },
             active,
+            can_reopen: pane.can_reopen(),
         }
     }
 }
@@ -581,6 +590,26 @@ pub fn drag_id(data: &DataTransfer) -> u64 {
         .map_or(0, |token| token.0)
 }
 
+/// What the payload of a drag of a tab holds: the id of the tab
+/// ([`Tab::id`](crate::pane::Tab::id)). Like a drag of rows, it stays in this app.
+#[derive(Debug)]
+struct TabToken(u64);
+
+/// The payload of a drag of the tab whose id is `id`.
+pub fn tab_payload(id: u64) -> DataTransfer {
+    let mut data = DataTransfer::default();
+    data.set_user_data(Rc::new(TabToken(id)));
+    data
+}
+
+/// The id of the tab a drag's payload carries; `None` for a payload not made by
+/// [`tab_payload`] (a drag of rows, or one from elsewhere).
+pub fn tab_id(data: &DataTransfer) -> Option<u64> {
+    data.user_data()
+        .and_then(|value| value.downcast::<TabToken>().ok())
+        .map(|token| token.0)
+}
+
 /// What a drop with `action` does with the items; `None` for an action this app does not
 /// take (none, link).
 pub fn drag_mode(action: DragAction) -> Option<TransferMode> {
@@ -613,6 +642,9 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_filter(key(Command::FocusFilter));
     shown.set_new_tab(key(Command::NewTab));
     shown.set_close_tab(key(Command::CloseTab));
+    shown.set_reopen_tab(key(Command::ReopenTab));
+    shown.set_move_tab_left(key(Command::MoveTabLeft));
+    shown.set_move_tab_right(key(Command::MoveTabRight));
     shown.set_toggle_tree(key(Command::ToggleTree));
     shown.set_focus_tree(key(Command::FocusTree));
     shown.set_toggle_preview(key(Command::TogglePreview));
@@ -1647,6 +1679,12 @@ mod tests {
     fn a_drags_payload_carries_its_id_and_nothing_else() {
         let payload = drag_payload(7);
         assert_eq!(drag_id(&payload), 7);
+        // A drag of rows is no drag of a tab, and the other way round.
+        assert_eq!(tab_id(&payload), None);
+        let tab = tab_payload(9);
+        assert_eq!(tab_id(&tab), Some(9));
+        assert_eq!(drag_id(&tab), 0);
+        assert!(!tab.is_empty());
         // Nothing for the system's drag and drop: no text, no paths.
         assert!(!payload.has_plain_text() && !payload.has_file_paths() && !payload.is_empty());
         // A payload from elsewhere (text another drag carries) is no drag of this app's.

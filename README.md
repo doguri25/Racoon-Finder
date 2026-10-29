@@ -87,14 +87,14 @@ Windows에서 어느 쪽인지 모르겠으면 설정 → 시스템 → 정보�
 | --- | --- | --- |
 | 왼쪽·오른쪽 패널 바꾸기 | Tab | Tab |
 | 열기 / 상위 폴더 | Enter / Alt+↑ | ⌘↓ / ⌘↑ |
-| 뒤로 / 앞으로 | Alt+←, Backspace / Alt+→ | ⌘[ / ⌘] |
+| 뒤로 / 앞으로 | Alt+←, Backspace / Alt+→ | ⌘[, ⌘← / ⌘], ⌘→ |
 | 범위 선택, 하나씩 선택, 모두 선택, 선택 해제 | Shift+↑↓, Ctrl+Space, Ctrl+A, Esc | ⇧↑↓, ⌘-클릭, ⌘A, Esc |
 | 이름 바꾸기 | F2 | Return(↩) |
 | 휴지통으로 / 영구 삭제 | Delete / Shift+Delete | ⌘delete / ⌥⌘delete |
 | 복사… / 이동…(위치 고르기) | F7 / F8 | F7 / F8 |
 | 새 폴더 | Ctrl+Shift+N | ⇧⌘N |
 | 되돌리기 / 다시 실행 | Ctrl+Z / Ctrl+Y | ⌘Z / ⇧⌘Z |
-| 새 탭 / 탭 닫기 / 다음 탭 | Ctrl+T / Ctrl+W / Ctrl+Tab | ⌘T / ⌘W / ⌃Tab |
+| 새 탭 / 탭 닫기 / 다음 탭 / 닫은 탭 다시 열기 | Ctrl+T / Ctrl+W / Ctrl+Tab / Ctrl+Shift+T | ⌘T / ⌘W / ⌃Tab / ⇧⌘T |
 | 경로 입력 / 이 폴더에서 거르기 | Ctrl+L / Ctrl+F | ⇧⌘G / ⌘F |
 | 숨김 파일 보기 / 보기 메뉴 | Ctrl+H / F10 | ⇧⌘. / ⌘J |
 | 글자 입력 | 그 글자로 시작하는 항목으로 이동 | 같음 |

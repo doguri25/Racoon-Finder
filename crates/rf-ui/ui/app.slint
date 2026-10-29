@@ -6,7 +6,8 @@
 // shortcut table (`keys.rs`) decides what it does, and gives the keys the toolbar's tooltips
 // and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
 // other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
-// under it takes them (`drop-check`).
+// under it takes them (`drop-check`). A tab dragged along its strip, or into the other pane's,
+// moves there (`tab-move-check`).
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -93,8 +94,15 @@ export component MainWindow inherits Window {
     in property <bool> notice-action-live: true;
     // How many rows PageUp and PageDown move in the pane with the keyboard.
     out property <int> page-rows: root.active-side == 1 ? right.page-rows : left.page-rows;
-    // The pane with the keyboard, which the 보기 menu's 정렬 sorts.
+    // The pane with the keyboard, which the 보기 menu's 정렬 sorts, and what it shows (its tab
+    // is the one of the 보기 menu's 탭 items).
     private property <int> active-side: root.right-pane.active ? 1 : 0;
+    private property <PaneView> active-view: root.active-side == 1 ? root.right-pane : root.left-pane;
+    private property <bool> active-tab-pinned: root.active-view.tabs[root.active-view.active-tab].pinned;
+    // A 탭 item of the 보기 menu for the tab the active pane shows.
+    function shown-tab(name: string) {
+        root.tab-command(root.active-side, root.active-view.active-tab, name);
+    }
     // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게) and whether hidden
     // items show, for the menu's check marks.
     in property <int> theme-choice;
@@ -103,6 +111,8 @@ export component MainWindow inherits Window {
     // readied. And what a drop on the list under the pointer would do ("항목 3개 이동 → 백업").
     in property <data-transfer> drag-data;
     in property <string> drag-label;
+    // The payload of a drag of a tab, made by Rust as a left press shows the tab.
+    in property <data-transfer> tab-drag-data;
     // The layout (Rust sets it from its state; the 보기 menu's marks are bound to it): two panes
     // or one, one above the other or side by side, the first pane's share of the room (0.1 to
     // 0.9), the sidebar, the preview panel's place; and whether navigation sync is on.
@@ -137,9 +147,18 @@ export component MainWindow inherits Window {
     // The window's size changed (the settings keep it).
     callback window-resized();
     callback pane-activated(side: int);
+    // A left press on tab `index` of pane `side`: it shows, and Rust readies `tab-drag-data`.
     callback tab-selected(side: int, index: int);
     callback tab-closed(side: int, index: int);
     callback tab-added(side: int);
+    // An item of the menu of tab `index` of pane `side`, or of the 보기 menu's 탭 items for the
+    // tab the active pane shows: close, close-others, close-right, duplicate, pin, move-other,
+    // move-left, move-right, reopen.
+    callback tab-command(side: int, index: int, name: string);
+    // A drag with the payload `data` would put a tab at `slot` of pane `side`'s strip: whether
+    // Rust takes it there. Then the drop itself, the same way.
+    callback tab-move-check(data: data-transfer, side: int, slot: int) -> bool;
+    callback tab-move-dropped(data: data-transfer, side: int, slot: int) -> bool;
     callback crumb-clicked(side: int, index: int);
     callback path-entered(side: int, text: string);
     // The filter box changed: the active pane shows the rows whose names hold `text`.
@@ -679,6 +698,67 @@ export component MainWindow inherits Window {
                                     }
                                 }
                                 MenuSeparator { }
+                                // The tab the active pane shows (as its own menu, and the keys
+                                // to move it along the strip).
+                                Menu {
+                                    title: "탭";
+
+                                    MenuItem {
+                                        title: "탭 복제";
+                                        activated => {
+                                            root.shown-tab("duplicate");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: root.active-tab-pinned ? "탭 고정 풀기" : "탭 고정";
+                                        activated => {
+                                            root.shown-tab("pin");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "탭을 반대 패널로 옮기기";
+                                        enabled: root.active-view.tabs.length > 1;
+                                        activated => {
+                                            root.shown-tab("move-other");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("탭을 왼쪽으로", Shortcuts.move-tab-left);
+                                        enabled: root.active-view.active-tab > 0;
+                                        activated => {
+                                            root.shown-tab("move-left");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: Shortcuts.titled("탭을 오른쪽으로", Shortcuts.move-tab-right);
+                                        enabled: root.active-view.active-tab < root.active-view.tabs.length - 1;
+                                        activated => {
+                                            root.shown-tab("move-right");
+                                        }
+                                    }
+                                    MenuSeparator { }
+                                    MenuItem {
+                                        title: Shortcuts.titled("닫은 탭 다시 열기", Shortcuts.reopen-tab);
+                                        enabled: root.active-view.can-reopen;
+                                        activated => {
+                                            root.shown-tab("reopen");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "다른 탭 닫기";
+                                        enabled: root.active-view.tabs[root.active-view.active-tab].can-close-others;
+                                        activated => {
+                                            root.shown-tab("close-others");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "오른쪽 탭 닫기";
+                                        enabled: root.active-view.tabs[root.active-view.active-tab].can-close-right;
+                                        activated => {
+                                            root.shown-tab("close-right");
+                                        }
+                                    }
+                                }
                                 Menu {
                                     title: "정렬";
 
@@ -839,6 +919,7 @@ export component MainWindow inherits Window {
                         label: "왼쪽 패널";
                         view: root.left-pane;
                         drag-data: root.drag-data;
+                        tab-drag-data: root.tab-drag-data;
                         drag-label: root.drag-label;
                         refusal: !root.refusal-in-tree && root.refusal-side == 0 ? root.refusal : "";
                         drag-ended => {
@@ -859,6 +940,16 @@ export component MainWindow inherits Window {
                         tab-added => {
                             root.tab-added(0);
                             keys.focus();
+                        }
+                        tab-command(index, name) => {
+                            root.tab-command(0, index, name);
+                            keys.focus();
+                        }
+                        tab-move-check(data, slot) => {
+                            return root.tab-move-check(data, 0, slot);
+                        }
+                        tab-move-dropped(data, slot) => {
+                            return root.tab-move-dropped(data, 0, slot);
                         }
                         crumb-clicked(index) => {
                             root.crumb-clicked(0, index);
@@ -936,6 +1027,7 @@ export component MainWindow inherits Window {
                         label: "오른쪽 패널";
                         view: root.right-pane;
                         drag-data: root.drag-data;
+                        tab-drag-data: root.tab-drag-data;
                         drag-label: root.drag-label;
                         refusal: !root.refusal-in-tree && root.refusal-side == 1 ? root.refusal : "";
                         drag-ended => {
@@ -956,6 +1048,16 @@ export component MainWindow inherits Window {
                         tab-added => {
                             root.tab-added(1);
                             keys.focus();
+                        }
+                        tab-command(index, name) => {
+                            root.tab-command(1, index, name);
+                            keys.focus();
+                        }
+                        tab-move-check(data, slot) => {
+                            return root.tab-move-check(data, 1, slot);
+                        }
+                        tab-move-dropped(data, slot) => {
+                            return root.tab-move-dropped(data, 1, slot);
                         }
                         crumb-clicked(index) => {
                             root.crumb-clicked(1, index);

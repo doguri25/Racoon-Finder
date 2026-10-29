@@ -1875,6 +1875,7 @@ fn panes_stay_as_wide_as_each_other_whatever_their_tabs() {
             .map(|i| rf_ui::TabItem {
                 title: format!("폴더 {i}").into(),
                 active: i + 1 == count,
+                ..rf_ui::TabItem::default()
             })
             .collect();
         ModelRc::new(slint::VecModel::from(tabs))
@@ -1911,6 +1912,193 @@ fn panes_stay_as_wide_as_each_other_whatever_their_tabs() {
         tab_x >= pane_x && tab_x + shown[0].size().width <= pane_x + pane.size().width,
         "tab at {tab_x}, pane at {pane_x}"
     );
+}
+
+/// A window whose left pane has the tabs `기획`, `디자인` and `회의록`, the last one pinned and
+/// the first one showing, and whose tab callbacks are noted as lines: `select`, `close` and
+/// the menu's commands with the pane and the tab, the drag's `check` and `drop` with the tab's
+/// id, the pane and the place in the strip (each taken).
+fn tab_window() -> (MainWindow, Calls) {
+    let window = window();
+    let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+    let (mut pane, _) = Pane::new(at("기획"), VisibilityFilter::default());
+    let _ = pane.add_tab(at("디자인"));
+    let _ = pane.add_tab(at("회의록"));
+    pane.tabs_mut()[2].set_pinned(true);
+    pane.select_tab(0);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_tab_selected(move |side, i| record.note(format!("select {side} {i}")));
+    let record = calls.clone();
+    window.on_tab_closed(move |side, i| record.note(format!("close {side} {i}")));
+    let record = calls.clone();
+    window.on_tab_command(move |side, i, name| record.note(format!("{name} {side} {i}")));
+    let record = calls.clone();
+    window.on_tab_move_check(move |data, side, slot| {
+        let id = ui_bridge::tab_id(&data).unwrap_or(0);
+        record.note(format!("check {id} {side} {slot}"));
+        true
+    });
+    let record = calls.clone();
+    window.on_tab_move_dropped(move |data, side, slot| {
+        let id = ui_bridge::tab_id(&data).unwrap_or(0);
+        record.note(format!("drop {id} {side} {slot}"));
+        true
+    });
+    (window, calls)
+}
+
+fn the_tab(window: &MainWindow, title: &str) -> ElementHandle {
+    let mut found = labelled(window, title, AccessibleRole::Tab);
+    assert_eq!(found.len(), 1, "one tab {title}");
+    found.remove(0)
+}
+
+/// Clicks the item `title` of the menu that shows.
+fn choose_item(window: &MainWindow, title: &str) {
+    ElementHandle::find_by_accessible_label(window, title)
+        .next()
+        .unwrap_or_else(|| panic!("the menu shows {title}"))
+        .mock_single_click(slint::platform::PointerEventButton::Left);
+}
+
+#[test]
+fn a_tab_s_menu_closes_copies_pins_and_moves_tabs() {
+    use slint::platform::PointerEventButton;
+    let (window, calls) = tab_window();
+    let menu_of = |title: &str| {
+        the_tab(&window, title).mock_single_click(PointerEventButton::Right);
+    };
+    for (item, call) in [
+        ("닫기", "close 0 1"),
+        ("다른 탭 닫기", "close-others 0 1"),
+        ("복제", "duplicate 0 1"),
+        ("고정", "pin 0 1"),
+        ("반대 패널로 옮기기", "move-other 0 1"),
+    ] {
+        // A right click opens the menu; it does not show the tab.
+        menu_of("디자인");
+        assert_eq!(calls.take(), Vec::<String>::new());
+        choose_item(&window, item);
+        assert_eq!(calls.take(), [call], "{item}");
+    }
+    // What does not apply is off: no tab to the right of it that is not pinned, no tab closed.
+    for item in ["오른쪽 탭 닫기", "닫은 탭 다시 열기"] {
+        menu_of("디자인");
+        choose_item(&window, item);
+        assert_eq!(calls.take(), Vec::<String>::new(), "{item}");
+        press(&window, Key::Escape);
+    }
+    // The pinned tab's menu unpins it.
+    menu_of("회의록");
+    choose_item(&window, "고정 풀기");
+    assert_eq!(calls.take(), ["pin 0 2"]);
+
+    // The pinned tab has no close button, and a middle click does not close it.
+    assert_eq!(
+        labelled(&window, "탭 닫기", AccessibleRole::Button).len(),
+        2
+    );
+    assert_eq!(
+        the_tab(&window, "회의록")
+            .accessible_description()
+            .as_deref(),
+        Some("고정된 탭")
+    );
+    the_tab(&window, "회의록").mock_single_click(PointerEventButton::Middle);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    the_tab(&window, "기획").mock_single_click(PointerEventButton::Middle);
+    assert_eq!(calls.take(), ["close 0 0"]);
+    // A left press shows the tab.
+    the_tab(&window, "디자인").mock_single_click(PointerEventButton::Left);
+    assert_eq!(calls.take(), ["select 0 1"]);
+}
+
+#[test]
+fn a_tab_dragged_along_its_strip_or_into_the_other_one_asks_rust_where_it_goes() {
+    let (window, calls) = tab_window();
+    // As the controller does: a payload of no tab from the start (a drag begins only on a press
+    // whose area has one), and the pressed tab's once the press has shown it.
+    window.set_tab_drag_data(ui_bridge::tab_payload(0));
+    let weak = window.as_weak();
+    let record = calls.clone();
+    window.on_tab_selected(move |side, i| {
+        record.note(format!("select {side} {i}"));
+        if let Some(window) = weak.upgrade() {
+            window.set_tab_drag_data(ui_bridge::tab_payload(5));
+        }
+    });
+    let first = centre(&the_tab(&window, "기획"));
+    let last = the_tab(&window, "회의록");
+    let (at, size) = (last.absolute_position(), last.size());
+    // The right half of the last tab: the place after it.
+    let after_last = LogicalPosition::new(at.x + size.width * 0.75, at.y + size.height / 2.0);
+    let before_last = LogicalPosition::new(at.x + size.width * 0.25, after_last.y);
+
+    drag_to(&window, first, after_last);
+    let noted = calls.take();
+    assert_eq!(noted.first().map(String::as_str), Some("select 0 0"));
+    assert_eq!(noted.last().map(String::as_str), Some("check 5 0 3"));
+    pointer(&window, "move", before_last);
+    assert_eq!(calls.take().last().map(String::as_str), Some("check 5 0 2"));
+    // Let go over a tab, whose own place takes dragged rows: the tab goes where the strip
+    // said, all the same.
+    pointer(&window, "move", after_last);
+    calls.take();
+    pointer(&window, "release", after_last);
+    assert_eq!(calls.take(), ["drop 5 0 3"]);
+    drag_to(&window, first, before_last);
+    calls.take();
+    // The other pane's strip (it has no tabs here: its only place is 0).
+    let right_new_tab = labelled(&window, "새 탭", AccessibleRole::Button)
+        .into_iter()
+        .max_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the right pane's 새 탭");
+    let strip = centre(&right_new_tab);
+    pointer(
+        &window,
+        "move",
+        LogicalPosition::new(strip.x + 80.0, strip.y),
+    );
+    assert_eq!(calls.take().last().map(String::as_str), Some("check 5 1 0"));
+    pointer(
+        &window,
+        "release",
+        LogicalPosition::new(strip.x + 80.0, strip.y),
+    );
+    assert_eq!(calls.take().last().map(String::as_str), Some("drop 5 1 0"));
+}
+
+#[test]
+fn the_view_menu_s_tab_items_act_on_the_tab_that_shows() {
+    let (window, calls) = tab_window();
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open_tabs = || {
+        button.invoke_accessible_default_action();
+        choose_item(&window, "탭");
+    };
+    for (item, call) in [
+        ("탭 복제", "duplicate 0 0"),
+        ("탭 고정", "pin 0 0"),
+        ("탭을 반대 패널로 옮기기", "move-other 0 0"),
+        ("탭을 오른쪽으로", "move-right 0 0"),
+        ("다른 탭 닫기", "close-others 0 0"),
+        ("오른쪽 탭 닫기", "close-right 0 0"),
+    ] {
+        open_tabs();
+        choose_item(&window, item);
+        assert_eq!(calls.take(), [call], "{item}");
+    }
+    // The first tab cannot go further left, and no closed tab is there to reopen.
+    for item in ["탭을 왼쪽으로", "닫은 탭 다시 열기"] {
+        open_tabs();
+        choose_item(&window, item);
+        assert_eq!(calls.take(), Vec::<String>::new(), "{item}");
+        press(&window, Key::Escape);
+        press(&window, Key::Escape);
+    }
 }
 
 #[test]
@@ -2013,6 +2201,19 @@ fn the_toolbar_and_the_tabs_say_the_keys_of_their_commands() {
     ];
     for (os, column) in [(Os::Windows, 1), (Os::MacOs, 2), (Os::Other, 1)] {
         ui_bridge::show_shortcuts(&window, os);
+        // The tab menus' keys.
+        let shown = window.global::<rf_ui::Shortcuts<'_>>();
+        let tab_keys = [
+            shown.get_reopen_tab(),
+            shown.get_move_tab_left(),
+            shown.get_move_tab_right(),
+        ];
+        let wanted = if column == 1 {
+            ["Ctrl+Shift+T", "Ctrl+Shift+PageUp", "Ctrl+Shift+PageDown"]
+        } else {
+            ["⇧⌘T", "⌃⇧⇞", "⌃⇧⇟"]
+        };
+        assert_eq!(tab_keys.map(|key| key.to_string()), wanted, "{os:?}");
         for case in cases {
             let keys = if column == 1 { case.1 } else { case.2 };
             assert_eq!(

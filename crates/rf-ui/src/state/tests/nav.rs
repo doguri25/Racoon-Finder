@@ -71,7 +71,7 @@ fn keys_of_commands_still_to_come_go_on_to_the_system() {
         (special(Key::F5), NONE),
         ("c".to_owned(), CTRL),
         ("v".to_owned(), CTRL),
-        ("T".to_owned(), CTRL_SHIFT),
+        ("x".to_owned(), CTRL),
         (special(Key::Return), ALT),
         (special(Key::F10), SHIFT),
     ] {

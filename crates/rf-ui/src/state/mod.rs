@@ -1,6 +1,7 @@
 //! The main window's state, and what its keys, clicks and the loader's events do to it.
 //!
-//! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
+//! [`AppState`] is plain data on the UI thread: the two panes and their tabs (module `tabs`
+//! for duplicating, reopening, reordering, pinning and moving them), which one has the keyboard,
 //! whether hidden items show, how the window lays them out ([`Layout`]) and whether navigation
 //! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
@@ -39,6 +40,7 @@ mod jobs;
 mod layout;
 mod pick;
 mod sidebar;
+mod tabs;
 
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
@@ -230,12 +232,12 @@ impl AppState {
         AppState::restore(left, right, Session::default(), &[], home)
     }
 
-    /// The window as `session` left it: the tabs of each pane with the one that showed, the
-    /// pane with the keyboard, the hidden items shown or not, the layout; and the requests for
-    /// the tabs' listings. Navigation sync starts off. A pane without tabs opens at `left` or
-    /// `right`. The tabs of `waiting` show home in place of their folder, which they stand in
-    /// for ([`Tab::stand_in_for`]) until they move, or [`AppState::restored_folder`] takes
-    /// what is found.
+    /// The window as `session` left it: the tabs of each pane in their order, pinned or not,
+    /// with the one that showed, the pane with the keyboard, the hidden items shown or not, the
+    /// layout; and the requests for the tabs' listings. Navigation sync starts off. A pane
+    /// without tabs opens at `left` or `right`. The tabs of `waiting` show home in place of their
+    /// folder, which they stand in for ([`Tab::stand_in_for`]) until they move, or
+    /// [`AppState::restored_folder`] takes what is found.
     pub fn restore(
         left: VPath,
         right: VPath,
@@ -250,12 +252,19 @@ impl AppState {
         let [left_saved, right_saved] = session.panes;
         let mut effects = Vec::new();
         let mut panes = [(left_saved, left), (right_saved, right)].map(|(saved, default)| {
-            let SessionPane { tabs, active } = saved;
+            let SessionPane {
+                tabs,
+                active,
+                pinned,
+            } = saved;
             let mut tabs = tabs.into_iter();
             let (mut pane, request) = Pane::new(tabs.next().unwrap_or(default), filter);
             effects.push(Effect::Load(request));
             for tab in tabs {
                 effects.push(Effect::Load(pane.add_tab(tab)));
+            }
+            for (tab, pinned) in pane.tabs_mut().iter_mut().zip(pinned) {
+                tab.set_pinned(pinned);
             }
             pane.select_tab(active.min(pane.tabs().len() - 1));
             pane
@@ -298,8 +307,10 @@ impl AppState {
         (state, effects)
     }
 
-    /// What the window shows, to keep for the next run. A tab that stands in at home for a
-    /// folder of the last run (a slow drive, an unplugged one) keeps that folder.
+    /// What the window shows, to keep for the next run: the tabs in their order, which of them
+    /// are pinned (a flag for each, as far as the last pinned one), the one that shows. A tab
+    /// that stands in at home for a folder of the last run (a slow drive, an unplugged one)
+    /// keeps that folder.
     pub fn session(&self) -> Session {
         let pane = |pane: &Pane| SessionPane {
             tabs: pane
@@ -308,6 +319,7 @@ impl AppState {
                 .map(|tab| tab.stands_in_for().unwrap_or(tab.location()).clone())
                 .collect(),
             active: pane.active(),
+            pinned: crate::settings::pinned_flags(pane.tabs().iter().map(Tab::pinned)),
         };
         Session {
             panes: [pane(&self.panes[LEFT]), pane(&self.panes[RIGHT])],
@@ -398,6 +410,9 @@ impl AppState {
             }
             Command::NextTab => self.step_tab(side, 1),
             Command::PrevTab => self.step_tab(side, -1),
+            Command::ReopenTab => self.reopen_tab(side),
+            Command::MoveTabLeft => self.shift_tab(side, self.panes[side].active(), -1),
+            Command::MoveTabRight => self.shift_tab(side, self.panes[side].active(), 1),
             Command::FocusFilter => vec![Effect::FocusFilter],
             Command::ViewMenu => vec![Effect::ShowViewMenu],
             Command::Open => self.open_cursor(side),
@@ -455,8 +470,7 @@ impl AppState {
             Command::SwapPanes => self.swap_panes(),
             Command::SameFolderInOther => self.same_folder_in_other(side),
             Command::SyncNavigation => self.toggle_sync(),
-            Command::ReopenTab
-            | Command::Refresh
+            Command::Refresh
             | Command::Copy
             | Command::Cut
             | Command::Paste
@@ -509,16 +523,20 @@ impl AppState {
         Vec::new()
     }
 
-    /// Opens row `row` of pane `side` (Enter or a double click): a folder shows in the tab
-    /// (and in the other pane with navigation sync), a file opens in its app, and a link is
-    /// followed first.
+    /// Opens row `row` of pane `side` (Enter or a double click): a folder shows in the tab, or
+    /// in a new tab beside a pinned one (and in the other pane with navigation sync), a file
+    /// opens in its app, and a link is followed first.
     pub fn open_row(&mut self, side: usize, row: usize) -> Vec<Effect> {
         self.activate(side);
         let tab = self.tab_mut(side);
         match tab.open_target(row) {
             Some(OpenAction::Navigate(folder)) => {
                 let name = folder.file_name().map(std::ffi::OsStr::to_os_string);
-                let mut effects = vec![Effect::Load(tab.navigate(folder))];
+                let mut effects: Vec<Effect> = self
+                    .navigate_shown(side, folder)
+                    .map(Effect::Load)
+                    .into_iter()
+                    .collect();
                 if let Some(name) = name {
                     effects.extend(self.sync_open(side, &name));
                 }
@@ -540,11 +558,11 @@ impl AppState {
         Vec::new()
     }
 
-    /// Closes tab `index` of pane `side`, unless it is the pane's last one.
+    /// Closes tab `index` of pane `side`, pinned or not, unless it is the pane's last one; the
+    /// pane keeps it to reopen.
     pub fn close_tab(&mut self, side: usize, index: usize) -> Vec<Effect> {
         self.activate(side);
-        // Its load stops once the controller sees its generation is gone.
-        drop(self.panes[side].close_tab(index));
+        self.close_one(side, index);
         Vec::new()
     }
 
@@ -561,7 +579,10 @@ impl AppState {
         let Some(folder) = ancestors(self.tab(side).location()).into_iter().nth(index) else {
             return Vec::new();
         };
-        vec![Effect::Load(self.tab_mut(side).navigate(folder))]
+        self.navigate_shown(side, folder)
+            .map(Effect::Load)
+            .into_iter()
+            .collect()
     }
 
     /// Goes to the path typed into the path row of pane `side`. Text that is no path gives
@@ -573,7 +594,11 @@ impl AppState {
             return Vec::new();
         }
         match VPath::parse(text) {
-            Ok(folder) => vec![Effect::Load(self.tab_mut(side).navigate(folder))],
+            Ok(folder) => self
+                .navigate_shown(side, folder)
+                .map(Effect::Load)
+                .into_iter()
+                .collect(),
             Err(_) => vec![Effect::Notice(words::cannot_open(ErrorKind::InvalidPath))],
         }
     }
@@ -607,10 +632,13 @@ impl AppState {
         vec![Effect::Load(self.tab_mut(side).reload())]
     }
 
-    /// Shows `folder` in the active pane.
+    /// Shows `folder` in the active pane (in a new tab beside a pinned one).
     pub fn go_to(&mut self, folder: VPath) -> Vec<Effect> {
         let side = self.active;
-        vec![Effect::Load(self.tab_mut(side).navigate(folder))]
+        self.navigate_shown(side, folder)
+            .map(Effect::Load)
+            .into_iter()
+            .collect()
     }
 
     /// Makes `places` (the favorites, then the drives) the roots of the folder tree, which
@@ -853,14 +881,19 @@ impl AppState {
 
     /// Takes what following a link gave ([`Loader::follow`](crate::loader::Loader::follow)).
     /// Only the tab that still has the generation the result carries takes it: a tab that has
-    /// moved on since takes nothing.
+    /// moved on since takes nothing. A pinned tab stays: the folder opens in a new tab beside
+    /// it.
     pub fn followed(&mut self, followed: Followed) -> Vec<Effect> {
         let Followed { generation, result } = followed;
-        let Some(tab) = self.tab_by_generation(generation) else {
+        let Some((side, index)) = self.place_of(generation) else {
             return Vec::new();
         };
         match result {
-            Ok(OpenAction::Navigate(folder)) => vec![Effect::Load(tab.navigate(folder))],
+            Ok(OpenAction::Navigate(folder)) => self
+                .navigate_tab(side, index, folder)
+                .map(Effect::Load)
+                .into_iter()
+                .collect(),
             Ok(OpenAction::OpenFile(file)) => vec![Effect::OpenFile(file)],
             // Following never gives another link to follow.
             Ok(OpenAction::Follow(_)) => Vec::new(),
@@ -970,15 +1003,23 @@ impl AppState {
 
     /// The pane one of whose tabs made the request `generation`.
     fn side_of(&self, generation: u64) -> Option<usize> {
-        self.panes
-            .iter()
-            .position(|pane| pane.tabs().iter().any(|tab| tab.generation() == generation))
+        self.place_of(generation).map(|(side, _)| side)
     }
 
-    /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go;
-    /// with navigation sync, the other pane makes the same move.
+    /// The pane and the position of the tab whose last request is `generation`.
+    fn place_of(&self, generation: u64) -> Option<(usize, usize)> {
+        self.panes.iter().enumerate().find_map(|(side, pane)| {
+            let tabs = pane.tabs();
+            let index = tabs.iter().position(|tab| tab.generation() == generation)?;
+            Some((side, index))
+        })
+    }
+
+    /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go (a
+    /// pinned one stays, and a new tab beside it makes the move); with navigation sync, the
+    /// other pane makes the same move.
     fn go(&mut self, side: usize, step: Step) -> Vec<Effect> {
-        let Some(request) = step.run(self.tab_mut(side)) else {
+        let Some(request) = self.move_shown(side, |tab| step.run(tab)) else {
             return Vec::new();
         };
         let mut effects = vec![Effect::Load(request)];

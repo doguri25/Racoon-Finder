@@ -176,7 +176,10 @@ impl AppState {
             return one_pane_only();
         }
         let here = self.tab(side).location().clone();
-        vec![Effect::Load(self.tab_mut(RIGHT - side).navigate(here))]
+        self.navigate_shown(RIGHT - side, here)
+            .map(Effect::Load)
+            .into_iter()
+            .collect()
     }
 
     /// Shift+F9: navigation sync on or off, and a notice that says which. With one pane, a
@@ -250,6 +253,12 @@ impl AppState {
         }
     }
 
+    /// The tab whose request is `generation` has left the pane it was in, or closed: sync waits
+    /// for it no more.
+    pub(super) fn forget_sync_wait(&mut self, generation: u64) {
+        self.sync_wait.take_if(|wait| wait.generation == generation);
+    }
+
     /// The tab a pane listed again (a rescan) under `generation`, having waited under `old`:
     /// sync's wait for it goes on under the new listing.
     pub(super) fn sync_relisted(&mut self, old: u64, generation: u64) {
@@ -265,7 +274,7 @@ impl AppState {
     /// Pane `other`, whose rows are in, opens its folder `name`, and waits to open `then` in
     /// turn; or sync turns off when its rows have no such folder, or its listing failed.
     fn sync_enter(&mut self, other: usize, name: &OsStr, then: Vec<OsString>) -> Vec<Effect> {
-        let tab = self.tab_mut(other);
+        let tab = self.tab(other);
         if let LoadStatus::Failed(_) = tab.status() {
             return self.stop_sync(words::sync_cannot_follow().to_owned());
         }
@@ -274,7 +283,10 @@ impl AppState {
         let Some(folder) = folder else {
             return self.stop_sync(words::sync_no_folder(&name.to_string_lossy()));
         };
-        let request = tab.navigate(folder);
+        // A pinned tab there stays: a tab beside it goes in, and is the one sync follows.
+        let Some(request) = self.navigate_shown(other, folder) else {
+            return Vec::new();
+        };
         if !then.is_empty() {
             self.sync_wait = Some(SyncWait {
                 generation: request.generation,
@@ -306,7 +318,7 @@ impl AppState {
             }
             return Vec::new();
         }
-        match step.run(self.tab_mut(other)) {
+        match self.move_shown(other, |tab| step.run(tab)) {
             Some(request) => vec![Effect::Load(request)],
             None => self.stop_sync(words::sync_cannot_follow().to_owned()),
         }

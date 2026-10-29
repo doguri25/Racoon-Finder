@@ -238,15 +238,6 @@ fn connect(window: &MainWindow) {
             });
         });
     });
-    window.on_tab_selected(|s, i| {
-        with(|c| c.update_at(i, |state, i| state.select_tab(side(s), i)));
-    });
-    window.on_tab_closed(|s, i| {
-        with(|c| c.update_at(i, |state, i| state.close_tab(side(s), i)));
-    });
-    window.on_tab_added(|s| {
-        with(|c| c.update(|state| state.add_tab(side(s))));
-    });
     window.on_crumb_clicked(|s, i| {
         with(|c| c.update_at(i, |state, i| state.open_crumb(side(s), i)));
     });
@@ -285,8 +276,49 @@ fn connect(window: &MainWindow) {
     window.on_drop_items(|data, place, s, i, action| {
         with(|c| c.drop_items(&data, place, s, i, action)).unwrap_or(DragAction::None)
     });
+    connect_tabs(window);
     connect_jobs(window);
     connect_pick(window);
+}
+
+/// The callbacks of the panes' tab bars: a press, the close button, the new tab button, a
+/// tab's menu, and a drag of a tab.
+fn connect_tabs(window: &MainWindow) {
+    window.on_tab_selected(|s, i| {
+        with(|c| c.press_tab(side(s), i));
+    });
+    window.on_tab_closed(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.close_tab(side(s), i)));
+    });
+    window.on_tab_added(|s| {
+        with(|c| c.update(|state| state.add_tab(side(s))));
+    });
+    window.on_tab_command(|s, i, name| {
+        with(|c| c.update_at(i, |state, i| tab_command(state, side(s), i, &name)));
+    });
+    window.on_tab_move_check(|data, s, slot| {
+        with(|c| c.tab_move_check(&data, side(s), slot)).unwrap_or(false)
+    });
+    window.on_tab_move_dropped(|data, s, slot| {
+        with(|c| c.tab_move_dropped(&data, side(s), slot)).unwrap_or(false)
+    });
+}
+
+/// Carries out the item `name` of the menu of tab `index` of pane `side` (or of the 보기 menu's
+/// 탭 items, for the tab the active pane shows).
+fn tab_command(state: &mut AppState, side: usize, index: usize, name: &str) -> Vec<Effect> {
+    match name {
+        "close" => state.close_tab(side, index),
+        "close-others" => state.close_other_tabs(side, index),
+        "close-right" => state.close_tabs_right(side, index),
+        "duplicate" => state.duplicate_tab(side, index),
+        "pin" => state.toggle_pin(side, index),
+        "move-other" => state.move_tab_to_other(side, index),
+        "move-left" => state.shift_tab(side, index, -1),
+        "move-right" => state.shift_tab(side, index, 1),
+        "reopen" => state.reopen_tab(side),
+        _ => Vec::new(),
+    }
 }
 
 /// The place of the state that a drag over `place` names, with the pane `side` and the row or
@@ -511,6 +543,9 @@ impl Controller {
         // A payload from the start: a drag only begins on a press whose area has one, and the
         // press readies the drag's own.
         window.set_drag_data(ui_bridge::drag_payload(0));
+        // The same for a drag of a tab: the press that shows the tab readies its own (id 0 is
+        // no tab's).
+        window.set_tab_drag_data(ui_bridge::tab_payload(0));
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
@@ -781,6 +816,46 @@ impl Controller {
             effects
         });
         if taken { action } else { DragAction::None }
+    }
+
+    /// A left press on tab `i` of pane `side`: the tab shows, and the payload of a drag of it is
+    /// ready for the drag that may follow.
+    fn press_tab(&self, side: usize, i: i32) {
+        self.update_at(i, |state, i| state.select_tab(side, i));
+        let id = self
+            .state
+            .borrow()
+            .as_ref()
+            .map(|state| state.panes()[side].active_tab().id());
+        if let (Some(id), Some(window)) = (id, self.window.upgrade()) {
+            window.set_tab_drag_data(ui_bridge::tab_payload(id));
+        }
+    }
+
+    /// Whether a drag with the payload `data`, a drag of a tab, would move the tab to `slot`
+    /// of pane `side`'s strip. Called at every move of the pointer; it changes nothing.
+    fn tab_move_check(&self, data: &DataTransfer, side: usize, slot: i32) -> bool {
+        let (Some(id), Some(slot)) = (ui_bridge::tab_id(data), index(slot)) else {
+            return false;
+        };
+        self.state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.tab_drop_offer(id, side, slot))
+    }
+
+    /// The drag with the payload `data` was dropped at `slot` of pane `side`'s strip: the tab it
+    /// carries moves there, when it may; whether it did.
+    fn tab_move_dropped(&self, data: &DataTransfer, side: usize, slot: i32) -> bool {
+        let (Some(id), Some(slot)) = (ui_bridge::tab_id(data), index(slot)) else {
+            return false;
+        };
+        let mut moved = false;
+        self.update(|state| {
+            moved = state.tab_drop_offer(id, side, slot);
+            state.drop_tab(id, side, slot)
+        });
+        moved
     }
 
     /// A toolbar button or a menu item: the same command as its key.

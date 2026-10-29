@@ -8,10 +8,13 @@
 //! Every request has a new generation number, unique in the process. A tab keeps the
 //! generation of its last request and drops every event of another one, so a late listing,
 //! change or free-space figure of a folder it has left never reaches the folder it shows now,
-//! and an event of a closed tab never reaches another tab.
+//! and an event of a closed tab never reaches another tab. A tab that moves (along the tab
+//! bar, or to the other pane) keeps its generation, so its listing follows it there; a tab
+//! that comes back after it was closed ([`Pane::reopen`]) or a copy of one
+//! ([`Pane::duplicate`]) is a new tab with a request of its own.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
@@ -28,6 +31,9 @@ use crate::words;
 
 /// How long after a key the next one still adds to the type-to-select prefix (NAV-14).
 pub const TYPE_TO_SELECT_WINDOW: Duration = Duration::from_secs(1);
+
+/// How many closed tabs a pane keeps to reopen ([`Pane::reopen`]); the oldest goes first.
+pub const CLOSED_TABS_KEPT: usize = 10;
 
 /// A generation that no request has had yet: the tabs and the folder tree
 /// ([`crate::tree`]) draw from the same count, so a generation names one request in the
@@ -72,9 +78,16 @@ pub enum OpenAction {
 /// `all` without the items the filter hides, both in the order of `sort`, and the selection
 /// and the cursor refer to `visible`.
 ///
-/// It is not `Clone`: a copy would share the tab's generation and take its events too.
+/// It is not `Clone`: a copy would share the tab's generation and take its events too
+/// ([`Pane::duplicate`] makes a copy with a request of its own).
 #[derive(Debug)]
 pub struct Tab {
+    /// Names the tab for as long as it is open, wherever it moves and whatever it lists: a
+    /// drag of the tab carries it.
+    id: u64,
+    /// A pinned tab stays at its folder: a move to another one opens in a new tab beside it
+    /// (NAV-01, [`Tab::fork`]).
+    pinned: bool,
     location: VPath,
     history: History,
     /// Every item of the folder, sorted by `sort`.
@@ -114,8 +127,29 @@ pub struct Tab {
 impl Tab {
     /// A tab that is about to show `location`, and the request for its listing.
     pub fn new(location: VPath, sort: SortSpec, filter: VisibilityFilter) -> (Tab, LoadRequest) {
-        let mut tab = Tab {
-            location: location.clone(),
+        let mut tab = Tab::idle(location.clone(), sort, filter);
+        let request = tab.load(location);
+        (tab, request)
+    }
+
+    /// A tab for going on from this one: at its folder, with its history and its order, not
+    /// pinned, and with no request yet. The caller makes it move at once ([`Tab::navigate`], a
+    /// step back, forward or up), which asks for the listing of where it goes; it is put in a
+    /// pane only then ([`Pane::open_beside`]). A pinned tab's moves go to such a tab.
+    #[must_use]
+    pub fn fork(&self) -> Tab {
+        let mut tab = Tab::idle(self.location.clone(), self.sort, self.filter);
+        tab.history = self.history.clone();
+        tab
+    }
+
+    /// A tab at `location` that has asked for nothing yet (generation 0, which no request
+    /// has).
+    fn idle(location: VPath, sort: SortSpec, filter: VisibilityFilter) -> Tab {
+        Tab {
+            id: next_generation(),
+            pinned: false,
+            location,
             history: History::default(),
             all: Vec::new(),
             visible: Vec::new(),
@@ -134,9 +168,22 @@ impl Tab {
             pending_select: None,
             revealed: None,
             stands_in_for: None,
-        };
-        let request = tab.load(location);
-        (tab, request)
+        }
+    }
+
+    /// What names the tab while it is open, wherever it moves.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Whether the tab is pinned: it stays at its folder, and a move to another one opens in a
+    /// new tab beside it.
+    pub fn pinned(&self) -> bool {
+        self.pinned
+    }
+
+    pub fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
     }
 
     /// The folder the tab shows, or is loading.
@@ -632,11 +679,27 @@ pub enum Handled {
     },
 }
 
-/// One of the two folder panes: its tabs, of which one shows. A pane has at least one tab.
+/// One of the two folder panes: its tabs, of which one shows, and the tabs it closed last. A
+/// pane has at least one tab.
 #[derive(Debug)]
 pub struct Pane {
     tabs: Vec<Tab>,
     active: usize,
+    /// The tabs closed last, the last one at the back: at most [`CLOSED_TABS_KEPT`].
+    closed: VecDeque<ClosedTab>,
+}
+
+/// What [`Pane::reopen`] brings back of a closed tab: where it was in the tab bar, its folder
+/// and history, its order, and whether it was pinned. Its rows and selection are not kept: the
+/// folder is listed again.
+#[derive(Debug)]
+struct ClosedTab {
+    /// Its position when it was closed.
+    index: usize,
+    location: VPath,
+    history: History,
+    sort: SortSpec,
+    pinned: bool,
 }
 
 impl Pane {
@@ -648,6 +711,7 @@ impl Pane {
             Pane {
                 tabs: vec![tab],
                 active: 0,
+                closed: VecDeque::new(),
             },
             request,
         )
@@ -688,18 +752,107 @@ impl Pane {
         request
     }
 
-    /// Closes tab `i` and returns it, so that the caller can drop its ticket. The tab that
-    /// showed keeps showing, or its right neighbour (the left one at the end) when it was
-    /// `i`. `None`, and no change, for the last tab or a position past the end.
+    /// Closes tab `i` and returns it, so that the caller can drop its ticket; the pane keeps
+    /// what [`Pane::reopen`] needs to bring it back. The tab that showed keeps showing, or its
+    /// right neighbour (the left one at the end) when it was `i`. `None`, and no change, for
+    /// the last tab or a position past the end.
     pub fn close_tab(&mut self, i: usize) -> Option<Tab> {
+        let closed = self.take_tab(i)?;
+        if self.closed.len() == CLOSED_TABS_KEPT {
+            self.closed.pop_front();
+        }
+        self.closed.push_back(ClosedTab {
+            index: i,
+            location: closed.location.clone(),
+            history: closed.history.clone(),
+            sort: closed.sort,
+            pinned: closed.pinned,
+        });
+        Some(closed)
+    }
+
+    /// Whether a closed tab is there to reopen.
+    pub fn can_reopen(&self) -> bool {
+        !self.closed.is_empty()
+    }
+
+    /// Opens the tab closed last again, where it was in the tab bar (or at the end, when the
+    /// bar is shorter now), at its folder, with its history, its order and its pin, and shows
+    /// it. It is a new tab: the request for its listing has a new generation, so a late event
+    /// of the closed one does not reach it. `None` when no closed tab is left.
+    pub fn reopen(&mut self) -> Option<LoadRequest> {
+        let closed = self.closed.pop_back()?;
+        let filter = self.active_tab().filter;
+        let (mut tab, request) = Tab::new(closed.location, closed.sort, filter);
+        tab.history = closed.history;
+        tab.pinned = closed.pinned;
+        let at = closed.index.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+        Some(request)
+    }
+
+    /// Opens a copy of tab `i` right after it, at its folder, with its history and its order,
+    /// not pinned, and shows it; the copy lists the folder itself. `None` for a position past
+    /// the end.
+    pub fn duplicate(&mut self, i: usize) -> Option<LoadRequest> {
+        let original = self.tabs.get(i)?;
+        let (mut tab, request) =
+            Tab::new(original.location.clone(), original.sort, original.filter);
+        tab.history = original.history.clone();
+        self.open_beside(i, tab);
+        Some(request)
+    }
+
+    /// Puts `tab`, which has made its request ([`Tab::fork`]), right after tab `i`, and shows
+    /// it.
+    pub fn open_beside(&mut self, i: usize, tab: Tab) {
+        let at = (i + 1).min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+    }
+
+    /// Moves tab `from` to `slot`, a place between the tabs as they are now (0 before the
+    /// first, the number of tabs after the last). The tab that shows keeps showing. `false`,
+    /// and no change, when that leaves the tab where it is or a position is past the end.
+    pub fn move_tab(&mut self, from: usize, slot: usize) -> bool {
+        if from >= self.tabs.len() || slot > self.tabs.len() || slot == from || slot == from + 1 {
+            return false;
+        }
+        let shown = self.tabs[self.active].id;
+        let tab = self.tabs.remove(from);
+        let to = if slot > from { slot - 1 } else { slot };
+        self.tabs.insert(to, tab);
+        self.active = self.position(shown).unwrap_or(0);
+        true
+    }
+
+    /// Takes tab `i` out of the pane, to put it in the other one ([`Pane::insert_tab`]); the
+    /// pane does not keep it to reopen. The tab that showed keeps showing, or its right
+    /// neighbour (the left one at the end) when it was `i`. `None`, and no change, for the last
+    /// tab or a position past the end.
+    pub fn take_tab(&mut self, i: usize) -> Option<Tab> {
         if self.tabs.len() <= 1 || i >= self.tabs.len() {
             return None;
         }
-        let closed = self.tabs.remove(i);
+        let taken = self.tabs.remove(i);
         if i < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
-        Some(closed)
+        Some(taken)
+    }
+
+    /// Puts `tab`, taken from the other pane with its listing and generation, at `slot` (past
+    /// the end: after the last tab), and shows it.
+    pub fn insert_tab(&mut self, slot: usize, tab: Tab) {
+        let at = slot.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+    }
+
+    /// The position of the tab whose id is `id`, if it is in this pane.
+    pub fn position(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
     }
 
     /// Shows tab `i`; `false`, and no change, for a position past the end.

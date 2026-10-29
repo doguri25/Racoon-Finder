@@ -7,6 +7,7 @@ fn session(left: &[&str], left_active: usize, right: &[&str], active_pane: usize
     let pane = |names: &[&str], active| SessionPane {
         tabs: names.iter().map(|name| folder(name)).collect(),
         active,
+        pinned: Vec::new(),
     };
     Session {
         panes: [pane(left, left_active), pane(right, 0)],

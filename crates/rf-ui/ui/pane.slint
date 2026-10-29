@@ -1,6 +1,7 @@
 // One folder pane: the tab strip, the path row, the file list and the status bar. The list and
 // the tabs take dragged rows: the list into the folder of the row under the pointer or of the
-// pane, a tab into its folder.
+// pane, a tab into its folder. A tab can be dragged too, to another place in its strip or into
+// the other pane's strip; its menu (a right click) closes, copies, pins and moves tabs.
 
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
@@ -10,6 +11,13 @@ import { Shortcuts } from "shortcuts.slint";
 export struct TabItem {
     title: string,
     active: bool,
+    // A pinned tab stays at its folder (another folder opens in a new tab); it has no close
+    // button.
+    pinned: bool,
+    // The tab's menu can close other tabs, or tabs to its right: there are some that are not
+    // pinned.
+    can-close-others: bool,
+    can-close-right: bool,
 }
 
 // One piece of the path row; `index` counts from the root (0).
@@ -39,6 +47,8 @@ export struct PaneView {
     error: string,
     // The pane has the keyboard.
     active: bool,
+    // The pane has a closed tab to reopen.
+    can-reopen: bool,
 }
 
 // Small square icon button inside a tab or a strip: its name and the key of its command
@@ -80,15 +90,25 @@ component StripButton inherits Rectangle {
     }
 }
 
+// One tab of the strip. A left press shows it, and readies a drag of it (`drag-data`, which Rust
+// sets to the tab's as the press shows it); a middle click closes it, but for a pinned one; a
+// right click opens its menu, whose items come back as `command` (close, close-others,
+// close-right, duplicate, pin, move-other, reopen).
 component TabButton inherits Rectangle {
     in property <TabItem> tab;
+    // The pane has other tabs: this one can close and go to the other pane.
     in property <bool> closable;
+    in property <bool> can-reopen;
+    in property <data-transfer> drag-data;
     callback selected();
     callback closed();
+    callback command(name: string);
     // A drag with the payload `data` over the tab asks for `action`: what the tab's folder
-    // takes, or `none`. Then the drop itself, the same way.
+    // takes, or `none`. Then the drop itself, the same way, at `x` in the tab: a drop lands on
+    // the place under the pointer, so a dragged tab let go over this one comes here too, though
+    // the strip took its hover.
     callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, action: DragAction, x: length) -> DragAction;
 
     height: 34px;
     min-width: 72px;
@@ -99,34 +119,97 @@ component TabButton inherits Rectangle {
     background: root.tab.active ? Theme.panel : touch.has-hover ? Theme.border : transparent;
     accessible-role: AccessibleRole.tab;
     accessible-label: root.tab.title;
+    accessible-description: root.tab.pinned ? "고정된 탭" : "";
     accessible-item-selected: root.tab.active;
     accessible-action-default => {
         root.selected();
     }
 
     // Under the close button, which takes its own clicks.
-    touch := TouchArea {
-        clicked => {
-            root.selected();
-        }
-        pointer-event(event) => {
-            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.middle) {
-                root.closed();
+    DragArea {
+        data: root.drag-data;
+        allow-move: true;
+
+        menu := ContextMenuArea {
+            Menu {
+                MenuItem {
+                    title: Shortcuts.titled("닫기", Shortcuts.close-tab);
+                    enabled: root.closable;
+                    activated => {
+                        root.command("close");
+                    }
+                }
+                MenuItem {
+                    title: "다른 탭 닫기";
+                    enabled: root.tab.can-close-others;
+                    activated => {
+                        root.command("close-others");
+                    }
+                }
+                MenuItem {
+                    title: "오른쪽 탭 닫기";
+                    enabled: root.tab.can-close-right;
+                    activated => {
+                        root.command("close-right");
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: "복제";
+                    activated => {
+                        root.command("duplicate");
+                    }
+                }
+                MenuItem {
+                    title: root.tab.pinned ? "고정 풀기" : "고정";
+                    activated => {
+                        root.command("pin");
+                    }
+                }
+                MenuItem {
+                    title: "반대 패널로 옮기기";
+                    enabled: root.closable;
+                    activated => {
+                        root.command("move-other");
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: Shortcuts.titled("닫은 탭 다시 열기", Shortcuts.reopen-tab);
+                    enabled: root.can-reopen;
+                    activated => {
+                        root.command("reopen");
+                    }
+                }
+            }
+
+            touch := TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.selected();
+                    }
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.middle && !root.tab.pinned) {
+                        root.closed();
+                    }
+                }
             }
         }
     }
 
     HorizontalLayout {
         padding-left: 12px;
-        padding-right: root.closable ? 4px : 12px;
+        padding-right: root.closable && !root.tab.pinned ? 4px : 12px;
         spacing: 6px;
 
         Icon {
             y: (parent.height - self.height) / 2;
             width: 16px;
             height: 16px;
-            name: "folder";
-            color: Theme.folder;
+            name: root.tab.pinned ? "pin" : "folder";
+            color: root.tab.pinned ? Theme.accent : Theme.folder;
         }
         Text {
             accessible-role: none;
@@ -136,7 +219,7 @@ component TabButton inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        if root.closable: VerticalLayout {
+        if root.closable && !root.tab.pinned: VerticalLayout {
             alignment: center;
 
             StripButton {
@@ -158,7 +241,7 @@ component TabButton inherits Rectangle {
             return root.drop-check(event.data, event.proposed-action);
         }
         dropped(event) => {
-            return root.dropped(event.data, event.proposed-action);
+            return root.dropped(event.data, event.proposed-action, event.position.x);
         }
     }
 
@@ -273,15 +356,25 @@ export component Pane inherits Rectangle {
     in property <string> drag-label;
     // Why the place of the pane under a drag does not take it (`FileList.refusal`).
     in property <string> refusal;
+    // The payload of a drag of a tab: the tab the last press showed, as Rust made it.
+    in property <data-transfer> tab-drag-data;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     out property <int> page-rows: files.page-rows;
 
     // Any click on the pane that nothing else takes.
     callback activated();
+    // A left press on tab `index` (it shows, and a drag of it may follow).
     callback tab-selected(index: int);
     callback tab-closed(index: int);
     callback tab-added();
+    // An item of tab `index`'s menu (`TabButton.command`).
+    callback tab-command(index: int, name: string);
+    // A drag with the payload `data` over the strip would put a tab at `slot` (0 before the
+    // first tab, the number of tabs after the last): whether Rust takes it there. Then the drop
+    // itself, the same way.
+    callback tab-move-check(data: data-transfer, slot: int) -> bool;
+    callback tab-move-dropped(data: data-transfer, slot: int) -> bool;
     callback crumb-clicked(index: int);
     // Enter in the path field.
     callback path-entered(text: string);
@@ -351,6 +444,13 @@ export component Pane inherits Rectangle {
         root.show-active-tab();
     }
 
+    // The place between the tabs nearest to `x`, a position in the strip: 0 before the first
+    // tab, the number of tabs after the last.
+    pure function slot-at(x: length) -> int {
+        let step = root.tab-width + root.tab-gap;
+        return clamp(floor((x - tabs-view.x - tabs-view.content-x + step / 2) / step), 0, root.tab-count);
+    }
+
     // Scrolls the strip as little as needed to show the tab that shows whole.
     function show-active-tab() {
         let shown = min(root.tab-room, root.tabs-width);
@@ -383,6 +483,20 @@ export component Pane inherits Rectangle {
             height: 40px;
             background: Theme.raised;
 
+            // Under the tabs, which pass a drag of a tab on (they take dragged rows): the place
+            // in the strip it would go to, and whether it goes there. A tab let go over another
+            // one lands on that one, which hands it the same place.
+            strip-drop := DropArea {
+                property <int> slot: -1;
+                can-drop(event) => {
+                    self.slot = root.slot-at(event.position.x);
+                    return root.tab-move-check(event.data, self.slot) ? DragAction.move : DragAction.none;
+                }
+                dropped(event) => {
+                    return root.tab-move-dropped(event.data, root.slot-at(event.position.x)) ? DragAction.move : DragAction.none;
+                }
+            }
+
             tabs-view := Flickable {
                 x: 8px;
                 y: 6px;
@@ -396,16 +510,26 @@ export component Pane inherits Rectangle {
                     width: root.tab-width;
                     tab: tab;
                     closable: root.view.tabs.length > 1;
+                    can-reopen: root.view.can-reopen;
+                    drag-data: root.tab-drag-data;
                     selected => {
                         root.tab-selected(i);
                     }
                     closed => {
                         root.tab-closed(i);
                     }
+                    command(name) => {
+                        root.tab-command(i, name);
+                    }
                     drop-check(data, action) => {
                         return root.tab-drop-check(data, i, action);
                     }
-                    dropped(data, action) => {
+                    // A dragged tab goes where the strip showed it would; dragged rows go into
+                    // the tab's folder.
+                    dropped(data, action, x) => {
+                        if (root.tab-move-dropped(data, root.slot-at(tabs-view.x + tabs-view.content-x + self.x + x))) {
+                            return DragAction.move;
+                        }
                         return root.tab-dropped(data, i, action);
                     }
                 }
@@ -419,6 +543,17 @@ export component Pane inherits Rectangle {
                 clicked => {
                     root.tab-added();
                 }
+            }
+
+            // Where the dragged tab would go: a bar between two tabs, in the part of the strip
+            // in view.
+            if strip-drop.has-drag: Rectangle {
+                x: clamp(tabs-view.x + tabs-view.content-x + strip-drop.slot * (root.tab-width + root.tab-gap) - root.tab-gap / 2 - 1px, tabs-view.x - 2px, tabs-view.x + tabs-view.width);
+                y: tabs-view.y + 4px;
+                width: 3px;
+                height: tabs-view.height - 8px;
+                border-radius: 1.5px;
+                background: Theme.accent;
             }
 
             Rectangle {

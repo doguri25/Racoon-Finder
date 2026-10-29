@@ -1,7 +1,7 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
 //! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size and layout
-//! (`[layout]`), the tabs of both panes and which one has the keyboard, and the destination
-//! picker's recent targets.
+//! (`[layout]`), the tabs of both panes (in their order, pinned or not) and which one has the
+//! keyboard, and the destination picker's recent targets.
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -17,8 +17,8 @@
 //! kept in the `extra` tables and written back, a known key with a value this version does not
 //! know (a new theme) takes its default, and a tab whose folder this version cannot read stays
 //! in the file. Running an older version in between loses as little as it can. The other way
-//! round, a file of an older version (the first demo's, without `[layout]`) opens with the
-//! default layout.
+//! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
+//! with the default layout and no tab pinned.
 //!
 //! Folders are stored as `VPath::to_uri`, which reads back losslessly with `VPath::parse`.
 
@@ -77,9 +77,25 @@ pub struct PaneSettings {
     /// The position of the tab that shows.
     #[serde(deserialize_with = "or_default")]
     pub active: usize,
+    /// Whether each tab of `tabs` is pinned, in the same order, as far as the last pinned one:
+    /// a tab without a flag is not. Not written when no tab is pinned.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "or_default")]
+    pub pinned: Vec<bool>,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// `flags`, one for each tab, without the ones after the last `true`: none at all when no tab
+/// is pinned, as [`PaneSettings::pinned`] and [`SessionPane::pinned`] keep them.
+pub fn pinned_flags(flags: impl IntoIterator<Item = bool>) -> Vec<bool> {
+    let mut flags: Vec<bool> = flags.into_iter().collect();
+    let kept = flags
+        .iter()
+        .rposition(|&pinned| pinned)
+        .map_or(0, |last| last + 1);
+    flags.truncate(kept);
+    flags
 }
 
 /// The window's layout, as stored (`[layout]`). Each key the file lacks, or whose value this
@@ -211,12 +227,15 @@ pub struct Session {
     pub layout: Layout,
 }
 
-/// The tabs of one pane: their folders in order, and the position of the one that shows. A pane
-/// without tabs opens its default folder.
+/// The tabs of one pane: their folders in order, the position of the one that shows, and which
+/// are pinned. A pane without tabs opens its default folder.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionPane {
     pub tabs: Vec<VPath>,
     pub active: usize,
+    /// Whether each tab is pinned, in the order of `tabs`, as far as the last pinned one
+    /// ([`pinned_flags`]): a tab without a flag is not.
+    pub pinned: Vec<bool>,
 }
 
 /// What a look at a folder of the last run's tabs found.
@@ -341,23 +360,27 @@ pub struct Loaded {
 }
 
 impl Settings {
-    /// The tabs, the active pane, the hidden items and the layout. A tab whose folder does not
-    /// read back as a path is left out (it stays in the file, [`Settings::set_session`]); the
-    /// tab that shows stays the same one when it is kept, and is the first otherwise.
+    /// The tabs and which are pinned, the active pane, the hidden items and the layout. A tab
+    /// whose folder does not read back as a path is left out (it stays in the file, with its
+    /// pin, [`Settings::set_session`]); the tab that shows stays the same one when it is kept,
+    /// and is the first otherwise.
     pub fn session(&self) -> Session {
         let pane = |side: usize| {
             let mut pane = SessionPane::default();
             let Some(stored) = self.panes.get(side) else {
                 return pane;
             };
+            let mut pinned = Vec::new();
             for (i, uri) in stored.tabs.iter().enumerate() {
                 if let Ok(path) = VPath::parse(uri) {
                     if i == stored.active {
                         pane.active = pane.tabs.len();
                     }
                     pane.tabs.push(path);
+                    pinned.push(stored.pinned.get(i).copied().unwrap_or(false));
                 }
             }
+            pane.pinned = pinned_flags(pinned);
             pane
         };
         Session {
@@ -369,18 +392,21 @@ impl Settings {
     }
 
     /// Takes `session` in, keeping the keys and the panes of a newer version, and the tabs whose
-    /// folder this version cannot read, after the others.
+    /// folder this version cannot read, with their pins, after the others.
     pub fn set_session(&mut self, session: &Session) {
         if self.panes.len() < 2 {
             self.panes.resize_with(2, PaneSettings::default);
         }
         for (stored, pane) in self.panes.iter_mut().zip(&session.panes) {
-            let unread: Vec<String> = stored
+            let (unread, unread_pins): (Vec<String>, Vec<bool>) = stored
                 .tabs
                 .iter()
-                .filter(|uri| VPath::parse(uri).is_err())
-                .cloned()
-                .collect();
+                .enumerate()
+                .filter(|(_, uri)| VPath::parse(uri).is_err())
+                .map(|(i, uri)| (uri.clone(), stored.pinned.get(i).copied().unwrap_or(false)))
+                .unzip();
+            let pins = (0..pane.tabs.len()).map(|i| pane.pinned.get(i).copied().unwrap_or(false));
+            stored.pinned = pinned_flags(pins.chain(unread_pins));
             stored.tabs = pane.tabs.iter().map(VPath::to_uri).chain(unread).collect();
             stored.active = pane.active;
         }
@@ -639,10 +665,12 @@ mod tests {
                 SessionPane {
                     tabs: vec![folder(dir, "a"), folder(dir, "설계 문서")],
                     active: 1,
+                    pinned: vec![true],
                 },
                 SessionPane {
                     tabs: vec![folder(dir, "c")],
                     active: 0,
+                    pinned: Vec::new(),
                 },
             ],
             active_pane: 1,
@@ -724,6 +752,7 @@ mod tests {
                 SessionPane {
                     tabs: vec![odd.clone()],
                     active: 0,
+                    pinned: Vec::new(),
                 },
                 SessionPane::default(),
             ],
@@ -793,8 +822,11 @@ mod tests {
         assert_eq!(settings.recent(), std::slice::from_ref(&c));
         assert!(settings.extra.is_empty());
         let session = settings.session();
+        // The tabs in their order, none of them pinned.
         assert_eq!(session.panes[0].tabs, [a.clone(), c.clone()]);
         assert_eq!(session.panes[0].active, 1);
+        assert_eq!(session.panes[0].pinned, Vec::<bool>::new());
+        assert_eq!(session.panes[1].pinned, Vec::<bool>::new());
         assert_eq!(session.active_pane, 1);
         assert!(session.show_hidden);
         assert_eq!(session.layout, Layout::default());
@@ -843,6 +875,64 @@ mod tests {
         let settings = load(dir.path()).settings;
         assert_eq!(settings.theme, ThemeChoice::Light);
         assert_eq!(settings.session().layout, Layout::default());
+    }
+
+    #[test]
+    fn pinned_tabs_keep_their_flags_beside_their_folders() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (a, b) = (folder(dir.path(), "a"), folder(dir.path(), "b"));
+        let session = |pinned: Vec<bool>| Session {
+            panes: [
+                SessionPane {
+                    tabs: vec![a.clone(), b.clone()],
+                    active: 0,
+                    pinned,
+                },
+                SessionPane::default(),
+            ],
+            ..Session::default()
+        };
+        // A flag for each tab, as far as the last pinned one.
+        let mut settings = Settings::default();
+        settings.set_session(&session(vec![true]));
+        let text = settings.to_text().expect("text");
+        assert!(text.contains("pinned = [true]"), "{text}");
+        settings.save(dir.path()).expect("saved");
+        assert_eq!(load(dir.path()).settings.session(), session(vec![true]));
+        // Nothing pinned, nothing written: the file reads as the first demo's did.
+        settings.set_session(&session(Vec::new()));
+        assert!(!settings.to_text().expect("text").contains("pinned"));
+
+        // A tab this version cannot read keeps its flag, after the others.
+        let mut stored = Settings {
+            panes: vec![PaneSettings {
+                tabs: vec!["cloud+new://x".to_owned(), a.to_uri(), b.to_uri()],
+                pinned: vec![true, false, true],
+                ..PaneSettings::default()
+            }],
+            ..Settings::default()
+        };
+        let read = stored.session();
+        assert_eq!(read.panes[0].tabs, [a.clone(), b.clone()]);
+        assert_eq!(read.panes[0].pinned, [false, true]);
+        stored.set_session(&read);
+        assert_eq!(
+            stored.panes[0].tabs,
+            [a.to_uri(), b.to_uri(), "cloud+new://x".to_owned()]
+        );
+        assert_eq!(stored.panes[0].pinned, [false, true, true]);
+
+        // Flags of a newer version that are no list of flags pin nothing; the tabs stay.
+        let (qa, qb) = (toml_string(&a.to_uri()), toml_string(&b.to_uri()));
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            format!("[[panes]]\ntabs = [{qa}, {qb}]\npinned = \"all\"\nactive = 1\n"),
+        )
+        .expect("written");
+        let read = load(dir.path()).settings.session();
+        assert_eq!(read.panes[0].tabs, [a, b]);
+        assert_eq!(read.panes[0].active, 1);
+        assert_eq!(read.panes[0].pinned, Vec::<bool>::new());
     }
 
     /// `text` as a TOML string, quoted and escaped: a Windows path's `\` would otherwise
@@ -1051,10 +1141,12 @@ mod tests {
                 SessionPane {
                     tabs: vec![a.clone(), gone.clone(), b.clone()],
                     active: 1,
+                    pinned: Vec::new(),
                 },
                 SessionPane {
                     tabs: vec![slow.clone(), gone.clone(), unplugged.clone()],
                     active: 0,
+                    pinned: Vec::new(),
                 },
             ],
             active_pane: 1,

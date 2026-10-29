@@ -201,6 +201,17 @@ pub fn one_pane_only() -> &'static str {
     "한 패널 보기에서는 쓸 수 없습니다"
 }
 
+/// The notice when a pane's last tab is to go to the other pane: a pane keeps one tab.
+pub fn last_tab_stays() -> &'static str {
+    "패널의 마지막 탭은 옮길 수 없습니다"
+}
+
+/// The notice when a tab went to the other pane while one pane shows: it is in the hidden
+/// pane, which the 보기 menu's 듀얼 패널 shows.
+pub fn tab_moved_to_hidden() -> &'static str {
+    "탭을 숨은 반대편 패널로 옮겼습니다. 보기 메뉴의 ‘듀얼 패널’로 볼 수 있습니다"
+}
+
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {

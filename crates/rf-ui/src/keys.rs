@@ -56,8 +56,12 @@ pub enum Command {
     PrevTab,
     NewTab,
     CloseTab,
-    /// The tab closed last comes back.
+    /// The tab the active pane closed last comes back.
     ReopenTab,
+    /// The tab that shows goes one place left in its tab bar.
+    MoveTabLeft,
+    /// The tab that shows goes one place right in its tab bar.
+    MoveTabRight,
     /// Open the item under the cursor.
     Open,
     /// The parent folder.
@@ -447,6 +451,9 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('t', CTRL), C::NewTab),
     (c('w', CTRL), C::CloseTab),
     (c('t', CTRL_SHIFT), C::ReopenTab),
+    // The browsers' keys to move a tab; File Explorer has none.
+    (k(Key::PageUp, CTRL_SHIFT), C::MoveTabLeft),
+    (k(Key::PageDown, CTRL_SHIFT), C::MoveTabRight),
     (k(Key::Return, NONE), C::Open),
     (k(Key::UpArrow, ALT), C::Up),
     (k(Key::LeftArrow, ALT), C::Back),
@@ -516,11 +523,18 @@ static MACOS: &[(Chord, Command)] = &[
     (c('t', CMD), C::NewTab),
     (c('w', CMD), C::CloseTab),
     (c('t', CMD_SHIFT), C::ReopenTab),
+    // Firefox's keys to move a tab (fn with ↑ and ↓ on a Mac keyboard); Finder has none.
+    (k(Key::PageUp, CTL_SHIFT), C::MoveTabLeft),
+    (k(Key::PageDown, CTL_SHIFT), C::MoveTabRight),
     (k(Key::DownArrow, CMD), C::Open),
     (c('o', CMD), C::Open),
     (k(Key::UpArrow, CMD), C::Up),
     (c('[', CMD), C::Back),
     (c(']', CMD), C::Forward),
+    // The browsers' Back and Forward too: arrows, which every keyboard layout has where they
+    // are. A text field that has the keys keeps them for its own line start and end.
+    (k(Key::LeftArrow, CMD), C::Back),
+    (k(Key::RightArrow, CMD), C::Forward),
     (c('g', CMD_SHIFT), C::EditPath),
     (c('f', CMD), C::FocusFilter),
     (c('r', CMD), C::Refresh),
@@ -653,6 +667,9 @@ mod tests {
             (text("t"), CTRL, C::NewTab),
             (text("w"), CTRL, C::CloseTab),
             (text("T"), CTRL_SHIFT, C::ReopenTab),
+            // The browsers' keys to move a tab.
+            (key(Key::PageUp), CTRL_SHIFT, C::MoveTabLeft),
+            (key(Key::PageDown), CTRL_SHIFT, C::MoveTabRight),
             (key(Key::Return), NONE, C::Open),
             (key(Key::UpArrow), ALT, C::Up),
             (key(Key::Backspace), NONE, C::Back),
@@ -717,12 +734,17 @@ mod tests {
             (text("t"), CMD, C::NewTab),
             (text("w"), CMD, C::CloseTab),
             (text("T"), CMD_SHIFT, C::ReopenTab),
+            (key(Key::PageUp), CTL_SHIFT, C::MoveTabLeft),
+            (key(Key::PageDown), CTL_SHIFT, C::MoveTabRight),
             (key(Key::DownArrow), CMD, C::Open),
             (text("o"), CMD, C::Open),
             (key(Key::Return), NONE, C::Rename),
             (key(Key::UpArrow), CMD, C::Up),
             (text("["), CMD, C::Back),
             (text("]"), CMD, C::Forward),
+            // The browsers' arrows, which no keyboard layout moves.
+            (key(Key::LeftArrow), CMD, C::Back),
+            (key(Key::RightArrow), CMD, C::Forward),
             (text("G"), CMD_SHIFT, C::EditPath),
             (text("f"), CMD, C::FocusFilter),
             (text("r"), CMD, C::Refresh),
@@ -797,6 +819,9 @@ mod tests {
         let windows_none = [
             (key(Key::DownArrow), CTRL),
             (key(Key::UpArrow), CTRL),
+            // A word to the left or right in text, and nothing in the list.
+            (key(Key::LeftArrow), CTRL),
+            (key(Key::RightArrow), CTRL),
             (text("["), CTRL),
             (text("o"), CTRL),
             (text("i"), CTRL),
@@ -1031,6 +1056,11 @@ mod tests {
             (C::EditPath, Some("Ctrl+L"), Some("⇧⌘G")),
             (C::SwapPanes, Some("Ctrl+U"), Some("⌘U")),
             (C::FocusTree, Some("F6"), Some("F6")),
+            // ⌘[ and ⌘] come first; ⌘← and ⌘→ are the other keys.
+            (C::Forward, Some("Alt+→"), Some("⌘]")),
+            (C::ReopenTab, Some("Ctrl+Shift+T"), Some("⇧⌘T")),
+            (C::MoveTabLeft, Some("Ctrl+Shift+PageUp"), Some("⌃⇧⇞")),
+            (C::MoveTabRight, Some("Ctrl+Shift+PageDown"), Some("⌃⇧⇟")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];
@@ -1115,6 +1145,9 @@ mod tests {
             C::FocusFilter,
             C::EditPath,
             C::NewTab,
+            C::ReopenTab,
+            C::MoveTabLeft,
+            C::MoveTabRight,
             C::Back,
             C::Up,
             C::Undo,
