@@ -289,26 +289,57 @@ fn a_pieces_chevron_asks_for_its_folders_and_the_list_takes_clicks() {
     let record = Rc::clone(&calls);
     window.on_subfolders_dismissed(move || record.borrow_mut().push("dismissed".to_owned()));
     let pane = listed_pane(vec![]);
-    let pieces = rf_ui::pane::ancestors(pane.active_tab().location()).len();
     let models = PaneModels::default();
-    window.set_right_pane(models.view(&pane, true));
-    // Each piece has a `›` after it, named for its folder: the last one lists the pane's own.
-    let chevrons = || {
+    let view = models.view(&pane, true);
+    let labels: Vec<String> = view.crumbs.iter().map(|crumb| crumb.label.into()).collect();
+    let pieces = labels.len();
+    window.set_right_pane(view);
+    // A row too long for the pane puts its last piece at its end as the window takes in an
+    // event (its pieces' places come out of the layout): the pointer comes over the window
+    // first, as it does before any click.
+    pointer(&window, "move", LogicalPosition::new(1.0, 1.0));
+    // The buttons of the right pane's path row, as it shows them: its pieces (the "…" one
+    // named for the folder it stands for) and their `›`s.
+    let path_row = || {
         let right = labelled(&window, "오른쪽 패널", AccessibleRole::Groupbox).remove(0);
-        right
+        let row = right
+            .query_descendants()
+            .match_accessible_role(AccessibleRole::Groupbox)
+            .match_predicate(|group| group.accessible_label().as_deref() == Some("경로"))
+            .find_first()
+            .expect("the path row");
+        let (chevrons, shown): (Vec<_>, Vec<_>) = row
             .query_descendants()
             .match_accessible_role(AccessibleRole::Button)
             .find_all()
             .into_iter()
-            .filter(|button| {
+            .partition(|button| {
                 button
                     .accessible_label()
                     .is_some_and(|label| label.ends_with(SUBFOLDERS))
-            })
-            .collect::<Vec<_>>()
+            });
+        (chevrons, shown)
     };
-    assert_eq!(chevrons().len(), pieces);
-    let last = chevrons().pop().expect("the last piece's chevron");
+    let name = |button: &ElementHandle| button.accessible_label().unwrap_or_default().to_string();
+    // Each piece the row shows has a `›` after it, named for its folder, the last one for the
+    // pane's own. A long path (the temporary folder of macOS or Windows) shows only its last
+    // pieces, after a "…" piece that stands for the folder before them.
+    let (chevrons, shown) = path_row();
+    assert!(
+        !shown.is_empty() && shown.len() <= pieces,
+        "{} of {pieces}",
+        shown.len()
+    );
+    let first = pieces - shown.len();
+    assert_eq!(shown.iter().map(name).collect::<Vec<_>>(), labels[first..]);
+    assert_eq!(
+        chevrons.iter().map(name).collect::<Vec<_>>(),
+        labels[first..]
+            .iter()
+            .map(|label| format!("‘{label}’ {SUBFOLDERS}"))
+            .collect::<Vec<_>>()
+    );
+    let last = path_row().0.pop().expect("the last piece's chevron");
     assert_eq!(
         last.accessible_label().as_deref(),
         Some("‘listed’ 하위 폴더")
