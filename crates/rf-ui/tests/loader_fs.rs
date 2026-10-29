@@ -663,3 +663,51 @@ fn inspect_target_tells_folder_room_and_volume() {
         assert!(linked.same_volume);
     }
 }
+
+#[test]
+fn a_folder_of_the_last_run_is_there_gone_or_offline() {
+    use rf_ui::loader::holds_volumes;
+    use rf_ui::settings::Found;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let here = dir.path().join("here");
+    std::fs::create_dir(&here).expect("made");
+    std::fs::write(dir.path().join("file"), "x").expect("written");
+    let loader = loader();
+
+    assert_eq!(loader.look_at(&local(&here)), Found::Folder);
+    // Its parent is there: it was removed.
+    assert_eq!(loader.look_at(&local(&here.join("gone"))), Found::Gone);
+    assert_eq!(
+        loader.look_at(&local(&dir.path().join("a/b/c"))),
+        Found::Gone
+    );
+    // A file where the folder was is no folder.
+    assert_eq!(
+        loader.look_at(&local(&dir.path().join("file"))),
+        Found::Gone
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&here, dir.path().join("link")).expect("linked");
+        assert_eq!(
+            loader.look_at(&local(&dir.path().join("link"))),
+            Found::Folder
+        );
+    }
+
+    // Right below where the system mounts volumes, a missing folder is a volume not there.
+    for mounts in ["/Volumes", "/media", "/media/kim", "/run/media/kim", "/mnt"] {
+        assert!(holds_volumes(Path::new(mounts)), "{mounts}");
+    }
+    for other in [
+        "/",
+        "/home/kim",
+        "/media/kim/USB",
+        "/run",
+        "/run/media",
+        "Volumes",
+    ] {
+        assert!(!holds_volumes(Path::new(other)), "{other}");
+    }
+}

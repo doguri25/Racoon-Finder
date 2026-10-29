@@ -2,15 +2,20 @@
 //! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size, the tabs of
 //! both panes and which one has the keyboard, and the destination picker's recent targets.
 //!
-//! [`load`] reads them once at the start, before the window shows. A file that cannot be read
-//! or does not parse is moved aside to `settings.toml.bad` (one is kept: a newer one replaces
-//! it) and the app starts with the defaults; nothing here fails the start. [`Settings::save`]
-//! writes them atomically: to `settings.toml.tmp` in the same folder, synced to the disk, then
-//! renamed over the old file, so a crash leaves the old settings or the new ones, never half a
-//! file. [`Saver`] runs those writes on worker threads, one at a time.
+//! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
+//! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
+//! `settings.toml.bad` (one is kept: a newer one replaces it) and the app starts with the
+//! defaults. A file that is there but cannot be read, or cannot be moved aside, is left alone:
+//! the app starts with the defaults and does not save over it ([`Loaded::writable`]).
 //!
-//! Keys this version does not know (a newer version wrote them) are kept in the `extra` tables
-//! and written back, so running an older version in between does not lose them.
+//! [`Saver`] writes them atomically, on worker threads, one at a time: to `settings.toml.tmp` in
+//! the same folder, synced to the disk, then renamed over the old file, so a crash leaves the
+//! old settings or the new ones, never half a file.
+//!
+//! A newer version's settings read as well as they can: keys this version does not know are
+//! kept in the `extra` tables and written back, a known key with a value this version does not
+//! know (a new theme) takes its default, and a tab whose folder this version cannot read stays
+//! in the file. Running an older version in between loses as little as it can.
 //!
 //! Folders are stored as `VPath::to_uri`, which reads back losslessly with `VPath::parse`.
 
@@ -18,19 +23,27 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::Duration;
 
 use rf_core::VPath;
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The name of the settings file in the config folder.
 pub const FILE_NAME: &str = "settings.toml";
-/// Where a settings file that could not be read is moved to.
+/// Where a broken settings file is moved to.
 pub const BAD_FILE_NAME: &str = "settings.toml.bad";
 /// The file a save writes before it takes the place of the settings file.
 pub const TEMP_FILE_NAME: &str = "settings.toml.tmp";
 /// A settings file larger than this is no file this app wrote; it is treated as broken.
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
+
+/// How many times a save tries to put its file in place. On Windows an antivirus, an indexer
+/// or a sync tool that has the old file open makes the rename fail for a moment.
+const RENAME_TRIES: u32 = if cfg!(windows) { 3 } else { 1 };
+/// The pause between two tries of the rename.
+const RENAME_PAUSE: Duration = Duration::from_millis(50);
 
 /// The smallest window size, in logical pixels (the main window's `min-width`/`min-height`).
 pub const MIN_WINDOW: (u32, u32) = (900, 560);
@@ -54,33 +67,70 @@ pub enum ThemeChoice {
 #[serde(default)]
 pub struct PaneSettings {
     /// The folders of the tabs, in the order of the tab bar, as `VPath::to_uri`.
+    #[serde(deserialize_with = "or_default")]
     pub tabs: Vec<String>,
     /// The position of the tab that shows.
+    #[serde(deserialize_with = "or_default")]
     pub active: usize,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
 }
 
-/// Everything `settings.toml` holds. A key the file lacks takes its default.
+/// Everything `settings.toml` holds. A key the file lacks, or whose value this version cannot
+/// read, takes its default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    #[serde(deserialize_with = "or_default")]
     pub theme: ThemeChoice,
+    #[serde(deserialize_with = "or_default")]
     pub show_hidden: bool,
     /// The window's last size in logical pixels (width, height), when it was neither maximized
     /// nor full screen; `None` until the first save.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_default"
+    )]
     pub window: Option<(u32, u32)>,
     /// The pane with the keyboard: 0 left, 1 right.
+    #[serde(deserialize_with = "or_default")]
     pub active_pane: usize,
     /// The destination picker's recent targets, the last one chosen first, as `VPath::to_uri`.
+    #[serde(deserialize_with = "or_default")]
     pub recent_targets: Vec<String>,
-    /// The left pane, then the right one.
-    pub panes: [PaneSettings; 2],
+    /// The left pane, then the right one. Read as a list: a missing pane is an empty one, and
+    /// a pane past the second (a newer version's) is kept as it is.
+    #[serde(deserialize_with = "panes_or_default")]
+    pub panes: Vec<PaneSettings>,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+/// A known key's value as `T`, or `T`'s default when it is no `T` (the wrong type, or a name a
+/// newer version added): one odd value does not cost the whole file.
+fn or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.try_into().unwrap_or_default())
+}
+
+/// The panes as a list, each one that cannot be read an empty pane; no list at all is none.
+fn panes_or_default<'de, D>(deserializer: D) -> Result<Vec<PaneSettings>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let toml::Value::Array(panes) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(panes
+        .into_iter()
+        .map(|pane| pane.try_into().unwrap_or_default())
+        .collect())
 }
 
 /// What the window showed when the app last ended, as folders: the tabs of each pane and the
@@ -102,8 +152,21 @@ pub struct SessionPane {
     pub active: usize,
 }
 
-/// A tab of a restored [`Session`] whose folder could not be looked at in time at the start:
-/// it shows the home folder meanwhile, and goes to `path` if it turns out to be there.
+/// What a look at a folder of the last run's tabs found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// It is there (or a link to it is).
+    Folder,
+    /// It is gone: the folders that held it are there, and it is not.
+    Gone,
+    /// Its drive, share or volume is not there (unplugged, not connected yet): it may come
+    /// back.
+    Offline,
+}
+
+/// A tab of a restored [`Session`] that shows home in place of its folder `path`: one not
+/// looked at in time (a slow or sleeping drive), which goes to its folder once that is found,
+/// or one on a drive that is not there. Until the user moves the tab, the settings keep `path`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Waiting {
     /// The pane: 0 left, 1 right.
@@ -126,22 +189,22 @@ impl Session {
         folders
     }
 
-    /// The session to open at the start: a tab whose folder `exists` says is gone shows `home`
-    /// instead. A tab whose folder `exists` cannot tell about yet (`None`: a slow or sleeping
-    /// drive) shows `home` too, so the window need not wait for it, and comes back as a
-    /// [`Waiting`], to go to its folder once that is found.
+    /// The session to open at the start, with what `look` found at each tab's folder: a folder
+    /// that is gone shows `home` instead. A folder on a drive that is not there, or one `look`
+    /// cannot tell about yet (`None`: a slow or sleeping drive), shows `home` too, so the window
+    /// need not wait for it, and its tab comes back as a [`Waiting`].
     pub fn resolve(
         mut self,
         home: &VPath,
-        mut exists: impl FnMut(&VPath) -> Option<bool>,
+        mut look: impl FnMut(&VPath) -> Option<Found>,
     ) -> (Session, Vec<Waiting>) {
         let mut waiting = Vec::new();
         for (side, pane) in self.panes.iter_mut().enumerate() {
             for (tab, path) in pane.tabs.iter_mut().enumerate() {
-                match exists(path) {
-                    Some(true) => continue,
-                    Some(false) => {}
-                    None => waiting.push(Waiting {
+                match look(path) {
+                    Some(Found::Folder) => continue,
+                    Some(Found::Gone) => {}
+                    Some(Found::Offline) | None => waiting.push(Waiting {
                         side,
                         tab,
                         path: path.clone(),
@@ -152,15 +215,49 @@ impl Session {
         }
         (self, waiting)
     }
+
+    /// The session with `folder`, the folder the app was asked to open, showing in the left
+    /// pane, which gets the keyboard: in the left tab that shows it already, or else in a new
+    /// tab after the others. The tabs of `waiting` show home in place of their folder, so they
+    /// are not taken for it.
+    #[must_use]
+    pub fn with_start(mut self, folder: VPath, waiting: &[Waiting]) -> Session {
+        let left = &mut self.panes[0];
+        let standing_in = |tab: usize| waiting.iter().any(|w| w.side == 0 && w.tab == tab);
+        let shown = left
+            .tabs
+            .iter()
+            .enumerate()
+            .position(|(tab, path)| *path == folder && !standing_in(tab));
+        left.active = shown.unwrap_or_else(|| {
+            left.tabs.push(folder);
+            left.tabs.len() - 1
+        });
+        self.active_pane = 0;
+        self
+    }
+}
+
+/// What [`load`] found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Loaded {
+    pub settings: Settings,
+    /// Whether the settings may be written back. `false` when a settings file is there that
+    /// could not be read (an I/O error) or could not be moved aside: a save would replace it
+    /// unread, so the run keeps what it changes to itself.
+    pub writable: bool,
 }
 
 impl Settings {
     /// The tabs, the active pane and the hidden items as folders. A tab whose folder does not
-    /// read back as a path is left out; the tab that shows stays the same one when it is kept,
-    /// and is the first otherwise.
+    /// read back as a path is left out (it stays in the file, [`Settings::set_session`]); the
+    /// tab that shows stays the same one when it is kept, and is the first otherwise.
     pub fn session(&self) -> Session {
-        let pane = |stored: &PaneSettings| {
+        let pane = |side: usize| {
             let mut pane = SessionPane::default();
+            let Some(stored) = self.panes.get(side) else {
+                return pane;
+            };
             for (i, uri) in stored.tabs.iter().enumerate() {
                 if let Ok(path) = VPath::parse(uri) {
                     if i == stored.active {
@@ -172,16 +269,26 @@ impl Settings {
             pane
         };
         Session {
-            panes: [pane(&self.panes[0]), pane(&self.panes[1])],
+            panes: [pane(0), pane(1)],
             active_pane: self.active_pane.min(1),
             show_hidden: self.show_hidden,
         }
     }
 
-    /// Takes `session` in, keeping the keys of a newer version.
+    /// Takes `session` in, keeping the keys and the panes of a newer version, and the tabs whose
+    /// folder this version cannot read, after the others.
     pub fn set_session(&mut self, session: &Session) {
+        if self.panes.len() < 2 {
+            self.panes.resize_with(2, PaneSettings::default);
+        }
         for (stored, pane) in self.panes.iter_mut().zip(&session.panes) {
-            stored.tabs = pane.tabs.iter().map(VPath::to_uri).collect();
+            let unread: Vec<String> = stored
+                .tabs
+                .iter()
+                .filter(|uri| VPath::parse(uri).is_err())
+                .cloned()
+                .collect();
+            stored.tabs = pane.tabs.iter().map(VPath::to_uri).chain(unread).collect();
             stored.active = pane.active;
         }
         self.active_pane = session.active_pane;
@@ -211,22 +318,37 @@ impl Settings {
         })
     }
 
-    /// Writes the settings to `settings.toml` in `config_dir` (made if missing), atomically:
-    /// to `settings.toml.tmp` there, synced to the disk with `rf_platform::sync_file`, then
-    /// renamed over the old file. The temporary file is removed when a step fails.
-    ///
-    /// Blocks on the disk: call it on a worker thread ([`Saver`]).
-    pub fn save(&self, config_dir: &Path) -> io::Result<()> {
-        let text = toml::to_string(self).map_err(io::Error::other)?;
-        std::fs::create_dir_all(config_dir)?;
-        let temp = config_dir.join(TEMP_FILE_NAME);
-        let written = write_synced(&temp, text.as_bytes())
-            .and_then(|()| std::fs::rename(&temp, config_dir.join(FILE_NAME)));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        written
+    /// The text of `settings.toml` for these settings. Two settings are the same to save when
+    /// their texts are: a newer version's `nan` is never equal to itself as a value.
+    pub fn to_text(&self) -> io::Result<String> {
+        toml::to_string(self).map_err(io::Error::other)
     }
+
+    /// Writes the settings to `config_dir` at once ([`write_text`]). Blocks on the disk.
+    pub fn save(&self, config_dir: &Path) -> io::Result<()> {
+        write_text(config_dir, &self.to_text()?)
+    }
+}
+
+/// Writes `text` as `settings.toml` in `config_dir` (made if missing), atomically: to
+/// `settings.toml.tmp` there, synced to the disk with `rf_platform::sync_file`, then renamed
+/// over the old file (tried again a few times on Windows), and the folder synced. The
+/// temporary file is removed when a step fails.
+///
+/// Blocks on the disk: call it on a worker thread ([`Saver`]).
+pub fn write_text(config_dir: &Path, text: &str) -> io::Result<()> {
+    std::fs::create_dir_all(config_dir)?;
+    let temp = config_dir.join(TEMP_FILE_NAME);
+    let written = write_synced(&temp, text.as_bytes())
+        .and_then(|()| rename_retrying(&temp, &config_dir.join(FILE_NAME)));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return written;
+    }
+    // Makes the rename durable. A folder that cannot be synced leaves, after a power loss, the
+    // old settings at worst, never half a file: nothing more to do then.
+    let _ = rf_platform::sync_dir(config_dir);
+    Ok(())
 }
 
 /// Writes `bytes` to a new file at `path` and makes it durable.
@@ -236,26 +358,61 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rf_platform::sync_file(&file)
 }
 
+/// Renames `from` over `to`, [`RENAME_TRIES`] times at most.
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    let mut tries = RENAME_TRIES;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tries -= 1;
+                if tries == 0 {
+                    return Err(error);
+                }
+                std::thread::sleep(RENAME_PAUSE);
+            }
+        }
+    }
+}
+
 /// Reads `settings.toml` in `config_dir`. Without one (the first run) the settings are the
-/// defaults. One that cannot be read, is too large or does not parse is moved aside to
+/// defaults. A broken one (it does not parse, is not text, or is too large) is moved aside to
 /// `settings.toml.bad`, replacing an older one there, and the settings are the defaults: the
-/// app starts either way, and the broken file stays for a look.
+/// app starts either way, and the broken file stays for a look. One that cannot be read (an
+/// I/O error), or that cannot be moved aside, stays where it is, and the settings are the
+/// defaults but not [`Loaded::writable`]: a save would replace it unread.
 ///
 /// It reads a small local file and is called once at the start, before the window shows: the
 /// UI thread may call it then.
-pub fn load(config_dir: &Path) -> Settings {
+pub fn load(config_dir: &Path) -> Loaded {
     let path = config_dir.join(FILE_NAME);
-    match read_small(&path) {
-        Ok(text) => {
-            if let Ok(settings) = toml::from_str(&text) {
-                return settings;
+    let broken = match read_small(&path) {
+        Ok(text) => match toml::from_str(&text) {
+            Ok(settings) => {
+                return Loaded {
+                    settings,
+                    writable: true,
+                };
             }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Settings::default(),
-        Err(_) => {}
+            Err(_) => true,
+        },
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound => {
+                return Loaded {
+                    settings: Settings::default(),
+                    writable: true,
+                };
+            }
+            // Not text, or far too large: no settings file this app wrote.
+            io::ErrorKind::InvalidData => true,
+            _ => false,
+        },
+    };
+    let writable = broken && std::fs::rename(&path, config_dir.join(BAD_FILE_NAME)).is_ok();
+    Loaded {
+        settings: Settings::default(),
+        writable,
     }
-    let _ = std::fs::rename(&path, config_dir.join(BAD_FILE_NAME));
-    Settings::default()
 }
 
 /// The text of the file at `path`; `InvalidData` for one larger than [`MAX_FILE_SIZE`] or not
@@ -274,22 +431,26 @@ fn read_small(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
-/// Writes the settings to the config folder, one write at a time, on worker threads or on the
-/// calling one. Every write has a number in the order it was asked for, and a write whose
-/// number is below that of one already written is skipped: the settings asked for last are the
-/// ones that stay, even when an earlier write waited longer. Clones share the order.
+/// Writes the settings to the config folder on worker threads, one write at a time. Every
+/// write has a number in the order it was asked for, and a write whose number is below that of
+/// one already written is skipped: the settings asked for last are the ones that stay, even
+/// when an earlier write waited longer. Clones share the order.
+///
+/// A saver that may not write ([`Loaded::writable`]) writes nothing and reports success.
 #[derive(Clone, Debug)]
 pub struct Saver {
     config_dir: Arc<PathBuf>,
+    writable: bool,
     /// The number of the last write done; held while a write runs.
     written: Arc<Mutex<u64>>,
     next: Arc<AtomicU64>,
 }
 
 impl Saver {
-    pub fn new(config_dir: PathBuf) -> Saver {
+    pub fn new(config_dir: PathBuf, writable: bool) -> Saver {
         Saver {
             config_dir: Arc::new(config_dir),
+            writable,
             written: Arc::new(Mutex::new(0)),
             next: Arc::new(AtomicU64::new(1)),
         }
@@ -300,41 +461,59 @@ impl Saver {
         &self.config_dir
     }
 
-    /// Writes `settings` on a new worker thread and returns at once; `done` gets the result
-    /// there, `Ok` too when a later write made this one needless. `Err` when the thread could
-    /// not start: nothing was written then.
+    /// Whether this saver writes at all.
+    pub fn writable(&self) -> bool {
+        self.writable
+    }
+
+    /// Writes `text` ([`Settings::to_text`]) on a new worker thread and returns at once; `done`
+    /// gets the result there, `Ok` too when a later write made this one needless. `Err` when
+    /// the thread could not start: nothing was written then.
     pub fn save_in_background(
         &self,
-        settings: Settings,
+        text: String,
         done: impl FnOnce(io::Result<()>) + Send + 'static,
     ) -> io::Result<()> {
         let number = self.next.fetch_add(1, Ordering::SeqCst);
         let saver = self.clone();
         std::thread::Builder::new()
             .name("rf-ui-settings".to_owned())
-            .spawn(move || done(saver.write(number, &settings)))
+            .spawn(move || done(saver.write(number, &text)))
             .map(drop)
     }
 
-    /// Writes `settings` on the calling thread, after any write in progress. Blocks on the disk:
-    /// call it on a worker thread.
-    pub fn save(&self, settings: &Settings) -> io::Result<()> {
-        let number = self.next.fetch_add(1, Ordering::SeqCst);
-        self.write(number, settings)
+    /// Writes `text` on a worker thread, after any write in progress, and waits up to `wait`
+    /// for it: its result, or `None` when it has not ended by then (a hung network home; the
+    /// write goes on, and the file is the old one or the new one either way). For the app's
+    /// end, which must not hang on a disk. Blocks: call it on a worker thread.
+    pub fn save_within(&self, text: String, wait: Duration) -> Option<io::Result<()>> {
+        let (sent, result) = mpsc::channel();
+        let started = self.save_in_background(text, move |done| {
+            let _ = sent.send(done);
+        });
+        if let Err(error) = started {
+            return Some(Err(error));
+        }
+        result.recv_timeout(wait).ok()
     }
 
-    fn write(&self, number: u64, settings: &Settings) -> io::Result<()> {
+    fn write(&self, number: u64, text: &str) -> io::Result<()> {
+        if !self.writable {
+            return Ok(());
+        }
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
         if *written > number {
             return Ok(());
         }
         *written = number;
-        settings.save(&self.config_dir)
+        write_text(&self.config_dir, text)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     fn folder(dir: &Path, name: &str) -> VPath {
@@ -381,6 +560,13 @@ mod tests {
         settings
     }
 
+    fn writable(settings: Settings) -> Loaded {
+        Loaded {
+            settings,
+            writable: true,
+        }
+    }
+
     #[test]
     fn round_trips() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -391,23 +577,48 @@ mod tests {
         assert!(!dir.path().join(TEMP_FILE_NAME).exists());
         let loaded = load(dir.path());
 
-        assert_eq!(loaded, settings);
-        assert_eq!(loaded.session(), settings.session());
+        assert_eq!(loaded, writable(settings.clone()));
+        assert_eq!(loaded.settings.session(), settings.session());
         assert_eq!(
-            loaded.recent(),
+            loaded.settings.recent(),
             [folder(dir.path(), "r1"), folder(dir.path(), "r2")]
         );
         // A second save replaces the first.
-        let mut changed = loaded;
+        let mut changed = loaded.settings;
         changed.theme = ThemeChoice::Light;
         changed.save(dir.path()).expect("saved again");
-        assert_eq!(load(dir.path()).theme, ThemeChoice::Light);
+        assert_eq!(load(dir.path()).settings.theme, ThemeChoice::Light);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_name_that_is_not_text_round_trips() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let odd = VPath::local(dir.path().join(OsStr::from_bytes(b"caf\xE9 \xFF")))
+            .expect("a local path");
+        let mut settings = Settings::default();
+        settings.set_session(&Session {
+            panes: [
+                SessionPane {
+                    tabs: vec![odd.clone()],
+                    active: 0,
+                },
+                SessionPane::default(),
+            ],
+            ..Session::default()
+        });
+        settings.save(dir.path()).expect("saved");
+
+        assert_eq!(load(dir.path()).settings.session().panes[0].tabs, [odd]);
     }
 
     #[test]
     fn missing_file_gives_the_defaults() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        assert_eq!(load(dir.path()), Settings::default());
+        assert_eq!(load(dir.path()), writable(Settings::default()));
         assert!(!dir.path().join(BAD_FILE_NAME).exists());
         assert_eq!(Settings::default().theme, ThemeChoice::System);
         assert_eq!(Settings::default().window_size(), None);
@@ -418,9 +629,91 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         std::fs::write(dir.path().join(FILE_NAME), "theme = \"light\"\n").expect("written");
         let loaded = load(dir.path());
-        assert_eq!(loaded.theme, ThemeChoice::Light);
-        assert!(!loaded.show_hidden);
-        assert_eq!(loaded.session(), Session::default());
+        assert!(loaded.writable);
+        assert_eq!(loaded.settings.theme, ThemeChoice::Light);
+        assert!(!loaded.settings.show_hidden);
+        assert_eq!(loaded.settings.session(), Session::default());
+    }
+
+    #[test]
+    fn values_of_a_newer_version_fall_back_one_key_at_a_time() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let a = folder(dir.path(), "a").to_uri();
+        let text = format!(
+            "theme = \"high-contrast\"\nshow_hidden = 3\nwindow = \"big\"\nactive_pane = 1\n\
+             recent_targets = [\"{a}\"]\npanes = [{{ tabs = [\"{a}\"], active = \"x\" }}, 5, \
+             {{ tabs = [\"{a}\"], layout = \"grid\" }}]\n"
+        );
+        std::fs::write(dir.path().join(FILE_NAME), &text).expect("written");
+
+        let loaded = load(dir.path());
+
+        assert!(loaded.writable);
+        assert!(!dir.path().join(BAD_FILE_NAME).exists());
+        let settings = loaded.settings;
+        assert_eq!(settings.theme, ThemeChoice::System);
+        assert!(!settings.show_hidden);
+        assert_eq!(settings.window, None);
+        assert_eq!(settings.active_pane, 1);
+        assert_eq!(settings.recent_targets, std::slice::from_ref(&a));
+        assert_eq!(settings.panes.len(), 3, "a third pane is kept");
+        assert_eq!(settings.panes[0].tabs, std::slice::from_ref(&a));
+        assert_eq!(settings.panes[0].active, 0);
+        assert_eq!(settings.panes[1], PaneSettings::default());
+        assert_eq!(
+            settings.panes[2].extra.get("layout"),
+            Some(&toml::Value::String("grid".to_owned()))
+        );
+        // A file with one pane, or none, opens the other with its default.
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            format!("[[panes]]\ntabs = [\"{a}\"]\n"),
+        )
+        .expect("written");
+        let session = load(dir.path()).settings.session();
+        assert_eq!(session.panes[0].tabs.len(), 1);
+        assert_eq!(session.panes[1], SessionPane::default());
+    }
+
+    #[test]
+    fn tabs_this_version_cannot_read_stay_in_the_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let a = folder(dir.path(), "a");
+        let b = folder(dir.path(), "b");
+        let mut settings = Settings {
+            panes: vec![
+                PaneSettings {
+                    tabs: vec![a.to_uri(), "cloud+new://x/y".to_owned(), b.to_uri()],
+                    active: 2,
+                    ..PaneSettings::default()
+                },
+                PaneSettings {
+                    tabs: vec!["nonsense".to_owned(), a.to_uri()],
+                    active: 0,
+                    ..PaneSettings::default()
+                },
+            ],
+            active_pane: 5,
+            ..Settings::default()
+        };
+
+        let session = settings.session();
+
+        assert_eq!(session.panes[0].tabs, [a.clone(), b.clone()]);
+        assert_eq!(session.panes[0].active, 1, "the same tab still shows");
+        assert_eq!(session.panes[1].tabs, std::slice::from_ref(&a));
+        assert_eq!(session.panes[1].active, 0, "the first one shows");
+        assert_eq!(session.active_pane, 1);
+
+        // Saving the session back keeps them, after the tabs that open; twice too.
+        settings.set_session(&session);
+        settings.set_session(&session);
+        assert_eq!(
+            settings.panes[0].tabs,
+            [a.to_uri(), b.to_uri(), "cloud+new://x/y".to_owned()]
+        );
+        assert_eq!(settings.panes[0].active, 1);
+        assert_eq!(settings.panes[1].tabs, [a.to_uri(), "nonsense".to_owned()]);
     }
 
     #[test]
@@ -432,12 +725,11 @@ mod tests {
 
         for broken in [
             &b"theme = \"dark\"\npanes = [[[[\n"[..],
-            b"theme = \"purple\"\n",
-            b"show_hidden = 3\n",
+            b"theme = \"dark\"\ntheme = \"light\"\n",
             b"\xFF\xFE not text",
         ] {
             std::fs::write(&file, broken).expect("written");
-            assert_eq!(load(dir.path()), Settings::default());
+            assert_eq!(load(dir.path()), writable(Settings::default()));
             assert!(!file.exists(), "{broken:?} stays in place");
             // The newest broken file replaces the older one.
             assert_eq!(std::fs::read(&bad).expect("set aside"), broken);
@@ -445,7 +737,7 @@ mod tests {
 
         // Settings saved after that load as usual.
         full(dir.path()).save(dir.path()).expect("saved");
-        assert_eq!(load(dir.path()), full(dir.path()));
+        assert_eq!(load(dir.path()), writable(full(dir.path())));
     }
 
     #[test]
@@ -456,29 +748,55 @@ mod tests {
             "x".repeat(usize::try_from(MAX_FILE_SIZE).unwrap())
         );
         std::fs::write(dir.path().join(FILE_NAME), huge).expect("written");
-        assert_eq!(load(dir.path()), Settings::default());
+        assert_eq!(load(dir.path()), writable(Settings::default()));
         assert!(dir.path().join(BAD_FILE_NAME).is_file());
     }
 
     #[test]
-    fn unparsable_tabs_are_left_out() {
+    fn a_file_that_cannot_be_read_or_set_aside_is_never_replaced() {
+        // A folder in the place of the file: it cannot be read, and stays.
         let dir = tempfile::tempdir().expect("a temp dir");
-        let a = folder(dir.path(), "a");
-        let b = folder(dir.path(), "b");
-        let mut settings = Settings::default();
-        settings.panes[0].tabs = vec![a.to_uri(), "nonsense".to_owned(), b.to_uri()];
-        settings.panes[0].active = 2;
-        settings.panes[1].tabs = vec!["nonsense".to_owned(), a.to_uri()];
-        settings.panes[1].active = 0;
-        settings.active_pane = 5;
+        let file = dir.path().join(FILE_NAME);
+        std::fs::create_dir(&file).expect("made");
+        std::fs::write(file.join("keep"), "keep").expect("written");
+        let loaded = load(dir.path());
+        assert_eq!(loaded.settings, Settings::default());
+        assert!(!loaded.writable);
+        assert!(file.join("keep").is_file());
+        assert!(!dir.path().join(BAD_FILE_NAME).exists());
 
-        let session = settings.session();
+        // A broken file whose place aside is taken by a folder that is not empty: it stays,
+        // and the run that starts with the defaults never saves over it.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let bad = dir.path().join(BAD_FILE_NAME);
+        std::fs::create_dir(&bad).expect("made");
+        std::fs::write(bad.join("x"), "x").expect("written");
+        std::fs::write(&file, "theme = [[[").expect("written");
+        let loaded = load(dir.path());
+        assert!(!loaded.writable);
+        let saver = Saver::new(dir.path().to_owned(), loaded.writable);
+        let text = full(dir.path()).to_text().expect("text");
+        assert!(matches!(
+            saver.save_within(text, Duration::from_secs(10)),
+            Some(Ok(()))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("still there"),
+            "theme = [[["
+        );
+    }
 
-        assert_eq!(session.panes[0].tabs, [a.clone(), b.clone()]);
-        assert_eq!(session.panes[0].active, 1, "the same tab still shows");
-        assert_eq!(session.panes[1].tabs, [a]);
-        assert_eq!(session.panes[1].active, 0, "the first one shows");
-        assert_eq!(session.active_pane, 1);
+    #[test]
+    fn a_nan_of_a_newer_version_reads_the_same_each_time() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(dir.path().join(FILE_NAME), "theme = \"dark\"\nzoom = nan\n")
+            .expect("written");
+        let settings = load(dir.path()).settings;
+        assert_ne!(settings, settings.clone(), "a nan is not equal to itself");
+        let text = settings.to_text().expect("text");
+        assert_eq!(settings.clone().to_text().expect("text"), text);
+        assert!(text.contains("zoom = nan"));
     }
 
     #[test]
@@ -489,6 +807,7 @@ mod tests {
         let b = folder(dir.path(), "b");
         let gone = folder(dir.path(), "gone");
         let slow = folder(dir.path(), "slow");
+        let unplugged = folder(dir.path(), "usb");
         for made in [&home, &a, &b, &slow] {
             std::fs::create_dir(made.as_local().expect("local")).expect("made");
         }
@@ -500,7 +819,7 @@ mod tests {
                     active: 1,
                 },
                 SessionPane {
-                    tabs: vec![slow.clone(), gone.clone()],
+                    tabs: vec![slow.clone(), gone.clone(), unplugged.clone()],
                     active: 0,
                 },
             ],
@@ -508,28 +827,43 @@ mod tests {
             show_hidden: false,
         });
         stored.save(dir.path()).expect("saved");
-        let session = load(dir.path()).session();
+        let session = load(dir.path()).settings.session();
         assert_eq!(
             session.folders(),
-            [a.clone(), gone, b.clone(), slow.clone()]
+            [a.clone(), gone, b.clone(), slow.clone(), unplugged.clone()]
         );
 
-        // The slow folder is not looked at in time.
+        // The slow folder is not looked at in time; the unplugged one's drive is not there.
         let (restored, waiting) = session.resolve(&home, |path| {
-            (*path != slow).then(|| path.as_local().is_some_and(Path::is_dir))
+            if *path == slow {
+                None
+            } else if *path == unplugged {
+                Some(Found::Offline)
+            } else if path.as_local().is_some_and(Path::is_dir) {
+                Some(Found::Folder)
+            } else {
+                Some(Found::Gone)
+            }
         });
 
         assert_eq!(restored.panes[0].tabs, [a, home.clone(), b]);
         assert_eq!(restored.panes[0].active, 1);
-        assert_eq!(restored.panes[1].tabs, [home.clone(), home]);
+        assert_eq!(restored.panes[1].tabs, [home.clone(), home.clone(), home]);
         assert_eq!(restored.active_pane, 1);
         assert_eq!(
             waiting,
-            [Waiting {
-                side: 1,
-                tab: 0,
-                path: slow
-            }]
+            [
+                Waiting {
+                    side: 1,
+                    tab: 0,
+                    path: slow
+                },
+                Waiting {
+                    side: 1,
+                    tab: 2,
+                    path: unplugged
+                }
+            ]
         );
     }
 
@@ -548,8 +882,8 @@ mod tests {
     #[test]
     fn the_saver_keeps_the_last_settings_asked_for() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let saver = Saver::new(dir.path().to_owned());
-        let (sent, received) = std::sync::mpsc::channel();
+        let saver = Saver::new(dir.path().to_owned(), true);
+        let (sent, received) = mpsc::channel();
         for theme in [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System] {
             let sent = sent.clone();
             let settings = Settings {
@@ -557,7 +891,7 @@ mod tests {
                 ..Settings::default()
             };
             saver
-                .save_in_background(settings, move |result| {
+                .save_in_background(settings.to_text().expect("text"), move |result| {
                     let _ = sent.send(result.is_ok());
                 })
                 .expect("the thread starts");
@@ -567,11 +901,37 @@ mod tests {
             show_hidden: true,
             ..Settings::default()
         };
-        saver.save(&last).expect("saved");
+        let text = last.to_text().expect("text");
+        assert!(matches!(
+            saver.save_within(text, Duration::from_secs(10)),
+            Some(Ok(()))
+        ));
         for _ in 0..3 {
             assert!(received.recv().expect("each write reports"));
         }
-        assert_eq!(load(dir.path()), last);
+        assert_eq!(load(dir.path()), writable(last));
+    }
+
+    #[test]
+    fn the_last_save_does_not_wait_for_a_hung_write() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let saver = Saver::new(dir.path().to_owned(), true);
+        let text = full(dir.path()).to_text().expect("text");
+        // A write that hangs (a network home that stopped answering) holds the saver.
+        let hung = saver.written.lock().expect("not poisoned");
+
+        let started = Instant::now();
+        let result = saver.save_within(text, Duration::from_millis(200));
+
+        assert!(result.is_none(), "it does not wait for the write");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The write goes on once the hung one ends.
+        drop(hung);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while load(dir.path()) != writable(full(dir.path())) {
+            assert!(Instant::now() < deadline, "the write ends");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

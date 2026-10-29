@@ -15,6 +15,7 @@
 //! a worker thread.
 
 use std::fmt;
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
@@ -25,6 +26,7 @@ use rf_vfs::{
 
 use crate::pane::OpenAction;
 use crate::pick::TargetFacts;
+use crate::settings::Found;
 
 /// What a tab asks the [`Loader`] for: the listing of `path` in the order `sort`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,14 +185,29 @@ impl Loader {
         None
     }
 
-    /// Whether `path` is a folder, or a link to one: a folder of the last run that a tab is to
-    /// show again.
+    /// What is at `path`, a folder of the last run that a tab is to show again: the folder (or
+    /// a link to one); nothing, while the folders that held it are there; or nothing because
+    /// its drive, share or volume is not there ([`Found::Offline`]): no folder above it is there
+    /// (a Windows drive or share that is not connected), or the nearest one is where the system
+    /// puts removable and network volumes ([`holds_volumes`]: an unplugged one's folder goes).
     ///
     /// Blocks (a slow or sleeping drive, a network folder); call it on a worker thread.
-    pub fn is_folder(&self, path: &VPath) -> bool {
-        self.vfs
-            .provider(path)
-            .is_ok_and(|provider| is_folder(provider.as_ref(), path))
+    pub fn look_at(&self, path: &VPath) -> Found {
+        let Ok(provider) = self.vfs.provider(path) else {
+            return Found::Offline;
+        };
+        if is_folder(provider.as_ref(), path) {
+            return Found::Folder;
+        }
+        let mut above = path.parent();
+        while let Some(folder) = above {
+            if is_folder(provider.as_ref(), &folder) {
+                let mounts = folder.as_local().is_some_and(holds_volumes);
+                return if mounts { Found::Offline } else { Found::Gone };
+            }
+            above = folder.parent();
+        }
+        Found::Offline
     }
 
     /// What is at `target`, a folder the destination picker may copy or move items to that
@@ -312,6 +329,24 @@ fn is_folder(provider: &dyn Provider, path: &VPath) -> bool {
             .is_ok_and(|target| target.kind == EntryKind::Dir),
         _ => false,
     }
+}
+
+/// Whether `folder` is where the system puts the folders of removable and network volumes:
+/// `/Volumes` (macOS), `/media`, `/media/<user>`, `/run/media/<user>` and `/mnt` (Linux). A
+/// folder missing right below it is a volume that is not there.
+pub fn holds_volumes(folder: &Path) -> bool {
+    let mut parts = folder.components();
+    if parts.next() != Some(Component::RootDir) {
+        return false;
+    }
+    let names: Vec<&std::ffi::OsStr> = parts.map(Component::as_os_str).collect();
+    let names: Vec<Option<&str>> = names.iter().map(|name| name.to_str()).collect();
+    matches!(
+        names.as_slice(),
+        [Some("Volumes" | "media" | "mnt")]
+            | [Some("media"), Some(_)]
+            | [Some("run"), Some("media"), Some(_)]
+    )
 }
 
 /// The running work of one [`Loader::request`]. Dropping it cancels the work.

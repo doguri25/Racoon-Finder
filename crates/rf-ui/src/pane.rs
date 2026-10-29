@@ -100,6 +100,9 @@ pub struct Tab {
     pending_select: Option<OsString>,
     /// The row a waiting [`Tab::select_name`] selected, until [`Tab::take_revealed`].
     revealed: Option<usize>,
+    /// The folder of the last run that the tab shows home in place of, until it goes
+    /// somewhere ([`Tab::stand_in_for`]).
+    stands_in_for: Option<VPath>,
 }
 
 impl Tab {
@@ -122,6 +125,7 @@ impl Tab {
             requested_sort: sort,
             pending_select: None,
             revealed: None,
+            stands_in_for: None,
         };
         let request = tab.load(location);
         (tab, request)
@@ -190,6 +194,8 @@ impl Tab {
     /// history.
     pub fn navigate(&mut self, to: VPath) -> LoadRequest {
         if to == self.location {
+            // Chosen again: it is the folder the tab shows now, not a stand-in.
+            self.stands_in_for = None;
             return self.reload();
         }
         self.history.visit(self.location.clone());
@@ -398,14 +404,33 @@ impl Tab {
         self.revealed.take()
     }
 
+    /// Makes the tab stand in for `folder`, a folder of the last run that is not there yet (a
+    /// slow drive, an unplugged one): it shows another folder (home) meanwhile, and the
+    /// settings keep `folder` for it. A reload keeps that; going anywhere ends it.
+    pub fn stand_in_for(&mut self, folder: VPath) {
+        self.stands_in_for = Some(folder);
+    }
+
+    /// The folder the tab stands in for, if it does.
+    pub fn stands_in_for(&self) -> Option<&VPath> {
+        self.stands_in_for.as_ref()
+    }
+
+    /// Ends the tab's standing in (its folder turned out to be gone).
+    pub fn end_stand_in(&mut self) {
+        self.stands_in_for = None;
+    }
+
     /// Whether the listing of request `generation` is still awaited.
     fn is_loading(&self, generation: u64) -> bool {
         generation == self.generation && self.status == LoadStatus::Loading
     }
 
-    /// Moves to `to` without touching the history: no rows, no selection, no free space.
+    /// Moves to `to` without touching the history: no rows, no selection, no free space, and no
+    /// folder stood in for any more.
     fn load(&mut self, to: VPath) -> LoadRequest {
         self.location = to;
+        self.stands_in_for = None;
         self.all.clear();
         self.visible.clear();
         self.selection = Selection::default();

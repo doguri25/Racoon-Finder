@@ -165,6 +165,12 @@ pub fn settings_not_saved() -> &'static str {
     "설정을 저장하지 못했습니다. 다음 실행 때 탭과 보기 설정이 돌아오지 않을 수 있습니다"
 }
 
+/// The notice at the start when the settings file is there but could not be read (or set
+/// aside): the app starts with the defaults and leaves the file alone.
+pub fn settings_unreadable() -> &'static str {
+    "설정 파일을 읽지 못해 기본 설정으로 시작했습니다. 이번에 바꾼 설정은 저장하지 않습니다"
+}
+
 /// The space line of a drive in the sidebar: `128 GB 남음 / 512 GB`. The free space is
 /// rounded down, so a full drive never reads as having room.
 pub fn drive_space(available: u64, total: u64) -> String {

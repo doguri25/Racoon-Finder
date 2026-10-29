@@ -1,7 +1,7 @@
 //! Opening the tabs of the last run, and handing them back for the settings.
 
 use super::*;
-use crate::settings::{Session, SessionPane, Waiting};
+use crate::settings::{Found, Session, SessionPane, Waiting};
 
 fn session(left: &[&str], left_active: usize, right: &[&str], active_pane: usize) -> Session {
     let pane = |names: &[&str], active| SessionPane {
@@ -123,18 +123,92 @@ fn a_waiting_tab_goes_to_its_folder_once_it_is_found() {
     // The user moves the third tab on meanwhile: it stays where it went.
     let _ = state.select_tab(LEFT, 2);
     let _ = state.go_to(folder("mine"));
+    // The second one's listing of home is reloaded meanwhile: it still stands in.
+    let _ = state.select_tab(LEFT, 1);
+    let _ = state.retry(LEFT);
 
-    let effects = state.restored_folder(&folder("slow"), true);
+    let effects = state.restored_folder(&folder("slow"), Found::Folder);
 
     assert_eq!(the_load(&effects).path, folder("slow"));
     assert_eq!(
         locations(&state, LEFT),
         [folder("a"), folder("slow"), folder("mine")]
     );
-    // A folder that is not there leaves its tab at home, for the settings too.
-    assert_eq!(state.restored_folder(&folder("offline"), false), []);
-    assert_eq!(locations(&state, RIGHT), std::slice::from_ref(&home));
-    assert_eq!(state.session().panes[RIGHT].tabs, [home]);
     // Each answer counts once.
-    assert_eq!(state.restored_folder(&folder("slow"), true), []);
+    assert_eq!(state.restored_folder(&folder("slow"), Found::Folder), []);
+
+    // A folder whose drive is still not there: the tab stays at home and keeps it.
+    assert_eq!(
+        state.restored_folder(&folder("offline"), Found::Offline),
+        []
+    );
+    assert_eq!(locations(&state, RIGHT), std::slice::from_ref(&home));
+    assert_eq!(state.session().panes[RIGHT].tabs, [folder("offline")]);
+    // A folder that is gone: the tab stays at home, for the settings too.
+    assert_eq!(state.restored_folder(&folder("offline"), Found::Gone), []);
+    assert_eq!(
+        state.session().panes[RIGHT].tabs,
+        std::slice::from_ref(&home)
+    );
+}
+
+#[test]
+fn a_tab_stops_standing_in_once_the_user_moves_it() {
+    let home = folder("home");
+    let waiting = [Waiting {
+        side: RIGHT,
+        tab: 0,
+        path: folder("usb"),
+    }];
+    let (mut state, _) = AppState::restore(
+        folder("l"),
+        folder("r"),
+        session(&["a"], 0, &["home"], 1),
+        &waiting,
+        Some(home.clone()),
+    );
+    // Choosing home again in that tab makes it a home tab.
+    let _ = state.go_to(home.clone());
+    assert_eq!(
+        state.session().panes[RIGHT].tabs,
+        std::slice::from_ref(&home)
+    );
+    assert_eq!(state.restored_folder(&folder("usb"), Found::Folder), []);
+}
+
+#[test]
+fn a_start_folder_opens_as_a_new_left_tab() {
+    let start = folder("start");
+    // A new tab after the left pane's tabs, which keeps the keyboard.
+    let opened = session(&["a", "b"], 0, &["c"], 1).with_start(start.clone(), &[]);
+    let (state, effects) = AppState::restore(folder("l"), folder("r"), opened, &[], None);
+    assert_eq!(
+        locations(&state, LEFT),
+        [folder("a"), folder("b"), start.clone()]
+    );
+    assert_eq!(state.panes()[LEFT].active(), 2);
+    assert_eq!(state.active(), LEFT);
+    assert_eq!(loads(&effects).len(), 4);
+    assert_eq!(state.session().panes[LEFT].tabs.len(), 3);
+
+    // A left tab that shows it already shows: no second one.
+    let opened = session(&["a", "start"], 0, &["c"], 1).with_start(start.clone(), &[]);
+    let (state, _) = AppState::restore(folder("l"), folder("r"), opened, &[], None);
+    assert_eq!(locations(&state, LEFT), [folder("a"), start.clone()]);
+    assert_eq!(state.panes()[LEFT].active(), 1);
+    assert_eq!(state.active(), LEFT);
+
+    // A tab that shows it only standing in for another folder is not it.
+    let waiting = [Waiting {
+        side: LEFT,
+        tab: 0,
+        path: folder("usb"),
+    }];
+    let opened = session(&["start"], 0, &[], 0).with_start(start.clone(), &waiting);
+    assert_eq!(opened.panes[LEFT].tabs, [start.clone(), start]);
+    assert_eq!(opened.panes[LEFT].active, 1);
+
+    // Without saved tabs the left pane has the start folder alone.
+    let opened = Session::default().with_start(folder("only"), &[]);
+    assert_eq!(opened.panes[LEFT].tabs, [folder("only")]);
 }

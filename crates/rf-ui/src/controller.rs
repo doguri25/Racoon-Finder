@@ -29,15 +29,15 @@ use crate::loader::{LoadEvent, LoadTicket, Loader};
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
-use crate::settings::{Saver, Session, SessionPane, Settings, ThemeChoice, Waiting};
+use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, JobRowView, MainWindow, open, words};
 
 mod persist;
 
-pub use persist::{RESTORE_WAIT, SAVE_DELAY};
-use persist::{logical, look_for, theme_number, theme_of, wait_for};
+pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
+use persist::{SaveLedger, logical, look_for, theme_number, theme_of, wait_for};
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -75,12 +75,12 @@ pub fn post_question(question: Question) -> bool {
 /// What the window starts with, besides the job engine.
 #[derive(Debug)]
 pub struct Startup {
-    /// The folder the app's first argument names: the left pane opens it alone, in place of
-    /// the tabs of the last run.
+    /// The folder the app's first argument names: the left pane shows it, in a new tab after
+    /// the tabs of the last run (or the one of them that shows it), and has the keyboard.
     pub start: Option<PathBuf>,
     /// The settings of the last run ([`crate::settings::load`]).
     pub settings: Settings,
-    /// Writes them back.
+    /// Writes them back (or, when the file there could not be read, writes nothing).
     pub saver: Saver,
 }
 
@@ -98,10 +98,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         window.set_start_width(logical(width));
         window.set_start_height(logical(height));
     }
-    let mut session = settings.session();
-    if start.is_some() {
-        session.panes[LEFT] = SessionPane::default();
-    }
+    let session = settings.session();
+    let started_at = start.is_some();
     window.set_theme_choice(theme_number(settings.theme));
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
@@ -126,13 +124,19 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         let (Some((left, right)), Some(fallback)) = (folders, home.clone().or(root)) else {
             return;
         };
-        let checks = look_for(&loader, session.folders());
-        let found = wait_for(&checks, session.folders().len(), RESTORE_WAIT);
-        let (session, waiting) = session.resolve(&fallback, |path| found.get(path).copied());
+        let folders = session.folders();
+        let count = folders.len();
+        let checks = look_for(folders, RESTORE_WORKERS, move |path| loader.look_at(path));
+        let found = wait_for(&checks, count, RESTORE_WAIT);
+        let (mut session, waiting) = session.resolve(&fallback, |path| found.get(path).copied());
+        if started_at {
+            // `left` is the folder asked for.
+            session = session.with_start(left.clone(), &waiting);
+        }
         post(move |c| c.open(left, right, session, &waiting, home, &tz));
         // The folders not known in time, as they come.
-        for (path, exists) in checks {
-            post(move |c| c.update(|state| state.restored_folder(&path, exists)));
+        for (path, what) in checks {
+            post(move |c| c.update(|state| state.restored_folder(&path, what)));
         }
     });
     spawn_worker("rf-ui-places", || {
@@ -396,14 +400,13 @@ pub struct Controller {
     /// shows another folder or tab scrolls to its cursor, or its top.
     shown: RefCell<[Option<(usize, VPath)>; 2]>,
     /// The settings as last read or written, with the keys of a newer version: a save writes
-    /// them with what the window shows then, and only when that differs.
+    /// them with what the window shows then.
     settings: RefCell<Settings>,
     saver: Saver,
+    /// Whether, and what, to save after a change ([`SaveLedger`]).
+    ledger: RefCell<SaveLedger>,
     /// Runs [`SAVE_DELAY`] after the first change since the last save.
     save_timer: slint::Timer,
-    /// The settings have been taken for the last write, as the app ends: none is planned any
-    /// more.
-    settings_closed: Cell<bool>,
     /// Whether a failed save has been told (once is enough).
     save_failure_told: Cell<bool>,
     /// The theme chosen in the 보기 menu.
@@ -448,10 +451,13 @@ impl Controller {
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
             theme: Cell::new(settings.theme),
+            ledger: RefCell::new(SaveLedger::new(
+                settings.to_text().unwrap_or_default(),
+                saver.writable(),
+            )),
             settings: RefCell::new(settings),
             saver,
             save_timer: slint::Timer::default(),
-            settings_closed: Cell::new(false),
             save_failure_told: Cell::new(false),
         }
     }
@@ -474,6 +480,9 @@ impl Controller {
         *self.tz.borrow_mut() = tz.clone();
         let (mut state, mut effects) = AppState::restore(left, right, session, waiting, home);
         state.set_recent_targets(self.settings.borrow().recent());
+        if !self.saver.writable() {
+            effects.push(Effect::Notice(words::settings_unreadable().to_owned()));
+        }
         let places = self.places.borrow().clone();
         if !places.is_empty() {
             effects.extend(state.set_places(&places));
@@ -544,10 +553,11 @@ impl Controller {
         self.update(AppState::request_close);
     }
 
-    /// Ends the app: on a worker thread the engine shuts down and the questions are released
-    /// ([`Jobs::close_down`]), then the settings are written a last time, and then the event
-    /// loop ends. The window shows the closing note meanwhile. A worker that cannot start
-    /// leaves the shutdown and the settings to [`crate::run`], after the event loop.
+    /// Ends the app on a worker thread: the settings are written a last time (waiting
+    /// [`FINAL_SAVE_WAIT`] at most), then the engine shuts down and the questions are released
+    /// ([`Jobs::close_down`]), and then the event loop ends. The window shows the closing note
+    /// meanwhile. A worker that cannot start leaves the settings and the shutdown to
+    /// [`crate::run`], after the event loop.
     fn quit(&self) {
         let jobs = self.jobs.clone();
         let saver = self.saver.clone();
@@ -556,18 +566,19 @@ impl Controller {
         let started = std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
             .spawn(move || {
-                jobs.close_down(QUIT_TIMEOUT);
-                if let Some(settings) = last {
-                    // After a write in progress; the app ends either way.
-                    let _ = saver.save(&settings);
+                // First: they do not wait for the engine, and an end forced while it shuts
+                // down does not lose them.
+                if let Some(text) = last {
+                    let _ = saver.save_within(text, FINAL_SAVE_WAIT);
                 }
+                jobs.close_down(QUIT_TIMEOUT);
                 let _ = slint::invoke_from_event_loop(|| {
                     let _ = slint::quit_event_loop();
                 });
             });
         if started.is_err() {
             if taken {
-                self.settings_closed.set(false);
+                self.reopen_settings();
             }
             let _ = slint::quit_event_loop();
         }

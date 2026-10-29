@@ -59,16 +59,17 @@ pub enum RunError {
 /// Shows the main window and runs the event loop until the app ends.
 ///
 /// The window opens as the last run left it ([`settings`]): its size, the theme, the tabs of
-/// both panes and the pane with the keyboard, the hidden items shown or not. `start` is the
-/// folder the left pane opens instead of its tabs (the app's first argument). On the first
-/// run the left pane opens `start` or the home folder, the right one the documents folder, or
-/// home.
+/// both panes and the pane with the keyboard, the hidden items shown or not. `start` (the app's
+/// first argument) is a folder the left pane shows too, in a new tab, with the keyboard. On the
+/// first run the left pane opens `start` or the home folder, the right one the documents
+/// folder, or home.
 ///
 /// One instance of the app runs at a time: it takes the lock in the folder of the job
 /// journal ([`instance`]) before anything else, and a second one only says so, in a small
 /// window, and ends with [`RunError::AlreadyRunning`]. The job engine keeps its journal in
-/// that folder. When the window closes, the engine is shut down and the jobs' questions are
-/// released ([`jobs::close_down`]), and then the settings are written, before this returns.
+/// that folder. When the window closes, the settings are written (waiting
+/// [`controller::FINAL_SAVE_WAIT`] at most), and the engine is shut down and the jobs'
+/// questions are released ([`jobs::close_down`]), before this returns.
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
@@ -82,8 +83,8 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     };
     // Read here, on the main thread, before the window shows: it is one small local file, read
     // once, and the window needs its size and theme before its first frame.
-    let settings = settings::load(paths.config_dir());
-    let saver = settings::Saver::new(paths.config_dir().to_owned());
+    let loaded = settings::load(paths.config_dir());
+    let saver = settings::Saver::new(paths.config_dir().to_owned(), loaded.writable);
     let window = MainWindow::new()?;
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     let jobs = jobs::Jobs::start(
@@ -94,28 +95,28 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     .map_err(RunError::Thread)?;
     let startup = controller::Startup {
         start,
-        settings,
+        settings: loaded.settings,
         saver: saver.clone(),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     let result = window.run();
-    // `None` when the end through the close button has written them already.
+    // `None` when the end through the close button has taken them already.
     let last = controller.final_settings();
     // Stops the listings and the watches before the window goes.
     drop(controller);
     controller::end();
     if !jobs.is_closed() || last.is_some() {
-        // The event loop ended some other way than the window's close button: end the engine
-        // and write the settings here, on a thread of its own as everywhere, and wait for it.
+        // The event loop ended some other way than the window's close button: write the
+        // settings and end the engine here, on a thread of its own as everywhere, and wait.
         let (closing, saving, writing) = (jobs.clone(), saver.clone(), last.clone());
         match std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
-            .spawn(move || finish(&closing, &saving, writing.as_ref()))
+            .spawn(move || finish(&closing, &saving, writing))
         {
             Ok(thread) => {
                 let _ = thread.join();
             }
-            Err(_) => finish(&jobs, &saver, last.as_ref()),
+            Err(_) => finish(&jobs, &saver, last),
         }
     }
     drop(lock);
@@ -123,14 +124,15 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     Ok(())
 }
 
-/// The end of the app after the event loop, when the close button did not end it: the engine
-/// shuts down (unless it has) and then `last`, the settings, are written. Blocks.
-fn finish(jobs: &jobs::Jobs, saver: &settings::Saver, last: Option<&settings::Settings>) {
+/// The end of the app after the event loop, when the close button did not end it: `last`, the
+/// text of the settings, is written (waiting [`controller::FINAL_SAVE_WAIT`] at most), then the
+/// engine shuts down, unless it has. Blocks.
+fn finish(jobs: &jobs::Jobs, saver: &settings::Saver, last: Option<String>) {
+    if let Some(text) = last {
+        let _ = saver.save_within(text, controller::FINAL_SAVE_WAIT);
+    }
     if !jobs.is_closed() {
         jobs.close_down(jobs::QUIT_TIMEOUT);
-    }
-    if let Some(settings) = last {
-        let _ = saver.save(settings);
     }
 }
 
