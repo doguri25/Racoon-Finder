@@ -298,7 +298,7 @@ fn the_tree_shows_places_and_folders() {
             }),
         },
     ];
-    let mut tree = Tree::new(false);
+    let mut tree = Tree::new(VisibilityFilter::default());
     tree.set_roots(
         places
             .iter()

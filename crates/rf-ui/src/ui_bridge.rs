@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn tree_rows_follow_the_tree() {
         let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         let place = Place {
             label: "홈".to_owned(),
             path: home,

@@ -30,7 +30,7 @@ use crate::dialogs::{
 use crate::jobs::{Ended, History, JobEffect, JobRow, JobRows, Started};
 use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest};
-use crate::pane::{Handled, OpenAction, Pane, Tab, ancestors};
+use crate::pane::{Handled, LoadStatus, OpenAction, Pane, Tab, ancestors};
 use crate::places::Place;
 use crate::resolver::{Asked, Question};
 use crate::tree::Tree;
@@ -155,7 +155,7 @@ impl AppState {
             panes: [left_pane, right_pane],
             active: LEFT,
             show_hidden: filter.show_hidden,
-            tree: Tree::new(filter.show_hidden),
+            tree: Tree::new(filter),
             home,
             auto_reloads: HashMap::new(),
             pending_reloads: HashSet::new(),
@@ -647,12 +647,23 @@ impl AppState {
     }
 
     /// The folders `folders` changed through a job of this window (a create, a rename, a
-    /// delete, a transfer, an undo). The panes follow their folders' watches; this is where
-    /// the folder tree will refresh the nodes of these folders it has listed (a follow-up of
-    /// the shared folder tree). It asks for nothing yet.
+    /// delete, a transfer, an undo). The panes follow their folders' watches, and the tree
+    /// follows a folder a pane shows through that pane's listing ([`AppState::loaded`]); the
+    /// tree's other listed nodes of these folders are listed again.
     pub fn folders_changed(&mut self, folders: &[VPath]) -> Vec<Effect> {
-        let _ = folders;
-        Vec::new()
+        let shown: Vec<&VPath> = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .filter(|tab| tab.status() == LoadStatus::Ready)
+            .map(Tab::location)
+            .collect();
+        let requests: Vec<LoadRequest> = folders
+            .iter()
+            .filter(|folder| !shown.contains(folder))
+            .flat_map(|folder| self.tree.relist_folder(folder))
+            .collect();
+        requests.into_iter().map(Effect::LoadChildren).collect()
     }
 
     /// Tells of the job that ended: see [`AppState::job_event`].
@@ -1026,10 +1037,16 @@ impl AppState {
         let Some(side) = self.side_of(event.generation()) else {
             return self.tree_loaded(event);
         };
+        let new_rows = matches!(event, LoadEvent::Listed { .. } | LoadEvent::Changes { .. });
         match self.panes[side].handle(event) {
             Handled::Stale => Vec::new(),
             // A row a job made may have come: it was selected, and shows.
             Handled::Applied { tab } => {
+                // The tree's nodes of the folder take its folders, once the listing is whole.
+                let listed = &self.panes[side].tabs()[tab];
+                if new_rows && listed.status() == LoadStatus::Ready {
+                    self.tree.sync_folder(listed.location(), listed.all());
+                }
                 let shows = tab == self.panes[side].active();
                 self.panes[side].tabs_mut()[tab]
                     .take_revealed()
@@ -2588,6 +2605,47 @@ mod tests {
         assert_eq!(effects, []);
         assert!(!state.tree().rows()[2].has_children);
         assert!(!state.generations().contains(&a.generation));
+    }
+
+    #[test]
+    fn the_tree_follows_folder_changes() {
+        let mut state = ready(vec![], vec![]);
+        let mut effects = state.set_places(&[drive("임시", &temp())]);
+        effects.extend(state.follow_active());
+        let request = the_tree_load(&effects);
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: vec![dir("a"), dir("b")],
+        });
+        assert_eq!(tree_labels(&state), ["임시", "a", "b"]);
+
+        // The left pane shows the temporary folder: its listing, then its watch, keep the
+        // tree's node of that folder up to date.
+        let load = the_load(&state.go_to(temp()));
+        state.loaded(LoadEvent::Listed {
+            generation: load.generation,
+            entries: vec![file("x.txt"), dir("new"), dir("b"), dir("a")],
+        });
+        assert_eq!(tree_labels(&state), ["임시", "a", "b", "new"]);
+        state.loaded(LoadEvent::Changes {
+            generation: load.generation,
+            changes: vec![rf_vfs::Change::Removed("b".into())],
+        });
+        assert_eq!(tree_labels(&state), ["임시", "a", "new"]);
+        // A job's folder that a pane shows follows through that pane's watch.
+        assert_eq!(state.folders_changed(&[temp()]), []);
+
+        // One that no pane shows is listed again, once the tree has listed it.
+        state.go_to(folder("a"));
+        let effects = state.folders_changed(&[temp(), folder("never-listed")]);
+        let request = the_tree_load(&effects);
+        assert_eq!(request.path, temp());
+        assert!(state.generations().contains(&request.generation));
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: vec![dir("a"), dir("made"), dir("new")],
+        });
+        assert_eq!(tree_labels(&state), ["임시", "a", "made", "new"]);
     }
 
     #[test]

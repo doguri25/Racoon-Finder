@@ -8,17 +8,25 @@
 //! through [`Tree::apply_children`] (or [`Tree::listing_failed`]). Every request has a new
 //! generation, and a listing that no node waits for any more is dropped.
 //!
-//! A node is listed once, the first time it opens, and keeps its children, hidden ones too;
-//! the rows show the hidden ones only while the setting says so. A node whose listing failed
-//! has no children and shows no chevron. [`Tree::reveal`] follows the folder of the active
-//! pane: it opens only the folders on the way to it, below the deepest root that holds it,
-//! and lists each of them in turn as the listing above it comes, so a far folder costs one
-//! listing per level and nothing else.
+//! A node is listed the first time it opens and keeps its children, hidden ones too; the rows
+//! show them as the panes' [`VisibilityFilter`] says. A listing that failed leaves the node
+//! without a chevron, and the next opening or reveal through it tries again. The children
+//! follow the folder afterwards: a pane's listing of the same folder reconciles them
+//! ([`Tree::sync_folder`]), and a folder a job changed is listed again
+//! ([`Tree::relist_folder`]). A reconciled node keeps the nodes of the children that are still
+//! there, with what is open below them.
+//!
+//! [`Tree::reveal`] follows the folder of the active pane: it opens only the folders on the
+//! way to it, below the deepest root that holds it, and lists each of them in turn as the
+//! listing above it comes, so a far folder costs one listing per level and nothing else. A
+//! folder on the way that its parent's listing lacks (made since) has the parent listed again,
+//! once per reveal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 
 use rf_core::{Attributes, Entry, EntryKind, VPath};
-use rf_vfs::SortSpec;
+use rf_vfs::{SortSpec, VisibilityFilter, sort_entries};
 
 use crate::loader::LoadRequest;
 use crate::pane::next_generation;
@@ -35,14 +43,20 @@ pub struct TreeNode {
     pub label: String,
     /// 0 for a root, one more for each level below it.
     pub depth: usize,
+    /// The node one level up; `None` for a root.
+    pub parent: Option<NodeId>,
     /// The node shows its children (once they are listed).
     pub expanded: bool,
-    /// The child folders in the listing's order, once listed; `None` before.
+    /// The child folders in natural order, once listed; `None` before, and after a first
+    /// listing that failed.
     pub children: Option<Vec<NodeId>>,
-    /// The listing of the children is on its way.
+    /// A listing of the children is on its way.
     pub loading: bool,
-    /// The folder is hidden: its row shows only while hidden items do.
-    pub hidden: bool,
+    /// The last listing failed: with no children known, the row shows no chevron.
+    pub failed: bool,
+    /// The folder's attributes (hidden, system): whether its row shows follows the panes'
+    /// [`VisibilityFilter`]. Empty for a root.
+    pub attributes: Attributes,
     /// For a root, its position among the roots given to [`Tree::set_roots`].
     pub root: Option<usize>,
 }
@@ -71,12 +85,14 @@ pub struct TreeRowData {
 /// The folder tree: its nodes, which of them show, and the folder it follows.
 ///
 /// The fields change only through the methods, which keep `visible` (the rows) up to date
-/// and count every change in `revision`.
+/// and count every change of the rows in `revision`.
 #[derive(Debug)]
 pub struct Tree {
+    /// Every node made since the tree started; a node a reconciliation dropped stays here,
+    /// unreachable.
     nodes: Vec<TreeNode>,
     roots: Vec<NodeId>,
-    show_hidden: bool,
+    filter: VisibilityFilter,
     /// The folder the tree follows: the one [`Tree::reveal`] or [`Tree::select`] was last
     /// given.
     target: Option<VPath>,
@@ -84,6 +100,8 @@ pub struct Tree {
     selected: Option<NodeId>,
     /// The node whose listing the reveal of `target` waits for, to go on below it.
     waiting: Option<NodeId>,
+    /// The nodes the current reveal has listed again because the next folder was missing.
+    relisted: HashSet<NodeId>,
     /// The listings on their way, by generation.
     loads: HashMap<u64, NodeId>,
     /// The nodes the rows show, in order.
@@ -93,15 +111,16 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// An empty tree, showing hidden folders when `show_hidden` is set.
-    pub fn new(show_hidden: bool) -> Tree {
+    /// An empty tree whose rows show what `filter` shows.
+    pub fn new(filter: VisibilityFilter) -> Tree {
         Tree {
             nodes: Vec::new(),
             roots: Vec::new(),
-            show_hidden,
+            filter,
             target: None,
             selected: None,
             waiting: None,
+            relisted: HashSet::new(),
             loads: HashMap::new(),
             visible: Vec::new(),
             revision: 0,
@@ -117,18 +136,13 @@ impl Tree {
     ) -> Vec<LoadRequest> {
         self.nodes.clear();
         self.loads.clear();
+        self.relisted.clear();
         self.roots.clear();
         for (index, (label, path)) in roots.into_iter().enumerate() {
             self.roots.push(self.nodes.len());
             self.nodes.push(TreeNode {
-                path,
-                label,
-                depth: 0,
-                expanded: false,
-                children: None,
-                loading: false,
-                hidden: false,
                 root: Some(index),
+                ..TreeNode::new(path, label, 0, None, Attributes::empty())
             });
         }
         // The rows first: the folder may show already.
@@ -154,7 +168,7 @@ impl Tree {
                     label: node.label.clone(),
                     depth: node.depth,
                     expanded: node.expanded,
-                    has_children_unknown: node.children.is_none(),
+                    has_children_unknown: node.children.is_none() && !node.failed,
                     has_children: node
                         .children
                         .as_ref()
@@ -200,18 +214,21 @@ impl Tree {
         self.loads.keys().copied()
     }
 
-    /// Opens node `id`, or closes it. The first time a node opens it asks for its listing;
-    /// after that, or while the listing is on its way, it asks for nothing. Closing a folder
-    /// on the way to the one the tree follows stops looking for that one there. `None` too for
-    /// a node past the end.
+    /// Opens node `id`, or closes it. Opening a node that has not been listed (or whose
+    /// listing failed) asks for its listing; a listed node, or one whose listing is on its
+    /// way, asks for nothing. Closing a node on the way to the folder the tree follows stops
+    /// looking for that folder there. `None` too for a node past the end.
     pub fn toggle(&mut self, id: NodeId) -> Option<LoadRequest> {
         let node = self.nodes.get_mut(id)?;
-        node.expanded = !node.expanded;
-        let request = if node.expanded {
+        // A node whose listing failed shows closed, whatever its flag says.
+        let opening = !node.expanded || (node.children.is_none() && !node.loading);
+        node.expanded = opening;
+        let request = if opening {
             self.request(id)
         } else {
-            if let Some(waiting) = self.waiting
-                && self.nodes[waiting].path.starts_with(&self.nodes[id].path)
+            if self
+                .waiting
+                .is_some_and(|waiting| within(&self.nodes, waiting, id))
             {
                 self.waiting = None;
             }
@@ -221,39 +238,23 @@ impl Tree {
         request
     }
 
-    /// Takes the listing of request `generation`: its folders become the node's children, in
-    /// the listing's order, and files and links are left out. If the folder the tree follows
-    /// waited for this listing, the tree goes on toward it and returns the listing that needs
-    /// next. A listing that no node waits for any more is dropped.
+    /// Takes the listing of request `generation`, in the natural order the worker sorted it
+    /// in: its folders become the node's children, reconciled with the ones it had (as
+    /// [`Tree::sync_folder`] does), and files and links are left out. If the folder the tree
+    /// follows waited for this listing, the tree goes on toward it and returns the listing
+    /// that needs next. A listing that no node waits for any more is dropped.
     pub fn apply_children(&mut self, generation: u64, entries: Vec<Entry>) -> Vec<LoadRequest> {
         let Some(id) = self.loads.remove(&generation) else {
             return Vec::new();
         };
-        let parent = self.nodes[id].path.clone();
-        let depth = self.nodes[id].depth + 1;
-        let mut children = Vec::new();
-        for entry in entries {
-            if entry.kind != EntryKind::Dir {
-                continue;
-            }
-            let Ok(path) = parent.join(&entry.name) else {
-                continue;
-            };
-            children.push(self.nodes.len());
-            self.nodes.push(TreeNode {
-                path,
-                label: entry.name.to_string_lossy().into_owned(),
-                depth,
-                expanded: false,
-                children: None,
-                loading: false,
-                hidden: entry.attributes.contains(Attributes::HIDDEN),
-                root: None,
-            });
-        }
+        let folders: Vec<Entry> = entries
+            .into_iter()
+            .filter(|entry| entry.kind == EntryKind::Dir)
+            .collect();
         let node = &mut self.nodes[id];
         node.loading = false;
-        node.children = Some(children);
+        node.failed = false;
+        self.set_children(id, folders);
         let requests = if self.waiting == Some(id) {
             self.waiting = None;
             self.reveal_from(id)
@@ -264,15 +265,17 @@ impl Tree {
         requests
     }
 
-    /// The listing of request `generation` failed: the node has no children, and no chevron.
-    /// `false`, and no change, for a listing that no node waits for any more.
+    /// The listing of request `generation` failed. A node never listed keeps no children
+    /// and shows no chevron, until the next opening or reveal through it tries again; a node
+    /// listed before keeps the children it had. `false`, and no change, for a listing that no
+    /// node waits for any more.
     pub fn listing_failed(&mut self, generation: u64) -> bool {
         let Some(id) = self.loads.remove(&generation) else {
             return false;
         };
         let node = &mut self.nodes[id];
         node.loading = false;
-        node.children = Some(Vec::new());
+        node.failed = true;
         if self.waiting == Some(id) {
             self.waiting = None;
         }
@@ -280,15 +283,68 @@ impl Tree {
         true
     }
 
+    /// Takes `entries`, the listing of the folder `path` that a pane shows (in its own order,
+    /// files and hidden items too): every node of that folder that has been listed and has no
+    /// listing on its way (a place and a folder below another place can both be it) gets its
+    /// child folders from it. A child still there keeps its node, with what is open below it
+    /// and its attributes brought up to date; a new one comes in natural order; one that went
+    /// takes along the selection, the reveal's wait and the listings inside it. `true` when
+    /// the children changed; when the folders and their attributes are the same, nothing
+    /// changes, not even the revision, since a watch reports often while a copy runs.
+    pub fn sync_folder(&mut self, path: &VPath, entries: &[Entry]) -> bool {
+        let ids: Vec<NodeId> = self
+            .reachable()
+            .into_iter()
+            .filter(|&id| {
+                let node = &self.nodes[id];
+                node.path == *path && node.children.is_some() && !node.loading
+            })
+            .collect();
+        if ids.is_empty() {
+            return false;
+        }
+        let mut folders: Vec<Entry> = entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Dir)
+            .cloned()
+            .collect();
+        sort_entries(&mut folders, &SortSpec::default());
+        let mut changed = false;
+        for id in ids {
+            changed |= self.set_children(id, folders.clone());
+        }
+        if changed {
+            self.refresh();
+        }
+        changed
+    }
+
+    /// The folder `path` changed through a job: every node of it that has been listed, with
+    /// no listing on its way, is listed again, and [`Tree::apply_children`] reconciles its
+    /// children when the listing comes. The requests for those listings.
+    pub fn relist_folder(&mut self, path: &VPath) -> Vec<LoadRequest> {
+        let ids: Vec<NodeId> = self
+            .reachable()
+            .into_iter()
+            .filter(|&id| {
+                let node = &self.nodes[id];
+                node.path == *path && node.children.is_some() && !node.loading
+            })
+            .collect();
+        ids.into_iter().map(|id| self.list(id)).collect()
+    }
+
     /// Follows `path`, the folder of the active pane, and selects its node. When a row shows
     /// it already, that row is the one (the first, when several do) and nothing opens.
     /// Otherwise the tree opens the folders on the way to it below the deepest root that holds
     /// it: a folder on the way that has not been listed is listed (the returned request), and
-    /// the tree goes on when the listing comes ([`Tree::apply_children`]); one that is not in
-    /// its parent's listing, or is hidden while hidden folders do not show, ends the way, with
-    /// nothing selected. A path under no root opens nothing and selects nothing.
+    /// the tree goes on when the listing comes ([`Tree::apply_children`]). A folder that its
+    /// parent's listing lacks has the parent listed again, once per reveal, in case it was
+    /// made since; still missing, or hidden while hidden folders do not show, it ends the way,
+    /// with nothing selected. A path under no root opens nothing and selects nothing.
     pub fn reveal(&mut self, path: &VPath) -> Vec<LoadRequest> {
         self.target = Some(path.clone());
+        self.relisted.clear();
         let requests = self.reveal_target();
         self.refresh();
         requests
@@ -311,10 +367,10 @@ impl Tree {
     /// Shows the hidden folders, or hides them. When the folder the tree follows was not found
     /// (it may be below a hidden one), the tree looks for it again.
     pub fn set_show_hidden(&mut self, show: bool) -> Vec<LoadRequest> {
-        if self.show_hidden == show {
+        if self.filter.show_hidden == show {
             return Vec::new();
         }
-        self.show_hidden = show;
+        self.filter.show_hidden = show;
         self.refresh();
         let requests = if self.selected.is_none() && self.waiting.is_none() {
             self.reveal_target()
@@ -325,25 +381,110 @@ impl Tree {
         requests
     }
 
-    /// Whether node `id` shows when its parent is open.
+    /// Whether node `id` shows when its parent is open: the panes' rule for hidden and
+    /// system items.
     fn shows(&self, id: NodeId) -> bool {
-        self.show_hidden || !self.nodes[id].hidden
+        let mut probe = Entry::new(OsString::new(), EntryKind::Dir);
+        probe.attributes = self.nodes[id].attributes;
+        self.filter.is_visible(&probe)
     }
 
-    /// The request for the listing of node `id`; `None` when it is listed or on its way.
+    /// The request for the first listing of node `id`; `None` when it is listed or its
+    /// listing is on its way.
     fn request(&mut self, id: NodeId) -> Option<LoadRequest> {
-        let node = &mut self.nodes[id];
+        let node = &self.nodes[id];
         if node.loading || node.children.is_some() {
             return None;
         }
+        Some(self.list(id))
+    }
+
+    /// A request for a listing of node `id`, which is on its way from now on.
+    fn list(&mut self, id: NodeId) -> LoadRequest {
+        let node = &mut self.nodes[id];
         node.loading = true;
+        node.failed = false;
         let generation = next_generation();
         self.loads.insert(generation, id);
-        Some(LoadRequest {
+        LoadRequest {
             generation,
             path: node.path.clone(),
             sort: SortSpec::default(),
-        })
+        }
+    }
+
+    /// Makes `folders` (in natural order) the children of node `id`. A child of the same name
+    /// keeps its node, with its attributes brought up to date; the children that are gone are
+    /// forgotten. `true` when the children or their attributes changed.
+    fn set_children(&mut self, id: NodeId, folders: Vec<Entry>) -> bool {
+        let previous = self.nodes[id].children.take();
+        let listed_before = previous.is_some();
+        let old = previous.unwrap_or_default();
+        let same = listed_before
+            && old.len() == folders.len()
+            && old.iter().zip(&folders).all(|(&child, entry)| {
+                let node = &self.nodes[child];
+                node.path.file_name() == Some(entry.name.as_os_str())
+                    && node.attributes == entry.attributes
+            });
+        if same {
+            self.nodes[id].children = Some(old);
+            return false;
+        }
+        let mut by_name: HashMap<OsString, NodeId> = old
+            .iter()
+            .filter_map(|&child| Some((self.nodes[child].path.file_name()?.to_owned(), child)))
+            .collect();
+        let (parent, depth) = (self.nodes[id].path.clone(), self.nodes[id].depth + 1);
+        let mut children = Vec::with_capacity(folders.len());
+        for entry in folders {
+            if let Some(child) = by_name.remove(&entry.name) {
+                self.nodes[child].attributes = entry.attributes;
+                children.push(child);
+                continue;
+            }
+            let Ok(path) = parent.join(&entry.name) else {
+                continue;
+            };
+            let label = entry.name.to_string_lossy().into_owned();
+            children.push(self.nodes.len());
+            self.nodes.push(TreeNode::new(
+                path,
+                label,
+                depth,
+                Some(id),
+                entry.attributes,
+            ));
+        }
+        for gone in by_name.into_values() {
+            self.forget(gone);
+        }
+        self.nodes[id].children = Some(children);
+        true
+    }
+
+    /// Lets go of node `gone` and everything below it, which a listing no longer has: the
+    /// selection and the reveal's wait inside it end, its listings on their way are dropped,
+    /// and its nodes no longer count as listed.
+    fn forget(&mut self, gone: NodeId) {
+        if self
+            .selected
+            .is_some_and(|id| within(&self.nodes, id, gone))
+        {
+            self.selected = None;
+        }
+        if self.waiting.is_some_and(|id| within(&self.nodes, id, gone)) {
+            self.waiting = None;
+        }
+        let nodes = &self.nodes;
+        self.loads.retain(|_, &mut id| !within(nodes, id, gone));
+        let mut stack = vec![gone];
+        while let Some(id) = stack.pop() {
+            let node = &mut self.nodes[id];
+            node.loading = false;
+            node.expanded = false;
+            stack.extend(node.children.take().unwrap_or_default());
+        }
     }
 
     /// Selects the row that shows the target, or looks for it from the deepest root that
@@ -370,7 +511,8 @@ impl Tree {
 
     /// Goes on toward the target from node `id`, which is on its way: opens each folder above
     /// the target until it reaches the target's node (selected), a folder that is not listed
-    /// yet (listed, and `waiting` for), or one without the next folder of the way.
+    /// yet (listed, and `waiting` for), or one without the next folder of the way (listed
+    /// again once per reveal, and `waiting` for, or the end of the way).
     fn reveal_from(&mut self, mut id: NodeId) -> Vec<LoadRequest> {
         let Some(target) = self.target.clone() else {
             return Vec::new();
@@ -388,10 +530,20 @@ impl Tree {
             let next = children
                 .iter()
                 .copied()
-                .find(|&child| self.shows(child) && target.starts_with(&self.nodes[child].path));
+                .find(|&child| target.starts_with(&self.nodes[child].path));
             match next {
-                Some(child) => id = child,
-                None => return Vec::new(),
+                Some(child) if self.shows(child) => id = child,
+                // Missing from the listing: it may be new, so the folder is listed again, once
+                // per reveal.
+                None if self.relisted.insert(id) => {
+                    self.waiting = Some(id);
+                    if self.nodes[id].loading {
+                        return Vec::new();
+                    }
+                    return vec![self.list(id)];
+                }
+                // There but out of sight, or still missing.
+                Some(_) | None => return Vec::new(),
             }
         }
     }
@@ -410,6 +562,20 @@ impl Tree {
                     best
                 }
             })
+    }
+
+    /// Every node in the tree: the roots and, below each listed node, all its children (open
+    /// or not, shown or not).
+    fn reachable(&self) -> Vec<NodeId> {
+        let mut found = Vec::new();
+        let mut stack: Vec<NodeId> = self.roots.clone();
+        while let Some(id) = stack.pop() {
+            found.push(id);
+            if let Some(children) = &self.nodes[id].children {
+                stack.extend(children);
+            }
+        }
+        found
     }
 
     /// Lists the rows again after a change.
@@ -434,6 +600,42 @@ impl Tree {
         self.visible = visible;
         self.revision += 1;
     }
+}
+
+impl TreeNode {
+    /// A closed node, not listed yet.
+    fn new(
+        path: VPath,
+        label: String,
+        depth: usize,
+        parent: Option<NodeId>,
+        attributes: Attributes,
+    ) -> TreeNode {
+        TreeNode {
+            path,
+            label,
+            depth,
+            parent,
+            expanded: false,
+            children: None,
+            loading: false,
+            failed: false,
+            attributes,
+            root: None,
+        }
+    }
+}
+
+/// Whether node `id` is node `ancestor` or lies below it.
+fn within(nodes: &[TreeNode], id: NodeId, ancestor: NodeId) -> bool {
+    let mut current = Some(id);
+    while let Some(node) = current {
+        if node == ancestor {
+            return true;
+        }
+        current = nodes[node].parent;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -461,6 +663,10 @@ mod tests {
     fn hidden(mut entry: Entry) -> Entry {
         entry.attributes |= Attributes::HIDDEN;
         entry
+    }
+
+    fn file(name: &str) -> Entry {
+        Entry::new(name, EntryKind::File)
     }
 
     fn roots(list: &[(&str, &VPath)]) -> Vec<(String, VPath)> {
@@ -501,7 +707,7 @@ mod tests {
     #[test]
     fn expanding_requests_children_once() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         assert_eq!(tree.set_roots(roots(&[("홈", &home)])), []);
         assert_eq!(shown(&tree), rows(&[(0, "홈")]));
         let root = row(&tree, 0);
@@ -560,7 +766,7 @@ mod tests {
         let home = folder("home");
         let docs = under(&home, &["문서"]);
         let disk = ancestors(&home)[0].clone();
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[
             ("홈", &home),
             ("문서", &docs),
@@ -625,8 +831,17 @@ mod tests {
         assert_eq!(tree.selected_row(), Some(9));
         assert!(!row(&tree, 9).expanded);
 
-        // A folder that is not in its parent's listing (gone since) is not looked for.
-        assert_eq!(tree.reveal(&under(&home, &["gone", "deeper"])), []);
+        // A folder that is not in its parent's listing is looked for in a new listing of the
+        // parent, once; still missing, it ends the way.
+        let request = the_request(tree.reveal(&under(&home, &["gone", "deeper"])));
+        assert_eq!(request.path, home);
+        assert_eq!(
+            tree.apply_children(
+                request.generation,
+                vec![dir("다운로드"), dir("프로젝트"), dir("사진")]
+            ),
+            []
+        );
         assert_eq!(tree.selected(), None);
         assert_eq!(shown(&tree).len(), 11);
     }
@@ -634,7 +849,7 @@ mod tests {
     #[test]
     fn reveal_does_nothing_outside_the_roots() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home)]));
         tree.reveal(&home);
         assert_eq!(tree.selected_row(), Some(0));
@@ -651,7 +866,7 @@ mod tests {
     #[test]
     fn stale_children_are_dropped() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home)]));
         let first = tree.toggle(0).expect("listed");
 
@@ -676,31 +891,43 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_listing_shows_no_chevron() {
+    fn a_failed_listing_is_tried_again() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home)]));
         let request = the_request(tree.reveal(&under(&home, &["locked", "inner"])));
         assert!(tree.listing_failed(request.generation));
+        // No chevron, and no notice: the row is just empty.
         let root = row(&tree, 0);
         assert!(!root.has_children && !root.has_children_unknown);
         assert_eq!(tree.selected(), None);
         assert_eq!(tree.generations().count(), 0);
-        // Nothing is asked for again.
-        assert_eq!(tree.toggle(0), None);
-        assert_eq!(tree.toggle(0), None);
-        assert_eq!(tree.reveal(&under(&home, &["locked"])), []);
+
+        // The next opening lists it again (the folder may be readable by now).
+        let again = tree.toggle(0).expect("the opening tries again");
+        assert_eq!(again.path, home);
+        assert!(tree.listing_failed(again.generation));
+        // So does the next reveal through it, which goes on when the listing comes.
+        let request = the_request(tree.reveal(&under(&home, &["locked"])));
+        assert_eq!(request.path, home);
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("locked")]),
+            []
+        );
+        assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "*locked")]));
     }
 
     #[test]
     fn hidden_folders_follow_the_setting() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home)]));
         let request = tree.toggle(0).expect("listed");
+        let mut recycle = hidden(dir("$Recycle.Bin"));
+        recycle.attributes |= Attributes::SYSTEM;
         tree.apply_children(
             request.generation,
-            vec![hidden(dir(".config")), dir("docs")],
+            vec![recycle, hidden(dir(".config")), dir("docs")],
         );
         assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "docs")]));
 
@@ -717,6 +944,9 @@ mod tests {
             rows(&[(0, "홈"), (1, ".config"), (2, "*app"), (1, "docs")])
         );
 
+        // A protected folder (hidden and system) stays out of sight, as in the panes.
+        assert!(tree.rows().iter().all(|row| row.label != "$Recycle.Bin"));
+
         // Hiding them again hides the branch; the listing is kept.
         assert_eq!(tree.set_show_hidden(false), []);
         assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "docs")]));
@@ -728,7 +958,7 @@ mod tests {
     #[test]
     fn a_newer_reveal_replaces_the_one_waiting() {
         let (home, usb) = (folder("home"), folder("usb"));
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home), ("USB", &usb)]));
         let at_home = the_request(tree.reveal(&under(&home, &["a", "b"])));
         let at_usb = the_request(tree.reveal(&under(&usb, &["c"])));
@@ -746,7 +976,7 @@ mod tests {
     #[test]
     fn closing_a_folder_on_the_way_stops_the_reveal() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home)]));
         let request = the_request(tree.reveal(&under(&home, &["a", "b"])));
         // The user closes home before its listing comes.
@@ -757,10 +987,221 @@ mod tests {
     }
 
     #[test]
+    fn closing_an_unrelated_folder_keeps_the_reveal() {
+        // The documents place lies inside home's folder, but not inside home's node.
+        let home = folder("home");
+        let docs = under(&home, &["문서"]);
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home), ("문서", &docs)]));
+        let request = the_request(tree.reveal(&under(&docs, &["세금"])));
+        assert_eq!(request.path, docs);
+        // Home opens and closes while the documents' listing is on its way.
+        assert!(tree.toggle(0).is_some());
+        assert_eq!(tree.toggle(0), None);
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("세금")]),
+            []
+        );
+        assert_eq!(tree.selected_row(), Some(2));
+    }
+
+    #[test]
+    fn pane_listing_updates_tree_children() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("a"), dir("c")]);
+        let a = tree.node_at(1).expect("a shows");
+        let request = tree.toggle(a).expect("a is listed");
+        tree.apply_children(request.generation, vec![dir("x")]);
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (2, "x"), (1, "c")])
+        );
+
+        // A pane lists home in its own order, files too: b2 and b10 came, c went. The new
+        // folders take their place in natural order, and a keeps its node and what is open
+        // below it.
+        let before = tree.revision();
+        assert!(tree.sync_folder(&home, &[file("z.txt"), dir("b10"), dir("b2"), dir("a")]));
+        assert_ne!(tree.revision(), before);
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (2, "x"), (1, "b2"), (1, "b10")])
+        );
+        assert_eq!(tree.node_at(1), Some(a));
+        assert!(row(&tree, 1).expanded);
+        assert_eq!(
+            tree.node(tree.node_at(3).expect("b2 shows"))
+                .map(|node| &node.path),
+            Some(&under(&home, &["b2"]))
+        );
+
+        // A folder that became hidden goes out of sight; its node is kept.
+        assert!(tree.sync_folder(&home, &[dir("a"), hidden(dir("b2")), dir("b10")]));
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (2, "x"), (1, "b10")])
+        );
+        // Every listed node of the folder follows, a place and a folder below another place.
+        let mut tree = Tree::new(VisibilityFilter::default());
+        let docs = under(&home, &["문서"]);
+        tree.set_roots(roots(&[("홈", &home), ("문서", &docs)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("문서")]);
+        let nested = tree.node_at(1).expect("home's documents");
+        let request = tree.toggle(nested).expect("listed");
+        tree.apply_children(request.generation, vec![]);
+        let place = tree.node_at(2).expect("the documents place");
+        let request = tree.toggle(place).expect("the documents place is listed");
+        tree.apply_children(request.generation, vec![]);
+        assert!(tree.sync_folder(&docs, &[dir("새 폴더")]));
+        assert_eq!(
+            shown(&tree),
+            rows(&[
+                (0, "홈"),
+                (1, "문서"),
+                (2, "새 폴더"),
+                (0, "문서"),
+                (1, "새 폴더")
+            ])
+        );
+    }
+
+    #[test]
+    fn removed_node_clears_selection_and_its_load() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("a"), dir("b"), dir("c")]);
+        // b's listing is on its way, a is selected, and the reveal waits for c's listing.
+        let at_b = tree
+            .toggle(tree.node_at(2).expect("b shows"))
+            .expect("b is listed");
+        assert_eq!(tree.reveal(&under(&home, &["a"])), []);
+        assert_eq!(tree.selected_row(), Some(1));
+        let at_c = the_request(tree.reveal(&under(&home, &["c", "deep"])));
+        assert_eq!(tree.generations().count(), 2);
+
+        // Another app removes a, b and c.
+        assert!(tree.sync_folder(&home, &[dir("d")]));
+        assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "d")]));
+        assert_eq!(tree.selected(), None);
+        assert_eq!(tree.generations().count(), 0);
+        // Their listings are dropped when they come.
+        assert_eq!(tree.apply_children(at_b.generation, vec![dir("x")]), []);
+        assert_eq!(tree.apply_children(at_c.generation, vec![dir("deep")]), []);
+        assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "d")]));
+
+        // A selected folder that goes away leaves nothing selected.
+        assert_eq!(tree.reveal(&under(&home, &["d"])), []);
+        assert_eq!(tree.selected_row(), Some(1));
+        assert!(tree.sync_folder(&home, &[]));
+        assert_eq!(tree.selected(), None);
+        assert_eq!(tree.selected_row(), None);
+    }
+
+    #[test]
+    fn reveal_relists_a_parent_once_when_the_folder_is_new() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("a"), hidden(dir(".h"))]);
+
+        // The pane went into a folder made after home was listed: home is listed again, its
+        // listing adds the folder, and the tree goes on below it.
+        let target = under(&home, &["new", "deeper"]);
+        let request = the_request(tree.reveal(&target));
+        assert_eq!(request.path, home);
+        // The rows stay while the new listing comes.
+        assert_eq!(shown(&tree), rows(&[(0, "홈"), (1, "a")]));
+        let request = the_request(tree.apply_children(
+            request.generation,
+            vec![dir("a"), dir("new"), hidden(dir(".h"))],
+        ));
+        assert_eq!(request.path, under(&home, &["new"]));
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("deeper")]),
+            []
+        );
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (1, "new"), (2, "*deeper")])
+        );
+
+        // Still missing after the new listing, the folder ends the way: once per reveal.
+        let request = the_request(tree.reveal(&under(&home, &["gone"])));
+        assert_eq!(
+            tree.apply_children(
+                request.generation,
+                vec![dir("a"), dir("new"), hidden(dir(".h"))]
+            ),
+            []
+        );
+        assert_eq!(tree.selected(), None);
+        assert_eq!(tree.generations().count(), 0);
+        // A hidden folder is there, only out of sight: no new listing.
+        assert_eq!(tree.reveal(&under(&home, &[".h"])), []);
+    }
+
+    #[test]
+    fn unchanged_listing_keeps_the_revision() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("a"), dir("b")]);
+        let before = tree.revision();
+
+        // The same folders in another order, with files: nothing changes (a watch reports
+        // often while a copy runs).
+        assert!(!tree.sync_folder(&home, &[dir("b"), file("x.txt"), dir("a")]));
+        assert_eq!(tree.revision(), before);
+        // Nor for a folder the tree has not listed, or one whose new listing is on its way
+        // (that listing brings the change).
+        assert!(!tree.sync_folder(&folder("other"), &[dir("y")]));
+        assert!(!tree.sync_folder(&under(&home, &["a"]), &[dir("y")]));
+        let again = the_request(tree.relist_folder(&home));
+        assert!(!tree.sync_folder(&home, &[dir("c")]));
+        assert_eq!(tree.revision(), before);
+        assert!(
+            tree.generations()
+                .any(|generation| generation == again.generation)
+        );
+    }
+
+    #[test]
+    fn changed_folders_are_listed_again() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home), ("USB", &folder("usb"))]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(request.generation, vec![dir("a")]);
+
+        // A job made `b` in home: the listed node is listed again, and the listing reconciles.
+        let request = the_request(tree.relist_folder(&home));
+        assert_eq!(request.path, home);
+        // Not twice while that listing is on its way, and not a folder never listed.
+        assert_eq!(tree.relist_folder(&home), []);
+        assert_eq!(tree.relist_folder(&folder("usb")), []);
+        assert_eq!(
+            tree.apply_children(request.generation, vec![dir("a"), dir("b")]),
+            []
+        );
+        assert_eq!(
+            shown(&tree),
+            rows(&[(0, "홈"), (1, "a"), (1, "b"), (0, "USB")])
+        );
+    }
+
+    #[test]
     fn a_folder_shown_already_is_selected_where_it_is() {
         let home = folder("home");
         let pictures = under(&home, &["사진"]);
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         tree.set_roots(roots(&[("홈", &home), ("사진", &pictures)]));
         let request = tree.toggle(0).expect("listed");
         tree.apply_children(request.generation, vec![dir("문서"), dir("사진")]);
@@ -793,7 +1234,7 @@ mod tests {
     #[test]
     fn rows_change_only_with_the_tree() {
         let home = folder("home");
-        let mut tree = Tree::new(false);
+        let mut tree = Tree::new(VisibilityFilter::default());
         let empty = tree.revision();
         tree.set_roots(roots(&[("홈", &home)]));
         let with_roots = tree.revision();

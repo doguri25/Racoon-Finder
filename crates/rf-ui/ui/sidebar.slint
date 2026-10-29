@@ -42,7 +42,9 @@ component TreeItem inherits Rectangle {
 
     // The head takes more room above the drives, which come after the favorites.
     private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
-    private property <length> indent: root.item.depth * 16px;
+    // Deep folders stop moving right at the eighth level, so their names stay readable in a
+    // sidebar of 220 to 280px.
+    private property <length> indent: min(root.item.depth, 8) * 16px;
 
     height: root.head-height + (root.item.is-drive ? 56px : Theme.row-height);
 
@@ -195,8 +197,6 @@ export component Sidebar inherits Rectangle {
     border-color: Theme.border;
     border-radius: Theme.radius-large;
     clip: true;
-    accessible-role: groupbox;
-    accessible-label: "폴더 트리";
 
     list := ListView {
         x: 1px;
