@@ -765,8 +765,10 @@ fn a_copy_is_compared_with_its_original() {
     }
     write_at(&src.join("docs").join("only-in-source.txt"), "S", at);
     let loader = loader();
-    let compare =
-        |name: &str| loader.compare_with_original(&local(&dst.join(name)), &local(&src.join(name)));
+    let go_on = CancelToken::new();
+    let compare = |name: &str| {
+        loader.compare_with_original(&local(&dst.join(name)), &local(&src.join(name)), &go_on)
+    };
 
     // As they were: a file of the same size and time, and a folder that holds everything the
     // copy holds (and more).
@@ -795,8 +797,94 @@ fn a_copy_is_compared_with_its_original() {
     assert_eq!(
         loader.compare_with_original(
             &local(&dst.join("docs").join("x.txt")),
-            &local(&src.join("docs").join("x.txt"))
+            &local(&src.join("docs").join("x.txt")),
+            &go_on
         ),
+        Original::Unknown
+    );
+
+    // Once the app ends, the worker stops looking: it cannot be told.
+    let stopped = CancelToken::new();
+    stopped.cancel();
+    assert_eq!(compare("docs"), Original::Same);
+    assert_eq!(
+        loader.compare_with_original(
+            &local(&dst.join("docs")),
+            &local(&src.join("docs")),
+            &stopped
+        ),
+        Original::Unknown
+    );
+}
+
+/// What a copy job records of the item at `path` it made: what `stat` finds there now.
+fn made_at(path: &Path) -> rf_jobs::CreatedItem {
+    let path = local(path);
+    let entry = LocalProvider::new().stat(&path).expect("the item is there");
+    rf_jobs::CreatedItem::from_entry(path, &entry)
+}
+
+#[test]
+fn a_copy_is_checked_against_what_the_copy_left() {
+    use rf_ui::loader::{CopyFound, Original};
+
+    let dir = tempfile::TempDir::new().expect("a temporary folder");
+    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    for folder in [&src, &dst] {
+        std::fs::create_dir_all(folder.join("docs").join("sub")).expect("folders");
+        write_at(&folder.join("a.txt"), "AAAA", old);
+        write_at(&folder.join("docs").join("sub").join("y.txt"), "YY", old);
+    }
+    // The copy job ended after it wrote everything (later than anything here).
+    let ended = std::time::SystemTime::now() + Duration::from_secs(3600);
+    let (file, folder) = (made_at(&dst.join("a.txt")), made_at(&dst.join("docs")));
+    let loader = loader();
+    let go_on = CancelToken::new();
+    let made = |item: &rf_jobs::CreatedItem| loader.compare_with_made(item, Some(ended), &go_on);
+
+    // As the copy left them.
+    assert_eq!(made(&file), Original::Same);
+    assert_eq!(made(&folder), Original::Same);
+    assert_eq!(
+        loader.check_copy(&file, Some(ended), &local(&src.join("a.txt")), &go_on),
+        CopyFound::SAME
+    );
+
+    // A file of the same size written since, or of another size.
+    set_modified(&dst.join("a.txt"), old + Duration::from_secs(60));
+    assert_eq!(made(&file), Original::Changed);
+    set_modified(&dst.join("a.txt"), old);
+    assert_eq!(made(&file), Original::Same);
+    write_at(&dst.join("a.txt"), "AAAAA", old);
+    assert_eq!(made(&file), Original::Changed);
+    // The copy is not compared with its original then: it is not the copy any more.
+    assert_eq!(
+        loader.check_copy(&file, Some(ended), &local(&src.join("a.txt")), &go_on),
+        CopyFound {
+            copy: Original::Changed,
+            original: Original::Unknown,
+        }
+    );
+    std::fs::remove_file(dst.join("a.txt")).expect("removed");
+    assert_eq!(made(&file), Original::Missing);
+
+    // A folder with something deep down newer than the job's end, or without the job's time.
+    let deep = dst.join("docs").join("sub").join("y.txt");
+    set_modified(&deep, ended + Duration::from_secs(60));
+    assert_eq!(made(&folder), Original::Changed);
+    set_modified(&deep, old);
+    assert_eq!(made(&folder), Original::Same);
+    assert_eq!(
+        loader.compare_with_made(&folder, None, &go_on),
+        Original::Unknown
+    );
+
+    // Once the app ends, the worker stops looking.
+    let stopped = CancelToken::new();
+    stopped.cancel();
+    assert_eq!(
+        loader.compare_with_made(&folder, Some(ended), &stopped),
         Original::Unknown
     );
 }

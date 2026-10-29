@@ -16,10 +16,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rf_core::{ErrorKind, VPath};
-use rf_jobs::{TransferMode, UndoRecord};
+use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
@@ -112,13 +112,15 @@ pub enum Effect {
         tabs: Vec<(u64, VPath)>,
         drives: Vec<VPath>,
     },
-    /// Find on a worker thread how the original of each copy of `pairs` (the copy, then its
-    /// original) is beside it
-    /// ([`Loader::compare_with_original`](crate::loader::Loader::compare_with_original)), then
-    /// call [`AppState::originals_checked`] with `token` and what was found, in order.
-    CheckOriginals {
+    /// Find on a worker thread how each copy of `copies` (as its job left it, then its
+    /// original) is now, that job having ended at `at`
+    /// ([`Loader::check_copy`](crate::loader::Loader::check_copy)), then call
+    /// [`AppState::copies_checked`] with `token` and what was found, in order. The look stops
+    /// when the app ends.
+    CheckCopies {
         token: u64,
-        pairs: Vec<(VPath, VPath)>,
+        copies: Vec<(CreatedItem, VPath)>,
+        at: Option<SystemTime>,
     },
     /// Show a toast with the message `text` and the button `action`, whose click comes back
     /// to [`AppState::toast_clicked`] with `token`.
@@ -127,6 +129,12 @@ pub enum Effect {
         text: String,
         action: String,
     },
+    /// Show `text` where the toasts show, without a button, until [`Effect::NotBusy`] with
+    /// `token` comes or a toast takes its place: a worker is at something the user waits for.
+    Busy { token: u64, text: String },
+    /// The work of the notice [`Effect::Busy`] `token` is over: the notice goes, unless a
+    /// toast has taken its place.
+    NotBusy(u64),
     /// End the app ([`crate::jobs::close_down`] on a worker thread, then the end of the event
     /// loop). [`AppState::begin_quit`] has closed the windows and stopped taking questions.
     Quit,

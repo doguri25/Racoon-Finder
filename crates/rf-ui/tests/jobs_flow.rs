@@ -707,7 +707,9 @@ fn a_question_during_shutdown_waits_for_the_release_and_the_job_is_recovered() {
 /// copies to the user's own trash.
 #[cfg(target_os = "linux")]
 mod without_a_trash {
-    use rf_ui::loader::Original;
+    use rf_jobs::CreatedItem;
+    use rf_ui::loader::{CopyFound, Original};
+    use rf_vfs::CancelToken;
 
     use super::*;
 
@@ -722,21 +724,49 @@ mod without_a_trash {
             .expect("the window takes it")
     }
 
-    /// The one check of originals among `effects`, its pairs in path order.
-    fn the_check(effects: &[Effect]) -> (u64, Vec<(VPath, VPath)>) {
-        let checks: Vec<(u64, Vec<(VPath, VPath)>)> = effects
+    /// A check of copies a worker is to make: its token, each copy as the copy left it with its
+    /// original, and the copy's time.
+    type Check = (
+        u64,
+        Vec<(CreatedItem, VPath)>,
+        Option<std::time::SystemTime>,
+    );
+
+    /// The one check of copies among `effects`.
+    fn the_check(effects: &[Effect]) -> Check {
+        let checks: Vec<Check> = effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::CheckOriginals { token, pairs } => Some((*token, pairs.clone())),
+                Effect::CheckCopies { token, copies, at } => Some((*token, copies.clone(), *at)),
                 _ => None,
             })
             .collect();
-        let [(token, pairs)] = checks.as_slice() else {
-            panic!("one check of the originals: {effects:?}");
+        let [check] = checks.as_slice() else {
+            panic!("one check of the copies: {effects:?}");
         };
-        let mut pairs = pairs.clone();
+        check.clone()
+    }
+
+    /// The copies of `check` with their originals, in path order.
+    fn pairs((_, copies, _): &Check) -> Vec<(VPath, VPath)> {
+        let mut pairs: Vec<(VPath, VPath)> = copies
+            .iter()
+            .map(|(made, original)| (made.path.clone(), original.clone()))
+            .collect();
         pairs.sort_by_key(|(copy, _)| copy.to_string());
-        (*token, pairs)
+        pairs
+    }
+
+    /// What the worker finds for `check`, as the controller has it look.
+    fn look(harness: &Harness, (_, copies, at): &Check) -> Vec<CopyFound> {
+        copies
+            .iter()
+            .map(|(made, original)| {
+                harness
+                    .loader
+                    .check_copy(made, *at, original, &CancelToken::new())
+            })
+            .collect()
     }
 
     /// The user is offered the copies for a permanent delete once their originals are found as
@@ -773,36 +803,25 @@ mod without_a_trash {
         let copied = harness.jobs.history().top.expect("the copy's record");
 
         // The undo trashes nothing, keeps its record for another try, and asks a worker about the
-        // originals before anything is offered.
+        // copies and their originals before anything is offered.
         let effects = undo_key(&mut state);
         let seen = harness.run(&mut state, effects);
         assert!(right.join("a.txt").exists() && right.join("docs").exists());
         assert_eq!(harness.jobs.history().top.as_ref(), Some(&copied));
         assert_eq!(state.modal(), None);
-        let (token, pairs) = the_check(&seen);
+        let check = the_check(&seen);
         assert_eq!(
-            pairs,
+            pairs(&check),
             [
                 (local(&right.join("a.txt")), local(&left.join("a.txt"))),
                 (local(&right.join("docs")), local(&left.join("docs"))),
             ]
         );
-        let found: Vec<Original> = pairs
-            .iter()
-            .map(|(copy, original)| harness.loader.compare_with_original(copy, original))
-            .collect();
-        assert_eq!(found, [Original::Same, Original::Same]);
+        let found = look(&harness, &check);
+        assert_eq!(found, [CopyFound::SAME, CopyFound::SAME]);
 
         // The copies are offered, each by its whole path, as a danger confirmation.
-        let (copy_order, _): (Vec<VPath>, Vec<VPath>) = seen
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::CheckOriginals { pairs, .. } => Some(pairs.iter().cloned().unzip()),
-                _ => None,
-            })
-            .expect("the check");
-        let found_in_order: Vec<Original> = copy_order.iter().map(|_| Original::Same).collect();
-        assert_eq!(state.originals_checked(token, &found_in_order), []);
+        state.copies_checked(check.0, &found);
         let Some(Modal::Confirm(confirm)) = state.modal() else {
             panic!("the copies are offered: {:?}", state.modal());
         };
@@ -817,9 +836,13 @@ mod without_a_trash {
             ]
         );
 
-        // Yes: the copies go for good, the originals stay, and the copy is undone: the next undo
-        // is the older job's.
+        // Yes: a worker looks once more, then the copies go for good, the originals stay, and the
+        // copy is undone: the next undo is the older job's.
         let effects = state.confirm_accepted();
+        let check = the_check(&effects);
+        assert!(right.join("a.txt").exists(), "nothing is deleted before");
+        let found = look(&harness, &check);
+        let effects = state.copies_checked(check.0, &found);
         let seen = harness.run(&mut state, effects);
         assert!(!right.join("a.txt").exists() && !right.join("docs").exists());
         assert_eq!(read(&left.join("a.txt")), "A");
@@ -850,19 +873,25 @@ mod without_a_trash {
 
         let effects = undo_key(&mut state);
         let seen = harness.run(&mut state, effects);
-        let (token, pairs) = the_check(&seen);
-        let found: Vec<Original> = pairs
-            .iter()
-            .map(|(copy, original)| harness.loader.compare_with_original(copy, original))
-            .collect();
-        assert_eq!(found, [Original::Missing]);
-        let effects = state.originals_checked(token, &found);
+        let check = the_check(&seen);
+        let found = look(&harness, &check);
+        assert_eq!(
+            found,
+            [CopyFound {
+                copy: Original::Same,
+                original: Original::Missing
+            }]
+        );
+        let effects = state.copies_checked(check.0, &found);
         assert_eq!(state.modal(), None, "nothing is offered");
-        let Some(Effect::Toast { token, text, .. }) = effects.first() else {
+        let Some((token, text)) = effects.iter().find_map(|effect| match effect {
+            Effect::Toast { token, text, .. } => Some((*token, text.clone())),
+            _ => None,
+        }) else {
             panic!("a toast: {effects:?}");
         };
         assert_eq!(text, "항목 1개를 처리하지 못했습니다");
-        state.toast_clicked(*token);
+        state.toast_clicked(token);
         let Some(Modal::Failures(failures)) = state.modal() else {
             panic!("the copy and why: {:?}", state.modal());
         };
@@ -876,5 +905,62 @@ mod without_a_trash {
         assert_eq!(read(&right.join("a.txt")), "A");
         // The record stays: the undo can be tried again.
         assert_eq!(harness.jobs.history().top, Some(copied));
+    }
+
+    /// The copies offered, and something changed before the user said yes: an original removed,
+    /// or a copy written to. Nothing is deleted.
+    #[test]
+    fn a_change_after_the_offer_keeps_the_copies() {
+        for change in ["original removed", "copy written"] {
+            let (_dir, left, right) = folders();
+            write(&left.join("a.txt"), "A");
+            write(&left.join("b.txt"), "B");
+            let mut harness = Harness::new();
+            let mut state = harness.open(&left, &right);
+            click(&mut state, LEFT, "a.txt");
+            state.click_row(LEFT, 1, true, false);
+            let dest = local(&right);
+            let effects =
+                state.transfer(LEFT, TransferMode::Copy, &dest, TransferOptions::default());
+            harness.run(&mut state, effects);
+            let copied = harness.jobs.history().top.expect("the copy's record");
+            let effects = undo_key(&mut state);
+            let seen = harness.run(&mut state, effects);
+            let check = the_check(&seen);
+            let found = look(&harness, &check);
+            state.copies_checked(check.0, &found);
+            assert!(
+                matches!(state.modal(), Some(Modal::Confirm(_))),
+                "{change}: the copies are offered"
+            );
+
+            if change == "original removed" {
+                std::fs::remove_file(left.join("b.txt")).expect("the original goes");
+            } else {
+                write(&right.join("b.txt"), "written since");
+            }
+            let effects = state.confirm_accepted();
+            let check = the_check(&effects);
+            let found = look(&harness, &check);
+            let effects = state.copies_checked(check.0, &found);
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Job(_))),
+                "{change}: nothing is deleted: {effects:?}"
+            );
+            let seen = harness.run(&mut state, effects);
+            assert!(
+                seen.iter().any(|effect| matches!(
+                    effect,
+                    Effect::Toast { text, .. } if text == "복사본 2개를 지우지 않았습니다"
+                )),
+                "{change}: {seen:?}"
+            );
+            assert_eq!(read(&right.join("a.txt")), "A", "{change}");
+            assert!(right.join("b.txt").exists(), "{change}");
+            // The record stays: the undo can be tried again.
+            assert_eq!(harness.jobs.history().top, Some(copied), "{change}");
+        }
     }
 }

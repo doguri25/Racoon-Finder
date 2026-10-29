@@ -797,14 +797,29 @@ pub fn copies_deleted(count: usize) -> String {
     format!("복사본 {count}개를 영구 삭제해 복사를 되돌렸습니다")
 }
 
-/// Why the copies an undo could not trash were not offered for a permanent delete, after
-/// [`failure_line`] of a copy: its original is gone, it differs from the copy (another kind,
-/// another size, something of the copy missing in it), or it could not be found out.
+/// The toast of the copies an undo could not trash, when something of them or their
+/// originals changed after the user was asked about them: nothing was deleted.
+pub fn copies_not_deleted(count: usize) -> String {
+    format!("복사본 {count}개를 지우지 않았습니다")
+}
+
+/// The notice while a worker looks at the copies an undo could not trash and their originals.
+pub fn checking_originals() -> &'static str {
+    "원본을 확인하는 중…"
+}
+
+/// Why the copies an undo could not trash were not offered for a permanent delete, or not
+/// deleted, after [`failure_line`] of a copy: its original is gone, it differs from the copy
+/// (another kind, another size, something of the copy missing in it), or it could not be found
+/// out; or the copy itself was written to, is gone, or could not be looked at.
 pub fn copy_kept(why: CopyKept) -> &'static str {
     match why {
         CopyKept::OriginalMissing => "원본이 없어 복사본을 지우지 않았습니다",
         CopyKept::OriginalChanged => "원본이 바뀌어 복사본을 지우지 않았습니다",
         CopyKept::OriginalUnknown => "원본을 확인할 수 없어 복사본을 지우지 않았습니다",
+        CopyKept::CopyChanged => "복사본이 바뀌어 지우지 않았습니다",
+        CopyKept::CopyMissing => "복사본이 이미 없습니다",
+        CopyKept::CopyUnknown => "복사본을 확인할 수 없어 지우지 않았습니다",
     }
 }
 
@@ -814,6 +829,9 @@ pub enum CopyKept {
     OriginalMissing,
     OriginalChanged,
     OriginalUnknown,
+    CopyChanged,
+    CopyMissing,
+    CopyUnknown,
 }
 
 /// The names of the items a confirmation is about: up to three, in quotes, and how many more.

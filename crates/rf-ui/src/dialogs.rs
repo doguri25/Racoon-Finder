@@ -235,9 +235,10 @@ pub enum ConfirmPurpose {
     /// Delete these items for good.
     DeletePermanently(Vec<VPath>),
     /// Delete for good the copies an undo of the copy `record` could not send to the trash,
-    /// whose originals a worker has found as they were.
+    /// whose originals (`originals`, one for each copy) a worker has found as they were.
     DeleteCopies {
         copies: Vec<VPath>,
+        originals: Vec<VPath>,
         record: Box<UndoRecord>,
     },
     /// End the app while jobs run.
@@ -285,9 +286,9 @@ impl Confirm {
     }
 
     /// The question before `copies` are deleted for good: the copies an undo of the copy
-    /// `record` could not send to the trash, whose originals are as they were. It lists every
-    /// copy by its whole path.
-    pub fn delete_copies(copies: Vec<VPath>, record: UndoRecord) -> Confirm {
+    /// `record` could not send to the trash, whose originals (`originals`, one for each copy)
+    /// are as they were. It lists every copy by its whole path.
+    pub fn delete_copies(copies: Vec<VPath>, originals: Vec<VPath>, record: UndoRecord) -> Confirm {
         Confirm {
             title: words::delete_permanently_title().to_owned(),
             message: words::copies_refused().to_owned(),
@@ -298,6 +299,7 @@ impl Confirm {
             danger: true,
             purpose: ConfirmPurpose::DeleteCopies {
                 copies,
+                originals,
                 record: Box::new(record),
             },
         }
@@ -322,15 +324,20 @@ impl Confirm {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths)
             | ConfirmPurpose::DeleteCopies { copies: paths, .. } => {
-                Some(JobSpec::Delete(DeleteSpec {
-                    paths: paths.clone(),
-                    method: DeleteMethod::Permanent,
-                    errors: ErrorPolicy::Continue,
-                }))
+                Some(permanent_delete(paths.clone()))
             }
             ConfirmPurpose::Quit => None,
         }
     }
+}
+
+/// The job that deletes `paths` for good, going on past an item that fails.
+pub fn permanent_delete(paths: Vec<VPath>) -> JobSpec {
+    JobSpec::Delete(DeleteSpec {
+        paths,
+        method: DeleteMethod::Permanent,
+        errors: ErrorPolicy::Continue,
+    })
 }
 
 /// The items a job could not process, and why.

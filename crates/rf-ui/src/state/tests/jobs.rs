@@ -517,7 +517,7 @@ fn incomplete(id: u64) -> rf_jobs::IncompleteJob {
     rf_jobs::IncompleteJob {
         id: JobId(id),
         spec: delete(vec![in_a("x")], DeleteMethod::Trash),
-        submitted: std::time::SystemTime::now(),
+        submitted: SystemTime::now(),
         started: true,
         temp_dirs: Vec::new(),
     }

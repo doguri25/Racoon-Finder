@@ -11,14 +11,16 @@
 //! [`Loader::list_folders`] is the same work without the watch and the free space, for the
 //! folder tree: one listing of the folders in a folder. [`Loader::follow`] works the same way
 //! for a link a tab opens, and its result carries the tab's generation too.
-//! [`Loader::nearest_existing_parent`] and [`Loader::inspect_target`] block and are called on
-//! a worker thread.
+//! [`Loader::nearest_existing_parent`], [`Loader::inspect_target`] and [`Loader::check_copy`]
+//! block and are called on a worker thread.
 
 use std::fmt;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
+use rf_jobs::CreatedItem;
 use rf_vfs::{
     CancelToken, Capabilities, Change, Provider, SortSpec, Vfs, WatchEvent, WatchHandle,
     sort_entries,
@@ -194,6 +196,89 @@ impl Loader {
         Some(space.available)
     }
 
+    /// How `made`, an item a copy job made that an undo could not send to the trash, and its
+    /// original `original` are now: the copy beside what the job left
+    /// ([`Loader::compare_with_made`]) and, while it is that, its original beside it
+    /// ([`Loader::compare_with_original`]). A copy that is not as the job left it is not the
+    /// copy any more: its original is not looked at (`Unknown`). `at` is when the job ended,
+    /// and `cancel` stops the look (the app ends): what is not looked at then cannot be told.
+    ///
+    /// Blocks (a large folder, a slow drive); call it on a worker thread.
+    pub fn check_copy(
+        &self,
+        made: &CreatedItem,
+        at: Option<SystemTime>,
+        original: &VPath,
+        cancel: &CancelToken,
+    ) -> CopyFound {
+        let copy = self.compare_with_made(made, at, cancel);
+        let original = if copy == Original::Same {
+            self.compare_with_original(&made.path, original, cancel)
+        } else {
+            Original::Unknown
+        };
+        CopyFound { copy, original }
+    }
+
+    /// Whether `made`, an item a copy job made and that job ended at `at`, is still as the job
+    /// left it, as the undo of the copy checks it before it trashes it (rf-jobs'
+    /// `check_copied`): the same item when both its identities are known, changed when the
+    /// job's record says (to the time), a file (or a link) of the recorded size, and a folder
+    /// with nothing under it newer than `at`, down to [`rf_jobs::MAX_DEPTH`] levels (a folder
+    /// on another volume, or below that depth, counts as a change). Gone, it is `Missing`;
+    /// without a recorded time (or `at`, for a folder), past [`ORIGINAL_ITEMS`] items, after
+    /// `cancel`, or for anything that cannot be looked at, it cannot be told.
+    ///
+    /// Blocks (a large folder, a slow drive); call it on a worker thread.
+    pub fn compare_with_made(
+        &self,
+        made: &CreatedItem,
+        at: Option<SystemTime>,
+        cancel: &CancelToken,
+    ) -> Original {
+        if cancel.is_cancelled() {
+            return Original::Unknown;
+        }
+        let Ok(provider) = self.vfs.provider(&made.path) else {
+            return Original::Unknown;
+        };
+        let now = match provider.stat(&made.path) {
+            Ok(now) => now,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Original::Missing,
+            Err(_) => return Original::Unknown,
+        };
+        let Some(was) = made.modified else {
+            return Original::Unknown;
+        };
+        let other_item = matches!(
+            (made.identity, now.identity()),
+            (Some(was), Some((volume, file))) if was != (volume.0, file.0)
+        );
+        if other_item || now.modified != Some(was) {
+            return Original::Changed;
+        }
+        if !made.is_dir {
+            return if now.kind != EntryKind::Dir && now.size == made.size {
+                Original::Same
+            } else {
+                Original::Changed
+            };
+        }
+        if now.kind != EntryKind::Dir {
+            return Original::Changed;
+        }
+        let Some(at) = at else {
+            return Original::Unknown;
+        };
+        let walk = Untouched {
+            provider: provider.as_ref(),
+            at,
+            cancel,
+        };
+        let mut budget = ORIGINAL_ITEMS;
+        walk.folder(&made.path, &now, 1, &mut budget)
+    }
+
     /// How `original` is now beside `copy`, a copy of it that an undo could not send to the
     /// trash: whether deleting the copy for good would lose nothing that is not still in the
     /// original.
@@ -204,11 +289,16 @@ impl Loader {
     /// [`rf_jobs::MTIME_TOLERANCE`]), and a link lead where the copy's does. A folder must
     /// hold, under the same names, everything the copy holds, each the same way, down to
     /// [`rf_jobs::MAX_DEPTH`] levels; what the original has more does not matter. Past
-    /// [`ORIGINAL_ITEMS`] items, or for anything that cannot be looked at (the copy among
-    /// them), it cannot be told.
+    /// [`ORIGINAL_ITEMS`] items, after `cancel` (the app ends), or for anything that cannot be
+    /// looked at (the copy among them), it cannot be told.
     ///
     /// Blocks (a large folder, a slow drive); call it on a worker thread.
-    pub fn compare_with_original(&self, copy: &VPath, original: &VPath) -> Original {
+    pub fn compare_with_original(
+        &self,
+        copy: &VPath,
+        original: &VPath,
+        cancel: &CancelToken,
+    ) -> Original {
         let (Ok(at_copy), Ok(at_original)) = (self.vfs.provider(copy), self.vfs.provider(original))
         else {
             return Original::Unknown;
@@ -219,7 +309,7 @@ impl Loader {
         let compare = Compare {
             copy: at_copy.as_ref(),
             original: at_original.as_ref(),
-            cancel: CancelToken::new(),
+            cancel,
         };
         let mut budget = ORIGINAL_ITEMS;
         match at_original.stat(original) {
@@ -379,28 +469,109 @@ fn is_folder(provider: &dyn Provider, path: &VPath) -> bool {
     }
 }
 
-/// How many items [`Loader::compare_with_original`] looks at, at most, before it gives up.
+/// How many items [`Loader::compare_with_original`] and [`Loader::compare_with_made`] look at,
+/// at most, before they give up.
 pub const ORIGINAL_ITEMS: usize = 20_000;
 
-/// How the original of a copy is beside the copy ([`Loader::compare_with_original`]).
+/// How the original of a copy is beside the copy ([`Loader::compare_with_original`]), or a
+/// copy beside what its job left ([`Loader::compare_with_made`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Original {
-    /// It holds everything the copy holds: deleting the copy loses nothing.
+    /// It holds everything the copy holds (the copy is as its job left it): deleting the copy
+    /// loses nothing.
     Same,
     /// It is gone.
     Missing,
-    /// It is there, but of another kind or size, or something of the copy is not in it.
+    /// It is there, but of another kind or size, or something of the copy is not in it (the
+    /// copy was written to since its job).
     Changed,
     /// It could not be found out.
     Unknown,
 }
 
+/// What [`Loader::check_copy`] found of a copy that an undo could not send to the trash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyFound {
+    /// The copy beside what its job left ([`Loader::compare_with_made`]).
+    pub copy: Original,
+    /// Its original beside it ([`Loader::compare_with_original`]); `Unknown` while the copy is
+    /// not as its job left it.
+    pub original: Original,
+}
+
+impl CopyFound {
+    /// Both as they were: deleting the copy loses nothing.
+    pub const SAME: CopyFound = CopyFound {
+        copy: Original::Same,
+        original: Original::Same,
+    };
+}
+
+/// The provider and the job's end that [`Loader::compare_with_made`] looks under a copied
+/// folder with.
+struct Untouched<'p> {
+    provider: &'p dyn Provider,
+    at: SystemTime,
+    cancel: &'p CancelToken,
+}
+
+impl Untouched<'_> {
+    /// Whether nothing under the folder `dir`, which `entry` describes, is newer than the
+    /// job's end: every item it lists has a known time, none after it, and every real folder
+    /// among them (a link is never followed) holds the same. `depth` is how far below the copied
+    /// folder its items are (its own are at 1); each item looked at takes one from `budget`.
+    fn folder(&self, dir: &VPath, entry: &Entry, depth: usize, budget: &mut usize) -> Original {
+        let mut children = Vec::new();
+        let listed = self
+            .provider
+            .list(dir, self.cancel, &mut |batch| children.extend(batch));
+        if listed.is_err() || self.cancel.is_cancelled() {
+            return Original::Unknown;
+        }
+        if depth > rf_jobs::MAX_DEPTH {
+            // The copy went no deeper: a folder down there must be empty.
+            return if children.is_empty() {
+                Original::Same
+            } else {
+                Original::Changed
+            };
+        }
+        for child in &children {
+            if *budget == 0 {
+                return Original::Unknown;
+            }
+            *budget -= 1;
+            if child.modified.is_none_or(|modified| modified > self.at) {
+                return Original::Changed;
+            }
+            if child.kind != EntryKind::Dir {
+                continue;
+            }
+            let elsewhere = matches!(
+                (entry.volume_id, child.volume_id),
+                (Some(here), Some(there)) if here != there
+            );
+            if elsewhere {
+                return Original::Changed;
+            }
+            let Ok(path) = dir.join(&child.name) else {
+                return Original::Unknown;
+            };
+            let below = self.folder(&path, child, depth + 1, budget);
+            if below != Original::Same {
+                return below;
+            }
+        }
+        Original::Same
+    }
+}
+
 /// The two providers [`Loader::compare_with_original`] compares a copy and its original
-/// through.
+/// through, until `cancel`.
 struct Compare<'p> {
     copy: &'p dyn Provider,
     original: &'p dyn Provider,
-    cancel: CancelToken,
+    cancel: &'p CancelToken,
 }
 
 impl Compare<'_> {
@@ -416,7 +587,7 @@ impl Compare<'_> {
         depth: usize,
         budget: &mut usize,
     ) -> Original {
-        if *budget == 0 || depth > rf_jobs::MAX_DEPTH {
+        if *budget == 0 || depth > rf_jobs::MAX_DEPTH || self.cancel.is_cancelled() {
             return Original::Unknown;
         }
         *budget -= 1;
@@ -504,9 +675,9 @@ impl Compare<'_> {
     fn listing(&self, provider: &dyn Provider, dir: &VPath) -> Option<Vec<Entry>> {
         let mut entries = Vec::new();
         provider
-            .list(dir, &self.cancel, &mut |batch| entries.extend(batch))
+            .list(dir, self.cancel, &mut |batch| entries.extend(batch))
             .ok()?;
-        Some(entries)
+        (!self.cancel.is_cancelled()).then_some(entries)
     }
 }
 

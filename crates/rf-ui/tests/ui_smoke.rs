@@ -471,6 +471,48 @@ fn a_toast_stays_while_the_pointer_is_over_it() {
 }
 
 #[test]
+fn a_busy_notice_stays_until_its_work_is_done() {
+    let window = window();
+    let shown = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+    let pointer = |position: LogicalPosition| {
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        slint::platform::update_timers_and_animations();
+    };
+    window.invoke_show_busy("원본을 확인하는 중…".into(), 7);
+    slint::platform::update_timers_and_animations();
+    let note = labelled(&window, "원본을 확인하는 중…", AccessibleRole::Text)
+        .into_iter()
+        .next()
+        .expect("the notice shows");
+    let (at, size) = (note.absolute_position(), note.size());
+
+    // However long the worker takes, and after the pointer has been over it.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(20));
+    assert!(shown("원본을 확인하는 중…"));
+    pointer(LogicalPosition::new(at.x + 8.0, at.y + size.height / 2.0));
+    pointer(LogicalPosition::new(10.0, 10.0));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(20));
+    assert!(shown("원본을 확인하는 중…"));
+    // The end of another work leaves it; the end of its own takes it away.
+    window.invoke_end_busy(6);
+    assert!(shown("원본을 확인하는 중…"));
+    window.invoke_end_busy(7);
+    assert!(!shown("원본을 확인하는 중…"));
+
+    // A toast that took its place stays when its work ends, and goes in its own time.
+    window.invoke_show_busy("원본을 확인하는 중…".into(), 8);
+    window.invoke_show_toast("항목 1개를 처리하지 못했습니다".into(), "자세히".into(), 9);
+    window.invoke_end_busy(8);
+    // Starts the toast's timer, as the event loop would.
+    slint::platform::update_timers_and_animations();
+    assert!(shown("항목 1개를 처리하지 못했습니다"));
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(9));
+    assert!(!shown("항목 1개를 처리하지 못했습니다"));
+}
+
+#[test]
 fn a_toast_button_answers_with_its_token() {
     let window = window();
     let clicked = Rc::new(RefCell::new(Vec::new()));
@@ -644,7 +686,8 @@ fn the_copies_an_undo_could_not_trash_are_listed_by_their_whole_paths() {
         overwritten: 0,
         at: None,
     };
-    let confirm = rf_ui::dialogs::Confirm::delete_copies(copies.clone(), record);
+    let originals = vec![in_backup("원본 a.txt"), in_backup("원본 docs")];
+    let confirm = rf_ui::dialogs::Confirm::delete_copies(copies.clone(), originals, record);
     window.set_confirm_view(ui_bridge::confirm_view(&confirm));
     window.set_dialog(DialogKind::Confirm);
     for copy in &copies {

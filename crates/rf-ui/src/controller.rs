@@ -20,6 +20,7 @@ use jiff::tz::TimeZone;
 use rf_core::VPath;
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
+use rf_vfs::CancelToken;
 use slint::language::DragAction;
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
@@ -455,6 +456,8 @@ pub struct Controller {
     shown_drag: Cell<u64>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
+    /// Stops the workers' looks at copies and their originals as the app ends.
+    checks: CancelToken,
 }
 
 impl fmt::Debug for Controller {
@@ -507,6 +510,7 @@ impl Controller {
             save_timer: slint::Timer::default(),
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
+            checks: CancelToken::new(),
         }
     }
 
@@ -607,6 +611,8 @@ impl Controller {
     /// meanwhile. A worker that cannot start leaves the settings and the shutdown to
     /// [`crate::run`], after the event loop.
     fn quit(&self) {
+        // The looks at copies stop: the state takes no answer while the app ends.
+        self.checks.cancel();
         let jobs = self.jobs.clone();
         let saver = self.saver.clone();
         let last = self.final_settings();
@@ -805,7 +811,7 @@ impl Controller {
                     }
                 }
                 Effect::CheckTrash { .. }
-                | Effect::CheckOriginals { .. }
+                | Effect::CheckCopies { .. }
                 | Effect::FindExisting { .. }
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
@@ -844,7 +850,9 @@ impl Controller {
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
-                | Effect::Toast { .. } => {
+                | Effect::Toast { .. }
+                | Effect::Busy { .. }
+                | Effect::NotBusy(_) => {
                     on_screen.push(effect);
                 }
             }
@@ -877,14 +885,15 @@ impl Controller {
                     post(move |c| c.update(|state| state.trash_checked(paths, supported)));
                 });
             }
-            Effect::CheckOriginals { token, pairs } => {
+            Effect::CheckCopies { token, copies, at } => {
                 let loader = self.loader.clone();
+                let cancel = self.checks.clone();
                 spawn_worker("rf-ui-originals", move || {
-                    let found: Vec<_> = pairs
+                    let found: Vec<_> = copies
                         .iter()
-                        .map(|(copy, original)| loader.compare_with_original(copy, original))
+                        .map(|(made, original)| loader.check_copy(made, at, original, &cancel))
                         .collect();
-                    post(move |c| c.update(|state| state.originals_checked(token, &found)));
+                    post(move |c| c.update(|state| state.copies_checked(token, &found)));
                 });
             }
             Effect::ReadSpace { tabs, drives } => {
@@ -966,6 +975,16 @@ impl Controller {
                     window.invoke_show_toast(text.into(), action.into(), token);
                 }
             }
+            Effect::Busy { token, text } => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_show_busy(text.into(), i32::try_from(token).unwrap_or(0));
+                }
+            }
+            Effect::NotBusy(token) => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_end_busy(i32::try_from(token).unwrap_or(0));
+                }
+            }
             // Carried out by `apply`.
             Effect::Load(_)
             | Effect::LoadChildren(_)
@@ -975,7 +994,7 @@ impl Controller {
             | Effect::OpenFile(_)
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
-            | Effect::CheckOriginals { .. }
+            | Effect::CheckCopies { .. }
             | Effect::InspectTarget { .. }
             | Effect::ReadSpace { .. }
             | Effect::Quit => {}

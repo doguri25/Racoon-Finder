@@ -240,13 +240,32 @@ export component MainWindow inherits Window {
         root.notice = text;
         root.notice-action-text = action;
         root.notice-token = token;
+        root.notice-lasting = false;
         notice-timer.start();
         notice-timer.restart();
+    }
+
+    // A notice without a button that stays, its time not running, until `end-busy` with its
+    // `token` (or another notice takes its place): the app is at something the user waits for.
+    public function show-busy(text: string, token: int) {
+        root.show-toast(text, "", token);
+        notice-timer.stop();
+        root.notice-lasting = true;
+    }
+
+    // The work of the notice `token` of `show-busy` is over: it goes, unless another notice
+    // has taken its place.
+    public function end-busy(token: int) {
+        if (root.notice-lasting && root.notice-token == token) {
+            root.notice = "";
+            root.notice-lasting = false;
+        }
     }
 
     private property <string> notice;
     private property <string> notice-action-text;
     private property <int> notice-token;
+    private property <bool> notice-lasting;
     // The keyboard goes back to the panes when a dialog closes.
     changed dialog => {
         if (root.dialog == DialogKind.none) {
@@ -754,7 +773,8 @@ export component MainWindow inherits Window {
     }
 
     // Above the job panel, when it shows, and above the panes' status lines. Its time stops
-    // while the pointer is over it, and starts again in full when the pointer leaves.
+    // while the pointer is over it, and starts again in full when the pointer leaves (a busy
+    // notice has no time).
     if root.notice != "": Toast {
         width: min(self.preferred-width, root.width - 48px);
         height: self.preferred-height;
@@ -764,7 +784,7 @@ export component MainWindow inherits Window {
         changed hovered => {
             if (self.hovered) {
                 notice-timer.stop();
-            } else {
+            } else if (!root.notice-lasting) {
                 notice-timer.restart();
             }
         }

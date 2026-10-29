@@ -182,18 +182,27 @@ impl AppState {
         effects
     }
 
-    /// The confirmation that shows was accepted: its job is submitted, or the app ends.
+    /// The confirmation that shows was accepted: its job is submitted, or the app ends. The
+    /// copies an undo could not trash are deleted only once a worker has found them and their
+    /// originals as they were once more ([`AppState::copies_checked`]).
     pub fn confirm_accepted(&mut self) -> Vec<Effect> {
         let Some(Modal::Confirm(confirm)) = &self.modal else {
             return Vec::new();
         };
         match (&confirm.purpose, confirm.job()) {
             (ConfirmPurpose::Quit, _) => self.begin_quit(),
-            (ConfirmPurpose::DeleteCopies { record, .. }, Some(spec)) => {
+            (
+                ConfirmPurpose::DeleteCopies {
+                    copies,
+                    originals,
+                    record,
+                },
+                _,
+            ) => {
+                let (copies, originals) = (copies.clone(), originals.clone());
                 let record = UndoRecord::clone(record);
                 self.close();
-                self.deleting_copies(spec.clone(), record);
-                vec![submit(spec, None)]
+                self.copies_confirmed(record, copies, originals)
             }
             (_, Some(spec)) => {
                 self.close();
@@ -584,6 +593,16 @@ impl AppState {
             .map(|row| Effect::ScrollTo { side, row })
             .into_iter()
             .collect()
+    }
+
+    /// The notice `text` that stays while a worker is at something ([`Effect::Busy`]),
+    /// replacing the toast on screen, with its token.
+    pub(super) fn busy(&mut self, text: &str) -> (u64, Effect) {
+        self.toast_token += 1;
+        let token = self.toast_token;
+        self.toast = None;
+        let text = text.to_owned();
+        (token, Effect::Busy { token, text })
     }
 
     /// A toast with `text`, whose button does `action`, replacing the one on screen.
