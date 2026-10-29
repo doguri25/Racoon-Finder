@@ -1,11 +1,14 @@
 // The name conflict window (760×560, from the mockup): what is there and what would come, side
 // by side, and what to do about it. The safe choice, keeping both under a numbered name, is
 // chosen when it opens; overwriting is offered only between two files, says what it does to
-// the file that is there, and is never confirmed by Enter alone.
+// the file that is there, and is never confirmed by Enter alone. With the keys: ↑↓ choose, Enter
+// takes the choice (not an overwrite), Tab goes to "남은 충돌에도 같은 선택 적용" (Space flips it),
+// 작업 취소 and the main button, where Space or Enter presses it, and Esc cancels the job.
 
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { PrimaryButton, OutlineButton, CheckBox, ChoiceRow, DialogFrame } from "widgets.slint";
+import { DialogKeys } from "shortcuts.slint";
 
 export struct ConflictView {
     // A new question gets a new number, which resets the choice.
@@ -168,6 +171,14 @@ export component ConflictDialog inherits DialogFrame {
     private property <int> choice: root.picked-for == root.view.serial ? root.picked-choice : 2;
     private property <bool> apply-all: root.picked-for == root.view.serial && root.picked-all;
 
+    // Where the keys are: -1 the choices, 0 the box, 1 작업 취소, 2 the main button. A new
+    // question starts again on the choices.
+    private property <int> on-button: -1;
+    private property <int> serial: root.view.serial;
+    changed serial => {
+        root.on-button = -1;
+    }
+
     width: 760px;
     height: 560px;
     accessible-label: root.view.title;
@@ -199,6 +210,24 @@ export component ConflictDialog inherits DialogFrame {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.on-button = DialogKeys.cycle(root.on-button + 1, step, 4) - 1;
+                return accept;
+            }
+            if (root.on-button == 0 && event.text == " ") {
+                root.toggle-all();
+                return accept;
+            }
+            if (root.on-button == 1 && DialogKeys.presses(event)) {
+                root.cancelled();
+                return accept;
+            }
+            // The button, chosen with Tab, confirms an overwrite too.
+            if (root.on-button == 2 && DialogKeys.presses(event)) {
+                root.answered(root.choice, root.apply-all);
                 return accept;
             }
             if (event.text == Key.UpArrow) {
@@ -328,6 +357,7 @@ export component ConflictDialog inherits DialogFrame {
                     CheckBox {
                         text: "남은 충돌에도 같은 선택 적용";
                         checked: root.apply-all;
+                        focused: root.on-button == 0;
                         toggled => {
                             root.toggle-all();
                             keys.focus();
@@ -349,6 +379,7 @@ export component ConflictDialog inherits DialogFrame {
                     OutlineButton {
                         button-height: 44px;
                         text: "작업 취소";
+                        focused: root.on-button == 1;
                         clicked => {
                             root.cancelled();
                         }
@@ -360,6 +391,7 @@ export component ConflictDialog inherits DialogFrame {
                     PrimaryButton {
                         button-height: 44px;
                         text: root.choice == 0 ? "덮어쓰기" : "계속";
+                        focused: root.on-button == 2;
                         clicked => {
                             root.answered(root.choice, root.apply-all);
                         }

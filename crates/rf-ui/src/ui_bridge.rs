@@ -1,7 +1,7 @@
 //! What the Slint screens are given: the row models of a file list and of the folder trees,
 //! the conversions from the panes' state, the dialogs and the destination picker to Slint
-//! structs, the payload of a drag of rows, and [`post`], which brings a worker thread's result
-//! back to the UI thread.
+//! structs, the payload of a drag of rows, the keys the toolbar and the menus show, and
+//! [`post`], which brings a worker thread's result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -10,11 +10,14 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use jiff::tz::TimeZone;
-use rf_core::{Attributes, Entry, EntryKind, VPath};
+use rf_core::{Attributes, Entry, EntryKind, Os, VPath};
 use rf_jobs::TransferMode;
 use rf_vfs::{SortKey, SortOrder};
 use slint::language::DragAction;
-use slint::{DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
+use slint::{
+    ComponentHandle, DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, SharedString,
+    VecModel,
+};
 
 use crate::controller::{self, Controller};
 use crate::dialogs::{
@@ -22,6 +25,7 @@ use crate::dialogs::{
 };
 use crate::format::{folder_label, format_size, format_time_in, kind_label, short_path};
 use crate::jobs::JobRow;
+use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
@@ -29,8 +33,9 @@ use crate::selection::Selection;
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, JobRowView, MessageView, NameView,
-    PaneView, PickTarget, PickView, PreflightView, RecoveryView, SectionHead, TabItem, TreeRow,
+    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, JobRowView, MainWindow, MessageView,
+    NameView, PaneView, PickTarget, PickView, PreflightView, RecoveryView, SectionHead, Shortcuts,
+    TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -584,6 +589,30 @@ pub fn drag_mode(action: DragAction) -> Option<TransferMode> {
         DragAction::Copy => Some(TransferMode::Copy),
         _ => None,
     }
+}
+
+/// Gives the window's toolbar, tooltips and menus the keys of their commands on `os`, from the
+/// shortcut table (KEY-03).
+pub fn show_shortcuts(window: &MainWindow, os: Os) {
+    let shown = window.global::<Shortcuts<'_>>();
+    let key =
+        |command: Command| SharedString::from(keys::shortcut(&command, os).unwrap_or_default());
+    shown.set_back(key(Command::Back));
+    shown.set_forward(key(Command::Forward));
+    shown.set_up(key(Command::Up));
+    shown.set_new_folder(key(Command::NewFolder));
+    shown.set_copy_to(key(Command::CopyTo));
+    shown.set_move_to(key(Command::MoveTo));
+    shown.set_trash(key(Command::Trash));
+    shown.set_delete_permanently(key(Command::DeletePermanently));
+    shown.set_rename(key(Command::Rename));
+    shown.set_undo(key(Command::Undo));
+    shown.set_open(key(Command::Open));
+    shown.set_toggle_hidden(key(Command::ToggleHidden));
+    shown.set_view_menu(key(Command::ViewMenu));
+    shown.set_filter(key(Command::FocusFilter));
+    shown.set_new_tab(key(Command::NewTab));
+    shown.set_close_tab(key(Command::CloseTab));
 }
 
 /// A row of the job panel.

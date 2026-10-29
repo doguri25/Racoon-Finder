@@ -112,7 +112,7 @@ fn tree_loads(effects: &[Effect]) -> Vec<LoadRequest> {
 #[test]
 fn f5_and_f6_open_the_picker_at_the_other_pane() {
     let mut state = with_items();
-    let effects = press(&mut state, &special(Key::F6), NONE).expect("the key is used");
+    let effects = press(&mut state, &special(Key::F8), NONE).expect("the key is used");
     let shown = picker(&state);
     assert_eq!(shown.request.mode, TransferMode::Move);
     assert_eq!(
@@ -139,13 +139,13 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
         press(&mut state, &special(Key::DownArrow), NONE),
         Some(vec![])
     );
-    assert_eq!(press(&mut state, &special(Key::F5), NONE), Some(vec![]));
+    assert_eq!(press(&mut state, &special(Key::F7), NONE), Some(vec![]));
     assert_eq!(cursor(&state, LEFT), before);
     assert_eq!(picker(&state).request.mode, TransferMode::Move);
     assert_eq!(state.dialog_cancelled(), []);
     assert_eq!(state.modal(), None);
 
-    // F5 copies; the toolbar's buttons and the row menu send the same commands.
+    // F7 copies; the toolbar's buttons and the row menu send the same commands.
     state.key(Command::CopyTo, NONE, 1, Instant::now());
     assert_eq!(picker(&state).request.mode, TransferMode::Copy);
     state.dialog_cancelled();
@@ -153,20 +153,20 @@ fn f5_and_f6_open_the_picker_at_the_other_pane() {
     // In an empty folder, nothing opens; nor does it for a row the user unselected, which the
     // screen shows unselected.
     let mut empty = ready(vec![], vec![]);
-    assert_eq!(press(&mut empty, &special(Key::F5), NONE), Some(vec![]));
+    assert_eq!(press(&mut empty, &special(Key::F7), NONE), Some(vec![]));
     assert_eq!(empty.modal(), None);
     let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
     state.click_row(LEFT, 1, false, false);
     state.click_row(LEFT, 1, true, false);
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
-    assert_eq!(press(&mut state, &special(Key::F5), NONE), Some(vec![]));
+    assert_eq!(press(&mut state, &special(Key::F7), NONE), Some(vec![]));
     assert_eq!(state.modal(), None);
 }
 
 #[test]
 fn confirming_submits_the_transfer_and_remembers_the_target() {
     let mut state = with_items();
-    let effects = press(&mut state, &special(Key::F5), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
     let (look, b) = the_look(&effects);
     assert_eq!(state.target_inspected(look, &b, folder_facts()), []);
     state.pick_policy(ConflictPolicy::Skip);
@@ -183,7 +183,7 @@ fn confirming_submits_the_transfer_and_remembers_the_target() {
     assert_eq!(state.recent_targets(), std::slice::from_ref(&b));
 
     // A target typed in comes first among the recent ones, and the next picker offers it.
-    let effects = press(&mut state, &special(Key::F5), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
     let (look, _) = the_look(&effects);
     let c = folder("c");
     let effects = state.pick_path_entered(&format!("  {c}  "));
@@ -197,7 +197,7 @@ fn confirming_submits_the_transfer_and_remembers_the_target() {
     let (spec, _) = the_submit(&state.pick_path_entered(&c.to_string()));
     assert!(matches!(spec, JobSpec::Transfer(_)));
     assert_eq!(state.recent_targets(), [c.clone(), b.clone()]);
-    press(&mut state, &special(Key::F5), NONE);
+    press(&mut state, &special(Key::F7), NONE);
     let recent = picker(&state)
         .groups
         .iter()
@@ -218,7 +218,7 @@ fn confirming_submits_the_transfer_and_remembers_the_target() {
 #[test]
 fn a_target_that_cannot_take_the_items_is_never_confirmed() {
     let mut state = with_items();
-    press(&mut state, &special(Key::F6), NONE);
+    press(&mut state, &special(Key::F8), NONE);
     // The items' own folder, typed: a move there would do nothing.
     let effects = state.pick_path_entered(&folder("a").to_string());
     let (look, a) = the_look(&effects);
@@ -260,7 +260,7 @@ fn a_target_that_cannot_take_the_items_is_never_confirmed() {
     // Too little room only warns: the button still works.
     press(&mut state, &special(Key::Escape), NONE);
     state.dialog_cancelled();
-    let effects = press(&mut state, &special(Key::F5), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
     let (look, b) = the_look(&effects);
     let full = TargetFacts {
         available: Some(MB),
@@ -283,7 +283,7 @@ fn a_target_that_cannot_take_the_items_is_never_confirmed() {
 #[test]
 fn an_overwrite_is_confirmed_by_the_button_alone() {
     let mut state = with_items();
-    press(&mut state, &special(Key::F5), NONE);
+    press(&mut state, &special(Key::F7), NONE);
     state.pick_policy(ConflictPolicy::Overwrite);
     assert_eq!(state.pick_enter(), []);
     assert_eq!(state.pick_path_entered(&folder("b").to_string()), []);
@@ -305,7 +305,7 @@ fn arrows_move_among_the_quick_targets() {
         entries: vec![],
     });
     state.activate(LEFT);
-    press(&mut state, &special(Key::F6), NONE);
+    press(&mut state, &special(Key::F8), NONE);
     // c (the other pane's tab that shows), then the tabs: a (the items' folder, passed over)
     // and b.
     assert_eq!(picker(&state).target, Some(c.clone()));
@@ -320,7 +320,7 @@ fn arrows_move_among_the_quick_targets() {
 fn the_filter_finds_listed_folders_and_enter_takes_the_first() {
     let mut state = with_items();
     state.set_places(&places());
-    let effects = press(&mut state, &special(Key::F5), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
     // The picker's tree opens on the way to the target, a place here: it is selected as it is.
     assert_eq!(state.pick_tree().selected_row(), Some(0));
     assert!(tree_loads(&effects).is_empty(), "{effects:?}");
@@ -355,7 +355,7 @@ fn the_filter_finds_listed_folders_and_enter_takes_the_first() {
 
     // A click on a row the filter found takes that folder; a filter that finds nothing does
     // nothing on Enter.
-    press(&mut state, &special(Key::F5), NONE);
+    press(&mut state, &special(Key::F7), NONE);
     let request = tree_loads(&state.pick_tree_toggled(0)).remove(0);
     state.loaded(LoadEvent::Listed {
         generation: request.generation,
@@ -375,7 +375,7 @@ fn the_filter_finds_listed_folders_and_enter_takes_the_first() {
 #[test]
 fn the_pickers_new_folder_becomes_its_target() {
     let mut state = with_items();
-    press(&mut state, &special(Key::F6), NONE);
+    press(&mut state, &special(Key::F8), NONE);
     assert_eq!(state.pick_new_folder(), []);
     // The name window shows over the picker, which stays on screen.
     let Some(Modal::Name(dialog)) = state.modal() else {
@@ -443,7 +443,7 @@ fn the_pickers_new_folder_becomes_its_target() {
 fn closing_the_picker_stops_its_tree_listings() {
     let mut state = with_items();
     state.set_places(&places());
-    press(&mut state, &special(Key::F5), NONE);
+    press(&mut state, &special(Key::F7), NONE);
     let request = tree_loads(&state.pick_tree_toggled(0)).remove(0);
     assert!(state.generations().contains(&request.generation));
     state.dialog_cancelled();
@@ -465,7 +465,7 @@ fn closing_the_picker_stops_its_tree_listings() {
 #[test]
 fn the_button_waits_while_the_path_field_says_otherwise() {
     let mut state = with_items();
-    let effects = press(&mut state, &special(Key::F6), NONE).expect("used");
+    let effects = press(&mut state, &special(Key::F8), NONE).expect("used");
     let (look, b) = the_look(&effects);
     state.target_inspected(look, &b, folder_facts());
     state.pick_policy(ConflictPolicy::Overwrite);
@@ -504,7 +504,7 @@ fn the_button_waits_while_the_path_field_says_otherwise() {
     assert_eq!(transfer.items[0].target, c.join("docs").expect("a name"));
 
     // A target chosen elsewhere replaces what was typed.
-    press(&mut state, &special(Key::F6), NONE);
+    press(&mut state, &special(Key::F8), NONE);
     state.pick_path_edited(&folder("elsewhere").to_string());
     assert_eq!(state.pick_confirmed(), []);
     state.pick_step(1);
@@ -526,7 +526,7 @@ fn with_items_and_their_folder() -> (AppState, LoadRequest) {
         kind: PlaceKind::Favorite(rf_platform::KnownFolder::Documents),
         space: None,
     }]);
-    press(&mut state, &special(Key::F6), NONE);
+    press(&mut state, &special(Key::F8), NONE);
     let request = tree_loads(&state.pick_tree_toggled(0)).remove(0);
     state.loaded(LoadEvent::Listed {
         generation: request.generation,

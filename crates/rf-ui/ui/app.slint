@@ -1,13 +1,16 @@
 // Main window: toolbar on top, the sidebar and the two panes below, the job panel under them
 // while a job runs, notices in the lower right corner, and a dialog over all of it when one
 // is open. Every key goes to Rust first (`key`), except while a text field or a dialog has
-// focus. Rows dragged from a pane drop on the other pane, a tab or the tree (DND): Rust says
-// at every move of the pointer whether the place under it takes them (`drop-check`).
+// focus; Rust's shortcut table (`keys.rs`) decides what it does, and gives the keys the
+// toolbar's tooltips and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
+// other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
+// under it takes them (`drop-check`).
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
+import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
 import { Pane, PaneView, TabItem, Crumb } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
@@ -22,7 +25,7 @@ import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 export {
     Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow
+    NoticeWindow, Shortcuts
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -88,6 +91,8 @@ export component MainWindow inherits Window {
     in property <bool> notice-action-live: true;
     // How many rows PageUp and PageDown move (the panes are equally tall).
     out property <int> page-rows: left.page-rows;
+    // The pane with the keyboard, which the 보기 menu's 정렬 sorts.
+    private property <int> active-side: root.right-pane.active ? 1 : 0;
     // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게) and whether hidden
     // items show, for the menu's check marks.
     in property <int> theme-choice;
@@ -101,8 +106,9 @@ export component MainWindow inherits Window {
     in property <length> start-height: 800px;
 
     // A key pressed while no text field has focus: the key's text (a character of
-    // `Key` for a special key) and the modifiers. `true` when Rust used it.
-    callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
+    // `Key` for a special key) and the modifiers (on macOS `ctrl` is Command and `meta`
+    // Control). `true` when Rust used it.
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
     // rename, undo, open, delete-permanently, toggle-hidden.
     callback command(name: string);
@@ -169,6 +175,16 @@ export component MainWindow inherits Window {
     // action the place takes, or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
     callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+
+    // The filter box takes the keys, all its text selected.
+    public function focus-filter() {
+        filter-box.take-focus-all();
+    }
+
+    // Opens the 보기 menu under its button, for the keys to choose in.
+    public function show-view-menu() {
+        view-menu.show({ x: 0, y: view-button.height + 4px });
+    }
 
     // The filter box shows `text`, the filter of the active pane, when it does not already.
     public function show-filter(text: string) {
@@ -352,7 +368,7 @@ export component MainWindow inherits Window {
             if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none) {
                 return reject;
             }
-            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt)) {
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
                 return accept;
             }
             reject
@@ -395,6 +411,7 @@ export component MainWindow inherits Window {
 
                         ToolButton {
                             icon: "back";
+                            keys: Shortcuts.back;
                             label: "뒤로";
                             enabled: root.can-back;
                             clicked => {
@@ -403,6 +420,7 @@ export component MainWindow inherits Window {
                         }
                         ToolButton {
                             icon: "forward";
+                            keys: Shortcuts.forward;
                             label: "앞으로";
                             enabled: root.can-forward;
                             clicked => {
@@ -411,6 +429,7 @@ export component MainWindow inherits Window {
                         }
                         ToolButton {
                             icon: "up";
+                            keys: Shortcuts.up;
                             label: "위로";
                             enabled: root.can-up;
                             clicked => {
@@ -435,6 +454,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "new-folder";
+                            keys: Shortcuts.new-folder;
                             text: "새 폴더";
                             clicked => {
                                 root.command("new-folder");
@@ -443,6 +463,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "copy";
+                            keys: Shortcuts.copy-to;
                             text: "복사…";
                             clicked => {
                                 root.command("copy");
@@ -451,6 +472,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "move";
+                            keys: Shortcuts.move-to;
                             text: "이동…";
                             clicked => {
                                 root.command("move");
@@ -459,6 +481,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "delete";
+                            keys: Shortcuts.trash;
                             text: "삭제";
                             clicked => {
                                 root.command("delete");
@@ -467,6 +490,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "rename";
+                            keys: Shortcuts.rename;
                             text: "이름 바꾸기";
                             clicked => {
                                 root.command("rename");
@@ -475,6 +499,7 @@ export component MainWindow inherits Window {
                         TextButton {
                             compact: root.compact;
                             icon: "undo";
+                            keys: Shortcuts.undo;
                             text: "되돌리기";
                             enabled: root.can-undo;
                             clicked => {
@@ -487,7 +512,8 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
-                    // The 보기 menu: the theme and the hidden items.
+                    // The 보기 menu: the theme, the hidden items and the order of the active pane
+                    // (its column heads, for the keys).
                     Rectangle {
                         view-menu := ContextMenuArea {
                             Menu {
@@ -520,20 +546,50 @@ export component MainWindow inherits Window {
                                 }
                                 MenuSeparator { }
                                 MenuItem {
-                                    title: "숨김 파일 보기";
+                                    title: Shortcuts.titled("숨김 파일 보기", Shortcuts.toggle-hidden);
                                     checkable: true;
                                     checked <=> root.show-hidden;
                                     activated => {
                                         root.command("toggle-hidden");
                                     }
                                 }
+                                MenuSeparator { }
+                                Menu {
+                                    title: "정렬";
+
+                                    MenuItem {
+                                        title: "이름";
+                                        activated => {
+                                            root.sort(root.active-side, 0);
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "크기";
+                                        activated => {
+                                            root.sort(root.active-side, 1);
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "수정한 날짜";
+                                        activated => {
+                                            root.sort(root.active-side, 2);
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "종류";
+                                        activated => {
+                                            root.sort(root.active-side, 3);
+                                        }
+                                    }
+                                }
                             }
                         }
 
-                        TextButton {
+                        view-button := TextButton {
                             compact: root.compact;
                             icon: "list-view";
                             text: "보기";
+                            keys: Shortcuts.view-menu;
                             clicked => {
                                 view-menu.show({ x: 0, y: self.height + 4px });
                             }
@@ -549,7 +605,7 @@ export component MainWindow inherits Window {
                         height: 32px;
                         horizontal-stretch: 0;
                         icon: "search";
-                        hint: "이 폴더에서 거르기";
+                        hint: Shortcuts.tip("이 폴더에서 거르기", Shortcuts.filter);
                         label: "이 폴더에서 거르기";
                         edited(text) => {
                             root.filter-edited(text);

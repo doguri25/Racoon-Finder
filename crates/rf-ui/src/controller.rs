@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
-use rf_core::VPath;
+use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
 use slint::language::DragAction;
@@ -104,6 +104,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     let session = settings.session();
     let started_at = start.is_some();
     window.set_theme_choice(theme_number(settings.theme));
+    ui_bridge::show_shortcuts(window, Os::CURRENT);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
@@ -190,8 +191,14 @@ fn index(index: i32) -> Option<usize> {
 }
 
 fn connect(window: &MainWindow) {
-    window.on_key(|text, ctrl, shift, alt| {
-        with(|c| c.key(&text, Mods { ctrl, shift, alt })).unwrap_or(false)
+    window.on_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        with(|c| c.key(&text, mods)).unwrap_or(false)
     });
     window.on_command(|name| {
         with(|c| c.command(&name));
@@ -662,7 +669,7 @@ impl Controller {
 
     /// A key; `true` when the window used it.
     fn key(&self, text: &str, mods: Mods) -> bool {
-        let Some(command) = keys::command_for(text, mods) else {
+        let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
             return false;
         };
         let page = self
@@ -847,6 +854,8 @@ impl Controller {
                 }),
                 Effect::Notice(_)
                 | Effect::EditPath(_)
+                | Effect::FocusFilter
+                | Effect::ShowViewMenu
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
@@ -948,6 +957,8 @@ impl Controller {
             | Effect::ReloadLater { .. }
             | Effect::Notice(_)
             | Effect::EditPath(_)
+            | Effect::FocusFilter
+            | Effect::ShowViewMenu
             | Effect::ScrollTo { .. }
             | Effect::ScrollTree(_)
             | Effect::ScrollPickTree(_)
@@ -966,6 +977,16 @@ impl Controller {
             Effect::EditPath(side) => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_edit_path(side_number(side));
+                }
+            }
+            Effect::FocusFilter => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_focus_filter();
+                }
+            }
+            Effect::ShowViewMenu => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_show_view_menu();
                 }
             }
             Effect::ScrollTo { side, row } => self.scroll_to(side, row),

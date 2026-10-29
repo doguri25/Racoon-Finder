@@ -41,7 +41,7 @@ fn delete(paths: Vec<VPath>, method: DeleteMethod) -> JobSpec {
 #[test]
 fn new_folder_asks_for_a_name_then_creates_it() {
     let mut state = ready(vec![file("x")], vec![]);
-    assert_eq!(press(&mut state, &special(Key::F7), NONE), Some(vec![]));
+    assert_eq!(press(&mut state, "N", CTRL_SHIFT), Some(vec![]));
     let Some(Modal::Name(dialog)) = state.modal() else {
         panic!("a name dialog: {:?}", state.modal());
     };
@@ -65,15 +65,8 @@ fn new_folder_asks_for_a_name_then_creates_it() {
         )
     );
     assert_eq!(state.modal(), None);
-    // Ctrl+Shift+N opens it too, and Esc closes it without a job.
-    press(
-        &mut state,
-        "N",
-        Mods {
-            shift: true,
-            ..CTRL
-        },
-    );
+    // The toolbar's 새 폴더 opens it too, and Esc closes it without a job.
+    state.key(Command::NewFolder, NONE, 1, Instant::now());
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     assert_eq!(state.dialog_cancelled(), []);
     assert_eq!(state.modal(), None);
@@ -125,8 +118,8 @@ fn a_folder_just_opened_changes_no_file_until_the_user_chooses_a_row() {
         (Key::Delete, NONE),
         (Key::Delete, SHIFT),
         (Key::F2, NONE),
-        (Key::F5, NONE),
-        (Key::F6, NONE),
+        (Key::F7, NONE),
+        (Key::F8, NONE),
     ] {
         assert_eq!(
             press(&mut state, &special(key), mods),
@@ -167,8 +160,8 @@ fn a_folder_just_opened_changes_no_file_until_the_user_chooses_a_row() {
             (Key::Delete, NONE),
             (Key::Delete, SHIFT),
             (Key::F2, NONE),
-            (Key::F5, NONE),
-            (Key::F6, NONE),
+            (Key::F7, NONE),
+            (Key::F8, NONE),
         ] {
             assert_eq!(
                 press(state, &special(key), mods),
@@ -503,7 +496,7 @@ fn conflict_question(id: u64) -> Question {
 #[test]
 fn questions_wait_behind_the_open_dialog_and_answer_the_job() {
     let mut state = ready(vec![file("x")], vec![]);
-    press(&mut state, &special(Key::F7), NONE);
+    press(&mut state, "N", CTRL_SHIFT);
     assert_eq!(state.question(conflict_question(5)), []);
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     state.dialog_cancelled();

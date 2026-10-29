@@ -77,6 +77,10 @@ pub enum Effect {
     Notice(String),
     /// Show the path of pane `side` as text to edit.
     EditPath(usize),
+    /// Give the toolbar's filter box (이 폴더에서 거르기) the keys.
+    FocusFilter,
+    /// Open the 보기 menu.
+    ShowViewMenu,
     /// Scroll pane `side` so that `row` shows.
     ScrollTo { side: usize, row: usize },
     /// List the folders in a folder of the tree
@@ -339,8 +343,9 @@ impl AppState {
     }
 
     /// Carries out the shortcut `command`, held with `mods`, on the active pane. `page` is how
-    /// many rows `PageUp` and `PageDown` move. `None` for a command this window does not take
-    /// (yet): the key goes on to the system.
+    /// many rows `PageUp` and `PageDown` move. `None` for a command of the shortcut table this
+    /// window does not do yet (`docs/ux/keyboard.md` says which task brings each): the key goes
+    /// on to the system.
     pub fn key(
         &mut self,
         command: Command,
@@ -360,6 +365,10 @@ impl AppState {
                 self.active = RIGHT - side;
                 Vec::new()
             }
+            Command::NextTab => self.step_tab(side, 1),
+            Command::PrevTab => self.step_tab(side, -1),
+            Command::FocusFilter => vec![Effect::FocusFilter],
+            Command::ViewMenu => vec![Effect::ShowViewMenu],
             Command::Open => self.open_cursor(side),
             Command::Up => self.go(side, Tab::go_up),
             Command::Back => self.go(side, Tab::go_back),
@@ -407,8 +416,35 @@ impl AppState {
             Command::Redo => self.redo(),
             Command::CopyTo => self.open_picker(side, TransferMode::Copy),
             Command::MoveTo => self.open_picker(side, TransferMode::Move),
+            Command::ReopenTab
+            | Command::Refresh
+            | Command::Copy
+            | Command::Cut
+            | Command::Paste
+            | Command::PasteMove
+            | Command::CopyPath
+            | Command::Properties
+            | Command::ContextMenu
+            | Command::QuickLook
+            | Command::TogglePreview
+            | Command::ToggleTree
+            | Command::ToggleDualPane
+            | Command::ToggleSplit
+            | Command::SwapPanes
+            | Command::SameFolderInOther
+            | Command::SyncNavigation => return None,
         };
         Some(effects)
+    }
+
+    /// Shows the tab `delta` places after (a negative `delta`: before) the one pane `side`
+    /// shows, going round from the last tab to the first and back.
+    fn step_tab(&mut self, side: usize, delta: isize) -> Vec<Effect> {
+        let pane = &mut self.panes[side];
+        let count = pane.tabs().len();
+        let next = pane.active().cast_signed().saturating_add(delta);
+        pane.select_tab(usize::try_from(next.rem_euclid(count.cast_signed())).unwrap_or(0));
+        Vec::new()
     }
 
     /// A right click on row `row` of pane `side`, before its menu opens: the pane gets the

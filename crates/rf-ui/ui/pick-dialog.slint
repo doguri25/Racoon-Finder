@@ -9,12 +9,18 @@
 // sends the items anywhere else than where the field says. Nor does a path being composed with
 // an input method (a Korean syllable not yet complete): the field's text and Rust do not have it
 // until it is committed, so the button and 새 폴더 are off meanwhile, and Enter does nothing.
+//
+// Tab and Shift+Tab move the keys round its stops (KEY-02): the filter, the path field, 새 폴더,
+// 이동/복사, 이름이 겹치면, 취소 and the confirm button (a button that is off is passed over, and so
+// is Tab while a syllable is being composed). On 이동/복사 and 이름이 겹치면 ← and → choose; on a
+// button Space or Enter presses it, which confirms an overwrite too.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, PrimaryButton, OutlineButton, DialogFrame, Field } from "widgets.slint";
 import { Sidebar, TreeRow } from "sidebar.slint";
+import { DialogKeys } from "shortcuts.slint";
 
 // One quick target, as Rust makes it.
 export struct PickTarget {
@@ -104,12 +110,15 @@ component Segment inherits Rectangle {
     }
 }
 
-// The track the segments of one set sit in.
+// The track the segments of one set sit in; a ring while the keys are on it.
 component SegmentTrack inherits Rectangle {
     in property <string> label;
+    in property <bool> focused;
 
     horizontal-stretch: 0;
     border-radius: 8px;
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
     background: Theme.raised;
     accessible-role: radio-group;
     accessible-label: root.label;
@@ -263,6 +272,23 @@ export component PickDialog inherits DialogFrame {
     accessible-label: root.view.title;
     accessible-description: root.view.summary;
 
+    // The stop the keys are on: 0 the filter, 1 the path field, 2 새 폴더, 3 이동/복사, 4 이름이
+    // 겹치면, 5 취소, 6 the confirm button.
+    property <int> stop: 0;
+    private property <bool> filter-focused: filter.has-focus;
+    private property <bool> path-focused: path.has-focus;
+    // A click into a field takes the keys there.
+    changed filter-focused => {
+        if (root.filter-focused) {
+            root.stop = 0;
+        }
+    }
+    changed path-focused => {
+        if (root.path-focused) {
+            root.stop = 1;
+        }
+    }
+
     init => {
         filter.text = root.view.filter;
         path.text = root.view.target-path;
@@ -270,9 +296,73 @@ export component PickDialog inherits DialogFrame {
         filter.take-focus();
     }
 
+    // Whether stop `at` takes the keys now: a button that is off does not.
+    pure function can-stop(at: int) -> bool {
+        if (at == 2) {
+            return root.view.can-make-folder && !path.composing;
+        }
+        if (at == 6) {
+            return root.view.can-confirm && !path.composing;
+        }
+        return true;
+    }
+
+    // The keys go to the next stop that takes them, `step` (1 or -1) at a time. The stops that
+    // can be off are not side by side: one is passed over at most.
+    function go(step: int) {
+        let first = DialogKeys.cycle(root.stop, step, 7);
+        let next = root.can-stop(first) ? first : DialogKeys.cycle(first, step, 7);
+        root.stop = next;
+        // A field Tab goes to has its text selected, as in the system's dialogs.
+        if (next == 0) {
+            filter.take-focus-all();
+        } else if (next == 1) {
+            path.take-focus-all();
+        } else {
+            keys.focus();
+        }
+    }
+
+    // A key of a stop other than the fields'; `accept` when it did something there.
+    function stop-key(event: KeyEvent) -> EventResult {
+        if (root.stop == 3 && (event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
+            root.mode-chosen(event.text == Key.LeftArrow);
+            return EventResult.accept;
+        }
+        if (root.stop == 4 && event.text == Key.LeftArrow) {
+            root.policy-chosen(max(0, root.view.policy - 1));
+            return EventResult.accept;
+        }
+        if (root.stop == 4 && event.text == Key.RightArrow) {
+            root.policy-chosen(min(3, root.view.policy + 1));
+            return EventResult.accept;
+        }
+        if (!DialogKeys.presses(event)) {
+            return EventResult.reject;
+        }
+        if (root.stop == 2) {
+            if (root.can-stop(2)) {
+                root.new-folder();
+            }
+            return EventResult.accept;
+        }
+        if (root.stop == 5) {
+            root.cancelled();
+            return EventResult.accept;
+        }
+        if (root.stop == 6) {
+            if (root.can-stop(6)) {
+                root.confirmed();
+            }
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
+
     // Back from the window over it (the name of a new folder): the filter has the keys again.
     changed active => {
         if (root.active) {
+            root.stop = 0;
             filter.take-focus();
         }
     }
@@ -301,11 +391,23 @@ export component PickDialog inherits DialogFrame {
     }
 
     // The keys the dialog takes wherever its focus is: the fields pass up those they do not
-    // use, and the filter passes the arrows. The dialog itself never takes the focus (a click
-    // between its parts leaves it where it was), so letters always go to a field.
+    // use, and the filter passes the arrows. The dialog takes the focus itself only on a stop
+    // other than the fields (a click between its parts leaves it where it was), so letters
+    // always go to a field there.
     function key(event: KeyEvent) -> EventResult {
         if (event.text == Key.Escape) {
             root.cancelled();
+            return EventResult.accept;
+        }
+        let step = DialogKeys.tab-step(event);
+        if (step != 0) {
+            // Not while a syllable is being composed in a field: it is not in it yet.
+            if (!(root.stop == 0 && filter.composing) && !(root.stop == 1 && path.composing)) {
+                root.go(step);
+            }
+            return EventResult.accept;
+        }
+        if (root.stop >= 2 && root.stop-key(event) == EventResult.accept) {
             return EventResult.accept;
         }
         if (event.text == Key.UpArrow) {
@@ -390,6 +492,7 @@ export component PickDialog inherits DialogFrame {
 
                     SegmentTrack {
                         label: "작업";
+                        focused: root.stop == 3;
 
                         Segment {
                             text: "이동";
@@ -442,6 +545,12 @@ export component PickDialog inherits DialogFrame {
                         icon: "folder";
                         label: "대상 경로";
                         hint: "폴더 경로를 입력하세요";
+                        key(event) => {
+                            if (DialogKeys.tab-step(event) != 0) {
+                                return root.key(event);
+                            }
+                            return EventResult.reject;
+                        }
                         edited(text) => {
                             root.path-edited(text);
                         }
@@ -462,6 +571,7 @@ export component PickDialog inherits DialogFrame {
                     OutlineButton {
                         text: "새 폴더";
                         enabled: root.view.can-make-folder && !path.composing;
+                        focused: root.stop == 2;
                         clicked => {
                             root.new-folder();
                         }
@@ -483,7 +593,7 @@ export component PickDialog inherits DialogFrame {
                         label: "폴더 이름으로 거르기";
                         hint: "폴더 이름으로 거르기";
                         key(event) => {
-                            if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                            if (event.text == Key.UpArrow || event.text == Key.DownArrow || DialogKeys.tab-step(event) != 0) {
                                 return root.key(event);
                             }
                             return EventResult.reject;
@@ -578,6 +688,7 @@ export component PickDialog inherits DialogFrame {
 
                     SegmentTrack {
                         label: "이름이 겹치면";
+                        focused: root.stop == 4;
 
                         Segment {
                             text: "물어보기";
@@ -669,6 +780,7 @@ export component PickDialog inherits DialogFrame {
                     OutlineButton {
                         button-height: 40px;
                         text: "취소";
+                        focused: root.stop == 5;
                         clicked => {
                             root.cancelled();
                         }
@@ -681,6 +793,7 @@ export component PickDialog inherits DialogFrame {
                         button-height: 40px;
                         text: root.view.confirm-text;
                         enabled: root.view.can-confirm && !path.composing;
+                        focused: root.stop == 6;
                         clicked => {
                             root.confirmed();
                         }

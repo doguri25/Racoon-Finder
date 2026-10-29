@@ -1,7 +1,7 @@
 // The column heads and the rows of a folder listing. The rows are a virtualized ListView:
 // only the rows on screen exist as elements, so a folder of 100,000 items scrolls as freely
 // as one of ten. A right click opens the menu of the row (move and copy first, OPS-05), or of
-// the empty part of the list.
+// the empty part of the list; each item says the key of its command (KEY-03).
 //
 // A row can be dragged (DND): its payload is what Rust readied when the row was pressed
 // (`drag-data`, the id of the items it noted). The whole list is one place to drop on, which
@@ -13,6 +13,7 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { Shortcuts } from "shortcuts.slint";
 
 // One row of the list, as Rust formats it.
 export struct FileRow {
@@ -243,7 +244,7 @@ export component FileList inherits Rectangle {
 
                     Menu {
                         MenuItem {
-                            title: "새 폴더";
+                            title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
                             activated => {
                                 root.menu-command("new-folder");
                             }
@@ -288,39 +289,39 @@ export component FileList inherits Rectangle {
                                 row-menu := ContextMenuArea {
                                     Menu {
                                         MenuItem {
-                                            title: "이동…";
+                                            title: Shortcuts.titled("이동…", Shortcuts.move-to);
                                             activated => {
                                                 root.menu-command("move");
                                             }
                                         }
                                         MenuItem {
-                                            title: "복사…";
+                                            title: Shortcuts.titled("복사…", Shortcuts.copy-to);
                                             activated => {
                                                 root.menu-command("copy");
                                             }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
-                                            title: "열기";
+                                            title: Shortcuts.titled("열기", Shortcuts.open);
                                             activated => {
                                                 root.menu-command("open");
                                             }
                                         }
                                         MenuItem {
-                                            title: "이름 바꾸기";
+                                            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
                                             activated => {
                                                 root.menu-command("rename");
                                             }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
-                                            title: "휴지통으로 보내기";
+                                            title: Shortcuts.titled("휴지통으로 보내기", Shortcuts.trash);
                                             activated => {
                                                 root.menu-command("delete");
                                             }
                                         }
                                         MenuItem {
-                                            title: "영구 삭제";
+                                            title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
                                             activated => {
                                                 root.menu-command("delete-permanently");
                                             }

@@ -1,0 +1,59 @@
+// The keys of the commands the toolbar, the menus and the tooltips show (KEY-03), written as
+// the system the app runs on writes them ("Ctrl+Shift+N" on Windows, "⇧⌘N" on macOS). Rust sets
+// them from its shortcut table (`keys.rs`, `ui_bridge::show_shortcuts`); a command without a
+// key there has an empty one.
+
+export global Shortcuts {
+    in property <string> back;
+    in property <string> forward;
+    in property <string> up;
+    in property <string> new-folder;
+    in property <string> copy-to;
+    in property <string> move-to;
+    in property <string> trash;
+    in property <string> delete-permanently;
+    in property <string> rename;
+    in property <string> undo;
+    in property <string> open;
+    in property <string> toggle-hidden;
+    in property <string> view-menu;
+    in property <string> filter;
+    in property <string> new-tab;
+    in property <string> close-tab;
+
+    // A menu item's title with its key after it, or the title alone for a command without
+    // one. A menu of a window (not of the menu bar) has no column for keys.
+    public pure function titled(title: string, keys: string) -> string {
+        return keys == "" ? title : "\{title}  (\{keys})";
+    }
+
+    // A tooltip's text: the name, and the key after it.
+    public pure function tip(name: string, keys: string) -> string {
+        return keys == "" ? name : "\{name} (\{keys})";
+    }
+}
+
+// The keys every dialog moves its focus with: Tab and Shift+Tab among its buttons (and fields),
+// going round, as the system's dialogs do.
+export global DialogKeys {
+    // 1 for Tab, -1 for Shift+Tab (Tab with Shift, or Backtab), 0 for any other key.
+    public pure function tab-step(event: KeyEvent) -> int {
+        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            return 0;
+        }
+        if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) {
+            return -1;
+        }
+        return event.text == Key.Tab ? 1 : 0;
+    }
+
+    // Stop `from` moved `step` places among `count` stops, after the last one the first.
+    public pure function cycle(from: int, step: int, count: int) -> int {
+        return Math.mod(from + step, count);
+    }
+
+    // The key presses the button the keys are on: Space or Enter.
+    public pure function presses(event: KeyEvent) -> bool {
+        return event.text == " " || event.text == Key.Return;
+    }
+}

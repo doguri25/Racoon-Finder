@@ -1,12 +1,17 @@
 // The dialogs over the main window: a name, a confirmation, a list of failed items, the jobs
 // the last run left unfinished, the pre-flight check of a transfer, and the note that shows
-// while the app ends. Each one takes the keyboard when it opens: Esc closes it (Cancel), and
-// Enter does its main action unless that action destroys something. `NoticeWindow` is a
-// window of its own, for a message before or instead of the main window.
+// while the app ends. Each one takes the keyboard when it opens and can be used with it alone
+// (KEY-02): Esc closes it (Cancel), Tab and Shift+Tab move among its buttons (and its field),
+// going round, Space or Enter presses the button the keys are on, which shows a ring, and
+// ↑↓ PageUp PageDown Home End scroll its list. With no button chosen yet, Enter does its main
+// action unless that action destroys something; a dialog whose main action destroys something
+// starts on 취소. `NoticeWindow` is a window of its own, for a message before or instead of the
+// main window.
 
 import { ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { PrimaryButton, OutlineButton, DialogFrame } from "widgets.slint";
+import { DialogKeys } from "shortcuts.slint";
 
 export struct NameView {
     title: string,
@@ -71,7 +76,8 @@ component Body inherits Text {
 // part before the extension selected; Rust checks each edit and sends the warning back. While
 // an input method composes a syllable, the field's text and Rust do not have it until it is
 // committed, so neither 확인 nor Enter takes the name meanwhile: either would leave the
-// syllable out.
+// syllable out, and Tab leaves the field only once it is committed. Tab goes from the field to
+// 취소, then to 확인, then back to the field.
 export component NameDialog inherits DialogFrame {
     in property <NameView> view;
     callback edited(text: string);
@@ -79,6 +85,8 @@ export component NameDialog inherits DialogFrame {
     callback cancelled();
 
     property <bool> composing: input.preedit-text != "";
+    // Where the keys are: -1 the field, 0 취소, 1 확인.
+    property <int> on-button: -1;
 
     width: 440px;
     height: layout.preferred-height;
@@ -90,73 +98,134 @@ export component NameDialog inherits DialogFrame {
         input.set-selection-offsets(0, root.view.select-end);
     }
 
-    layout := VerticalLayout {
-        padding: 24px;
-        spacing: Theme.gap-m;
-
-        Heading {
-            text: root.view.title;
+    // The keys go `step` stops on from where they are (the field is the stop before 취소).
+    function go(step: int) {
+        root.on-button = DialogKeys.cycle(root.on-button + 1, step, 3) - 1;
+        if (root.on-button < 0) {
+            input.focus();
+        } else {
+            keys.focus();
         }
-        Rectangle {
-            height: 38px;
-            border-width: 1px;
-            border-color: root.view.warning == "" ? Theme.accent : Theme.muted;
-            border-radius: Theme.radius;
-            background: Theme.bg;
+    }
 
-            input := TextInput {
-                x: 10px;
-                width: parent.width - 20px;
-                height: parent.height;
-                color: Theme.text;
-                selection-background-color: Theme.selection;
-                selection-foreground-color: Theme.text;
-                vertical-alignment: center;
-                single-line: true;
-                accessible-role: text-input;
-                accessible-label: root.view.title;
-                edited => {
-                    root.edited(self.text);
-                }
-                // Rust decides: a name that cannot be used keeps the dialog open.
-                accepted => {
-                    if (!root.composing) {
-                        root.accepted(self.text);
+    function press(button: int) {
+        if (button == 0) {
+            root.cancelled();
+        } else if (button == 1 && root.view.ok-enabled && !root.composing) {
+            root.accepted(input.text);
+        }
+    }
+
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            if (root.on-button >= 0 && DialogKeys.presses(event)) {
+                root.press(root.on-button);
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Rectangle {
+                height: 38px;
+                border-width: 1px;
+                border-color: root.view.warning != "" ? Theme.muted : input.has-focus ? Theme.accent : Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+
+                input := TextInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.text;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-role: text-input;
+                    accessible-label: root.view.title;
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    // Rust decides: a name that cannot be used keeps the dialog open.
+                    accepted => {
+                        if (!root.composing) {
+                            root.accepted(self.text);
+                        }
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.cancelled();
+                            return accept;
+                        }
+                        let step = DialogKeys.tab-step(event);
+                        if (step != 0) {
+                            if (!root.composing) {
+                                root.go(step);
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                    // A click into the field takes the keys back from the buttons.
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            root.on-button = -1;
+                        }
                     }
                 }
-                key-pressed(event) => {
-                    if (event.text == Key.Escape) {
+            }
+            if root.view.warning != "": Body {
+                text: root.view.warning;
+                font-size: Theme.font-small;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.on-button == 0;
+                    clicked => {
                         root.cancelled();
-                        return accept;
                     }
-                    reject
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    enabled: root.view.ok-enabled && !root.composing;
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.accepted(input.text);
+                    }
                 }
             }
         }
-        if root.view.warning != "": Body {
-            text: root.view.warning;
-            font-size: Theme.font-small;
-        }
-        HorizontalLayout {
-            alignment: end;
-            spacing: Theme.gap-s;
-            padding-top: Theme.gap-s;
+    }
+}
 
-            OutlineButton {
-                text: "취소";
-                clicked => {
-                    root.cancelled();
-                }
-            }
-            PrimaryButton {
-                button-height: 36px;
-                text: "확인";
-                enabled: root.view.ok-enabled && !root.composing;
-                clicked => {
-                    root.accepted(input.text);
-                }
-            }
-        }
+// The keys that scroll a dialog's list of items.
+global LineListKeys {
+    public pure function scrolls(event: KeyEvent) -> bool {
+        let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta;
+        return plain && (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.PageUp || event.text == Key.PageDown || event.text == Key.Home || event.text == Key.End);
     }
 }
 
@@ -189,6 +258,44 @@ component LineList inherits Rectangle {
     in property <[string]> lines;
     in property <[string]> head;
     in property <length> tallest;
+    // For a list its dialog cannot reach (one shown only with items): it scrolls for the key
+    // `scroll-text` each time `scroll-serial` changes.
+    in property <string> scroll-text;
+    in property <int> scroll-serial;
+    changed scroll-serial => {
+        root.scroll-for(root.scroll-text);
+    }
+
+    // Scrolls the list for a key of `LineListKeys.scrolls`; `false` for any other key.
+    public function scroll-key(event: KeyEvent) -> bool {
+        if (!LineListKeys.scrolls(event)) {
+            return false;
+        }
+        root.scroll-for(event.text);
+        return true;
+    }
+
+    // ↑↓ scroll a line's height, PageUp PageDown the list's height, Home and End to its ends.
+    function scroll-for(key: string) {
+        let page = list.visible-height;
+        if (key == Key.UpArrow) {
+            root.scroll-to(list.content-y + 24px);
+        } else if (key == Key.DownArrow) {
+            root.scroll-to(list.content-y - 24px);
+        } else if (key == Key.PageUp) {
+            root.scroll-to(list.content-y + page);
+        } else if (key == Key.PageDown) {
+            root.scroll-to(list.content-y - page);
+        } else if (key == Key.Home) {
+            root.scroll-to(0px);
+        } else if (key == Key.End) {
+            root.scroll-to(-list.content-height);
+        }
+    }
+
+    function scroll-to(y: length) {
+        list.content-y = max(min(0px, list.visible-height - list.content-height), min(0px, y));
+    }
 
     height: min(root.tallest, max(48px, measured.preferred-height + 2px));
     border-width: 1px;
@@ -224,6 +331,11 @@ export component ConfirmDialog inherits DialogFrame {
     accessible-label: root.view.title;
     accessible-description: root.view.message;
 
+    // The last key that scrolls the list, which is not there without items (a key for it each
+    // time the serial changes).
+    property <string> scroll-text;
+    property <int> scroll-serial;
+
     // The button the keys are on: 0 취소, 1 the other, -1 neither. A danger confirm starts on
     // 취소, so Enter answers No until Tab moves to the button that deletes; any other starts
     // on neither, and Enter there is Yes. The keys stay with the dialog's FocusScope (the
@@ -253,11 +365,12 @@ export component ConfirmDialog inherits DialogFrame {
                 root.cancelled();
                 return accept;
             }
-            if (event.text == Key.Tab || event.text == Key.RightArrow) {
+            let step = DialogKeys.tab-step(event);
+            if (step > 0 || event.text == Key.RightArrow) {
                 root.on-button = root.on-button == 0 ? 1 : 0;
                 return accept;
             }
-            if (event.text == Key.Backtab || event.text == Key.LeftArrow) {
+            if (step < 0 || event.text == Key.LeftArrow) {
                 root.on-button = root.on-button == 1 ? 0 : 1;
                 return accept;
             }
@@ -271,6 +384,11 @@ export component ConfirmDialog inherits DialogFrame {
                 } else if (!root.view.danger) {
                     root.accepted();
                 }
+                return accept;
+            }
+            if (root.view.lines.length > 0 && LineListKeys.scrolls(event)) {
+                root.scroll-text = event.text;
+                root.scroll-serial += 1;
                 return accept;
             }
             reject
@@ -292,6 +410,8 @@ export component ConfirmDialog inherits DialogFrame {
                 lines: root.view.lines;
                 head: root.view.head;
                 tallest: 200px;
+                scroll-text: root.scroll-text;
+                scroll-serial: root.scroll-serial;
             }
             if root.view.detail != "": Body {
                 text: root.view.detail;
@@ -327,7 +447,7 @@ export component ConfirmDialog inherits DialogFrame {
     }
 }
 
-// The items a job could not process, and why.
+// The items a job could not process, and why. Enter or Esc closes it; Tab puts the keys on 확인.
 export component MessageDialog inherits DialogFrame {
     in property <MessageView> view;
     callback closed();
@@ -335,6 +455,9 @@ export component MessageDialog inherits DialogFrame {
     width: 600px;
     height: layout.preferred-height;
     accessible-label: root.view.title;
+
+    // 0 while the keys are on 확인, its one button; -1 before Tab.
+    property <int> on-button: -1;
 
     init => {
         keys.focus();
@@ -344,6 +467,17 @@ export component MessageDialog inherits DialogFrame {
         key-pressed(event) => {
             if (event.text == Key.Escape || event.text == Key.Return) {
                 root.closed();
+                return accept;
+            }
+            if (DialogKeys.tab-step(event) != 0) {
+                root.on-button = 0;
+                return accept;
+            }
+            if (event.text == " " && root.on-button == 0) {
+                root.closed();
+                return accept;
+            }
+            if (lines.scroll-key(event)) {
                 return accept;
             }
             reject
@@ -356,7 +490,7 @@ export component MessageDialog inherits DialogFrame {
             Heading {
                 text: root.view.title;
             }
-            LineList {
+            lines := LineList {
                 lines: root.view.lines;
                 head: root.view.head;
                 tallest: 360px;
@@ -367,6 +501,7 @@ export component MessageDialog inherits DialogFrame {
                 PrimaryButton {
                     button-height: 36px;
                     text: "확인";
+                    focused: root.on-button == 0;
                     clicked => {
                         root.closed();
                     }
@@ -377,7 +512,9 @@ export component MessageDialog inherits DialogFrame {
 }
 
 // The jobs the last run of the app left unfinished: each can be run again or dropped. One
-// that is neither stays for the next start.
+// that is neither stays for the next start. The keys start on 닫기, which drops nothing: Tab
+// goes from there to the first job's 버리기 and 다시 실행, the next job's, and back to 닫기.
+// Each answer takes its job off the list, and the keys go back to 닫기.
 export component RecoveryDialog inherits DialogFrame {
     in property <RecoveryView> view;
     callback chosen(index: int, run-again: bool);
@@ -387,14 +524,52 @@ export component RecoveryDialog inherits DialogFrame {
     height: layout.preferred-height;
     accessible-label: root.view.title;
 
+    // The button the keys are on: 2 × job for its 버리기, one more for its 다시 실행, and the
+    // last one, 2 × the number of jobs, 닫기.
+    property <int> on-button: root.view.rows.length * 2;
+    // A job answered goes from the list: the keys start again on 닫기.
+    changed view => {
+        root.on-button = root.view.rows.length * 2;
+    }
+
     init => {
         keys.focus();
+    }
+
+    function press(button: int) {
+        if (button >= root.view.rows.length * 2) {
+            root.closed();
+        } else {
+            root.chosen(floor(button / 2), Math.mod(button, 2) == 1);
+        }
+    }
+
+    // Scrolls the list as little as needed to show the job the keys are on.
+    function show-row(row: int) {
+        let top = row * 56px;
+        if (top + jobs.content-y < 0) {
+            jobs.content-y = -top;
+        } else if (top + 56px + jobs.content-y > jobs.visible-height) {
+            jobs.content-y = jobs.visible-height - top - 56px;
+        }
     }
 
     keys := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.closed();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.on-button = DialogKeys.cycle(root.on-button, step, root.view.rows.length * 2 + 1);
+                if (root.on-button < root.view.rows.length * 2) {
+                    root.show-row(floor(root.on-button / 2));
+                }
+                return accept;
+            }
+            if (DialogKeys.presses(event)) {
+                root.press(root.on-button);
                 return accept;
             }
             reject
@@ -416,7 +591,7 @@ export component RecoveryDialog inherits DialogFrame {
                 border-color: Theme.border;
                 border-radius: Theme.radius;
 
-                ListView {
+                jobs := ListView {
                     for row[i] in root.view.rows: Rectangle {
                         height: 56px;
 
@@ -437,6 +612,7 @@ export component RecoveryDialog inherits DialogFrame {
 
                                 OutlineButton {
                                     text: "버리기";
+                                    focused: root.on-button == i * 2;
                                     clicked => {
                                         root.chosen(i, false);
                                     }
@@ -448,6 +624,7 @@ export component RecoveryDialog inherits DialogFrame {
                                 PrimaryButton {
                                     button-height: 36px;
                                     text: "다시 실행";
+                                    focused: root.on-button == i * 2 + 1;
                                     clicked => {
                                         root.chosen(i, true);
                                     }
@@ -468,6 +645,7 @@ export component RecoveryDialog inherits DialogFrame {
 
                 OutlineButton {
                     text: "닫기";
+                    focused: root.on-button == root.view.rows.length * 2;
                     clicked => {
                         root.closed();
                     }
@@ -478,7 +656,8 @@ export component RecoveryDialog inherits DialogFrame {
 }
 
 // The problems the pre-flight check of a transfer found on the target, before anything was
-// written: go on as it is, leave out the items that cannot be written, or cancel.
+// written: go on as it is, leave out the items that cannot be written, or cancel. The keys
+// start on 취소: going on despite the problems is chosen with Tab.
 export component PreflightDialog inherits DialogFrame {
     in property <PreflightView> view;
     // 0 go on, 1 leave out the blocked items, 2 cancel.
@@ -488,14 +667,40 @@ export component PreflightDialog inherits DialogFrame {
     height: layout.preferred-height;
     accessible-label: root.view.title;
 
+    // The button the keys are on, in their order on screen: 0 취소, 1 막힌 항목 건너뛰기 (only
+    // with blocked items), 2 계속.
+    property <int> on-button: 0;
+    changed view => {
+        root.on-button = 0;
+    }
+
     init => {
         keys.focus();
+    }
+
+    function go(step: int) {
+        let count = root.view.has-blocked ? 3 : 2;
+        let at = root.view.has-blocked || root.on-button == 0 ? root.on-button : 1;
+        let next = DialogKeys.cycle(at, step, count);
+        root.on-button = root.view.has-blocked || next == 0 ? next : 2;
     }
 
     keys := FocusScope {
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.answered(2);
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            if (DialogKeys.presses(event)) {
+                root.answered(root.on-button == 0 ? 2 : root.on-button == 1 ? 1 : 0);
+                return accept;
+            }
+            if (lines.scroll-key(event)) {
                 return accept;
             }
             reject
@@ -508,7 +713,7 @@ export component PreflightDialog inherits DialogFrame {
             Heading {
                 text: root.view.title;
             }
-            LineList {
+            lines := LineList {
                 lines: root.view.lines;
                 head: root.view.head;
                 tallest: 320px;
@@ -519,12 +724,14 @@ export component PreflightDialog inherits DialogFrame {
 
                 OutlineButton {
                     text: "취소";
+                    focused: root.on-button == 0;
                     clicked => {
                         root.answered(2);
                     }
                 }
                 if root.view.has-blocked: OutlineButton {
                     text: "막힌 항목 건너뛰기";
+                    focused: root.on-button == 1;
                     clicked => {
                         root.answered(1);
                     }
@@ -532,6 +739,7 @@ export component PreflightDialog inherits DialogFrame {
                 PrimaryButton {
                     button-height: 36px;
                     text: "계속";
+                    focused: root.on-button == 2;
                     clicked => {
                         root.answered(0);
                     }

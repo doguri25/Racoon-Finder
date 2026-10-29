@@ -5,7 +5,7 @@
 use super::*;
 use crate::keys;
 use crate::places::PlaceKind;
-use rf_core::{Attributes, Entry, EntryKind};
+use rf_core::{Attributes, Entry, EntryKind, Os};
 use rf_jobs::{JobId, JobReport};
 use rf_vfs::SortOrder;
 use slint::platform::Key;
@@ -95,7 +95,7 @@ fn cursor(state: &AppState, side: usize) -> Option<usize> {
 }
 
 fn press(state: &mut AppState, text: &str, mods: Mods) -> Option<Vec<Effect>> {
-    let command = keys::command_for(text, mods).expect("a shortcut");
+    let command = keys::command_for(text, mods, Os::Windows).expect("a shortcut");
     state.key(command, mods, 10, Instant::now())
 }
 
@@ -103,11 +103,7 @@ fn special(key: Key) -> String {
     char::from(key).to_string()
 }
 
-const NONE: Mods = Mods {
-    ctrl: false,
-    shift: false,
-    alt: false,
-};
+const NONE: Mods = Mods::NONE;
 
 const SHIFT: Mods = Mods {
     shift: true,
@@ -117,3 +113,9 @@ const SHIFT: Mods = Mods {
 const CTRL: Mods = Mods { ctrl: true, ..NONE };
 
 const ALT: Mods = Mods { alt: true, ..NONE };
+
+const CTRL_SHIFT: Mods = Mods {
+    ctrl: true,
+    shift: true,
+    ..NONE
+};

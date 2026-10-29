@@ -24,6 +24,67 @@ fn tab_switches_panes_and_clicks_activate() {
 }
 
 #[test]
+fn ctrl_tab_goes_round_the_tabs_of_the_active_pane() {
+    let mut state = ready(vec![file("x")], vec![file("z")]);
+    press(&mut state, "t", CTRL);
+    press(&mut state, "t", CTRL);
+    let shown = |state: &AppState| state.panes()[LEFT].active();
+    assert_eq!(shown(&state), 2);
+    // After the last tab the first, and back.
+    assert_eq!(press(&mut state, &special(Key::Tab), CTRL), Some(vec![]));
+    assert_eq!(shown(&state), 0);
+    press(&mut state, &special(Key::Tab), CTRL);
+    assert_eq!(shown(&state), 1);
+    press(&mut state, &special(Key::Tab), CTRL_SHIFT);
+    press(&mut state, &special(Key::Tab), CTRL_SHIFT);
+    assert_eq!(shown(&state), 2);
+    // The other pane, with one tab, keeps it.
+    press(&mut state, &special(Key::Tab), NONE);
+    press(&mut state, &special(Key::Tab), CTRL);
+    assert_eq!(state.panes()[RIGHT].active(), 0);
+    assert_eq!(shown(&state), 2);
+}
+
+#[test]
+fn the_filter_box_and_the_view_menu_take_the_keys() {
+    let mut state = ready(vec![file("x")], vec![]);
+    for text in ["f", "e"] {
+        assert_eq!(
+            press(&mut state, text, CTRL),
+            Some(vec![Effect::FocusFilter])
+        );
+    }
+    assert_eq!(
+        press(&mut state, &special(Key::F3), NONE),
+        Some(vec![Effect::FocusFilter])
+    );
+    assert_eq!(
+        press(&mut state, &special(Key::F10), NONE),
+        Some(vec![Effect::ShowViewMenu])
+    );
+}
+
+#[test]
+fn keys_of_commands_still_to_come_go_on_to_the_system() {
+    let mut state = ready(vec![file("x")], vec![file("z")]);
+    for (text, mods) in [
+        (special(Key::F5), NONE),
+        ("c".to_owned(), CTRL),
+        ("v".to_owned(), CTRL),
+        ("u".to_owned(), CTRL),
+        (special(Key::F9), NONE),
+        (special(Key::F12), NONE),
+        (special(Key::Return), ALT),
+        (special(Key::F10), SHIFT),
+    ] {
+        assert_eq!(press(&mut state, &text, mods), None, "{text:?} {mods:?}");
+    }
+    // Nothing changed meanwhile.
+    assert_eq!(state.active(), LEFT);
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
 fn keys_move_the_cursor_and_select() {
     let names = ["a", "b", "c", "d", "e"];
     let mut state = ready(names.iter().copied().map(file).collect(), vec![]);

@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use rf_core::{Entry, EntryKind, VPath};
+use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_jobs::{
     Conflict, ConflictAction, ConflictAnswer, DeleteMethod, DeleteSpec, EngineConfig, ErrorPolicy,
     JobEngine, JobEvent, JobId, JobSpec, Outcome, Resolver, TransferMode, TransferOptions,
@@ -366,9 +366,22 @@ fn key(state: &mut AppState, key: Key, shift: bool) -> Vec<Effect> {
         shift,
         ..rf_ui::keys::Mods::default()
     };
-    let command = rf_ui::keys::command_for(&char::from(key).to_string(), mods).expect("a shortcut");
+    let command = rf_ui::keys::command_for(&char::from(key).to_string(), mods, Os::Windows)
+        .expect("a shortcut");
     state
         .key(command, mods, 10, Instant::now())
+        .expect("the window takes it")
+}
+
+/// The toolbar's 새 폴더 (Ctrl+Shift+N).
+fn new_folder(state: &mut AppState) -> Vec<Effect> {
+    state
+        .key(
+            rf_ui::keys::Command::NewFolder,
+            rf_ui::keys::Mods::NONE,
+            10,
+            Instant::now(),
+        )
         .expect("the window takes it")
 }
 
@@ -408,7 +421,7 @@ fn create_folder_selects_output() {
     let mut harness = Harness::new();
     let mut state = harness.open(&left, &right);
 
-    assert_eq!(key(&mut state, Key::F7, false), []);
+    assert_eq!(new_folder(&mut state), []);
     let effects = state.name_confirmed("자료");
     harness.run(&mut state, effects);
     assert!(left.join("자료").is_dir());
@@ -420,7 +433,7 @@ fn create_folder_selects_output() {
     assert_eq!(tab.selection().cursor(), Some(0));
 
     // A second one with the same name gets a numbered name, which is selected in turn.
-    key(&mut state, Key::F7, false);
+    new_folder(&mut state);
     let effects = state.name_confirmed("자료");
     harness.run(&mut state, effects);
     let numbered = if cfg!(target_os = "macos") {

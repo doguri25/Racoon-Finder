@@ -6,7 +6,7 @@ use std::rc::Rc;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
 // The input method's composition has no public event; Slint's own backends send it this way.
 use i_slint_core::input::{InternalKeyEvent, KeyEventType};
-use rf_core::{Entry, EntryKind, VPath};
+use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_platform::{DiskSpace, KnownFolder};
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
@@ -15,8 +15,8 @@ use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, NameView,
-    NoticeWindow, PaneView, PickTarget, PickView, Theme,
+    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, MessageView,
+    NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -163,17 +163,17 @@ fn key_callback_reaches_rust() {
     let window = window();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&seen);
-    window.on_key(move |text, ctrl, shift, alt| {
+    window.on_key(move |text, ctrl, shift, alt, meta| {
         record
             .borrow_mut()
-            .push((text.to_string(), ctrl, shift, alt));
+            .push((text.to_string(), ctrl, shift, alt, meta));
         true
     });
 
-    assert!(window.invoke_key("a".into(), true, false, false));
+    assert!(window.invoke_key("a".into(), true, false, false, false));
     assert_eq!(
         seen.borrow().as_slice(),
-        [("a".to_owned(), true, false, false)]
+        [("a".to_owned(), true, false, false, false)]
     );
 
     // A key pressed in the window reaches the callback through the window's key scope.
@@ -184,7 +184,10 @@ fn key_callback_reaches_rust() {
     window.window().dispatch_event(WindowEvent::KeyReleased {
         text: down.clone().into(),
     });
-    assert_eq!(seen.borrow().last(), Some(&(down, false, false, false)));
+    assert_eq!(
+        seen.borrow().last(),
+        Some(&(down, false, false, false, false))
+    );
 }
 
 /// Presses and releases `keys` in order, then releases them in reverse: `[Control, "t"]` is
@@ -207,7 +210,7 @@ fn keys_go_to_the_path_field_while_it_is_open() {
     let window = window();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&seen);
-    window.on_key(move |text, ctrl, _, _| {
+    window.on_key(move |text, ctrl, _, _, _| {
         record.borrow_mut().push((text.to_string(), ctrl));
         true
     });
@@ -629,7 +632,7 @@ fn a_dialog_takes_the_keys_until_it_closes() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _| {
+    window.on_key(move |text, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -1099,7 +1102,7 @@ fn the_picker_takes_the_keys_until_it_closes() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _| {
+    window.on_key(move |text, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -1912,7 +1915,7 @@ fn the_filter_box_hands_over_what_is_typed_and_esc_clears_it() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _| {
+    window.on_key(move |text, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -1955,4 +1958,399 @@ fn enter_while_a_syllable_is_composed_does_not_take_the_path() {
     commit_composition(&window, "사");
     chord(&window, &[&enter]);
     assert_eq!(entered.borrow().as_slice(), [(0, "사".to_owned())]);
+}
+
+/// The text of a special key.
+fn special(key: Key) -> String {
+    char::from(key).to_string()
+}
+
+/// Presses `key` alone, then with Shift (Shift+Tab arrives as Tab with Shift held).
+fn press(window: &MainWindow, key: Key) {
+    chord(window, &[&special(key)]);
+}
+
+fn press_shifted(window: &MainWindow, key: Key) {
+    chord(window, &[&special(Key::Shift), &special(key)]);
+}
+
+/// Records each call of a dialog's callbacks as a line, in order.
+#[derive(Clone, Default)]
+struct Calls(Rc<RefCell<Vec<String>>>);
+
+impl Calls {
+    fn note(&self, call: impl Into<String>) {
+        self.0.borrow_mut().push(call.into());
+    }
+
+    fn take(&self) -> Vec<String> {
+        self.0.borrow_mut().drain(..).collect()
+    }
+}
+
+#[test]
+fn the_toolbar_and_the_tabs_say_the_keys_of_their_commands() {
+    let window = window();
+    let description = |label: &str| {
+        labelled(&window, label, AccessibleRole::Button)[0]
+            .accessible_description()
+            .map(|text| text.to_string())
+    };
+    let cases = [
+        ("뒤로", "Alt+←", "⌘["),
+        ("위로", "Alt+↑", "⌘↑"),
+        ("새 폴더", "Ctrl+Shift+N", "⇧⌘N"),
+        ("복사…", "F7", "F7"),
+        ("이동…", "F8", "F8"),
+        ("삭제", "Delete", "⌘⌫"),
+        ("이름 바꾸기", "F2", "↩"),
+        ("되돌리기", "Ctrl+Z", "⌘Z"),
+        ("보기", "F10", "⌘J"),
+        ("새 탭", "Ctrl+T", "⌘T"),
+    ];
+    for (os, column) in [(Os::Windows, 1), (Os::MacOs, 2), (Os::Other, 1)] {
+        ui_bridge::show_shortcuts(&window, os);
+        for case in cases {
+            let keys = if column == 1 { case.1 } else { case.2 };
+            assert_eq!(
+                description(case.0).as_deref(),
+                Some(keys),
+                "{os:?} {}",
+                case.0
+            );
+        }
+    }
+}
+
+#[test]
+fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_filter_edited(move |text| record.note(format!("filter {text}")));
+    let record = calls.clone();
+    window.on_theme_chosen(move |choice| record.note(format!("theme {choice}")));
+    let record = calls.clone();
+    window.on_key(move |text, _, _, _, _| {
+        record.note(format!("key {text}"));
+        false
+    });
+
+    // The filter takes the keys with what it held selected: what is typed replaces it.
+    window.invoke_show_filter("old".into());
+    window.invoke_focus_filter();
+    chord(&window, &["x"]);
+    assert_eq!(calls.take(), ["filter x"]);
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["filter "]);
+
+    // The 보기 menu opens with the keys on it: ↓ goes to its first item, 밝게, and Enter takes it.
+    window.invoke_show_view_menu();
+    press(&window, Key::DownArrow);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["theme 1"]);
+    // Closed, the keys are the panes' again.
+    chord(&window, &["a"]);
+    assert_eq!(calls.take(), ["key a"]);
+}
+
+#[test]
+fn the_failures_window_is_closed_and_scrolled_from_the_keys() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("closed"));
+    let lines: Vec<slint::SharedString> = (1..=60)
+        .map(|i| format!("항목 {i}.txt: 권한이 없습니다").into())
+        .collect();
+    let head: Vec<slint::SharedString> = lines[..12].to_vec();
+    window.set_message_view(MessageView {
+        title: "처리하지 못한 항목".into(),
+        lines: ModelRc::new(slint::VecModel::from(lines)),
+        head: ModelRc::new(slint::VecModel::from(head)),
+    });
+    window.set_dialog(DialogKind::Message);
+    // Where the second line is: the list makes only the lines it shows, and drops the first one
+    // once it is mostly out of view.
+    let line_y = || {
+        labelled(&window, "항목 2.txt: 권한이 없습니다", AccessibleRole::Text)
+            .first()
+            .map(|line| line.absolute_position().y)
+    };
+    let top = line_y().expect("the second line shows");
+
+    // ↓ and ↑ scroll the list by part of a line, Home back to its top; the window stays.
+    press(&window, Key::DownArrow);
+    assert_eq!(line_y(), Some(top - 24.0));
+    press(&window, Key::UpArrow);
+    assert_eq!(line_y(), Some(top));
+    press(&window, Key::DownArrow);
+    press(&window, Key::Home);
+    assert_eq!(line_y(), Some(top));
+    // PageDown scrolls by the list's height: the line goes out of view.
+    press(&window, Key::PageDown);
+    assert!(line_y().is_none_or(|y| y < top - 300.0), "{:?}", line_y());
+    press(&window, Key::Home);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    // Tab puts the keys on 확인, which Space presses; Enter and Esc close it too.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Return);
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["closed", "closed", "closed"]);
+}
+
+#[test]
+fn recovered_jobs_are_answered_from_the_keys_starting_on_close() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_recovery_chosen(move |i, again| record.note(format!("job {i} {again}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("closed"));
+    let show = |rows: &[&str]| {
+        let rows: Vec<slint::SharedString> = rows.iter().map(|&row| row.into()).collect();
+        window.set_recovery_view(RecoveryView {
+            title: "끝나지 않은 작업".into(),
+            note: "다시 실행하거나 버립니다".into(),
+            rows: ModelRc::new(slint::VecModel::from(rows)),
+        });
+        window.set_dialog(DialogKind::Recovery);
+        slint::platform::update_timers_and_animations();
+    };
+    show(&["복사 a → b", "이동 c → d"]);
+
+    // The keys start on 닫기: Enter drops no job.
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["closed"]);
+    // Tab goes round: the first job's 버리기, its 다시 실행, then the second job's.
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["job 0 true"]);
+    // An answered job leaves the list, and the keys start again on 닫기: Shift+Tab goes back
+    // to the last job's 다시 실행, and once more to its 버리기.
+    show(&["이동 c → d"]);
+    press_shifted(&window, Key::Tab);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["job 0 false"]);
+    // Esc closes it from anywhere.
+    press(&window, Key::Tab);
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["closed"]);
+}
+
+#[test]
+fn the_name_window_tabs_between_its_field_and_its_buttons() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_name_edited(move |text| record.note(format!("edited {text}")));
+    let record = calls.clone();
+    window.on_name_accepted(move |text| record.note(format!("accepted {text}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    window.set_name_view(NameView {
+        title: "새 폴더".into(),
+        initial: "보고서".into(),
+        select_end: 0,
+        warning: "".into(),
+        ok_enabled: true,
+    });
+    window.set_dialog(DialogKind::Name);
+    slint::platform::update_timers_and_animations();
+
+    // Tab: 취소, which Space presses.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+    // Once more: 확인, which Enter presses with the name; once more: the field, which types.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["accepted 보고서"]);
+    press(&window, Key::Tab);
+    chord(&window, &["x"]);
+    assert_eq!(calls.take(), ["edited x보고서"]);
+    // Shift+Tab from the field goes to 확인; letters there type nothing.
+    press_shifted(&window, Key::Tab);
+    chord(&window, &["y"]);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["accepted x보고서"]);
+
+    // While a syllable is composed in the field, Tab leaves it alone: the syllable is not in
+    // the name yet.
+    press(&window, Key::Tab);
+    compose(&window, "ㅅ");
+    press(&window, Key::Tab);
+    commit_composition(&window, "서");
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["edited x서보고서", "accepted x서보고서"]);
+}
+
+fn preflight_view(has_blocked: bool) -> PreflightView {
+    let lines: Vec<slint::SharedString> = vec!["a.txt: 이름이 너무 깁니다".into()];
+    PreflightView {
+        title: "복사하기 전에 확인할 것이 있습니다".into(),
+        lines: ModelRc::new(slint::VecModel::from(lines.clone())),
+        head: ModelRc::new(slint::VecModel::from(lines)),
+        has_blocked,
+    }
+}
+
+#[test]
+fn the_preflight_window_starts_on_cancel() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_preflight_answered(move |choice| record.note(format!("answer {choice}")));
+    let show = |has_blocked: bool| {
+        window.set_dialog(DialogKind::None);
+        window.set_preflight_view(preflight_view(has_blocked));
+        window.set_dialog(DialogKind::Preflight);
+        slint::platform::update_timers_and_animations();
+    };
+
+    // Enter on 취소 (2); Tab goes to 막힌 항목 건너뛰기 (1), then 계속 (0), then round to 취소.
+    show(true);
+    press(&window, Key::Return);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(
+        calls.take(),
+        ["answer 2", "answer 1", "answer 0", "answer 2"]
+    );
+    // Without blocked items, Tab and Shift+Tab go between 취소 and 계속.
+    show(false);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Return);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 0", "answer 2", "answer 0"]);
+}
+
+#[test]
+fn the_conflict_window_reaches_its_box_and_buttons_by_tab() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_conflict_answered(move |choice, all| record.note(format!("answer {choice} {all}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    window.set_conflict_view(conflict_view());
+    window.set_dialog(DialogKind::Conflict);
+    slint::platform::update_timers_and_animations();
+    let apply_all = || {
+        labelled(
+            &window,
+            "남은 충돌에도 같은 선택 적용",
+            AccessibleRole::Checkbox,
+        )[0]
+        .accessible_checked()
+    };
+
+    // ↑↑ chooses overwrite, which Enter alone does not confirm.
+    press(&window, Key::UpArrow);
+    press(&window, Key::UpArrow);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    // Tab: the box, which Space flips; 작업 취소; the button, which confirms the overwrite.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(apply_all(), Some(true));
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 0 true"]);
+    // Shift+Tab back to 작업 취소, which Space presses.
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+
+    // A new question starts again on the choices: Enter takes keeping both.
+    window.set_conflict_view(ConflictView {
+        serial: 2,
+        ..conflict_view()
+    });
+    slint::platform::update_timers_and_animations();
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 2 false"]);
+}
+
+#[test]
+fn the_picker_tabs_round_its_parts() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_pick_filter_edited(move |text| record.note(format!("filter {text}")));
+    let record = calls.clone();
+    window.on_pick_path_edited(move |text| record.note(format!("path {text}")));
+    let record = calls.clone();
+    window.on_pick_new_folder(move || record.note("new folder"));
+    let record = calls.clone();
+    window.on_pick_mode(move |is_move| record.note(format!("move {is_move}")));
+    let record = calls.clone();
+    window.on_pick_policy(move |policy| record.note(format!("policy {policy}")));
+    let record = calls.clone();
+    window.on_pick_confirmed(move || record.note("confirmed"));
+    let record = calls.clone();
+    window.on_pick_enter(move || record.note("enter"));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+
+    // The filter has the keys; Tab goes to the path field, whose text is all selected: what is
+    // typed replaces it.
+    chord(&window, &["백"]);
+    press(&window, Key::Tab);
+    chord(&window, &["/"]);
+    assert_eq!(calls.take(), ["filter 백", "path /"]);
+    // 새 폴더, which Enter presses.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["new folder"]);
+    // 이동/복사: → copies, ← moves.
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    press(&window, Key::LeftArrow);
+    assert_eq!(calls.take(), ["move false", "move true"]);
+    // 이름이 겹치면: → goes to 덮어쓰기; Enter there is the picker's Enter.
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["policy 1", "enter"]);
+    // 취소, then the button: Space confirms (an overwrite too, since the button is pressed).
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["confirmed"]);
+    // Round to the filter, whose text is all selected, and back with Shift+Tab to the button,
+    // then 취소.
+    press(&window, Key::Tab);
+    chord(&window, &["업"]);
+    assert_eq!(calls.take(), ["filter 업"]);
+    press_shifted(&window, Key::Tab);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["cancelled"]);
+
+    // A button that is off is passed over: without 새 폴더, Tab goes from the path to 이동/복사.
+    window.set_pick_view(PickView {
+        can_make_folder: false,
+        ..pick_view()
+    });
+    // From 취소: the button, the filter, the path, 이동/복사.
+    for _ in 0..4 {
+        press(&window, Key::Tab);
+    }
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take(), ["move false"]);
 }

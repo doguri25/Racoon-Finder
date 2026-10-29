@@ -5,6 +5,7 @@
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileList, FileRow } from "file-list.slint";
+import { Shortcuts } from "shortcuts.slint";
 
 export struct TabItem {
     title: string,
@@ -40,10 +41,12 @@ export struct PaneView {
     active: bool,
 }
 
-// Small square icon button inside a tab or a strip.
+// Small square icon button inside a tab or a strip: its name and the key of its command
+// (`keys`) show in a tooltip.
 component StripButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
+    in property <string> keys;
     in property <length> icon-size: 16px;
     callback clicked();
 
@@ -53,6 +56,7 @@ component StripButton inherits Rectangle {
     background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.label;
+    accessible-description: root.keys;
     accessible-action-default => {
         root.clicked();
     }
@@ -68,6 +72,11 @@ component StripButton inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    // In front of the touch area, which would take the pointer from it.
+    Tooltip {
+        text: @markdown("\{Shortcuts.tip(root.label, root.keys)}");
     }
 }
 
@@ -136,6 +145,7 @@ component TabButton inherits Rectangle {
                 icon: "close";
                 icon-size: 14px;
                 label: "탭 닫기";
+                keys: Shortcuts.close-tab;
                 clicked => {
                     root.closed();
                 }
@@ -349,6 +359,7 @@ export component Pane inherits Rectangle {
                 y: tabs-view.y + (tabs-view.height - self.height) / 2;
                 icon: "plus";
                 label: "새 탭";
+                keys: Shortcuts.new-tab;
                 clicked => {
                     root.tab-added();
                 }
