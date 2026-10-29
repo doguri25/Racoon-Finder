@@ -1,0 +1,420 @@
+// The column heads of 자세히 (NAV-07, NAV-08) and the places of the columns, which the rows of
+// `file-list.slint` take from here (`col-x`, `w`, `name-end`, `shown`).
+//
+// The name, always first, takes the room the others leave; the others follow in the order Rust
+// gives (`columns`), as wide as Rust says, and when the list is too narrow for them all the last
+// ones go first. A head's right click opens the menu that shows or hides the columns; a head
+// dragged sideways moves its column among the others (a drag of the pointer, not a drag of items:
+// it carries no payload and nothing drops it); the border before a column, dragged, trades width
+// between that column and the one before it (the name takes what the first column gives up), and
+// double-clicked, fits the column to the rows on screen. A click on a head sorts by its column,
+// with Shift by a second key.
+
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
+// 5 extension, 6 attributes), what its head says, how wide it is, whether its text lines up on
+// the right, and whether a click on its head sorts.
+export struct ColumnView {
+    id: int,
+    title: string,
+    width: length,
+    align-end: bool,
+    sortable: bool,
+}
+
+// A column head: its name, an arrow on the column the rows are sorted by first (a fainter one
+// on the column of the second key). A left click is `clicked`, with Shift or not; a left press
+// moved sideways is a drag of the head along the header (`movable`), told where the pointer is
+// (`dragging`, relative to the head) and where it was let go (`dropped`); a right click asks
+// for the header's menu at a point of the head.
+component HeadCell inherits Rectangle {
+    in property <string> text;
+    // 0 the rows are not sorted by this column, 1 they are first, 2 second.
+    in property <int> sorted;
+    in property <bool> ascending;
+    in property <bool> align-end;
+    in property <bool> movable;
+    callback clicked(shift: bool);
+    callback dragging(at: length);
+    callback dropped(at: length);
+    callback menu(x: length, y: length);
+
+    private property <bool> moving;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked(false);
+    }
+
+    HorizontalLayout {
+        alignment: root.align-end ? end : start;
+        spacing: 2px;
+
+        Text {
+            accessible-role: none;
+            text: root.text;
+            font-size: Theme.font-small;
+            font-weight: 500;
+            color: touch.has-hover || root.moving ? Theme.text : Theme.muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.sorted > 0: Icon {
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            name: root.ascending ? "sort-up" : "sort-down";
+            color: root.sorted == 1 ? Theme.muted : Theme.faint;
+        }
+    }
+
+    touch := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.menu(self.mouse-x, self.mouse-y);
+                return;
+            }
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+            if (event.kind == PointerEventKind.down) {
+                root.moving = false;
+            } else if (event.kind == PointerEventKind.up) {
+                if (root.moving) {
+                    root.moving = false;
+                    root.dropped(self.mouse-x);
+                } else if (self.has-hover) {
+                    root.clicked(event.modifiers.shift);
+                }
+            } else if (event.kind == PointerEventKind.cancel && root.moving) {
+                root.moving = false;
+                root.dropped(-1000000px);
+            }
+        }
+        moved => {
+            if (root.movable && self.pressed && abs(self.mouse-x - self.pressed-x) > 6px) {
+                root.moving = true;
+            }
+            if (root.moving) {
+                root.dragging(self.mouse-x);
+            }
+        }
+    }
+}
+
+export component FileHead inherits Rectangle {
+    // The columns after the name, in their order, and which columns show by number (0 to 6),
+    // for the head's menu.
+    in property <[ColumnView]> columns;
+    in property <[bool]> shows;
+    // The column the rows are sorted by first (0 name, then as `ColumnView.id`), and the one of
+    // the second key (-1 for none).
+    in property <int> sort-key;
+    in property <bool> sort-ascending: true;
+    in property <int> then-key: -1;
+    in property <bool> then-ascending: true;
+    // The first row on screen and how many show, for a fit.
+    in property <int> first-row;
+    in property <int> page-rows;
+
+    // A click on the head of column `column` (with Shift: `then`).
+    callback sort(column: int, then: bool);
+    // The head's menu showed or hid the column numbered `column`.
+    callback column-toggled(column: int);
+    // The column at `from` among those after the name was dragged to `slot` (0 before the
+    // first of them, their number after the last).
+    callback column-moved(from: int, slot: int);
+    // The column numbered `column` is to be `width` wide.
+    callback column-resized(column: int, width: length);
+    // The texts of the column numbered `column` in `count` rows from row `first` on, one a
+    // line, for a fit to measure.
+    callback column-texts(column: int, first: int, count: int) -> string;
+
+    height: 32px;
+
+    // Column geometry, shared by the heads and the rows. The columns are placed by hand, not
+    // by a layout, so that which ones show can follow the width without a binding loop.
+    out property <length> pad: 12px;
+    private property <length> gap: 10px;
+    private property <length> name-min: 120px;
+    // The border before column `drag-border` is being dragged, `drag-dx` from where it was.
+    private property <int> drag-border: -1;
+    private property <length> drag-dx;
+    // The head of column `head-drag` is being dragged; the pointer is at `head-pointer` of the
+    // header.
+    private property <int> head-drag: -1;
+    private property <length> head-pointer;
+
+    // How wide column `i` after the name is now, a border drag counted in: the column after the
+    // border gives up what the one before it takes.
+    public pure function w(i: int) -> length {
+        if (i < 0 || i >= root.columns.length) {
+            return 0px;
+        }
+        let base = root.columns[i].width;
+        if (i == root.drag-border) {
+            return base - root.drag-dx;
+        }
+        if (i + 1 == root.drag-border) {
+            return base + root.drag-dx;
+        }
+        return base;
+    }
+    // The room the first `k` columns after the name take, each with the gap before it.
+    pure function s(k: int) -> length {
+        return (k > 0 ? root.gap + root.w(0) : 0px) + (k > 1 ? root.gap + root.w(1) : 0px) + (k > 2 ? root.gap + root.w(2) : 0px) + (k > 3 ? root.gap + root.w(3) : 0px) + (k > 4 ? root.gap + root.w(4) : 0px) + (k > 5 ? root.gap + root.w(5) : 0px);
+    }
+    pure function fits(k: int) -> bool {
+        return k <= root.columns.length && 2 * root.pad + root.name-min + root.s(k) <= root.width;
+    }
+    // How many columns after the name show: as many as leave the name its least room.
+    out property <int> shown: root.fits(6) ? 6 : root.fits(5) ? 5 : root.fits(4) ? 4 : root.fits(3) ? 3 : root.fits(2) ? 2 : root.fits(1) ? 1 : 0;
+    private property <length> shown-room: root.s(root.shown);
+    out property <length> name-end: root.width - root.pad - root.shown-room;
+    // Where column `i` after the name starts.
+    public pure function col-x(i: int) -> length {
+        return root.name-end + root.s(i) + root.gap;
+    }
+    // The place among the columns after the name that a head let go at `at` of the header goes
+    // to: before the first column whose middle is right of it.
+    pure function slot-at(at: length) -> int {
+        return (root.shown > 0 && root.col-x(0) + root.w(0) / 2 < at ? 1 : 0) + (root.shown > 1 && root.col-x(1) + root.w(1) / 2 < at ? 1 : 0) + (root.shown > 2 && root.col-x(2) + root.w(2) / 2 < at ? 1 : 0) + (root.shown > 3 && root.col-x(3) + root.w(3) / 2 < at ? 1 : 0) + (root.shown > 4 && root.col-x(4) + root.w(4) / 2 < at ? 1 : 0) + (root.shown > 5 && root.col-x(5) + root.w(5) / 2 < at ? 1 : 0);
+    }
+    // Where the line that shows that place is.
+    pure function slot-x(slot: int) -> length {
+        return slot < root.shown ? root.col-x(slot) - root.gap / 2 : root.col-x(root.shown - 1) + root.w(root.shown - 1) + root.gap / 2;
+    }
+
+    // How far the border before column `i` may be dragged: neither column past its least or
+    // most width, and the name, beside the first, not below its least.
+    pure function clamp-dx(i: int, dx: length) -> length {
+        let width = root.columns[i].width;
+        let before = i > 0 ? root.columns[i - 1].width : 0px;
+        let low = max(width - 600px, i > 0 ? 40px - before : root.name-min + root.pad - (root.name-end - root.drag-dx));
+        let high = min(width - 40px, i > 0 ? 600px - before : 100000px);
+        return max(low, min(dx, high));
+    }
+
+    // The border before column `i` was let go: the two columns it lies between take their new
+    // widths (the first column, and the name, which takes the rest).
+    function end-resize(i: int, commit: bool) {
+        let dx = root.drag-dx;
+        let after = root.columns[i];
+        let before = root.columns[i - 1];
+        root.drag-border = -1;
+        root.drag-dx = 0px;
+        if (!commit || dx == 0px) {
+            return;
+        }
+        root.column-resized(after.id, after.width - dx);
+        if (i > 0) {
+            root.column-resized(before.id, before.width + dx);
+        }
+    }
+
+    // Fits column `i` after the name to its texts in the rows on screen, and to its head.
+    function fit(i: int) {
+        let column = root.columns[i];
+        root.measure-text = root.column-texts(column.id, root.first-row, root.page-rows + 1);
+        root.measure-head-text = column.title;
+        root.column-resized(column.id, max(measure.preferred-width + 6px, measure-head.preferred-width + 20px));
+    }
+
+    private property <string> measure-text;
+    private property <string> measure-head-text;
+    measure := Text {
+        visible: false;
+        text: root.measure-text;
+        wrap: no-wrap;
+    }
+
+    measure-head := Text {
+        visible: false;
+        text: root.measure-head-text;
+        font-size: Theme.font-small;
+        font-weight: 500;
+    }
+
+    // The check marks of the head's menu, set from `shows` as it opens (a checkable item flips
+    // its own mark as it is chosen).
+    private property <bool> mark-size;
+    private property <bool> mark-modified;
+    private property <bool> mark-created;
+    private property <bool> mark-kind;
+    private property <bool> mark-extension;
+    private property <bool> mark-attributes;
+    function show-head-menu(x: length, y: length) {
+        root.mark-size = root.shows[1];
+        root.mark-modified = root.shows[2];
+        root.mark-kind = root.shows[3];
+        root.mark-created = root.shows[4];
+        root.mark-extension = root.shows[5];
+        root.mark-attributes = root.shows[6];
+        head-menu.show({ x: x, y: y });
+    }
+
+
+    // The menu of the header (a right click on a head, or between them).
+    head-menu := ContextMenuArea {
+        width: parent.width;
+        height: parent.height;
+
+        Menu {
+            MenuItem {
+                title: "크기";
+                checkable: true;
+                checked <=> root.mark-size;
+                activated => {
+                    root.column-toggled(1);
+                }
+            }
+            MenuItem {
+                title: "수정한 날짜";
+                checkable: true;
+                checked <=> root.mark-modified;
+                activated => {
+                    root.column-toggled(2);
+                }
+            }
+            MenuItem {
+                title: "만든 날짜";
+                checkable: true;
+                checked <=> root.mark-created;
+                activated => {
+                    root.column-toggled(4);
+                }
+            }
+            MenuItem {
+                title: "종류";
+                checkable: true;
+                checked <=> root.mark-kind;
+                activated => {
+                    root.column-toggled(3);
+                }
+            }
+            MenuItem {
+                title: "확장자";
+                checkable: true;
+                checked <=> root.mark-extension;
+                activated => {
+                    root.column-toggled(5);
+                }
+            }
+            MenuItem {
+                title: "속성";
+                checkable: true;
+                checked <=> root.mark-attributes;
+                activated => {
+                    root.column-toggled(6);
+                }
+            }
+        }
+    }
+
+    HeadCell {
+        x: root.pad;
+        width: root.name-end - root.pad;
+        text: "이름";
+        sorted: root.sort-key == 0 ? 1 : root.then-key == 0 ? 2 : 0;
+        ascending: root.sort-key == 0 ? root.sort-ascending : root.then-ascending;
+        clicked(shift) => {
+            root.sort(0, shift);
+        }
+        menu(x, y) => {
+            root.show-head-menu(self.x + x, y);
+        }
+    }
+    for column[i] in root.columns: HeadCell {
+        x: root.col-x(i);
+        width: root.w(i);
+        visible: i < root.shown;
+        text: column.title;
+        align-end: column.align-end;
+        movable: true;
+        background: root.head-drag == i ? Theme.raised : transparent;
+        sorted: !column.sortable ? 0 : column.id == root.sort-key ? 1 : column.id == root.then-key ? 2 : 0;
+        ascending: column.id == root.sort-key ? root.sort-ascending : root.then-ascending;
+        clicked(shift) => {
+            if (column.sortable) {
+                root.sort(column.id, shift);
+            }
+        }
+        menu(x, y) => {
+            root.show-head-menu(self.x + x, y);
+        }
+        dragging(at) => {
+            root.head-drag = i;
+            root.head-pointer = self.x + at;
+        }
+        dropped(at) => {
+            root.head-drag = -1;
+            if (at > -100000px) {
+                root.column-moved(i, root.slot-at(self.x + at));
+            }
+        }
+    }
+
+    // The border before each column after the name: dragged, it trades width between the
+    // two columns; double-clicked, it fits the column after it.
+    for column[i] in root.columns: Rectangle {
+        visible: i < root.shown;
+        x: root.col-x(i) - root.gap / 2 - 4px;
+        width: 8px;
+        accessible-role: none;
+
+        grip := TouchArea {
+            mouse-cursor: MouseCursor.col-resize;
+            pointer-event(event) => {
+                if (event.button != PointerEventButton.left) {
+                    return;
+                }
+                if (event.kind == PointerEventKind.down) {
+                    root.drag-border = i;
+                    root.drag-dx = 0px;
+                } else if (event.kind == PointerEventKind.up) {
+                    root.end-resize(i, true);
+                } else if (event.kind == PointerEventKind.cancel) {
+                    root.end-resize(i, false);
+                }
+            }
+            // The border is where the pointer is, less where it was pressed: it moves
+            // with what it is dragged by, so the move adds to the one so far.
+            moved => {
+                if (self.pressed && root.drag-border == i) {
+                    root.drag-dx = root.clamp-dx(i, root.drag-dx + self.mouse-x - self.pressed-x);
+                }
+            }
+            double-clicked => {
+                root.drag-border = -1;
+                root.drag-dx = 0px;
+                root.fit(i);
+            }
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 8px;
+            width: 1px;
+            height: parent.height - 16px;
+            background: grip.has-hover || grip.pressed ? Theme.accent : Theme.border;
+        }
+    }
+
+    // Where a dragged head would go.
+    if root.head-drag >= 0: Rectangle {
+        x: root.slot-x(root.slot-at(root.head-pointer)) - 1px;
+        y: 4px;
+        width: 2px;
+        height: parent.height - 8px;
+        background: Theme.accent;
+    }
+
+    Rectangle {
+        y: parent.height - self.height;
+        height: 1px;
+        background: Theme.border;
+    }
+}

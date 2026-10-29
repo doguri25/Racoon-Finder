@@ -1946,42 +1946,43 @@ fn the_theme_follows_the_view_menu() {
         assert_eq!(theme.get_bg(), if dark { dark_bg } else { light_bg });
     }
 
-    // The 보기 button opens the menu whose items choose a theme.
+    // The 보기 button opens the menu whose 테마 menu chooses a theme.
     let button = labelled(&window, "보기", AccessibleRole::Button);
     assert_eq!(button.len(), 1);
+    let click = |label: &str| {
+        ElementHandle::find_by_accessible_label(&window, label)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {label}"))
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+    };
     button[0].invoke_accessible_default_action();
-    let dark = ElementHandle::find_by_accessible_label(&window, "어둡게")
-        .next()
-        .expect("the menu shows 어둡게");
+    click("테마");
     // The menu is a popup window of its own: the element clicks there.
-    dark.mock_single_click(slint::platform::PointerEventButton::Left);
+    click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2]);
 
-    // The marks of the menu: the theme chosen, and 숨김 파일 보기 as `show-hidden` says (with
+    // The marks of the menus: the theme chosen, and 숨김 파일 보기 as `show-hidden` says (with
     // the marks of the layout's 폴더 트리 and 듀얼 패널, which are on).
     window.set_show_tree(false);
     window.set_dual_pane(false);
     let commands = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&commands);
     window.on_command(move |name| record.borrow_mut().push(name.to_string()));
-    let open_menu = || {
+    let open_themes = || {
         button[0].invoke_accessible_default_action();
+        click("테마");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
     };
-    let click = |label: &str| {
-        ElementHandle::find_by_accessible_label(&window, label)
-            .next()
-            .expect("an item of the menu")
-            .mock_single_click(slint::platform::PointerEventButton::Left);
-    };
-    assert_eq!(open_menu(), 1);
+    assert_eq!(open_themes(), 1);
     // Choosing the theme that is chosen keeps its mark.
     click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2, 2]);
-    assert_eq!(open_menu(), 1);
+    assert_eq!(open_themes(), 1);
     click("어둡게");
     window.set_show_hidden(true);
-    assert_eq!(open_menu(), 2);
+    assert_eq!(open_themes(), 2);
+    click("어둡게");
+    button[0].invoke_accessible_default_action();
     click("숨김 파일 보기");
     assert_eq!(commands.borrow().as_slice(), ["toggle-hidden"]);
 }
@@ -3176,14 +3177,17 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     assert_eq!(calls.take(), ["filter "]);
 
     // The 보기 menu opens with the keys on it: after the 보기 방식, 정렬 and 열 menus, ↓ goes to
-    // the first theme, 밝게, and Enter takes it.
+    // the 테마 menu, → opens it, ↓ goes to its first theme, 밝게, and Enter takes it.
     window.invoke_show_view_menu();
     for _ in 0..4 {
         press(&window, Key::DownArrow);
     }
+    press(&window, Key::RightArrow);
+    press(&window, Key::DownArrow);
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["theme 1"]);
     // Closed, the keys are the panes' again.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     chord(&window, &["a"]);
     assert_eq!(calls.take(), ["key a"]);
     // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 큰
@@ -3745,33 +3749,37 @@ fn the_view_menu_switches_the_layout() {
     let record = calls.clone();
     window.on_split_changed(move |share| record.note(format!("split {share:.2}")));
     let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
-    let choose = |item: &str| {
+    // The menu opens, and the sub-menu `sub` of it ("" for none).
+    let open = |sub: &str| {
         button.invoke_accessible_default_action();
-        ElementHandle::find_by_accessible_label(&window, item)
-            .next()
-            .unwrap_or_else(|| panic!("the menu shows {item}"))
-            .mock_single_click(slint::platform::PointerEventButton::Left);
+        if !sub.is_empty() {
+            choose_item(&window, sub);
+        }
+    };
+    let choose = |sub: &str, item: &str| {
+        open(sub);
+        choose_item(&window, item);
         default_layout(&window);
     };
-    for (item, call) in [
-        ("폴더 트리", "toggle-tree"),
-        ("폴더 트리로 가기", "focus-tree"),
-        ("미리 보기 패널", "toggle-preview"),
-        ("듀얼 패널", "toggle-dual"),
-        ("위아래로 나누기", "toggle-split"),
-        ("두 패널을 같은 크기로", "split 0.50"),
-        ("분할선을 왼쪽으로", "split 0.40"),
-        ("분할선을 오른쪽으로", "split 0.60"),
-        ("패널 바꾸기", "swap-panes"),
-        ("같은 폴더를 반대편에", "same-folder"),
-        ("탐색 동기화", "toggle-sync"),
+    for (sub, item, call) in [
+        ("", "폴더 트리", "toggle-tree"),
+        ("", "폴더 트리로 가기", "focus-tree"),
+        ("", "미리 보기 패널", "toggle-preview"),
+        ("배치", "듀얼 패널", "toggle-dual"),
+        ("배치", "위아래로 나누기", "toggle-split"),
+        ("배치", "두 패널을 같은 크기로", "split 0.50"),
+        ("배치", "분할선을 왼쪽으로", "split 0.40"),
+        ("배치", "분할선을 오른쪽으로", "split 0.60"),
+        ("", "패널 바꾸기", "swap-panes"),
+        ("", "같은 폴더를 반대편에", "same-folder"),
+        ("", "탐색 동기화", "toggle-sync"),
     ] {
-        choose(item);
-        assert_eq!(calls.take(), [call]);
+        choose(sub, item);
+        assert_eq!(calls.take(), [call], "{item}");
     }
     // One above the other, the divider goes up and down.
     window.set_stacked(true);
-    button.invoke_accessible_default_action();
+    open("배치");
     for item in ["분할선을 위로", "분할선을 아래로"] {
         assert!(
             ElementHandle::find_by_accessible_label(&window, item)
@@ -3780,46 +3788,45 @@ fn the_view_menu_switches_the_layout() {
             "{item}"
         );
     }
-    choose("밝게");
+    choose("테마", "밝게");
     calls.take();
     // With one pane, the items for the divider and the other pane do nothing.
-    for item in [
-        "두 패널을 같은 크기로",
-        "분할선을 왼쪽으로",
-        "같은 폴더를 반대편에",
-        "탐색 동기화",
+    for (sub, item) in [
+        ("배치", "두 패널을 같은 크기로"),
+        ("배치", "분할선을 왼쪽으로"),
+        ("", "같은 폴더를 반대편에"),
+        ("", "탐색 동기화"),
     ] {
         window.set_dual_pane(false);
-        button.invoke_accessible_default_action();
-        ElementHandle::find_by_accessible_label(&window, item)
-            .next()
-            .unwrap_or_else(|| panic!("the menu shows {item}"))
-            .mock_single_click(slint::platform::PointerEventButton::Left);
+        open(sub);
+        choose_item(&window, item);
         assert_eq!(calls.take(), Vec::<String>::new(), "{item}");
-        // A disabled item leaves the menu open: Esc closes it.
+        // A disabled item leaves the menu open: Esc closes it (and the sub-menu first).
         press(&window, Key::Escape);
+        if !sub.is_empty() {
+            press(&window, Key::Escape);
+        }
     }
     default_layout(&window);
-    // The marks show the layout as Rust sets it back after each toggle.
+    // The marks show the layout as Rust sets it back after each toggle: 폴더 트리, 미리 보기
+    // 패널 and 탐색 동기화 in the menu, 듀얼 패널 and 위아래로 나누기 in its 배치 menu.
     let marks = || {
-        button.invoke_accessible_default_action();
+        open("배치");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
     };
     for (tree, preview, dual, stacked, sync, count) in [
-        (true, false, true, false, false, 3),
-        (false, false, false, false, false, 1),
-        (true, true, true, true, true, 6),
+        (true, false, true, false, false, 2),
+        (false, false, false, false, false, 0),
+        (true, true, true, true, true, 5),
     ] {
         window.set_show_tree(tree);
         window.set_show_preview(preview);
         window.set_dual_pane(dual);
         window.set_stacked(stacked);
         window.set_sync_navigation(sync);
-        assert_eq!(marks(), count, "the theme's and {count} - 1 of the layout");
-        ElementHandle::find_by_accessible_label(&window, "밝게")
-            .next()
-            .expect("the menu is open")
-            .mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(marks(), count, "{count} of the layout");
+        press(&window, Key::Escape);
+        press(&window, Key::Escape);
     }
 }
 

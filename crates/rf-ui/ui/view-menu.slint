@@ -1,0 +1,551 @@
+// The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
+// columns, which its column heads change too), the theme, the hidden items, the sidebar and the
+// preview panel, the layout, the panes and the tabs. It is short enough for a 560px window: the
+// themes and the layout are sub-menus of their own. Every item says its key (KEY-03), and the keys
+// reach every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
+//
+// A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
+// items are two-way bound to properties set from the state: the view's marks as the menu opens and
+// after an item changed the view (`mark`), the theme's from `theme-choice`, and the layout's to the
+// window's, which Rust sets back to the state's after the toggle.
+
+import { Shortcuts } from "shortcuts.slint";
+import { PaneView } from "pane.slint";
+
+export component ViewMenu inherits ContextMenuArea {
+    // What the active pane shows.
+    in property <PaneView> view;
+    // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게).
+    in property <int> theme-choice;
+    // The layout and the hidden items, two-way with the window's.
+    in-out property <bool> show-hidden;
+    in-out property <bool> show-tree;
+    in-out property <bool> show-preview;
+    in-out property <bool> dual-pane;
+    in-out property <bool> stacked;
+    in-out property <bool> sync-navigation;
+
+    // A command of the window's (`MainWindow.command`).
+    callback command(name: string);
+    callback theme-chosen(choice: int);
+    // 두 패널을 같은 크기로, and the divider moved by `step` of the room.
+    callback even-split();
+    callback divider-moved(step: float);
+    // The active pane's order, columns and view, as the window's callbacks of the same names for
+    // that pane.
+    callback sort(column: int);
+    callback sort-then(column: int);
+    callback column-toggled(column: int);
+    callback view-command(name: string);
+    // An item of the 탭 sub-menu for the tab the active pane shows (`MainWindow.tab-command`).
+    callback tab-command(name: string);
+    // An item of a sub-menu was chosen: the keys are to go back where they were once the menus
+    // have closed (a sub-menu's choice leaves them nowhere).
+    callback sub-menu-done();
+
+    // Opens the menu at `x`, `y`, its marks showing the active pane's view.
+    public function open(x: length, y: length) {
+        root.mark();
+        root.show({ x: x, y: y });
+    }
+
+    // The marks of the view's items, from the active pane's view.
+    public function mark() {
+        root.mark-mode-0 = root.view.mode == 0;
+        root.mark-mode-1 = root.view.mode == 1;
+        root.mark-mode-2 = root.view.mode == 2;
+        root.mark-mode-3 = root.view.mode == 3;
+        root.mark-mode-4 = root.view.mode == 4;
+        root.mark-folders-first = root.view.folders-first;
+        root.mark-col-1 = root.view.shows[1];
+        root.mark-col-2 = root.view.shows[2];
+        root.mark-col-3 = root.view.shows[3];
+        root.mark-col-4 = root.view.shows[4];
+        root.mark-col-5 = root.view.shows[5];
+        root.mark-col-6 = root.view.shows[6];
+    }
+
+    private property <bool> mark-mode-0;
+    private property <bool> mark-mode-1;
+    private property <bool> mark-mode-2;
+    private property <bool> mark-mode-3;
+    private property <bool> mark-mode-4;
+    private property <bool> mark-folders-first;
+    private property <bool> mark-col-1;
+    private property <bool> mark-col-2;
+    private property <bool> mark-col-3;
+    private property <bool> mark-col-4;
+    private property <bool> mark-col-5;
+    private property <bool> mark-col-6;
+
+    private property <bool> system-mark: true;
+    private property <bool> light-mark;
+    private property <bool> dark-mark;
+    function mark-theme(choice: int) {
+        root.system-mark = choice == 0;
+        root.light-mark = choice == 1;
+        root.dark-mark = choice == 2;
+    }
+    init => {
+        root.mark-theme(root.theme-choice);
+    }
+    changed theme-choice => {
+        root.mark-theme(root.theme-choice);
+    }
+
+    // An item of a sub-menu: its marks show the view it made.
+    function done() {
+        root.mark();
+        root.sub-menu-done();
+    }
+
+    private property <bool> tab-pinned: root.view.tabs[root.view.active-tab].pinned;
+
+    Menu {
+        Menu {
+            title: "보기 방식";
+
+            MenuItem {
+                title: Shortcuts.titled("큰 아이콘", Shortcuts.view-large-icons);
+                checkable: true;
+                checked <=> root.mark-mode-4;
+                activated => {
+                    root.command("view-large-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("보통 아이콘", Shortcuts.view-medium-icons);
+                checkable: true;
+                checked <=> root.mark-mode-3;
+                activated => {
+                    root.command("view-medium-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("작은 아이콘", Shortcuts.view-small-icons);
+                checkable: true;
+                checked <=> root.mark-mode-2;
+                activated => {
+                    root.command("view-small-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("목록", Shortcuts.view-list);
+                checkable: true;
+                checked <=> root.mark-mode-1;
+                activated => {
+                    root.command("view-list");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("자세히", Shortcuts.view-details);
+                checkable: true;
+                checked <=> root.mark-mode-0;
+                activated => {
+                    root.command("view-details");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The view of this folder for its subfolders too, or the folder's own view forgotten.
+            MenuItem {
+                title: "하위 폴더에 적용";
+                activated => {
+                    root.view-command("apply-below");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "기본값으로 되돌리기";
+                enabled: root.view.own-view;
+                activated => {
+                    root.view-command("reset-view");
+                    root.done();
+                }
+            }
+        }
+        Menu {
+            title: "정렬";
+
+            MenuItem {
+                title: "이름";
+                activated => {
+                    root.sort(0);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "크기";
+                activated => {
+                    root.sort(1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "수정한 날짜";
+                activated => {
+                    root.sort(2);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "만든 날짜";
+                activated => {
+                    root.sort(4);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "종류";
+                activated => {
+                    root.sort(3);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "확장자";
+                activated => {
+                    root.sort(5);
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The second key (Shift+click on a head).
+            Menu {
+                title: "2차 정렬";
+
+                MenuItem {
+                    title: "없음";
+                    activated => {
+                        root.sort-then(-1);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "이름";
+                    activated => {
+                        root.sort-then(0);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "크기";
+                    activated => {
+                        root.sort-then(1);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "수정한 날짜";
+                    activated => {
+                        root.sort-then(2);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "만든 날짜";
+                    activated => {
+                        root.sort-then(4);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "종류";
+                    activated => {
+                        root.sort-then(3);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: "확장자";
+                    activated => {
+                        root.sort-then(5);
+                        root.done();
+                    }
+                }
+            }
+            MenuItem {
+                title: "폴더 먼저";
+                checkable: true;
+                checked <=> root.mark-folders-first;
+                activated => {
+                    root.view-command("folders-first");
+                    root.done();
+                }
+            }
+        }
+        // The columns of 자세히 after the name (as the menu of its heads).
+        Menu {
+            title: "열";
+            enabled: root.view.mode == 0;
+
+            MenuItem {
+                title: "크기";
+                checkable: true;
+                checked <=> root.mark-col-1;
+                activated => {
+                    root.column-toggled(1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "수정한 날짜";
+                checkable: true;
+                checked <=> root.mark-col-2;
+                activated => {
+                    root.column-toggled(2);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "만든 날짜";
+                checkable: true;
+                checked <=> root.mark-col-4;
+                activated => {
+                    root.column-toggled(4);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "종류";
+                checkable: true;
+                checked <=> root.mark-col-3;
+                activated => {
+                    root.column-toggled(3);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "확장자";
+                checkable: true;
+                checked <=> root.mark-col-5;
+                activated => {
+                    root.column-toggled(5);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "속성";
+                checkable: true;
+                checked <=> root.mark-col-6;
+                activated => {
+                    root.column-toggled(6);
+                    root.done();
+                }
+            }
+        }
+        MenuSeparator { }
+        Menu {
+            title: "테마";
+
+            MenuItem {
+                title: "밝게";
+                checkable: true;
+                checked <=> root.light-mark;
+                activated => {
+                    root.mark-theme(1);
+                    root.theme-chosen(1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "어둡게";
+                checkable: true;
+                checked <=> root.dark-mark;
+                activated => {
+                    root.mark-theme(2);
+                    root.theme-chosen(2);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "시스템 설정 따르기";
+                checkable: true;
+                checked <=> root.system-mark;
+                activated => {
+                    root.mark-theme(0);
+                    root.theme-chosen(0);
+                    root.done();
+                }
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("숨김 파일 보기", Shortcuts.toggle-hidden);
+            checkable: true;
+            checked <=> root.show-hidden;
+            activated => {
+                root.command("toggle-hidden");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("폴더 트리", Shortcuts.toggle-tree);
+            checkable: true;
+            checked <=> root.show-tree;
+            activated => {
+                root.command("toggle-tree");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("폴더 트리로 가기", Shortcuts.focus-tree);
+            activated => {
+                root.command("focus-tree");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("미리 보기 패널", Shortcuts.toggle-preview);
+            checkable: true;
+            checked <=> root.show-preview;
+            activated => {
+                root.command("toggle-preview");
+            }
+        }
+        MenuSeparator { }
+        // The panes: one or two, beside or above each other, and the divider between them (its
+        // items act only while two panes show).
+        Menu {
+            title: "배치";
+
+            MenuItem {
+                title: Shortcuts.titled("듀얼 패널", Shortcuts.toggle-dual-pane);
+                checkable: true;
+                checked <=> root.dual-pane;
+                activated => {
+                    root.command("toggle-dual");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("위아래로 나누기", Shortcuts.toggle-split);
+                checkable: true;
+                checked <=> root.stacked;
+                activated => {
+                    root.command("toggle-split");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "두 패널을 같은 크기로";
+                enabled: root.dual-pane;
+                activated => {
+                    root.even-split();
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.stacked ? "분할선을 위로" : "분할선을 왼쪽으로";
+                enabled: root.dual-pane;
+                activated => {
+                    root.divider-moved(-0.1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.stacked ? "분할선을 아래로" : "분할선을 오른쪽으로";
+                enabled: root.dual-pane;
+                activated => {
+                    root.divider-moved(0.1);
+                    root.done();
+                }
+            }
+        }
+        // Those for the other pane act only while two panes show.
+        MenuItem {
+            title: Shortcuts.titled("패널 바꾸기", Shortcuts.swap-panes);
+            activated => {
+                root.command("swap-panes");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("같은 폴더를 반대편에", Shortcuts.same-folder);
+            enabled: root.dual-pane;
+            activated => {
+                root.command("same-folder");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("탐색 동기화", Shortcuts.sync-navigation);
+            enabled: root.dual-pane;
+            checkable: true;
+            checked <=> root.sync-navigation;
+            activated => {
+                root.command("toggle-sync");
+            }
+        }
+        MenuSeparator { }
+        // The tab the active pane shows (as its own menu, and the keys to move it along the
+        // strip).
+        Menu {
+            title: "탭";
+
+            MenuItem {
+                title: "탭 복제";
+                activated => {
+                    root.tab-command("duplicate");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.tab-pinned ? "탭 고정 풀기" : "탭 고정";
+                activated => {
+                    root.tab-command("pin");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "탭을 반대 패널로 옮기기";
+                enabled: root.view.tabs.length > 1;
+                activated => {
+                    root.tab-command("move-other");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("탭을 왼쪽으로", Shortcuts.move-tab-left);
+                enabled: root.view.active-tab > 0;
+                activated => {
+                    root.tab-command("move-left");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("탭을 오른쪽으로", Shortcuts.move-tab-right);
+                enabled: root.view.active-tab < root.view.tabs.length - 1;
+                activated => {
+                    root.tab-command("move-right");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Shortcuts.titled("닫은 탭 다시 열기", Shortcuts.reopen-tab);
+                enabled: root.view.can-reopen;
+                activated => {
+                    root.tab-command("reopen");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "다른 탭 닫기";
+                enabled: root.view.tabs[root.view.active-tab].can-close-others;
+                activated => {
+                    root.tab-command("close-others");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "오른쪽 탭 닫기";
+                enabled: root.view.tabs[root.view.active-tab].can-close-right;
+                activated => {
+                    root.tab-command("close-right");
+                    root.done();
+                }
+            }
+        }
+    }
+}

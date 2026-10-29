@@ -5,16 +5,33 @@
 // bottom and then in the next column, scrolls sideways (the wheel too), and makes only the
 // columns on screen. A folder of 100,000 items costs no more than one of ten.
 //
-// An item takes the same presses, drags, right clicks and double clicks as a row of 자세히, and
-// tells Rust the same things by its position in the rows; the list is one place to drop on, as
-// in 자세히: an item of a folder takes the items into that folder, any other place into the
-// pane's folder.
+// An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
+// same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
+// place to drop on, as in 자세히: an item of a folder takes the items into that folder, any other
+// place into the pane's folder.
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
+import { RowMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+
+// What the pointer did to an item.
+enum TileEvent {
+    // A left press (with Ctrl and Shift as held).
+    press,
+    // Its release, when no drag came of the press.
+    release,
+    // A double click, or the screen reader's default action.
+    activate,
+    // A right press, just before the item's menu opens.
+    menu,
+    // An item of the item's menu (its name).
+    command,
+    // A drag of the items ended, dropped or not.
+    drag-end,
+}
 
 // One item: its icon, and its name beside a small icon or under a larger one.
 component Tile inherits Rectangle {
@@ -27,12 +44,8 @@ component Tile inherits Rectangle {
     in property <bool> cursor-here;
     in property <bool> drop-here;
     in property <data-transfer> drag-data;
-    callback pressed(ctrl: bool, shift: bool);
-    callback released();
-    callback activated();
-    callback menu-opening();
-    callback menu-command(name: string);
-    callback drag-ended();
+    // What the pointer did, with the modifiers of a press and the command of a menu item.
+    callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
 
     private property <bool> big: root.mode >= 3;
     private property <length> icon-size: root.mode == 4 ? 72px : root.mode == 3 ? 40px : 18px;
@@ -45,7 +58,7 @@ component Tile inherits Rectangle {
     accessible-item-selectable: true;
     accessible-item-selected: root.item.selected;
     accessible-action-default => {
-        root.activated();
+        root.event(TileEvent.activate, false, false, "");
     }
 
     // A press readies a drag of what it selects, or keeps selected.
@@ -54,68 +67,31 @@ component Tile inherits Rectangle {
         allow-move: true;
         allow-copy: true;
         drag-finished(action) => {
-            root.drag-ended();
+            root.event(TileEvent.drag-end, false, false, "");
         }
 
-        item-menu := ContextMenuArea {
-            Menu {
-                MenuItem {
-                    title: Shortcuts.titled("이동…", Shortcuts.move-to);
-                    activated => {
-                        root.menu-command("move");
-                    }
-                }
-                MenuItem {
-                    title: Shortcuts.titled("복사…", Shortcuts.copy-to);
-                    activated => {
-                        root.menu-command("copy");
-                    }
-                }
-                MenuSeparator { }
-                MenuItem {
-                    title: Shortcuts.titled("열기", Shortcuts.open);
-                    activated => {
-                        root.menu-command("open");
-                    }
-                }
-                MenuItem {
-                    title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
-                    activated => {
-                        root.menu-command("rename");
-                    }
-                }
-                MenuSeparator { }
-                MenuItem {
-                    title: Shortcuts.titled("휴지통으로 보내기", Shortcuts.trash);
-                    activated => {
-                        root.menu-command("delete");
-                    }
-                }
-                MenuItem {
-                    title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
-                    activated => {
-                        root.menu-command("delete-permanently");
-                    }
-                }
+        item-menu := RowMenu {
+            command(name) => {
+                root.event(TileEvent.command, false, false, name);
             }
 
             // It takes the right click itself, so the item is selected before its menu opens.
             touch := TouchArea {
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                        root.pressed(event.modifiers.control, event.modifiers.shift);
+                        root.event(TileEvent.press, event.modifiers.control, event.modifiers.shift, "");
                     }
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                        root.menu-opening();
+                        root.event(TileEvent.menu, false, false, "");
                         item-menu.show({ x: self.mouse-x, y: self.mouse-y });
                     }
                 }
                 // Not after a drag: the drag takes the pointer from the item.
                 clicked => {
-                    root.released();
+                    root.event(TileEvent.release, false, false, "");
                 }
                 double-clicked => {
-                    root.activated();
+                    root.event(TileEvent.activate, false, false, "");
                 }
             }
         }
@@ -212,6 +188,23 @@ export component FileGrid inherits Rectangle {
     private property <int> first-column: max(0, floor((-columns-view.content-x - root.pad) / root.tile-w));
     private property <int> columns-shown: !root.columnar ? 0 : ceil(columns-view.visible-width / root.tile-w) + 1;
 
+    // What the pointer did to item `index`: told to the pane as a row of 자세히 tells it.
+    function tile-event(index: int, what: TileEvent, ctrl: bool, shift: bool, command: string) {
+        if (what == TileEvent.press) {
+            root.row-clicked(index, ctrl, shift);
+        } else if (what == TileEvent.release) {
+            root.row-released(index);
+        } else if (what == TileEvent.activate) {
+            root.row-activated(index);
+        } else if (what == TileEvent.menu) {
+            root.row-menu(index);
+        } else if (what == TileEvent.command) {
+            root.menu-command(command);
+        } else {
+            root.drag-ended();
+        }
+    }
+
     // The item at (`x`, `y`) of the list, or -1 where there is none.
     function index-at(x: length, y: length) -> int {
         if (root.columnar) {
@@ -226,46 +219,28 @@ export component FileGrid inherits Rectangle {
         return line >= 0 && place >= 0 && place < root.per-row && index < root.rows.length ? index : -1;
     }
 
-    // Scrolls as little as needed to show item `index` whole (as `FileList.scroll-to`, which says
-    // why the list settles after a long jump).
+    // Scrolls as little as needed to show item `index` whole (the icons keep the place while
+    // their list settles after a long jump, `ListSettle`).
     public function scroll-to(index: int) {
         if (index < 0) {
             return;
         }
         if (root.columnar) {
-            let left = root.pad + floor(index / root.per-column) * root.tile-w;
-            let most = max(0px, columns-view.content-width - columns-view.visible-width);
-            if (left + columns-view.content-x < 0) {
-                columns-view.content-x = max(-most, min(0px, root.pad - left));
-            } else if (left + root.tile-w + columns-view.content-x > columns-view.visible-width) {
-                columns-view.content-x = max(-most, min(0px, columns-view.visible-width - left - root.tile-w - root.pad));
+            let x = ListScroll.into-view(root.pad + floor(index / root.per-column) * root.tile-w - root.pad, root.tile-w + 2 * root.pad, columns-view.content-x, columns-view.visible-width);
+            if (x <= 0) {
+                columns-view.content-x = max(-max(0px, columns-view.content-width - columns-view.visible-width), x);
             }
             return;
         }
-        let top = floor(index / root.per-row) * root.tile-h;
-        if (top + icons.content-y < 0) {
-            root.scroll-target = -top;
-        } else if (top + root.tile-h + icons.content-y > icons.visible-height) {
-            root.scroll-target = icons.visible-height - top - root.tile-h;
-        } else {
+        let y = ListScroll.into-view(floor(index / root.per-row) * root.tile-h, root.tile-h, icons.content-y, icons.visible-height);
+        if (y > 0) {
             return;
         }
-        root.settling = true;
-        icons.content-y = root.scroll-target;
-        settle.restart();
+        settle.start(y);
+        icons.content-y = y;
     }
 
-    private property <length> scroll-target;
-    private property <bool> settling;
-
-    settle := Timer {
-        interval: 500ms;
-        running: false;
-        triggered => {
-            self.stop();
-            root.settling = false;
-        }
-    }
+    settle := ListSettle { }
 
     drop := DropArea {
         // The folder item the drag would go into; -1 for the pane's folder.
@@ -299,13 +274,13 @@ export component FileGrid inherits Rectangle {
                 visible: !root.columnar;
                 accessible-label: "항목 목록";
                 changed content-y => {
-                    if (root.settling && self.content-y != root.scroll-target) {
-                        root.settling = false;
-                        self.content-y = root.scroll-target;
+                    let y = settle.corrected(self.content-y);
+                    if (y != self.content-y) {
+                        self.content-y = y;
                     }
                 }
                 scrolled => {
-                    root.settling = false;
+                    settle.stop();
                 }
 
                 for line in root.line-count: Rectangle {
@@ -323,23 +298,8 @@ export component FileGrid inherits Rectangle {
                         cursor-here: root.active && self.index == root.cursor;
                         drop-here: drop.has-drag && self.index == drop.target;
                         drag-data: root.drag-data;
-                        pressed(ctrl, shift) => {
-                            root.row-clicked(self.index, ctrl, shift);
-                        }
-                        released => {
-                            root.row-released(self.index);
-                        }
-                        activated => {
-                            root.row-activated(self.index);
-                        }
-                        menu-opening => {
-                            root.row-menu(self.index);
-                        }
-                        menu-command(name) => {
-                            root.menu-command(name);
-                        }
-                        drag-ended => {
-                            root.drag-ended();
+                        event(what, ctrl, shift, command) => {
+                            root.tile-event(self.index, what, ctrl, shift, command);
                         }
                     }
                 }
@@ -389,23 +349,8 @@ export component FileGrid inherits Rectangle {
                             cursor-here: root.active && self.index == root.cursor;
                             drop-here: drop.has-drag && self.index == drop.target;
                             drag-data: root.drag-data;
-                            pressed(ctrl, shift) => {
-                                root.row-clicked(self.index, ctrl, shift);
-                            }
-                            released => {
-                                root.row-released(self.index);
-                            }
-                            activated => {
-                                root.row-activated(self.index);
-                            }
-                            menu-opening => {
-                                root.row-menu(self.index);
-                            }
-                            menu-command(name) => {
-                                root.menu-command(name);
-                            }
-                            drag-ended => {
-                                root.drag-ended();
+                            event(what, ctrl, shift, command) => {
+                                root.tile-event(self.index, what, ctrl, shift, command);
                             }
                         }
                     }
@@ -414,52 +359,13 @@ export component FileGrid inherits Rectangle {
         }
     }
 
-    // The pane's folder takes the drag: a frame around the list.
-    if drop.has-drag && drop.target < 0: Rectangle {
-        x: 2px;
-        y: 2px;
-        width: parent.width - 4px;
-        height: parent.height - 4px;
-        border-width: 2px;
-        border-color: Theme.accent;
-        border-radius: Theme.radius;
-    }
-    // Why the drag cannot go where the pointer is.
-    if !drop.has-drag && root.refusal != "": Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - 14px;
-        width: min(refused.preferred-width + 28px, parent.width - 24px);
-        height: 30px;
-        border-radius: 15px;
-        background: Theme.toast-bg;
-
-        refused := Text {
-            width: parent.width - 28px;
-            text: root.refusal;
-            color: Theme.toast-text;
-            font-weight: 600;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-    // What the drop would do.
-    if drop.has-drag && root.drag-label != "": Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - 14px;
-        width: min(label.preferred-width + 28px, parent.width - 24px);
-        height: 30px;
-        border-radius: 15px;
-        background: Theme.accent;
-
-        label := Text {
-            width: parent.width - 28px;
-            text: root.drag-label;
-            color: Theme.on-accent;
-            font-weight: 600;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            overflow: elide;
-        }
+    // The frame, the label of the drop, or why it cannot be made there.
+    DropHint {
+        width: parent.width;
+        height: parent.height;
+        dragging: drop.has-drag;
+        frame: drop.has-drag && drop.target < 0;
+        label: root.drag-label;
+        refusal: root.refusal;
     }
 }

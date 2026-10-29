@@ -1,0 +1,175 @@
+// Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
+// `file-grid.slint`): the menu of an item, what a drag over the list shows, and how a list keeps
+// the place it scrolled to after a long jump.
+
+import { Theme } from "theme.slint";
+import { Shortcuts } from "shortcuts.slint";
+
+// The menu of an item: move and copy first (OPS-05), each command with its key (KEY-03). It wraps
+// what is right-clicked; the press selects the item first, then calls `show`.
+export component RowMenu inherits ContextMenuArea {
+    // An item of the menu: the name of the toolbar command it runs (move, copy, open, rename,
+    // delete, delete-permanently).
+    callback command(name: string);
+
+    // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
+    // children placed after it would have no place to go.)
+    @children
+
+    Menu {
+        MenuItem {
+            title: Shortcuts.titled("이동…", Shortcuts.move-to);
+            activated => {
+                root.command("move");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("복사…", Shortcuts.copy-to);
+            activated => {
+                root.command("copy");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("열기", Shortcuts.open);
+            activated => {
+                root.command("open");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
+            activated => {
+                root.command("rename");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("휴지통으로 보내기", Shortcuts.trash);
+            activated => {
+                root.command("delete");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
+            activated => {
+                root.command("delete-permanently");
+            }
+        }
+    }
+}
+
+// A pill near the bottom of a list: what a drop would do, or why it cannot be made there.
+component DropPill inherits Rectangle {
+    in property <string> text;
+    in property <brush> fill;
+    in property <brush> ink;
+    // The size of the list it shows over.
+    in property <length> room-width;
+    in property <length> room-height;
+
+    x: (root.room-width - self.width) / 2;
+    y: root.room-height - self.height - 14px;
+    width: min(shown.preferred-width + 28px, root.room-width - 24px);
+    height: 30px;
+    border-radius: 15px;
+    background: root.fill;
+
+    shown := Text {
+        width: parent.width - 28px;
+        text: root.text;
+        color: root.ink;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// What a list shows of a drag of items over it: an accent frame around it while its own folder
+// takes them (`frame`), what the drop would do while a place of it takes them (`label`), and why
+// the place under the pointer does not take them (`refusal`, while it does not).
+export component DropHint {
+    // A drag the list takes is over it.
+    in property <bool> dragging;
+    in property <bool> frame;
+    in property <string> label;
+    in property <string> refusal;
+
+    if root.frame: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        border-radius: Theme.radius;
+    }
+    if !root.dragging && root.refusal != "": DropPill {
+        room-width: root.width;
+        room-height: root.height;
+        text: root.refusal;
+        fill: Theme.toast-bg;
+        ink: Theme.toast-text;
+    }
+    if root.dragging && root.label != "": DropPill {
+        room-width: root.width;
+        room-height: root.height;
+        text: root.label;
+        fill: Theme.accent;
+        ink: Theme.on-accent;
+    }
+}
+
+// Where a list scrolls to show a stretch of its content whole, scrolling as little as it can.
+export global ListScroll {
+    // The `content-y` that shows the stretch from `top` to `top + size` of a list at `content-y`
+    // whose visible height is `room`; a positive length when it shows already.
+    public pure function into-view(top: length, size: length, content-y: length, room: length) -> length {
+        if (top + content-y < 0) {
+            return -top;
+        }
+        if (top + size + content-y > room) {
+            return room - top - size;
+        }
+        return 1px;
+    }
+}
+
+// After a jump of more than a screen and a half (End in a long folder), a ListView makes the
+// rows of the new place afresh and lines the first of them up with its top, which rounds the
+// place by part of a row: the last row would stay cut. So while the list settles, a place it
+// moves to by itself is set back to the one asked for, once; a scroll of the user's ends that.
+export component ListSettle {
+    in-out property <bool> settling;
+    in-out property <length> target;
+
+    // The list was sent to `target`.
+    public function start(target: length) {
+        root.target = target;
+        root.settling = true;
+        timer.restart();
+    }
+
+    // The list moved to `y`: where it is to be (the place asked for, once, while it settles).
+    public function corrected(y: length) -> length {
+        if (root.settling && y != root.target) {
+            root.settling = false;
+            return root.target;
+        }
+        return y;
+    }
+
+    // The user scrolled.
+    public function stop() {
+        root.settling = false;
+    }
+
+    timer := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.settling = false;
+        }
+    }
+}
