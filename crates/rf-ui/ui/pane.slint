@@ -377,6 +377,13 @@ export component Pane inherits Rectangle {
             }
 
             crumb-view := Rectangle {
+                // Where the strip would start to end at the right edge of the row: before it
+                // when the path is too long. And how much further left the strip goes then, so
+                // that the first folder shown follows the "…" piece with no gap (the piece the
+                // "…" stands in sets it).
+                property <length> end-x: min(0px, self.width - crumb-strip.preferred-width);
+                property <length> lead;
+
                 x: 6px;
                 width: parent.width - 12px;
                 visible: !root.editing;
@@ -385,20 +392,37 @@ export component Pane inherits Rectangle {
                 // Too long for the row, the path keeps its last folders in view. A folder that
                 // does not fit whole is not shown cut: the folders left of the first one that
                 // fits are hidden, and the last of them gives its place to a "…" piece that
-                // goes to it (the nearest folder out of view).
+                // goes to it (the nearest folder out of view). The "…" piece starts the row,
+                // and the folders shown follow it.
                 crumb-strip := HorizontalLayout {
-                    x: min(0px, crumb-view.width - self.preferred-width);
+                    x: crumb-view.end-x < 0 ? crumb-view.end-x - crumb-view.lead : 0px;
                     width: self.preferred-width;
                     alignment: start;
                     spacing: 0px;
 
                     for crumb[i] in root.view.crumbs: Rectangle {
-                        // Where the piece is in the row, and whether the row is cut on the left.
-                        property <length> left: crumb-strip.x + self.x;
-                        property <bool> cut: crumb-strip.x < 0;
+                        // Where the piece would be in the row ending at its right edge, and
+                        // whether the row is cut on the left.
+                        property <length> left: crumb-view.end-x + self.x;
+                        property <bool> cut: crumb-view.end-x < 0;
                         property <length> room: 30px;
                         property <bool> hidden: self.cut && self.left < self.room;
                         property <bool> stands-for-hidden: self.hidden && self.left + self.width >= self.room;
+                        // For the piece the "…" stands in: how much further left the strip goes
+                        // for the folder after it to start right after the "…" (-1px for the
+                        // others).
+                        property <length> lead: self.stands-for-hidden ? self.left + self.width - self.room : -1px;
+
+                        init => {
+                            if (self.lead >= 0) {
+                                crumb-view.lead = self.lead;
+                            }
+                        }
+                        changed lead => {
+                            if (self.lead >= 0) {
+                                crumb-view.lead = self.lead;
+                            }
+                        }
 
                         // Hidden, it keeps its place in the row, which tells where each
                         // piece is.
@@ -427,9 +451,10 @@ export component Pane inherits Rectangle {
                             }
                         }
                         if self.stands-for-hidden: CrumbButton {
-                            x: parent.width - self.width;
+                            // At the start of the row.
+                            x: parent.width - parent.room;
                             y: (parent.height - self.height) / 2;
-                            width: 26px;
+                            width: parent.room;
                             text: "…";
                             label: crumb.label;
                             clicked => {

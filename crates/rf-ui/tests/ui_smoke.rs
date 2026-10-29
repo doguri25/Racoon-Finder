@@ -246,6 +246,65 @@ fn keys_go_to_the_path_field_while_it_is_open() {
 }
 
 #[test]
+fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
+    let window = window();
+    let mut path = std::env::temp_dir();
+    for name in [
+        "프로젝트 자료 모음",
+        "2026년 상반기 보고서 초안",
+        "부서별 정리본",
+        "최종 검토용 사본",
+        "마지막",
+    ] {
+        path.push(name);
+    }
+    let folder = VPath::local(&path).expect("a local path");
+    let (pane, _) = Pane::new(folder, VisibilityFilter::default());
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    // As the event loop does before it draws: the pieces are made (a look at the window makes
+    // them here), then their change handlers run.
+    assert!(!labelled(&window, "마지막", AccessibleRole::Button).is_empty());
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+    }
+    let row = labelled(&window, "경로", AccessibleRole::Groupbox)
+        .into_iter()
+        .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the left pane's path row");
+    let (row_x, row_width) = (row.absolute_position().x, row.size().width);
+    let mut pieces = row
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::Button)
+        .find_all();
+    pieces.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
+    let place = |piece: &ElementHandle| {
+        let x = piece.absolute_position().x - row_x;
+        (
+            piece.accessible_label().unwrap_or_default().to_string(),
+            x,
+            x + piece.size().width,
+        )
+    };
+    let shown: Vec<_> = pieces.iter().map(place).collect();
+    // The "…" piece (named for the nearest folder out of view) starts the row, and the first
+    // folder shown follows it after the `›`, with no gap.
+    let [ellipsis, first, .., last] = shown.as_slice() else {
+        panic!("a cut path: {shown:?}");
+    };
+    assert!(ellipsis.1 <= 8.0, "the … piece starts the row: {shown:?}");
+    assert!(
+        first.1 - ellipsis.2 <= 12.0,
+        "the first folder shown follows the … piece: {shown:?}"
+    );
+    assert_eq!(last.0, "마지막");
+    assert!(
+        last.2 <= row_width,
+        "the last folder shows whole: {shown:?}"
+    );
+}
+
+#[test]
 fn rows_that_come_and_go_reach_the_list() {
     let window = window();
     let rows = Rc::new(FileRows::default());
@@ -1668,6 +1727,59 @@ fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
             [(42, place, side, 0, DragAction::Move)]
         );
     }
+}
+
+#[test]
+fn a_refused_place_says_why_while_the_drag_stays_over_it() {
+    let (window, _calls, _models, _tree) = drag_window();
+    // As the controller does: every check tells the window whether the place refuses, and why.
+    let weak = window.as_weak();
+    window.on_drop_check(move |_, place, side, _, action| {
+        let refused = side == 0 && place == DropPlace::List;
+        if let Some(window) = weak.upgrade() {
+            let why = if refused {
+                "여기에 놓을 수 없습니다: 같은 폴더"
+            } else {
+                ""
+            };
+            window.invoke_drop_refused(place, side, why.into());
+        }
+        if refused { DragAction::None } else { action }
+    });
+    let shown = || {
+        !labelled(
+            &window,
+            "여기에 놓을 수 없습니다: 같은 폴더",
+            AccessibleRole::Text,
+        )
+        .is_empty()
+    };
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    // The toolbar takes no drop.
+    let toolbar = LogicalPosition::new(docs.x, 20.0);
+
+    // Over the pane the items are in: the reason shows, and stays while the pointer rests there.
+    drag_to(&window, x_txt, docs);
+    // Runs what the event loop runs between the moves (timers start).
+    slint::platform::update_timers_and_animations();
+    assert!(shown());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_secs(5));
+    assert!(shown(), "still over the place that refuses");
+    // Off to a place that takes no drop, it goes; back over the place, it shows again.
+    pointer(&window, "move", toolbar);
+    assert!(!shown());
+    pointer(&window, "move", docs);
+    assert!(shown());
+    // A place that takes the drag says nothing.
+    pointer(&window, "move", backup);
+    assert!(!shown());
+    // The end of the drag takes it away.
+    pointer(&window, "move", docs);
+    assert!(shown());
+    pointer(&window, "release", docs);
+    assert!(!shown());
 }
 
 #[test]

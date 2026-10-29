@@ -940,7 +940,22 @@ impl Controller {
                     });
                 });
             }
-            _ => {}
+            // `apply` carries these out itself: it hands only the ones above to this method.
+            Effect::Load(_)
+            | Effect::LoadChildren(_)
+            | Effect::Follow { .. }
+            | Effect::OpenFile(_)
+            | Effect::ReloadLater { .. }
+            | Effect::Notice(_)
+            | Effect::EditPath(_)
+            | Effect::ScrollTo { .. }
+            | Effect::ScrollTree(_)
+            | Effect::ScrollPickTree(_)
+            | Effect::Job(_)
+            | Effect::Toast { .. }
+            | Effect::Busy { .. }
+            | Effect::NotBusy(_)
+            | Effect::Quit => {}
         }
     }
 

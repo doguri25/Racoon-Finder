@@ -196,20 +196,21 @@ export component MainWindow inherits Window {
     }
 
     // The place under a drag (`place`, of pane `side`) does not take it, for the reason `text`;
-    // an empty one says it does. The reason shows by the place while the drag hovers there, and
-    // goes with a moment without news, or when the drag ends.
+    // an empty one says it does. The reason shows by the place while the drag hovers there, the
+    // pointer moving or not, and goes when the drag moves where nothing takes drops (the
+    // `DropArea` under everything), or ends.
     public function drop-refused(place: DropPlace, side: int, text: string) {
         root.refusal = text;
         root.refusal-place = place;
         root.refusal-side = side;
-        if (text != "") {
-            refusal-timer.restart();
-        }
+        root.refusal-told = text != "";
     }
 
     private property <string> refusal;
     private property <DropPlace> refusal-place;
     private property <int> refusal-side;
+    // A place has refused the drag in the move that is under way.
+    private property <bool> refusal-told;
     private property <bool> refusal-in-tree: root.refusal-place == DropPlace.tree;
 
     // Scrolls the tree so that row `index` shows.
@@ -325,6 +326,23 @@ export component MainWindow inherits Window {
     changed theme-choice => {
         root.mark-theme(root.theme-choice);
         root.show-theme();
+    }
+
+    // Under everything, so a move of a drag reaches it last, and only when no place above took
+    // the drag: a place that refuses it has said why (`drop-refused`) in the same move, and the
+    // reason stays; a move over nothing that takes drops (the toolbar, the gap between the
+    // panes) takes it away.
+    DropArea {
+        can-drop(event) => {
+            if (!root.refusal-told) {
+                root.refusal = "";
+            }
+            root.refusal-told = false;
+            return DragAction.none;
+        }
+        dropped(event) => {
+            return DragAction.none;
+        }
     }
 
     keys := FocusScope {
@@ -798,15 +816,6 @@ export component MainWindow inherits Window {
             root.notice = "";
             notice-timer.stop();
             root.notice-closed(root.notice-token);
-        }
-    }
-
-    refusal-timer := Timer {
-        interval: 1500ms;
-        running: false;
-        triggered => {
-            root.refusal = "";
-            self.stop();
         }
     }
 

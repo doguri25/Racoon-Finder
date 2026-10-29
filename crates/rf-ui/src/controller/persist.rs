@@ -3,6 +3,7 @@
 //! saves after a change and as the app ends ([`SaveLedger`] decides when).
 
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsStr;
 use std::path::{Component, Prefix};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -111,7 +112,8 @@ fn volume_of(folder: &VPath) -> (bool, VPath) {
 /// not known):
 ///
 /// - on Windows a drive is a volume, removable unless it is the system's drive (a USB stick
-///   at `E:`, a share mapped at `Z:`), and a server's share is one, on the network;
+///   at `E:`, a share mapped at `Z:`), and a server's share is one, on the network, however
+///   the path spells them ([`prefix_volume`]);
 /// - below where the system mounts removable and network volumes, the folder of the volume:
 ///   `/Volumes/<name>`, `/mnt/<name>`, `/run/media/<user>/<label>`, and `/media/<user>/<label>`
 ///   for `user`'s own folder there, `/media/<label>` otherwise;
@@ -128,16 +130,11 @@ fn volume_in(folder: &VPath, user: Option<&str>, system_drive: Option<&str>) -> 
     let mut parts = path.components();
     match parts.next() {
         Some(Component::Prefix(prefix)) => {
-            let removable = match prefix.kind() {
-                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-                    let system = system_drive
-                        .and_then(|drive| drive.bytes().next())
-                        .unwrap_or(b'C');
-                    !letter.eq_ignore_ascii_case(&system)
-                }
-                _ => true,
-            };
-            return (removable, root.clone());
+            let (removable, volume) = prefix_volume(prefix.kind(), system_drive);
+            return (
+                removable,
+                VPath::local(volume).unwrap_or_else(|_| root.clone()),
+            );
         }
         Some(Component::RootDir) => {}
         _ => return (true, root.clone()),
@@ -152,6 +149,30 @@ fn volume_in(folder: &VPath, user: Option<&str>, system_drive: Option<&str>) -> 
     match depth.and_then(|depth| chain.get(depth)) {
         Some(volume) => (true, volume.clone()),
         None => (false, chain.get(1).unwrap_or(root).clone()),
+    }
+}
+
+/// The Windows volume a path that starts with `prefix` is on, as the text of its root, and
+/// whether it is a removable or network one (`true`), for the system's drive `system_drive`
+/// (`C:` when not known). One volume has one root however a path spells it: a drive
+/// (`C:\`, `\\?\c:\`) by its letter in upper case, and a server's share (`\\NAS\Share\`,
+/// `\\?\UNC\nas\share\`) by its names in lower case, as Windows does not tell their cases
+/// apart.
+fn prefix_volume(prefix: Prefix<'_>, system_drive: Option<&str>) -> (bool, String) {
+    let lower = |name: &OsStr| name.to_string_lossy().to_lowercase();
+    match prefix {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            let system = system_drive
+                .and_then(|drive| drive.bytes().next())
+                .unwrap_or(b'C');
+            let drive = char::from(letter.to_ascii_uppercase());
+            (!letter.eq_ignore_ascii_case(&system), format!("{drive}:\\"))
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            (true, format!(r"\\{}\{}\", lower(server), lower(share)))
+        }
+        Prefix::Verbatim(name) => (true, format!(r"\\?\{}\", name.to_string_lossy())),
+        Prefix::DeviceNS(name) => (true, format!(r"\\.\{}\", name.to_string_lossy())),
     }
 }
 
@@ -475,6 +496,42 @@ mod tests {
         VPath::local(path).expect("a local path")
     }
 
+    #[test]
+    fn a_drive_or_a_share_is_one_volume_however_its_path_spells_it() {
+        use std::ffi::OsStr;
+
+        let volume = |prefix| prefix_volume(prefix, Some("C:"));
+        let (nas, share) = (OsStr::new("nas"), OsStr::new("share"));
+        // A drive, with `\\?\` or without, and its letter in either case.
+        assert_eq!(volume(Prefix::Disk(b'c')), (false, r"C:\".to_owned()));
+        assert_eq!(
+            volume(Prefix::VerbatimDisk(b'C')),
+            volume(Prefix::Disk(b'C'))
+        );
+        assert_eq!(
+            volume(Prefix::VerbatimDisk(b'e')),
+            (true, r"E:\".to_owned())
+        );
+        assert_eq!(
+            volume(Prefix::Disk(b'E')),
+            volume(Prefix::VerbatimDisk(b'e'))
+        );
+        // A server's share, with `\\?\UNC\` or without, its names in any case.
+        let on_nas = volume(Prefix::UNC(nas, share));
+        assert_eq!(on_nas, (true, r"\\nas\share\".to_owned()));
+        assert_eq!(volume(Prefix::VerbatimUNC(nas, share)), on_nas);
+        assert_eq!(
+            volume(Prefix::UNC(OsStr::new("NAS"), OsStr::new("Share"))),
+            on_nas
+        );
+        assert_ne!(volume(Prefix::UNC(nas, OsStr::new("other"))), on_nas);
+        // A volume known only by its name is one of its own.
+        assert_eq!(
+            volume(Prefix::Verbatim(OsStr::new("Volume{1}"))),
+            (true, r"\\?\Volume{1}\".to_owned())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_volume_is_where_the_system_mounts_it() {
@@ -528,7 +585,11 @@ mod tests {
         let share = volume(r"\\nas\share\a\b");
         assert!(share.0);
         assert_eq!(share, volume(r"\\nas\share\c"));
+        assert_eq!(share, volume(r"\\NAS\Share\d"));
         assert_ne!(share, volume(r"\\nas\other\a"));
+        // However the path is spelled.
+        assert_eq!(volume(r"\\?\C:\Users\a"), volume(r"C:\Users\a"));
+        assert_eq!(volume(r"\\?\UNC\nas\share\e"), share);
     }
 
     #[test]
