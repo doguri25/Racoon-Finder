@@ -1101,7 +1101,10 @@ fn an_edit_that_brings_the_target_back_keeps_the_cursor() {
 
     // A character typed at the start and taken back: the field says the target again, and the
     // cursor stays where the typing was.
-    chord(&window, &[&char::from(Key::Home).to_string()]);
+    // Left arrows rather than Home: on macOS Home does not move a text cursor.
+    for _ in "/home/me/작업/백업".chars() {
+        chord(&window, &[&char::from(Key::LeftArrow).to_string()]);
+    }
     chord(&window, &["x"]);
     chord(&window, &[&char::from(Key::Backspace).to_string()]);
     slint::platform::update_timers_and_animations();
