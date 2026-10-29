@@ -1,10 +1,15 @@
-// Main window: toolbar on top, the two panes below.
+// Main window: toolbar on top, the sidebar and the two panes below, notices in the lower
+// right corner. Every key goes to Rust first (`key`), except while a text field has focus.
 
+import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { ToolButton, TextButton } from "widgets.slint";
+import { ToolButton, TextButton, Toast } from "widgets.slint";
+import { FileRow } from "file-list.slint";
+import { Pane, PaneView, TabItem, Crumb } from "pane.slint";
+import { Sidebar, PlaceRow } from "sidebar.slint";
 
-export { Theme }
+export { Theme, FileRow, PaneView, TabItem, Crumb, PlaceRow }
 
 export component MainWindow inherits Window {
     // Window title and the name beside the logo; Rust passes the product name.
@@ -15,6 +20,67 @@ export component MainWindow inherits Window {
     // change that widens the toolbar must re-check both numbers.
     private property <bool> compact;
 
+    // The two panes; side 0 is the left one, 1 the right one.
+    in property <PaneView> left-pane;
+    in property <PaneView> right-pane;
+    // The sidebar's places: the favorites, then the drives.
+    in property <[PlaceRow]> places;
+    // Whether the active pane can go back, forward and up.
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <bool> can-up;
+    // How many rows PageUp and PageDown move (the panes are equally tall).
+    out property <int> page-rows: left.page-rows;
+
+    // A key pressed while no text field has focus: the key's text (a character of
+    // `Key` for a special key) and the modifiers. `true` when Rust used it.
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
+    // A toolbar button: back, forward, up, new-folder, copy, move, delete, rename, undo.
+    callback command(name: string);
+    callback pane-activated(side: int);
+    callback tab-selected(side: int, index: int);
+    callback tab-closed(side: int, index: int);
+    callback tab-added(side: int);
+    callback crumb-clicked(side: int, index: int);
+    callback path-entered(side: int, text: string);
+    callback sort(side: int, column: int);
+    callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
+    callback row-activated(side: int, index: int);
+    callback retry(side: int);
+    callback place-clicked(index: int);
+
+    // Shows pane `side`'s path as text to edit.
+    public function edit-path(side: int) {
+        if (side == 0) {
+            left.edit-path();
+        } else {
+            right.edit-path();
+        }
+    }
+
+    // Scrolls pane `side` so that row `index` shows whole.
+    public function scroll-to(side: int, index: int) {
+        if (side == 0) {
+            left.scroll-to(index);
+        } else {
+            right.scroll-to(index);
+        }
+    }
+
+    // A notice in the lower right corner for 5 seconds.
+    public function show-notice(text: string) {
+        root.notice = text;
+        notice-timer.start();
+        notice-timer.restart();
+    }
+
+    private property <string> notice;
+    // The standard widgets (scroll bars) follow the app's theme, not the system's.
+    private property <bool> dark: Theme.dark;
+    changed dark => {
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
     title: root.app-title;
     preferred-width: 1280px;
     preferred-height: 800px;
@@ -23,170 +89,343 @@ export component MainWindow inherits Window {
     background: Theme.bg;
     default-font-size: Theme.font-body;
 
+    forward-focus: keys;
+
     init => {
         root.compact = root.width < 1200px;
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
     }
     changed width => {
         root.compact = root.width < 1200px;
     }
 
-    VerticalLayout {
-        Rectangle {
-            background: Theme.panel;
+    keys := FocusScope {
+        key-pressed(event) => {
+            // A text field that has focus passes up the keys it does not use; they are not
+            // shortcuts while it is open.
+            if (left.editing || right.editing) {
+                return reject;
+            }
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt)) {
+                return accept;
+            }
+            reject
+        }
 
-            HorizontalLayout {
-                padding-left: Theme.gap-l;
-                padding-right: Theme.gap-l;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: Theme.gap-s;
-
-                HorizontalLayout {
-                    horizontal-stretch: 0;
-                    padding-right: Theme.gap-s;
-                    spacing: 10px;
-
-                    Icon {
-                        y: (parent.height - self.height) / 2;
-                        width: 26px;
-                        height: 26px;
-                        name: "logo";
-                        color: Theme.accent;
-                    }
-                    if !root.compact: Text {
-                        text: root.app-title;
-                        font-size: 15px;
-                        font-weight: 700;
-                        color: Theme.text;
-                        vertical-alignment: center;
-                    }
-                }
+        VerticalLayout {
+            Rectangle {
+                background: Theme.panel;
 
                 HorizontalLayout {
-                    spacing: Theme.gap-xs;
-
-                    ToolButton {
-                        icon: "back";
-                        label: "뒤로";
-                    }
-                    ToolButton {
-                        icon: "forward";
-                        label: "앞으로";
-                    }
-                    ToolButton {
-                        icon: "up";
-                        label: "위로";
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-
-                    Rectangle {
-                        width: 1px;
-                        height: 28px;
-                        background: Theme.border;
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: Theme.gap-xs;
-
-                    TextButton {
-                        compact: root.compact;
-                        icon: "new-folder";
-                        text: "새 폴더";
-                    }
-                    TextButton {
-                        compact: root.compact;
-                        icon: "copy";
-                        text: "복사…";
-                    }
-                    TextButton {
-                        compact: root.compact;
-                        icon: "move";
-                        text: "이동…";
-                    }
-                    TextButton {
-                        compact: root.compact;
-                        icon: "delete";
-                        text: "삭제";
-                    }
-                    TextButton {
-                        compact: root.compact;
-                        icon: "rename";
-                        text: "이름 바꾸기";
-                    }
-                    TextButton {
-                        compact: root.compact;
-                        icon: "undo";
-                        text: "되돌리기";
-                    }
-                }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-
-                // Place of the view menu.
-                ToolButton {
-                    icon: "list-view";
-                    label: "보기 방식";
-                }
-
-                // Place of the filter box.
-                Rectangle {
-                    min-width: 120px;
-                    preferred-width: 260px;
-                    max-width: 260px;
-                    border-width: 1px;
-                    border-color: Theme.border;
-                    border-radius: Theme.radius;
-                    background: Theme.bg;
+                    padding-left: Theme.gap-l;
+                    padding-right: Theme.gap-l;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: Theme.gap-s;
 
                     HorizontalLayout {
-                        padding-left: Theme.gap-m;
-                        padding-right: Theme.gap-m;
-                        spacing: Theme.gap-s;
+                        horizontal-stretch: 0;
+                        padding-right: Theme.gap-s;
+                        spacing: 10px;
 
                         Icon {
                             y: (parent.height - self.height) / 2;
-                            width: 18px;
-                            height: 18px;
-                            name: "search";
-                            color: Theme.muted;
+                            width: 26px;
+                            height: 26px;
+                            name: "logo";
+                            color: Theme.accent;
                         }
-                        Text {
-                            text: "이 폴더에서 거르기";
-                            color: Theme.faint;
+                        if !root.compact: Text {
+                            text: root.app-title;
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Theme.text;
                             vertical-alignment: center;
-                            overflow: elide;
                         }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.gap-xs;
+
+                        ToolButton {
+                            icon: "back";
+                            label: "뒤로";
+                            enabled: root.can-back;
+                            clicked => {
+                                root.command("back");
+                            }
+                        }
+                        ToolButton {
+                            icon: "forward";
+                            label: "앞으로";
+                            enabled: root.can-forward;
+                            clicked => {
+                                root.command("forward");
+                            }
+                        }
+                        ToolButton {
+                            icon: "up";
+                            label: "위로";
+                            enabled: root.can-up;
+                            clicked => {
+                                root.command("up");
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        Rectangle {
+                            width: 1px;
+                            height: 28px;
+                            background: Theme.border;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.gap-xs;
+
+                        TextButton {
+                            compact: root.compact;
+                            icon: "new-folder";
+                            text: "새 폴더";
+                            clicked => {
+                                root.command("new-folder");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "copy";
+                            text: "복사…";
+                            clicked => {
+                                root.command("copy");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "move";
+                            text: "이동…";
+                            clicked => {
+                                root.command("move");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "delete";
+                            text: "삭제";
+                            clicked => {
+                                root.command("delete");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "rename";
+                            text: "이름 바꾸기";
+                            clicked => {
+                                root.command("rename");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "undo";
+                            text: "되돌리기";
+                            clicked => {
+                                root.command("undo");
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    // Place of the view menu.
+                    ToolButton {
+                        icon: "list-view";
+                        label: "보기 방식";
+                    }
+
+                    // Place of the filter box.
+                    Rectangle {
+                        min-width: 120px;
+                        preferred-width: 260px;
+                        max-width: 260px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        border-radius: Theme.radius;
+                        background: Theme.bg;
+
+                        HorizontalLayout {
+                            padding-left: Theme.gap-m;
+                            padding-right: Theme.gap-m;
+                            spacing: Theme.gap-s;
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                width: 18px;
+                                height: 18px;
+                                name: "search";
+                                color: Theme.muted;
+                            }
+                            Text {
+                                text: "이 폴더에서 거르기";
+                                color: Theme.faint;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+
+            HorizontalLayout {
+                padding: Theme.gap-m;
+                spacing: Theme.gap-m;
+                vertical-stretch: 1;
+
+                Sidebar {
+                    min-width: 220px;
+                    preferred-width: 220px;
+                    max-width: 280px;
+                    horizontal-stretch: 0.1;
+                    places: root.places;
+                    place-clicked(index) => {
+                        root.place-clicked(index);
+                        keys.focus();
+                    }
+                }
+
+                left := Pane {
+                    horizontal-stretch: 1;
+                    min-width: 300px;
+                    label: "왼쪽 패널";
+                    view: root.left-pane;
+                    activated => {
+                        root.pane-activated(0);
+                        keys.focus();
+                    }
+                    tab-selected(index) => {
+                        root.tab-selected(0, index);
+                        keys.focus();
+                    }
+                    tab-closed(index) => {
+                        root.tab-closed(0, index);
+                        keys.focus();
+                    }
+                    tab-added => {
+                        root.tab-added(0);
+                        keys.focus();
+                    }
+                    crumb-clicked(index) => {
+                        root.crumb-clicked(0, index);
+                        keys.focus();
+                    }
+                    path-entered(text) => {
+                        keys.focus();
+                        root.path-entered(0, text);
+                    }
+                    edit-ended => {
+                        keys.focus();
+                    }
+                    sort(column) => {
+                        root.sort(0, column);
+                        keys.focus();
+                    }
+                    row-clicked(index, ctrl, shift) => {
+                        root.row-clicked(0, index, ctrl, shift);
+                        keys.focus();
+                    }
+                    row-activated(index) => {
+                        root.row-activated(0, index);
+                    }
+                    retry => {
+                        root.retry(0);
+                        keys.focus();
+                    }
+                }
+
+                right := Pane {
+                    horizontal-stretch: 1;
+                    min-width: 300px;
+                    label: "오른쪽 패널";
+                    view: root.right-pane;
+                    activated => {
+                        root.pane-activated(1);
+                        keys.focus();
+                    }
+                    tab-selected(index) => {
+                        root.tab-selected(1, index);
+                        keys.focus();
+                    }
+                    tab-closed(index) => {
+                        root.tab-closed(1, index);
+                        keys.focus();
+                    }
+                    tab-added => {
+                        root.tab-added(1);
+                        keys.focus();
+                    }
+                    crumb-clicked(index) => {
+                        root.crumb-clicked(1, index);
+                        keys.focus();
+                    }
+                    path-entered(text) => {
+                        keys.focus();
+                        root.path-entered(1, text);
+                    }
+                    edit-ended => {
+                        keys.focus();
+                    }
+                    sort(column) => {
+                        root.sort(1, column);
+                        keys.focus();
+                    }
+                    row-clicked(index, ctrl, shift) => {
+                        root.row-clicked(1, index, ctrl, shift);
+                        keys.focus();
+                    }
+                    row-activated(index) => {
+                        root.row-activated(1, index);
+                    }
+                    retry => {
+                        root.retry(1);
+                        keys.focus();
                     }
                 }
             }
 
+            // Place of the job panel: it takes room only while a job runs.
             Rectangle {
-                y: parent.height - self.height;
-                height: 1px;
-                background: Theme.border;
+                height: 0px;
             }
         }
+    }
 
-        HorizontalLayout {
-            padding: Theme.gap-m;
-            spacing: Theme.gap-m;
-            vertical-stretch: 1;
+    if root.notice != "": Toast {
+        width: min(self.preferred-width, root.width - 48px);
+        height: self.preferred-height;
+        x: root.width - self.width - 24px;
+        y: root.height - self.height - 24px;
+        message: root.notice;
+        closed => {
+            root.notice = "";
+            notice-timer.stop();
+        }
+    }
 
-            for side in ["왼쪽 패널", "오른쪽 패널"]: Rectangle {
-                horizontal-stretch: 1;
-                background: Theme.panel;
-                border-width: 1px;
-                border-color: Theme.border;
-                border-radius: Theme.radius;
-                accessible-role: groupbox;
-                accessible-label: side;
-            }
+    notice-timer := Timer {
+        interval: 5s;
+        running: false;
+        triggered => {
+            root.notice = "";
+            self.stop();
         }
     }
 }

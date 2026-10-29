@@ -4,13 +4,16 @@ use std::path::PathBuf;
 
 use slint::ComponentHandle;
 
+pub mod controller;
 pub mod format;
 pub mod history;
 pub mod keys;
 pub mod loader;
+pub mod open;
 pub mod pane;
 pub mod places;
 pub mod selection;
+pub mod ui_bridge;
 pub mod words;
 
 #[allow(
@@ -38,12 +41,16 @@ pub enum RunError {
 
 /// Shows the main window and runs the event loop until the window closes.
 ///
-/// `start` is the folder the left pane opens first (the app's first argument).
+/// `start` is the folder the left pane opens first (the app's first argument); without it the
+/// left pane opens the home folder. The right pane opens the documents folder, or home.
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
-    // Nothing opens `start` yet: the window has no folder panes so far.
-    drop(start);
     let window = MainWindow::new()?;
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
-    window.run()?;
+    let controller = controller::begin(&window, start);
+    let result = window.run();
+    // Stops the listings and the watches before the window goes.
+    drop(controller);
+    controller::end();
+    result?;
     Ok(())
 }

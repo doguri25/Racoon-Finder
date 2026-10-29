@@ -1,0 +1,141 @@
+// The sidebar: the user's folders under "즐겨찾기", the drives under "이 PC".
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// One place. A drive has a space line (`info`) and a bar filled to its used share (`fill`,
+// 0..1); a favorite has neither.
+export struct PlaceRow {
+    label: string,
+    info: string,
+    fill: float,
+    is-drive: bool,
+}
+
+component SectionHead inherits Rectangle {
+    in property <string> text;
+
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    Text {
+        x: 10px;
+        y: parent.height - self.height - 4px;
+        accessible-role: none;
+        text: root.text;
+        font-size: Theme.font-small;
+        font-weight: 700;
+        color: Theme.muted;
+    }
+}
+
+component PlaceButton inherits Rectangle {
+    in property <PlaceRow> place;
+    callback clicked();
+
+    min-height: root.place.is-drive ? 56px : 34px;
+    border-radius: Theme.radius;
+    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.place.label;
+    accessible-description: root.place.info;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 18px;
+            height: 18px;
+            name: root.place.is-drive ? "drive" : "folder";
+            color: root.place.is-drive ? Theme.text : Theme.folder;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+
+            Text {
+                accessible-role: none;
+                text: root.place.label;
+                color: Theme.text;
+                overflow: elide;
+            }
+            if root.place.is-drive: Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.border;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(root.place.fill, 0, 1);
+                    border-radius: 2px;
+                    background: Theme.accent;
+                }
+            }
+            if root.place.is-drive && root.place.info != "": Text {
+                accessible-role: none;
+                text: root.place.info;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    // The favorites first, then the drives.
+    in property <[PlaceRow]> places;
+    callback place-clicked(index: int);
+
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-large;
+    accessible-role: groupbox;
+    accessible-label: "장소";
+
+    ScrollView {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+
+        VerticalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-top: 12px;
+            padding-bottom: 12px;
+            spacing: 2px;
+            alignment: start;
+
+            for place[i] in root.places: VerticalLayout {
+                spacing: 2px;
+
+                // A head before the first favorite and before the first drive.
+                if i == 0 || place.is-drive != root.places[i - 1].is-drive: SectionHead {
+                    height: place.is-drive && i > 0 ? 36px : 24px;
+                    text: place.is-drive ? "이 PC" : "즐겨찾기";
+                }
+                PlaceButton {
+                    place: place;
+                    clicked => {
+                        root.place-clicked(i);
+                    }
+                }
+            }
+        }
+    }
+}

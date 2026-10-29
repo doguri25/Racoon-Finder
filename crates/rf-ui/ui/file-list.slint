@@ -1,0 +1,251 @@
+// The column heads and the rows of a folder listing. The rows are a virtualized ListView:
+// only the rows on screen exist as elements, so a folder of 100,000 items scrolls as freely
+// as one of ten.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// One row of the list, as Rust formats it.
+export struct FileRow {
+    name: string,
+    size: string,
+    modified: string,
+    kind: string,
+    is-dir: bool,
+    is-link: bool,
+    selected: bool,
+    hidden: bool,
+}
+
+// A column head: its name, and an arrow on the column the list is sorted by.
+component HeadCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> sorted;
+    in property <bool> ascending;
+    in property <bool> align-end;
+    callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    HorizontalLayout {
+        alignment: root.align-end ? end : start;
+        spacing: 2px;
+
+        Text {
+            accessible-role: none;
+            text: root.text;
+            font-size: Theme.font-small;
+            font-weight: 500;
+            color: touch.has-hover ? Theme.text : Theme.muted;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.sorted: Icon {
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            name: root.ascending ? "sort-up" : "sort-down";
+            color: Theme.muted;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component FileList inherits Rectangle {
+    in property <[FileRow]> rows;
+    // The keyboard cursor's row, or -1.
+    in property <int> cursor: -1;
+    // The column the rows are sorted by: 0 name, 1 size, 2 modified, 3 kind.
+    in property <int> sort-key;
+    in property <bool> sort-ascending: true;
+    // Whether this list's pane has the keyboard; the cursor frame shows only then.
+    in property <bool> active;
+    // How many whole rows fit on screen, for PageUp and PageDown.
+    out property <int> page-rows: max(1, floor(list.visible-height / Theme.row-height));
+
+    callback sort(column: int);
+    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-activated(index: int);
+
+    // Scrolls as little as needed to show row `index` whole.
+    public function scroll-to(index: int) {
+        if (index < 0) {
+            return;
+        }
+        let top = index * Theme.row-height;
+        if (top + list.content-y < 0) {
+            list.content-y = -top;
+        } else if (top + Theme.row-height + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - top - Theme.row-height;
+        }
+    }
+
+    // Column geometry, shared by the heads and the rows. The columns are placed by hand, not
+    // by a layout, so that which ones show can follow the width without a binding loop. As the
+    // list narrows, the kind goes first, then the date, then the size.
+    private property <length> pad: 12px;
+    private property <length> gap: 12px;
+    private property <length> icon-room: 26px;
+    private property <length> name-min: 140px;
+    private property <length> size-w: 76px;
+    private property <length> date-w: 124px;
+    private property <length> kind-w: 108px;
+    private property <bool> show-kind: root.width >= 2 * root.pad + root.name-min + 3 * root.gap + root.size-w + root.date-w + root.kind-w;
+    private property <bool> show-date: root.width >= 2 * root.pad + root.name-min + 2 * root.gap + root.size-w + root.date-w;
+    private property <bool> show-size: root.width >= 2 * root.pad + root.name-min + root.gap + root.size-w;
+    private property <length> kind-x: root.width - root.pad - root.kind-w;
+    private property <length> date-x: (root.show-kind ? root.kind-x - root.gap : root.width - root.pad) - root.date-w;
+    private property <length> size-x: (root.show-date ? root.date-x - root.gap : root.show-kind ? root.kind-x - root.gap : root.width - root.pad) - root.size-w;
+    private property <length> name-end: root.show-size ? root.size-x - root.gap : root.width - root.pad;
+
+    VerticalLayout {
+        Rectangle {
+            height: 32px;
+
+            HeadCell {
+                x: root.pad;
+                width: root.name-end - root.pad;
+                text: "이름";
+                sorted: root.sort-key == 0;
+                ascending: root.sort-ascending;
+                clicked => {
+                    root.sort(0);
+                }
+            }
+            if root.show-size: HeadCell {
+                x: root.size-x;
+                width: root.size-w;
+                text: "크기";
+                align-end: true;
+                sorted: root.sort-key == 1;
+                ascending: root.sort-ascending;
+                clicked => {
+                    root.sort(1);
+                }
+            }
+            if root.show-date: HeadCell {
+                x: root.date-x;
+                width: root.date-w;
+                text: "수정한 날짜";
+                sorted: root.sort-key == 2;
+                ascending: root.sort-ascending;
+                clicked => {
+                    root.sort(2);
+                }
+            }
+            if root.show-kind: HeadCell {
+                x: root.kind-x;
+                width: root.kind-w;
+                text: "종류";
+                sorted: root.sort-key == 3;
+                ascending: root.sort-ascending;
+                clicked => {
+                    root.sort(3);
+                }
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        list := ListView {
+            accessible-label: "항목 목록";
+
+            for row[i] in root.rows: Rectangle {
+                height: Theme.row-height;
+                background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                accessible-role: list-item;
+                accessible-label: row.name;
+                accessible-item-index: i;
+                accessible-item-selectable: true;
+                accessible-item-selected: row.selected;
+                accessible-action-default => {
+                    root.row-activated(i);
+                }
+
+                touch := TouchArea {
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                        }
+                    }
+                    double-clicked => {
+                        root.row-activated(i);
+                    }
+                }
+
+                // Hidden items show at half strength.
+                Rectangle {
+                    opacity: row.hidden ? 0.5 : 1;
+
+                    Icon {
+                        x: root.pad;
+                        y: (parent.height - self.height) / 2;
+                        width: 18px;
+                        height: 18px;
+                        name: row.is-link ? "link" : row.is-dir ? "folder" : "file";
+                        color: row.is-dir ? Theme.folder : Theme.muted;
+                    }
+                    Text {
+                        x: root.pad + root.icon-room;
+                        width: root.name-end - self.x;
+                        height: parent.height;
+                        text: row.name;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if root.show-size: Text {
+                        x: root.size-x;
+                        width: root.size-w;
+                        height: parent.height;
+                        text: row.size;
+                        color: Theme.muted;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if root.show-date: Text {
+                        x: root.date-x;
+                        width: root.date-w;
+                        height: parent.height;
+                        text: row.modified;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if root.show-kind: Text {
+                        x: root.kind-x;
+                        width: root.kind-w;
+                        height: parent.height;
+                        text: row.kind;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                if root.active && i == root.cursor: Rectangle {
+                    x: 2px;
+                    width: parent.width - 4px;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    border-radius: 4px;
+                }
+            }
+        }
+    }
+}

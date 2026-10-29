@@ -1,0 +1,501 @@
+// One folder pane: the tab strip, the path row, the file list and the status bar.
+
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { FileList, FileRow } from "file-list.slint";
+
+export struct TabItem {
+    title: string,
+    active: bool,
+}
+
+// One piece of the path row; `index` counts from the root (0).
+export struct Crumb {
+    label: string,
+    index: int,
+}
+
+// Everything a pane shows. `rows` is a Rust model updated row by row; the rest is set as a
+// whole.
+export struct PaneView {
+    tabs: [TabItem],
+    crumbs: [Crumb],
+    path-text: string,
+    rows: [FileRow],
+    // The keyboard cursor's row, or -1.
+    cursor: int,
+    // 0 name, 1 size, 2 modified, 3 kind.
+    sort-key: int,
+    sort-ascending: bool,
+    status: string,
+    // A listing is on its way.
+    loading: bool,
+    // Why the folder could not be listed; empty when it could.
+    error: string,
+    // The pane has the keyboard.
+    active: bool,
+}
+
+// Small square icon button inside a tab or a strip.
+component StripButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <length> icon-size: 16px;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Icon {
+        width: root.icon-size;
+        height: root.icon-size;
+        name: root.icon;
+        color: Theme.muted;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component TabButton inherits Rectangle {
+    in property <TabItem> tab;
+    in property <bool> closable;
+    callback selected();
+    callback closed();
+
+    height: 34px;
+    min-width: 72px;
+    max-width: 200px;
+    horizontal-stretch: 0;
+    border-top-left-radius: Theme.radius;
+    border-top-right-radius: Theme.radius;
+    background: root.tab.active ? Theme.panel : touch.has-hover ? Theme.border : transparent;
+    accessible-role: AccessibleRole.tab;
+    accessible-label: root.tab.title;
+    accessible-item-selected: root.tab.active;
+    accessible-action-default => {
+        root.selected();
+    }
+
+    // Under the close button, which takes its own clicks.
+    touch := TouchArea {
+        clicked => {
+            root.selected();
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.up && event.button == PointerEventButton.middle) {
+                root.closed();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: root.closable ? 4px : 12px;
+        spacing: 6px;
+
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            name: "folder";
+            color: Theme.folder;
+        }
+        Text {
+            accessible-role: none;
+            text: root.tab.title;
+            color: root.tab.active ? Theme.text : Theme.muted;
+            font-weight: root.tab.active ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.closable: VerticalLayout {
+            alignment: center;
+
+            StripButton {
+                width: 22px;
+                height: 22px;
+                icon: "close";
+                icon-size: 14px;
+                label: "탭 닫기";
+                clicked => {
+                    root.closed();
+                }
+            }
+        }
+    }
+}
+
+component CrumbButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> current;
+    callback clicked();
+
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+
+        Text {
+            accessible-role: none;
+            text: root.text;
+            color: Theme.text;
+            font-weight: root.current ? 700 : 400;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Pane inherits Rectangle {
+    in property <PaneView> view;
+    // The pane's name for screen readers.
+    in property <string> label;
+    // The path row shows a text field instead of the crumbs.
+    out property <bool> editing;
+    out property <int> page-rows: files.page-rows;
+
+    // Any click on the pane that nothing else takes.
+    callback activated();
+    callback tab-selected(index: int);
+    callback tab-closed(index: int);
+    callback tab-added();
+    callback crumb-clicked(index: int);
+    // Enter in the path field.
+    callback path-entered(text: string);
+    // The path field closed without Enter (Esc, or a click elsewhere).
+    callback edit-ended();
+    callback sort(column: int);
+    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-activated(index: int);
+    callback retry();
+
+    // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs).
+    public function edit-path() {
+        root.editing = true;
+        path-input.text = root.view.path-text;
+        path-input.focus();
+        path-input.select-all();
+    }
+
+    public function scroll-to(index: int) {
+        files.scroll-to(index);
+    }
+
+    // "불러오는 중…" shows only once a listing has taken 0.3 s, so a quick one never flashes it.
+    private property <bool> loading: root.view.loading;
+    private property <bool> loading-shown;
+    changed loading => {
+        root.loading-shown = false;
+    }
+
+    background: Theme.panel;
+    border-radius: Theme.radius-large;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    Timer {
+        interval: 300ms;
+        running: root.loading && !root.loading-shown;
+        triggered => {
+            root.loading-shown = true;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+
+    VerticalLayout {
+        // Tab strip.
+        Rectangle {
+            background: Theme.raised;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 6px;
+                spacing: 2px;
+
+                for tab[i] in root.view.tabs: TabButton {
+                    tab: tab;
+                    closable: root.view.tabs.length > 1;
+                    selected => {
+                        root.tab-selected(i);
+                    }
+                    closed => {
+                        root.tab-closed(i);
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+
+                    StripButton {
+                        icon: "plus";
+                        label: "새 탭";
+                        clicked => {
+                            root.tab-added();
+                        }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // Path row: the crumbs, or the path as text while editing.
+        Rectangle {
+            height: 38px;
+            accessible-role: groupbox;
+            accessible-label: "경로";
+
+            // A click beside the crumbs edits the path.
+            TouchArea {
+                visible: !root.editing;
+                clicked => {
+                    root.edit-path();
+                }
+            }
+
+            crumb-view := Rectangle {
+                x: 6px;
+                width: parent.width - 12px;
+                visible: !root.editing;
+                clip: true;
+
+                // Too long for the row, the path keeps its last folders in view.
+                crumb-strip := HorizontalLayout {
+                    x: min(0px, crumb-view.width - self.preferred-width);
+                    width: self.preferred-width;
+                    alignment: start;
+                    spacing: 0px;
+
+                    for crumb[i] in root.view.crumbs: HorizontalLayout {
+                        spacing: 0px;
+
+                        if i > 0: Text {
+                            text: "›";
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+
+                            CrumbButton {
+                                text: crumb.label;
+                                current: i == root.view.crumbs.length - 1;
+                                clicked => {
+                                    root.crumb-clicked(crumb.index);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fades out the folders cut off on the left.
+                if crumb-strip.x < 0: Rectangle {
+                    x: 0;
+                    width: 28px;
+                    background: @linear-gradient(90deg, Theme.panel 30%, Theme.panel.transparentize(1) 100%);
+                }
+            }
+
+            Rectangle {
+                x: 8px;
+                y: 4px;
+                width: parent.width - 16px;
+                height: parent.height - 8px;
+                visible: root.editing;
+                border-width: 1px;
+                border-color: Theme.accent;
+                border-radius: 6px;
+                background: Theme.bg;
+
+                path-input := TextInput {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.text;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-role: text-input;
+                    accessible-label: "경로";
+                    accepted => {
+                        root.editing = false;
+                        root.path-entered(self.text);
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.editing = false;
+                            root.edit-ended();
+                            return accept;
+                        }
+                        reject
+                    }
+                    changed has-focus => {
+                        if (!self.has-focus && root.editing) {
+                            root.editing = false;
+                            root.edit-ended();
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The list, or why there is none.
+        Rectangle {
+            vertical-stretch: 1;
+
+            files := FileList {
+                visible: root.view.error == "";
+                rows: root.view.rows;
+                cursor: root.view.cursor;
+                sort-key: root.view.sort-key;
+                sort-ascending: root.view.sort-ascending;
+                active: root.view.active;
+                sort(column) => {
+                    root.sort(column);
+                }
+                row-clicked(index, ctrl, shift) => {
+                    root.row-clicked(index, ctrl, shift);
+                }
+                row-activated(index) => {
+                    root.row-activated(index);
+                }
+            }
+
+            if root.view.loading && root.loading-shown && root.view.rows.length == 0 && root.view.error == "": Text {
+                y: 64px;
+                height: 24px;
+                text: "불러오는 중…";
+                color: Theme.muted;
+                horizontal-alignment: center;
+            }
+
+            if root.view.error != "": VerticalLayout {
+                alignment: center;
+                padding: Theme.gap-l;
+                spacing: Theme.gap-s;
+
+                Text {
+                    text: "이 폴더를 열 수 없습니다";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.view.error;
+                    color: Theme.muted;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    padding-top: Theme.gap-s;
+
+                    retry-button := Rectangle {
+                        height: 32px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        border-radius: Theme.radius;
+                        background: retry-touch.pressed ? Theme.border : retry-touch.has-hover ? Theme.raised : transparent;
+                        accessible-role: button;
+                        accessible-label: "다시 시도";
+                        accessible-action-default => {
+                            root.retry();
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Theme.gap-l;
+                            padding-right: Theme.gap-l;
+
+                            Text {
+                                accessible-role: none;
+                                text: "다시 시도";
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        retry-touch := TouchArea {
+                            clicked => {
+                                root.retry();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Status bar.
+        Rectangle {
+            height: 32px;
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            Text {
+                x: 16px;
+                width: parent.width - 32px;
+                text: root.view.status;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // The frame goes over the content: 2px accent on the pane with the keyboard, else 1px.
+    Rectangle {
+        border-radius: Theme.radius-large;
+        border-width: root.view.active ? 2px : 1px;
+        border-color: root.view.active ? Theme.accent : Theme.border;
+    }
+}

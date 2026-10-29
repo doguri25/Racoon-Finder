@@ -9,7 +9,7 @@ use rf_jobs::{
     DeleteMethod, FailureReason, IssueKind, JobKind, JobSpec, JobState, Outcome, Severity,
 };
 
-use crate::format::{Rounding, format_size_rounded};
+use crate::format::{Rounding, format_size, format_size_rounded};
 
 /// What a job does, as the user sees it: a [`JobKind`] with a delete told apart by where the
 /// items go.
@@ -112,6 +112,22 @@ pub fn error_kind(kind: ErrorKind) -> &'static str {
         // `Other`, and any kind added after this was written.
         _ => "알 수 없는 오류가 났습니다",
     }
+}
+
+/// The notice for an item that could not be opened or a folder that could not be shown:
+/// `열 수 없습니다: 권한이 없습니다`.
+pub fn cannot_open(kind: ErrorKind) -> String {
+    format!("열 수 없습니다: {}", error_kind(kind))
+}
+
+/// The space line of a drive in the sidebar: `128 GB 남음 / 512 GB`. The free space is
+/// rounded down, so a full drive never reads as having room.
+pub fn drive_space(available: u64, total: u64) -> String {
+    format!(
+        "{} 남음 / {}",
+        format_size_rounded(available, Rounding::Down),
+        format_size(total)
+    )
 }
 
 /// Why a job refused an item, or part of one: one sentence for each rule of the jobs, or for
@@ -304,6 +320,27 @@ mod tests {
         ErrorKind::Cancelled,
         ErrorKind::Other,
     ];
+
+    #[test]
+    fn cannot_open_names_the_reason() {
+        assert_eq!(
+            cannot_open(ErrorKind::PermissionDenied),
+            "열 수 없습니다: 권한이 없습니다"
+        );
+        assert_eq!(
+            cannot_open(ErrorKind::NotFound),
+            "열 수 없습니다: 찾을 수 없습니다"
+        );
+    }
+
+    #[test]
+    fn drive_space_matches_mockup() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(drive_space(128 * GB, 512 * GB), "128 GB 남음 / 512 GB");
+        assert_eq!(drive_space(212 * GB, 1024 * GB), "212 GB 남음 / 1 TB");
+        // Free space just below 10 GB does not round up to 10 GB.
+        assert_eq!(drive_space(10 * GB - 1, 64 * GB), "9.9 GB 남음 / 64 GB");
+    }
 
     #[test]
     fn every_error_kind_has_words() {
