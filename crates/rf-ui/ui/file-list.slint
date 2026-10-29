@@ -136,8 +136,7 @@ export component FileList inherits Rectangle {
 
     // Scrolls a step sideways (← and →), as far as the columns reach.
     public function scroll-sideways(right: bool) {
-        let most = max(0px, head.content-width - list.visible-width);
-        list.content-x = max(-most, min(0px, list.content-x + (right ? -80px : 80px)));
+        list.content-x = max(-root.overflow, min(0px, list.content-x + (right ? -80px : 80px)));
     }
 
     // Fits every column to its texts in the rows on screen (모든 열 너비 맞추기).
@@ -146,6 +145,9 @@ export component FileList inherits Rectangle {
     }
 
     settle := ListSettle { }
+
+    // How far the columns reach past the list's right edge; 0 while they fit.
+    private property <length> overflow: max(0px, head.content-width - list.visible-width);
 
     // The room before a row's name: its icon.
     private property <length> icon-room: 26px;
@@ -217,6 +219,9 @@ export component FileList inherits Rectangle {
                         width: parent.width;
                         height: parent.height;
                         accessible-label: "항목 목록";
+                        // The list's own sideways bar would lie over its last row: the one
+                        // under the rows takes its place.
+                        horizontal-scrollbar-policy: always-off;
                         changed content-y => {
                             let y = settle.corrected(self.content-y);
                             if (y != self.content-y) {
@@ -343,6 +348,44 @@ export component FileList inherits Rectangle {
                 frame: drop.has-drag && drop.target-row < 0;
                 label: root.drag-label;
                 refusal: root.refusal;
+            }
+        }
+
+        // The sideways scroll bar, while the columns are wider than the list: under the rows, not
+        // over the last of them as the list's own would lie. Dragged, it scrolls the list; a
+        // press beside its thumb moves the thumb there.
+        if root.overflow > 0: Rectangle {
+            height: 10px;
+
+            bar := TouchArea {
+                // The list's scroll when the press came.
+                property <length> from;
+                function scroll-to(x: length) {
+                    list.content-x = max(-root.overflow, min(0px, x));
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        let thumb-x = thumb.x;
+                        if (self.mouse-x < thumb-x || self.mouse-x > thumb-x + thumb.width) {
+                            self.scroll-to(-(self.mouse-x - thumb.width / 2) / (self.width - thumb.width) * root.overflow);
+                        }
+                        self.from = list.content-x;
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        self.scroll-to(self.from - (self.mouse-x - self.pressed-x) / max(1px, self.width - thumb.width) * root.overflow);
+                    }
+                }
+            }
+
+            thumb := Rectangle {
+                width: max(32px, parent.width * list.visible-width / head.content-width);
+                x: (parent.width - self.width) * (-list.content-x / root.overflow);
+                y: 3px;
+                height: 4px;
+                border-radius: 2px;
+                background: bar.has-hover || bar.pressed ? Theme.muted : Theme.border;
             }
         }
     }

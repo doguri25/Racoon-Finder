@@ -1275,6 +1275,20 @@ fn the_arrows_scroll_details_sideways() {
     let right = list.absolute_position().x + list.size().width;
     let (last_at, last_size) = head_box(&window, "속성");
     assert_eq!(last_at.x + last_size.width + 12.0, right);
+
+    // The bar under the rows: a press at its left end scrolls back to the start, a drag of its
+    // thumb to the right as far as the end.
+    let bar_y = list.absolute_position().y + list.size().height + 5.0;
+    let left = list.absolute_position().x;
+    pointer(&window, "press", LogicalPosition::new(left + 2.0, bar_y));
+    pointer(&window, "release", LogicalPosition::new(left + 2.0, bar_y));
+    assert_eq!(size_x(), at);
+    pointer(&window, "press", LogicalPosition::new(left + 10.0, bar_y));
+    pointer(&window, "move", LogicalPosition::new(left + 60.0, bar_y));
+    pointer(&window, "move", LogicalPosition::new(right, bar_y));
+    pointer(&window, "release", LogicalPosition::new(right, bar_y));
+    let (last_at, last_size) = head_box(&window, "속성");
+    assert_eq!(last_at.x + last_size.width + 12.0, right);
 }
 
 #[test]
