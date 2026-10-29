@@ -94,12 +94,14 @@ export component FileList inherits Rectangle {
     // by a layout, so that which ones show can follow the width without a binding loop. As the
     // list narrows, the kind goes first, then the date, then the size.
     private property <length> pad: 12px;
-    private property <length> gap: 12px;
+    private property <length> gap: 10px;
     private property <length> icon-room: 26px;
-    private property <length> name-min: 140px;
-    private property <length> size-w: 76px;
-    private property <length> date-w: 124px;
-    private property <length> kind-w: 108px;
+    // All four columns fit a pane of the default 1280px window (about 494px wide); the date
+    // column holds the widest `2026-10-28 22:08`.
+    private property <length> name-min: 120px;
+    private property <length> size-w: 72px;
+    private property <length> date-w: 126px;
+    private property <length> kind-w: 104px;
     private property <bool> show-kind: root.width >= 2 * root.pad + root.name-min + 3 * root.gap + root.size-w + root.date-w + root.kind-w;
     private property <bool> show-date: root.width >= 2 * root.pad + root.name-min + 2 * root.gap + root.size-w + root.date-w;
     private property <bool> show-size: root.width >= 2 * root.pad + root.name-min + root.gap + root.size-w;

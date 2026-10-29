@@ -187,7 +187,8 @@ export component Pane inherits Rectangle {
     callback crumb-clicked(index: int);
     // Enter in the path field.
     callback path-entered(text: string);
-    // The path field closed without Enter (Esc, or a click elsewhere).
+    // Esc closed the path field. (A field that loses focus closes silently: the focus stays
+    // where the click put it.)
     callback edit-ended();
     callback sort(column: int);
     callback row-clicked(index: int, ctrl: bool, shift: bool);
@@ -283,10 +284,11 @@ export component Pane inherits Rectangle {
             accessible-role: groupbox;
             accessible-label: "경로";
 
-            // A click beside the crumbs edits the path.
+            // A click beside the crumbs makes the pane active and edits the path.
             TouchArea {
                 visible: !root.editing;
                 clicked => {
+                    root.activated();
                     root.edit-path();
                 }
             }
@@ -367,10 +369,11 @@ export component Pane inherits Rectangle {
                         }
                         reject
                     }
+                    // Focus went elsewhere (a click on the other pane's path, a row, a
+                    // tab): the field closes and leaves the focus where it went.
                     changed has-focus => {
                         if (!self.has-focus && root.editing) {
                             root.editing = false;
-                            root.edit-ended();
                         }
                     }
                 }

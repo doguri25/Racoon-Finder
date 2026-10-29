@@ -3,12 +3,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
 use rf_core::{Entry, EntryKind, VPath};
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
-use rf_ui::ui_bridge::PaneModels;
-use rf_ui::{MainWindow, PlaceRow, Theme};
+use rf_ui::selection::Selection;
+use rf_ui::ui_bridge::{FileRows, PaneModels};
+use rf_ui::{MainWindow, PaneView, PlaceRow, Theme};
 use rf_vfs::VisibilityFilter;
 use slint::platform::{Key, WindowEvent};
 use slint::{Color, ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
@@ -152,13 +153,28 @@ fn key_callback_reaches_rust() {
     assert_eq!(seen.borrow().last(), Some(&(down, false, false, false)));
 }
 
+/// Presses and releases `keys` in order, then releases them in reverse: `[Control, "t"]` is
+/// Ctrl+T.
+fn chord(window: &MainWindow, keys: &[&str]) {
+    for key in keys {
+        window.window().dispatch_event(WindowEvent::KeyPressed {
+            text: (*key).into(),
+        });
+    }
+    for key in keys.iter().rev() {
+        window.window().dispatch_event(WindowEvent::KeyReleased {
+            text: (*key).into(),
+        });
+    }
+}
+
 #[test]
 fn keys_go_to_the_path_field_while_it_is_open() {
     let window = window();
-    let seen = Rc::new(RefCell::new(0));
+    let seen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&seen);
-    window.on_key(move |_, _, _, _| {
-        *record.borrow_mut() += 1;
+    window.on_key(move |text, ctrl, _, _| {
+        record.borrow_mut().push((text.to_string(), ctrl));
         true
     });
     let entered = Rc::new(RefCell::new(None));
@@ -166,22 +182,69 @@ fn keys_go_to_the_path_field_while_it_is_open() {
     window.on_path_entered(move |side, text| {
         *record.borrow_mut() = Some((side, text.to_string()));
     });
+    let control = char::from(Key::Control).to_string();
+    let down = char::from(Key::DownArrow).to_string();
+    let enter = char::from(Key::Return).to_string();
+
+    // Without the field, Ctrl+T and Down are shortcuts.
+    chord(&window, &[&control, "t"]);
+    chord(&window, &[&down]);
+    let shortcuts: Vec<_> = seen
+        .borrow_mut()
+        .drain(..)
+        .filter(|(text, _)| *text != control)
+        .collect();
+    assert_eq!(shortcuts, [("t".to_owned(), true), (down.clone(), false)]);
 
     let mut view = window.get_right_pane();
     view.path_text = "/start".into();
     window.set_right_pane(view);
     window.invoke_edit_path(1);
-    for text in ["x".into(), char::from(Key::Return).to_string()] {
-        window.window().dispatch_event(WindowEvent::KeyPressed {
-            text: text.clone().into(),
-        });
-        window
-            .window()
-            .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
-    }
+    // The field takes the text; the keys it does not use are not shortcuts while it is open.
+    chord(&window, &["x"]);
+    chord(&window, &[&control, "t"]);
+    chord(&window, &[&down]);
+    assert_eq!(seen.borrow().as_slice(), []);
+    chord(&window, &[&enter]);
     // The field had the whole path selected, so the typed text replaced it.
     assert_eq!(*entered.borrow(), Some((1, "x".to_owned())));
-    assert_eq!(*seen.borrow(), 0);
+    assert_eq!(seen.borrow().as_slice(), []);
+}
+
+#[test]
+fn rows_that_come_and_go_reach_the_list() {
+    let window = window();
+    let rows = Rc::new(FileRows::default());
+    let names = |list: &[&str]| -> Vec<Entry> {
+        list.iter()
+            .map(|name| entry(name, EntryKind::File, 1))
+            .collect()
+    };
+    let none = Selection::default();
+    rows.sync(&names(&["a.txt", "b.txt", "c.txt"]), &none);
+    window.set_left_pane(PaneView {
+        rows: ModelRc::from(Rc::clone(&rows)),
+        ..PaneView::default()
+    });
+    // The rows the left list draws, in their order.
+    let drawn = || -> Vec<String> {
+        let mut items: Vec<(usize, String)> = window
+            .root_element()
+            .query_descendants()
+            .match_accessible_role(AccessibleRole::ListItem)
+            .find_all()
+            .into_iter()
+            .filter_map(|row| Some((row.accessible_item_index()?, row.accessible_label()?.into())))
+            .collect();
+        items.sort();
+        items.into_iter().map(|(_, label)| label).collect()
+    };
+    assert_eq!(drawn(), ["a.txt", "b.txt", "c.txt"]);
+
+    // Another app adds one file and removes another: the model reports the two rows, and the
+    // list draws the new set without a new view.
+    rows.sync(&names(&["a.txt", "ab.txt", "c.txt"]), &none);
+    assert_eq!(drawn(), ["a.txt", "ab.txt", "c.txt"]);
 }
 
 #[test]

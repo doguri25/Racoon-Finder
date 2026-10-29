@@ -78,10 +78,16 @@ pub fn end() {
     drop(controller);
 }
 
-/// Runs `f` on a new thread. A thread that cannot start leaves its work undone: the window
-/// stays as it is (the system is out of threads).
+/// Runs `f` on a new thread. A thread that cannot start (the system is out of threads or
+/// memory) leaves its work undone, and a notice says so.
 fn spawn_worker(name: &str, f: impl FnOnce() + Send + 'static) {
-    let _ = std::thread::Builder::new().name(name.to_owned()).spawn(f);
+    if std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(f)
+        .is_err()
+    {
+        post(|c| c.notice(words::background_failed()));
+    }
 }
 
 /// The pane a callback's `side` names: 1 is the right one, anything else the left one.
@@ -304,6 +310,13 @@ impl Controller {
                 Effect::OpenFile(file) => open::open_file(file, |kind| {
                     post(move |c| c.notice(&words::cannot_open(kind)));
                 }),
+                Effect::ReloadLater {
+                    generation,
+                    path,
+                    after,
+                } => slint::Timer::single_shot(after, move || {
+                    with(|c| c.update(|state| state.reload_due(generation, &path, Instant::now())));
+                }),
                 Effect::Notice(_) | Effect::EditPath(_) | Effect::ScrollTo { .. } => {
                     on_screen.push(effect);
                 }
@@ -325,6 +338,7 @@ impl Controller {
                 Effect::Load(_)
                 | Effect::FindExisting { .. }
                 | Effect::Follow { .. }
+                | Effect::ReloadLater { .. }
                 | Effect::OpenFile(_) => {}
             }
         }

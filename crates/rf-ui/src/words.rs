@@ -122,6 +122,13 @@ pub fn cannot_open(kind: ErrorKind) -> String {
     format!("열 수 없습니다: {}", error_kind(kind))
 }
 
+/// The notice when the system could not start the work behind part of the window (it is out
+/// of threads or memory): the sidebar, the first folders, or where to go from a vanished
+/// folder.
+pub fn background_failed() -> &'static str {
+    "시스템 자원이 부족해 일부 내용을 불러오지 못했습니다"
+}
+
 /// The space line of a drive in the sidebar: `128 GB 남음 / 512 GB`. The free space is
 /// rounded down, so a full drive never reads as having room.
 pub fn drive_space(available: u64, total: u64) -> String {
@@ -137,7 +144,8 @@ pub fn drive_space(available: u64, total: u64) -> String {
 /// `items` is the number of rows and `selected` the number of selected ones; the selection
 /// part shows only when there is one. `selected_bytes` is the size of the selected files, and
 /// `None` when only folders or links are selected, which have no size to add up. `free` is
-/// the space left on the volume, shown once known.
+/// the space left on the volume, shown once known and rounded down like the sidebar's
+/// [`drive_space`], so the two never show different numbers for the same volume.
 pub fn status_line(
     items: usize,
     selected: usize,
@@ -151,7 +159,10 @@ pub fn status_line(
         (count, None) => parts.push(format!("선택 {count}개")),
     }
     if let Some(free) = free {
-        parts.push(format!("남은 공간 {}", format_size(free)));
+        parts.push(format!(
+            "남은 공간 {}",
+            format_size_rounded(free, Rounding::Down)
+        ));
     }
     parts.join(" · ")
 }
@@ -385,6 +396,10 @@ mod tests {
             cannot_open(ErrorKind::NotFound),
             "열 수 없습니다: 찾을 수 없습니다"
         );
+        assert_eq!(
+            background_failed(),
+            "시스템 자원이 부족해 일부 내용을 불러오지 못했습니다"
+        );
     }
 
     #[test]
@@ -404,6 +419,13 @@ mod tests {
             "항목 9개 · 남은 공간 212 GB"
         );
         assert_eq!(status_line(0, 0, None, None), "항목 0개");
+        // Free space rounds down, as in the sidebar: 4.66 GB is 4.6 GB in both places.
+        let free = 4 * GB + 2 * GB / 3;
+        assert_eq!(
+            status_line(1, 0, None, Some(free)),
+            "항목 1개 · 남은 공간 4.6 GB"
+        );
+        assert!(drive_space(free, 64 * GB).starts_with("4.6 GB 남음"));
         assert_eq!(
             status_line(3, 3, Some(0), None),
             "항목 3개 · 선택 3개 (0 바이트)"

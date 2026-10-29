@@ -44,6 +44,14 @@ pub enum Effect {
     Follow { generation: u64, link: VPath },
     /// Open the file with the system's default app.
     OpenFile(VPath),
+    /// The folder of the tab with `generation` came back after its watch ended, within
+    /// [`AUTO_RELOAD_GAP`] of its last automatic reload: call [`AppState::reload_due`] after
+    /// `after` (a one-shot timer on the UI thread).
+    ReloadLater {
+        generation: u64,
+        path: VPath,
+        after: Duration,
+    },
     /// Show a notice in the corner of the window.
     Notice(String),
     /// Show the path of pane `side` as text to edit.
@@ -63,6 +71,9 @@ pub struct AppState {
     home: Option<VPath>,
     /// When each folder was last reloaded because its watch ended ([`AUTO_RELOAD_GAP`]).
     auto_reloads: HashMap<VPath, Instant>,
+    /// The tabs, by generation, with a reload waiting for its gap ([`Effect::ReloadLater`]):
+    /// one at most each.
+    pending_reloads: HashSet<u64>,
 }
 
 impl AppState {
@@ -78,6 +89,7 @@ impl AppState {
             show_hidden: filter.show_hidden,
             home,
             auto_reloads: HashMap::new(),
+            pending_reloads: HashSet::new(),
         };
         (
             state,
@@ -302,8 +314,10 @@ impl AppState {
     /// Takes where the tab with `generation`, whose folder `path` vanished, can go: `found`,
     /// the nearest folder of `path` that is still there, or home when none is. A tab that has
     /// moved on since takes nothing. When `found` is `path` itself (the folder was replaced,
-    /// or only its watch failed), the folder is listed again, at most once per
-    /// [`AUTO_RELOAD_GAP`]; otherwise the tab goes there.
+    /// or only its watch failed), the folder is listed again; within [`AUTO_RELOAD_GAP`] of
+    /// its last automatic reload, that waits for the gap to pass ([`Effect::ReloadLater`]),
+    /// so a watch that keeps failing cannot reload it in a loop and a folder replaced twice
+    /// in quick succession still shows the second one. Otherwise the tab goes to `found`.
     pub fn found_existing(
         &mut self,
         generation: u64,
@@ -315,25 +329,53 @@ impl AppState {
             return Vec::new();
         };
         if target == *path {
-            let recent = self
-                .auto_reloads
-                .get(path)
-                .is_some_and(|&at| now.saturating_duration_since(at) < AUTO_RELOAD_GAP);
-            if recent || self.tab_by_generation(generation).is_none() {
+            if self.tab_by_generation(generation).is_none() {
                 return Vec::new();
             }
-            self.auto_reloads
-                .retain(|_, &mut at| now.saturating_duration_since(at) < AUTO_RELOAD_GAP);
-            self.auto_reloads.insert(path.clone(), now);
-            let Some(tab) = self.tab_by_generation(generation) else {
-                return Vec::new();
-            };
-            return vec![Effect::Load(tab.reload())];
+            let since = self
+                .auto_reloads
+                .get(path)
+                .map(|&at| now.saturating_duration_since(at))
+                .filter(|&since| since < AUTO_RELOAD_GAP);
+            if let Some(since) = since {
+                if !self.pending_reloads.insert(generation) {
+                    return Vec::new();
+                }
+                return vec![Effect::ReloadLater {
+                    generation,
+                    path: path.clone(),
+                    after: AUTO_RELOAD_GAP.saturating_sub(since),
+                }];
+            }
+            return self.auto_reload(generation, path, now);
         }
         match self.tab_by_generation(generation) {
             Some(tab) => vec![Effect::Load(tab.navigate(target))],
             None => Vec::new(),
         }
+    }
+
+    /// The time of the reload [`Effect::ReloadLater`] asked for has come: the tab with
+    /// `generation` lists its folder `path` again, unless it has moved on since.
+    pub fn reload_due(&mut self, generation: u64, path: &VPath, now: Instant) -> Vec<Effect> {
+        if !self.pending_reloads.remove(&generation) {
+            return Vec::new();
+        }
+        self.auto_reload(generation, path, now)
+    }
+
+    /// Lists the folder `path` of the tab with `generation` again after its watch ended, and
+    /// notes when; nothing for a tab that has moved on.
+    fn auto_reload(&mut self, generation: u64, path: &VPath, now: Instant) -> Vec<Effect> {
+        self.pending_reloads.remove(&generation);
+        let Some(tab) = self.tab_by_generation(generation) else {
+            return Vec::new();
+        };
+        let request = tab.reload();
+        self.auto_reloads
+            .retain(|_, &mut at| now.saturating_duration_since(at) < AUTO_RELOAD_GAP);
+        self.auto_reloads.insert(path.clone(), now);
+        vec![Effect::Load(request)]
     }
 
     /// Takes what following a link gave ([`Loader::follow`](crate::loader::Loader::follow)).
@@ -723,20 +765,92 @@ mod tests {
         // A reload keeps the rows until the new listing comes.
         assert_eq!(rows(&state, LEFT), ["old"]);
 
-        // The new watch ends at once again: no second reload within the gap.
+        // The new watch ends at once again: no second reload within the gap, but one when it
+        // has passed.
         state.loaded(LoadEvent::Vanished {
             generation: request.generation,
         });
         let soon = now + Duration::from_secs(1);
         assert_eq!(
             state.found_existing(request.generation, &folder("a"), Some(folder("a")), soon),
-            []
+            [Effect::ReloadLater {
+                generation: request.generation,
+                path: folder("a"),
+                after: AUTO_RELOAD_GAP.saturating_sub(Duration::from_secs(1)),
+            }]
         );
-        // After the gap it may reload again.
+        // An answer after the gap reloads at once, and the waiting reload then has nothing to do.
         let later = now + AUTO_RELOAD_GAP + Duration::from_secs(1);
         let effects =
             state.found_existing(request.generation, &folder("a"), Some(folder("a")), later);
         assert_eq!(the_load(&effects).path, folder("a"));
+        assert_eq!(
+            state.reload_due(request.generation, &folder("a"), later),
+            []
+        );
+    }
+
+    #[test]
+    fn a_folder_replaced_twice_quickly_is_listed_once_more_after_the_gap() {
+        let mut state = ready(vec![file("first")], vec![]);
+        let now = Instant::now();
+        let a = folder("a");
+        // The first replacement reloads at once.
+        let generation = state.panes()[LEFT].active_tab().generation();
+        state.loaded(LoadEvent::Vanished { generation });
+        let first = the_load(&state.found_existing(generation, &a, Some(a.clone()), now));
+
+        // The second, a second later, waits for the rest of the gap; asking again adds nothing.
+        state.loaded(LoadEvent::Vanished {
+            generation: first.generation,
+        });
+        let soon = now + Duration::from_secs(1);
+        let later = vec![Effect::ReloadLater {
+            generation: first.generation,
+            path: a.clone(),
+            after: AUTO_RELOAD_GAP.saturating_sub(Duration::from_secs(1)),
+        }];
+        assert_eq!(
+            state.found_existing(first.generation, &a, Some(a.clone()), soon),
+            later
+        );
+        assert_eq!(
+            state.found_existing(first.generation, &a, Some(a.clone()), soon),
+            []
+        );
+
+        // When the gap has passed, exactly one more reload comes.
+        let due = now + AUTO_RELOAD_GAP;
+        let second = the_load(&state.reload_due(first.generation, &a, due));
+        assert_eq!(second.path, a);
+        assert_ne!(second.generation, first.generation);
+        assert_eq!(state.reload_due(first.generation, &a, due), []);
+        assert_eq!(
+            state.panes()[LEFT].active_tab().generation(),
+            second.generation
+        );
+    }
+
+    #[test]
+    fn a_waiting_reload_of_a_tab_that_moved_on_does_nothing() {
+        let mut state = ready(vec![file("x")], vec![]);
+        let now = Instant::now();
+        let a = folder("a");
+        let generation = state.panes()[LEFT].active_tab().generation();
+        let first = the_load(&state.found_existing(generation, &a, Some(a.clone()), now));
+        let soon = now + Duration::from_secs(1);
+        let effects = state.found_existing(first.generation, &a, Some(a.clone()), soon);
+        assert!(matches!(effects.as_slice(), [Effect::ReloadLater { .. }]));
+        // The user opens another folder before the gap has passed.
+        state.go_to(folder("elsewhere"));
+        assert_eq!(
+            state.reload_due(first.generation, &a, now + AUTO_RELOAD_GAP),
+            []
+        );
+        assert_eq!(
+            state.panes()[LEFT].active_tab().location(),
+            &folder("elsewhere")
+        );
     }
 
     #[test]

@@ -84,7 +84,11 @@ impl PaneModels {
                 .unwrap_or(-1),
             sort_key: sort_column(sort.key),
             sort_ascending: sort.order == SortOrder::Ascending,
-            status: tab.status_line().into(),
+            // A folder that could not be listed has no items to count.
+            status: match tab.status() {
+                LoadStatus::Failed(_) => SharedString::new(),
+                LoadStatus::Loading | LoadStatus::Ready => tab.status_line().into(),
+            },
             loading: tab.status() == LoadStatus::Loading,
             error: match tab.status() {
                 LoadStatus::Failed(kind) => words::error_kind(kind).into(),
@@ -232,8 +236,8 @@ pub enum RowChange {
 /// The steps that turn `old` into `new`, where a row is known by its `name` (unique in a
 /// list): first the removals and additions, each at its position in the list as the steps
 /// before it have left it, then the changes, at positions in `new`. A row that moved is
-/// removed and added. `None` when there are more than [`MAX_ROW_CHANGES`] steps, which a
-/// fresh start shows faster.
+/// removed and added. `None` when there are more than 512 steps (`MAX_ROW_CHANGES`), which
+/// a fresh start shows faster.
 pub fn diff_rows<T: PartialEq>(
     old: &[T],
     new: &[T],
@@ -409,9 +413,12 @@ mod tests {
     use std::ffi::OsString;
     use std::time::{Duration, UNIX_EPOCH};
 
+    use rf_core::ErrorKind;
     use rf_platform::DiskSpace;
+    use rf_vfs::VisibilityFilter;
 
     use super::*;
+    use crate::loader::LoadEvent;
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -588,6 +595,22 @@ mod tests {
         assert_eq!(modified(), Some("2025-10-25 07:20".into()));
         model.set_time_zone(TimeZone::fixed(jiff::tz::offset(9)));
         assert_eq!(modified(), Some("2025-10-25 16:20".into()));
+    }
+
+    #[test]
+    fn a_folder_that_failed_shows_why_and_no_count() {
+        let folder = VPath::local(std::env::temp_dir().join("gone")).expect("a local path");
+        let (mut pane, request) = Pane::new(folder, VisibilityFilter::default());
+        let models = PaneModels::default();
+        assert_eq!(models.view(&pane, true).status, "항목 0개");
+        pane.handle(LoadEvent::Failed {
+            generation: request.generation,
+            kind: ErrorKind::NotFound,
+        });
+        let view = models.view(&pane, true);
+        assert_eq!(view.error, "찾을 수 없습니다");
+        assert_eq!(view.status, "");
+        assert!(!view.loading);
     }
 
     #[test]
