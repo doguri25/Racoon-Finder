@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use rf_core::{Entry, ErrorKind, Scheme, VPath};
-use rf_ui::loader::{LoadEvent, LoadRequest, LoadTicket, Loader};
+use rf_core::{Entry, ErrorKind, Os, Scheme, VPath};
+use rf_ui::loader::{LoadEvent, LoadRequest, LoadTicket, Loader, NamesRequest};
 use rf_ui::pane::{Handled, LoadStatus, Pane};
 use rf_vfs::{
     CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LocalProvider, Provider, ReadStream,
@@ -581,6 +581,147 @@ fn a_folder_listing_has_only_folders_and_no_watch() {
             kind: ErrorKind::NotFound,
         }
     );
+}
+
+/// What a [`Loader::list_names`] of `request` sent: the names, and how many more there are.
+fn names_of(loader: &Loader, request: NamesRequest) -> (Vec<String>, usize) {
+    let generation = request.generation;
+    let (tx, rx) = mpsc::channel();
+    let _ticket = loader.list_names(request, sender(&tx));
+    match recv_until(&rx, "the names", |_| true) {
+        LoadEvent::Names {
+            generation: sent,
+            names,
+            more,
+        } => {
+            assert_eq!(sent, generation);
+            let names = names
+                .iter()
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect();
+            (names, more)
+        }
+        other => panic!("expected names, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_listing_of_names_keeps_the_folders_that_fit_and_counts_the_rest() {
+    let t = tempfile::tempdir().unwrap();
+    for dir in ["b10", "b2", "Alpha", "beta", "music"] {
+        std::fs::create_dir(t.path().join(dir)).unwrap();
+    }
+    std::fs::write(t.path().join("b.txt"), b"a").unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(t.path().join(".cache")).unwrap();
+        std::os::unix::fs::symlink(t.path().join("b2"), t.path().join("blink")).unwrap();
+    }
+    let request = |prefix: &str, filter: VisibilityFilter, limit: usize, os: Os| NamesRequest {
+        generation: 7,
+        folder: local(t.path()),
+        prefix: prefix.to_owned(),
+        filter,
+        limit,
+        os,
+    };
+    let shown = VisibilityFilter::default();
+    let (gated, log, open) = Gated::loader(Hold::List);
+    // The gate is open from the start.
+    open.send(()).unwrap();
+    // The folders, in natural order: no file, no link, and no hidden folder while the panes
+    // hide them.
+    assert_eq!(
+        names_of(&gated, request("", shown, 100, Os::Other)),
+        (strings(&["Alpha", "b2", "b10", "beta", "music"]), 0)
+    );
+    drop(gated);
+    // The worker lists and ends: no watch, no free space.
+    let steps = steps_until(&log, "the worker to end", |step| *step == Step::Dropped);
+    assert_eq!(steps, [Step::Listing, Step::Listed(Ok(())), Step::Dropped]);
+
+    // A prefix ignores case on Windows and macOS, and not elsewhere.
+    let b = strings(&["b2", "b10", "beta"]);
+    assert_eq!(
+        names_of(&loader(), request("B", shown, 100, Os::Windows)),
+        (b.clone(), 0)
+    );
+    assert_eq!(
+        names_of(&loader(), request("B", shown, 100, Os::MacOs)),
+        (b.clone(), 0)
+    );
+    assert_eq!(
+        names_of(&loader(), request("B", shown, 100, Os::Other)),
+        (Vec::new(), 0)
+    );
+    assert_eq!(
+        names_of(&loader(), request("b", shown, 100, Os::Other)),
+        (b, 0)
+    );
+    // At most the limit; the rest are counted.
+    assert_eq!(
+        names_of(&loader(), request("b", shown, 2, Os::Other)),
+        (strings(&["b2", "b10"]), 1)
+    );
+    // Hidden folders count when the panes show them.
+    #[cfg(unix)]
+    {
+        let hidden_too = VisibilityFilter {
+            show_hidden: true,
+            ..shown
+        };
+        let (names, _) = names_of(&loader(), request("", hidden_too, 100, Os::Other));
+        assert!(names.contains(&".cache".to_owned()), "{names:?}");
+    }
+
+    // A folder that cannot be listed fails once.
+    let (tx, rx) = mpsc::channel();
+    let missing = NamesRequest {
+        folder: local(&t.path().join("missing")),
+        ..request("", shown, 100, Os::Other)
+    };
+    let _ticket = loader().list_names(missing, sender(&tx));
+    assert_eq!(
+        recv_until(&rx, "the failure", |_| true),
+        LoadEvent::Failed {
+            generation: 7,
+            kind: ErrorKind::NotFound,
+        }
+    );
+}
+
+#[test]
+fn a_cancelled_listing_of_names_sends_nothing() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir(t.path().join("docs")).unwrap();
+    let (loader, log, open) = Gated::loader(Hold::List);
+    let (tx, rx) = mpsc::channel();
+    let request = NamesRequest {
+        generation: 1,
+        folder: local(t.path()),
+        prefix: String::new(),
+        filter: VisibilityFilter::default(),
+        limit: 10,
+        os: Os::CURRENT,
+    };
+    let ticket = loader.list_names(request, sender(&tx));
+    drop((tx, loader));
+    // No watch: the listing comes first.
+    let before = steps_until(&log, "the listing", |step| *step == Step::Listing);
+    assert_eq!(before, [Step::Listing]);
+    // The text changed, or the list closed: the ticket goes.
+    drop(ticket);
+    open.send(()).unwrap();
+    let rest = steps_until(&log, "the worker to end", |step| *step == Step::Dropped);
+    assert_eq!(
+        rest,
+        [Step::Listed(Err(ErrorKind::Cancelled)), Step::Dropped]
+    );
+    assert_no_events(&rx);
+}
+
+fn strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|name| (*name).to_owned()).collect()
 }
 
 #[cfg(unix)]

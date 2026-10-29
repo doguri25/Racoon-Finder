@@ -6,12 +6,13 @@
 use super::*;
 use crate::keys;
 use crate::places::PlaceKind;
-use rf_core::{Attributes, Entry, EntryKind, Os};
+use rf_core::{Attributes, Entry, EntryKind, ErrorKind, Os};
 use rf_jobs::{JobId, JobReport};
 use rf_vfs::SortOrder;
 use slint::platform::Key;
 use std::sync::Arc;
 
+mod address;
 mod copies;
 mod drag;
 mod jobs;

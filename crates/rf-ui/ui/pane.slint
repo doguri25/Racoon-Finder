@@ -1,12 +1,133 @@
 // One folder pane: the tab strip, the path row, the file list and the status bar. The list and
 // the tabs take dragged rows: the list into the folder of the row under the pointer or of the
 // pane, a tab into its folder. A tab can be dragged too, to another place in its strip or into
-// the other pane's strip; its menu (a right click) closes, copies, pins and moves tabs.
+// the other pane's strip; its menu (a right click) closes, copies, pins and moves tabs. The path
+// row is the address bar (NAV-03): the `›` after each piece asks for the list of that folder's
+// folders, which the window shows under it (`FolderMenu`), and the path field shows the
+// completions Rust finds for its text under it.
 
+import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileList, FileRow } from "file-list.slint";
 import { Shortcuts } from "shortcuts.slint";
+
+// A list of folder names of the address bar, as Rust has it.
+export struct FolderMenuView {
+    // The list shows.
+    open: bool,
+    rows: [string],
+    // The row of the keyboard's cursor, or -1.
+    cursor: int,
+    // A line under the rows: the listing is on its way, it failed, the folder has no folder,
+    // or how many more folders there are than the rows. Empty for none.
+    note: string,
+}
+
+// A drop-down list of folder names (the folders of a piece of the path row, or the completions
+// of the path field): at most ten rows show, and it scrolls to the keyboard's row. A click on a
+// row chooses it. It takes no focus: its keys come from the field or the window that has them.
+export component FolderMenu inherits Rectangle {
+    in property <FolderMenuView> view;
+    // The list's name for screen readers.
+    in property <string> label;
+    callback chosen(index: int);
+
+    property <length> row-height: 30px;
+    property <int> shown-rows: min(root.view.rows.length, 10);
+    property <int> cursor: root.view.cursor;
+    // Scrolls as little as needed to show the keyboard's row whole.
+    changed cursor => {
+        if (root.cursor < 0) {
+            return;
+        }
+        let top = root.cursor * root.row-height;
+        if (top + list.content-y < 0) {
+            list.content-y = -top;
+        } else if (top + root.row-height + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - top - root.row-height;
+        }
+    }
+
+    height: layout.preferred-height;
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+    drop-shadow-blur: 16px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #00000033;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    // Takes the clicks between the rows, which are not the panes' behind it.
+    TouchArea { }
+
+    layout := VerticalLayout {
+        padding: 4px;
+
+        list := ListView {
+            height: root.shown-rows * root.row-height;
+            visible: root.shown-rows > 0;
+            accessible-label: root.label;
+
+            for name[i] in root.view.rows: Rectangle {
+                height: root.row-height;
+                border-radius: 4px;
+                background: i == root.view.cursor ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                accessible-role: list-item;
+                accessible-label: name;
+                accessible-item-index: i;
+                accessible-item-selectable: true;
+                accessible-item-selected: i == root.view.cursor;
+                accessible-action-default => {
+                    root.chosen(i);
+                }
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        name: "folder";
+                        color: Theme.folder;
+                    }
+                    Text {
+                        accessible-role: none;
+                        text: name;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                touch := TouchArea {
+                    clicked => {
+                        root.chosen(i);
+                    }
+                }
+            }
+        }
+
+        if root.view.note != "": HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            height: root.row-height;
+
+            Text {
+                text: root.view.note;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
 
 export struct TabItem {
     title: string,
@@ -49,6 +170,10 @@ export struct PaneView {
     active: bool,
     // The pane has a closed tab to reopen.
     can-reopen: bool,
+    // The completion list of the path field, while it is edited.
+    completion: FolderMenuView,
+    // The piece of the path row whose `›` has its list of folders open, or -1.
+    chevron: int,
 }
 
 // Small square icon button inside a tab or a strip: its name and the key of its command
@@ -254,6 +379,38 @@ component TabButton inherits Rectangle {
     }
 }
 
+// The `›` after a piece of the path row: it asks for the list of that piece's folders, and
+// points down while the list shows.
+component ChevronButton inherits Rectangle {
+    // The name for screen readers: "‘docs’ 하위 폴더".
+    in property <string> label;
+    in property <bool> open;
+    callback clicked();
+
+    width: 16px;
+    height: 24px;
+    border-radius: 4px;
+    background: root.open || touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Icon {
+        width: 12px;
+        height: 12px;
+        name: root.open ? "chevron-down" : "chevron-right";
+        color: Theme.muted;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 component CrumbButton inherits Rectangle {
     in property <string> text;
     // The name for screen readers, when it is not the text (the "…" piece's folder).
@@ -377,8 +534,22 @@ export component Pane inherits Rectangle {
     callback tab-move-check(data: data-transfer, slot: int) -> bool;
     callback tab-move-dropped(data: data-transfer, slot: int) -> bool;
     callback crumb-clicked(index: int);
+    // A click on the `›` after piece `index`, whose bottom left corner is at (`x`, `y`) of the
+    // window: the window shows the list of that piece's folders there.
+    callback subfolders-clicked(index: int, x: length, y: length);
     // Enter in the path field.
     callback path-entered(text: string);
+    // The text of the path field changed as it was typed (not by Tab's completion).
+    callback path-edited(text: string);
+    // ↑ (-1) or ↓ (1) in the path field while its completion list shows.
+    callback completion-step(delta: int);
+    // Tab in the path field, which holds `text`, while its completion list shows: the completed
+    // text, or an empty one for none.
+    callback path-completed(text: string) -> string;
+    // A click on row `index` of the completion list; the field closes.
+    callback completion-chosen(index: int);
+    // The completion list is to close: Esc while it shows, or the field closed.
+    callback completion-dismissed();
     // Esc closed the path field. (A field that loses focus closes silently: the focus stays
     // where the click put it.)
     callback edit-ended();
@@ -635,10 +806,17 @@ export component Pane inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 0px;
 
-                                if i > 0: Text {
-                                    text: "›";
-                                    color: Theme.muted;
-                                    vertical-alignment: center;
+                                // The `›` of the piece before (its folder's folders).
+                                if i > 0: VerticalLayout {
+                                    alignment: center;
+
+                                    ChevronButton {
+                                        label: "‘\{root.view.crumbs[i - 1].label}’ 하위 폴더";
+                                        open: root.view.chevron == crumb.index - 1;
+                                        clicked => {
+                                            root.subfolders-clicked(crumb.index - 1, self.absolute-position.x, self.absolute-position.y + self.height);
+                                        }
+                                    }
                                 }
                                 VerticalLayout {
                                     alignment: center;
@@ -648,6 +826,18 @@ export component Pane inherits Rectangle {
                                         current: i == root.view.crumbs.length - 1;
                                         clicked => {
                                             root.crumb-clicked(crumb.index);
+                                        }
+                                    }
+                                }
+                                // The pane's own folder's folders.
+                                if i == root.view.crumbs.length - 1: VerticalLayout {
+                                    alignment: center;
+
+                                    ChevronButton {
+                                        label: "‘\{crumb.label}’ 하위 폴더";
+                                        open: root.view.chevron == crumb.index;
+                                        clicked => {
+                                            root.subfolders-clicked(crumb.index, self.absolute-position.x, self.absolute-position.y + self.height);
                                         }
                                     }
                                 }
@@ -715,10 +905,40 @@ export component Pane inherits Rectangle {
                             root.editing = false;
                             root.path-entered(self.text);
                         }
+                        edited => {
+                            root.path-edited(self.text);
+                        }
+                        // Esc closes the completion list first, then the field. The list's keys
+                        // (↑↓ and Tab) act only while it shows and no input method composes:
+                        // Tab is kept from moving the focus then, as in the dialogs.
                         key-pressed(event) => {
+                            let listing = root.view.completion.open;
                             if (event.text == Key.Escape) {
-                                root.editing = false;
-                                root.edit-ended();
+                                if (listing) {
+                                    root.completion-dismissed();
+                                } else {
+                                    root.editing = false;
+                                    root.completion-dismissed();
+                                    root.edit-ended();
+                                }
+                                return accept;
+                            }
+                            let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                            if (!listing || !plain) {
+                                return reject;
+                            }
+                            if (event.text == Key.Tab) {
+                                if (!self.composing) {
+                                    let completed = root.path-completed(self.text);
+                                    if (completed != "") {
+                                        self.text = completed;
+                                        self.set-selection-offsets(2147483647, 2147483647);
+                                    }
+                                }
+                                return accept;
+                            }
+                            if (!self.composing && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                                root.completion-step(event.text == Key.UpArrow ? -1 : 1);
                                 return accept;
                             }
                             reject
@@ -728,6 +948,7 @@ export component Pane inherits Rectangle {
                         changed has-focus => {
                             if (!self.has-focus && root.editing) {
                                 root.editing = false;
+                                root.completion-dismissed();
                             }
                         }
                     }
@@ -868,6 +1089,19 @@ export component Pane inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
             }
+        }
+    }
+
+    // The completion list, under the path field while it is edited and Rust has names for it.
+    if root.editing && root.view.completion.open: FolderMenu {
+        x: 8px;
+        y: 40px + 38px - 2px;
+        width: min(parent.width - 16px, 420px);
+        view: root.view.completion;
+        label: "경로 자동 완성";
+        chosen(index) => {
+            root.editing = false;
+            root.completion-chosen(index);
         }
     }
 

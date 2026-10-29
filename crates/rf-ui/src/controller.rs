@@ -21,7 +21,7 @@ use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
 use slint::language::DragAction;
-use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, SharedString, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
@@ -32,7 +32,7 @@ use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
-use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, start_folders};
+use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, Subfolders, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, JobRowView, MainWindow, open, words};
 
@@ -228,7 +228,7 @@ fn connect(window: &MainWindow) {
         }
     });
     window.on_window_resized(|| {
-        with(Controller::plan_save);
+        with(Controller::window_resized);
     });
     window.on_pane_activated(|s| {
         with(|c| {
@@ -244,6 +244,7 @@ fn connect(window: &MainWindow) {
     window.on_path_entered(|s, text| {
         with(|c| c.update(|state| state.enter_path(side(s), &text)));
     });
+    connect_address(window);
     window.on_filter_edited(|text| {
         with(|c| c.update(|state| state.filter_edited(&text)));
     });
@@ -279,6 +280,43 @@ fn connect(window: &MainWindow) {
     connect_tabs(window);
     connect_jobs(window);
     connect_pick(window);
+}
+
+/// The callbacks of the address bar (NAV-03): the `›` of a piece of a path row and its list of
+/// folders, and the completion list of a path field.
+fn connect_address(window: &MainWindow) {
+    window.on_subfolders_clicked(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.open_subfolders(side(s), i)));
+    });
+    window.on_subfolder_chosen(|i| {
+        with(|c| c.update_at(i, AppState::choose_subfolder));
+    });
+    window.on_subfolders_dismissed(|| {
+        with(Controller::close_subfolders);
+    });
+    window.on_path_edited(|s, text| {
+        with(|c| c.update(|state| state.path_edited(side(s), &text)));
+    });
+    window.on_completion_step(|s, delta| {
+        let delta = if delta < 0 { -1 } else { 1 };
+        with(|c| c.update(|state| state.completion_step(side(s), delta)));
+    });
+    window.on_path_completed(|s, text| {
+        with(|c| c.complete_path(side(s), &text))
+            .unwrap_or_default()
+            .into()
+    });
+    window.on_completion_chosen(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.choose_completion(side(s), i)));
+    });
+    window.on_completion_dismissed(|s| {
+        with(|c| {
+            c.update(|state| {
+                state.dismiss_completion(side(s));
+                Vec::new()
+            });
+        });
+    });
 }
 
 /// The callbacks of the panes' tab bars: a press, the close button, the new tab button, a
@@ -495,6 +533,8 @@ pub struct Controller {
     /// The sidebar's places, the roots of the tree, once found.
     places: RefCell<Vec<Place>>,
     tree_rows: Rc<TreeRows>,
+    /// The rows of the list of folders under a `›` of a path row.
+    subfolder_rows: Rc<VecModel<SharedString>>,
     panes: [PaneModels; 2],
     /// The tab (its position) and folder each pane showed at the last redraw: a pane that
     /// shows another folder or tab scrolls to its cursor, or its top.
@@ -559,6 +599,7 @@ impl Controller {
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
             tree_rows,
+            subfolder_rows: Rc::new(VecModel::default()),
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
             theme: Cell::new(settings.theme),
@@ -721,8 +762,18 @@ impl Controller {
         });
     }
 
-    /// A key; `true` when the window used it.
+    /// A key; `true` when the window used it. While the list of subfolders under a `›` shows,
+    /// its keys (`keys::list_key`) go to it; any other command closes it as it does its work.
     fn key(&self, text: &str, mods: Mods) -> bool {
+        let listing = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.subfolders().is_some());
+        if listing && let Some(key) = keys::list_key(text, mods, Os::CURRENT) {
+            self.update(|state| state.subfolders_key(key));
+            return true;
+        }
         let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
             return false;
         };
@@ -858,6 +909,43 @@ impl Controller {
         moved
     }
 
+    /// The list of subfolders under a `›` is to close (a press elsewhere, the keys leaving the
+    /// panes); nothing to do when none shows.
+    fn close_subfolders(&self) {
+        let listing = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.subfolders().is_some());
+        if listing {
+            self.update(|state| {
+                state.close_subfolders();
+                Vec::new()
+            });
+        }
+    }
+
+    /// The window's size changed: the settings keep it, and the list of subfolders, which
+    /// stays where its `›` was, closes.
+    fn window_resized(&self) {
+        self.close_subfolders();
+        self.plan_save();
+    }
+
+    /// Tab in the path field of pane `side`, which holds `text`: the completed text, empty when
+    /// there is nothing to complete with.
+    fn complete_path(&self, side: usize, text: &str) -> String {
+        let mut completed = String::new();
+        self.update(|state| match state.complete_path(side, text) {
+            Some((text, effects)) => {
+                completed = text;
+                effects
+            }
+            None => Vec::new(),
+        });
+        completed
+    }
+
     /// A toolbar button or a menu item: the same command as its key.
     fn command(&self, name: &str) {
         let command = match name {
@@ -891,8 +979,8 @@ impl Controller {
         });
     }
 
-    /// Changes the state with `f`, lets the tree follow the active pane, then carries out what
-    /// both return and redraws.
+    /// Changes the state with `f`, drops the address bar's lists that the change left behind,
+    /// lets the tree follow the active pane, then carries out what both return and redraws.
     fn update(&self, f: impl FnOnce(&mut AppState) -> Vec<Effect>) {
         let effects = {
             let mut state = self.state.borrow_mut();
@@ -900,6 +988,7 @@ impl Controller {
                 return;
             };
             let mut effects = f(state);
+            state.drop_stale_address();
             effects.extend(state.follow_active());
             effects
         };
@@ -946,6 +1035,13 @@ impl Controller {
                 Effect::LoadChildren(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.list_folders(request, |event| {
+                        post(move |c| c.loaded(event));
+                    });
+                    self.tickets.borrow_mut().insert(generation, ticket);
+                }
+                Effect::ListNames(request) => {
+                    let generation = request.generation;
+                    let ticket = self.loader.list_names(request, |event| {
                         post(move |c| c.loaded(event));
                     });
                     self.tickets.borrow_mut().insert(generation, ticket);
@@ -1067,6 +1163,7 @@ impl Controller {
             // `apply` carries these out itself: it hands only the ones above to this method.
             Effect::Load(_)
             | Effect::LoadChildren(_)
+            | Effect::ListNames(_)
             | Effect::Follow { .. }
             | Effect::OpenFile(_)
             | Effect::ReloadLater { .. }
@@ -1151,6 +1248,7 @@ impl Controller {
             // Carried out by `apply`.
             Effect::Load(_)
             | Effect::LoadChildren(_)
+            | Effect::ListNames(_)
             | Effect::FindExisting { .. }
             | Effect::Follow { .. }
             | Effect::ReloadLater { .. }
@@ -1211,7 +1309,12 @@ impl Controller {
             let mut shown = self.shown.borrow_mut();
             for side in [LEFT, RIGHT] {
                 let pane = &state.panes()[side];
-                let view = self.panes[side].view(pane, side == state.active());
+                let mut view = self.panes[side].view(pane, side == state.active());
+                let chevron = state
+                    .subfolders()
+                    .filter(|list| list.side() == side)
+                    .map(Subfolders::index);
+                self.panes[side].show_address(&mut view, state.completion(side), chevron);
                 if side == LEFT {
                     window.set_left_pane(view);
                 } else {
@@ -1230,6 +1333,8 @@ impl Controller {
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
             show_layout(&window, state.layout(), state.syncing());
+            let list = state.subfolders().map(|list| (list.names(), list.cursor()));
+            window.set_subfolders(ui_bridge::folder_menu(&self.subfolder_rows, list, true));
             // The active pane's own filter (another pane's, or none once the tab moved on).
             window.invoke_show_filter(state.filter_text().into());
             // The next drag carries the items the last press readied.

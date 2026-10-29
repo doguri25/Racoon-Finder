@@ -1,7 +1,7 @@
 //! What the Slint screens are given: the row models of a file list and of the folder trees,
-//! the conversions from the panes' state, the dialogs and the destination picker to Slint
-//! structs, the payload of a drag of rows, the keys the toolbar and the menus show, and
-//! [`post`], which brings a worker thread's result back to the UI thread.
+//! the conversions from the panes' state, the address bar's lists, the dialogs and the
+//! destination picker to Slint structs, the payload of a drag of rows, the keys the toolbar and
+//! the menus show, and [`post`], which brings a worker thread's result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -30,12 +30,13 @@ use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
+use crate::state::{Completion, Names};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, JobRowView, MainWindow, MessageView,
-    NameView, PaneView, PickTarget, PickView, PreflightView, RecoveryView, SectionHead, Shortcuts,
-    TabItem, TreeRow,
+    ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuView, JobRowView, MainWindow,
+    MessageView, NameView, PaneView, PickTarget, PickView, PreflightView, RecoveryView,
+    SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -67,6 +68,7 @@ pub struct PaneModels {
     rows: Rc<FileRows>,
     tabs: Rc<VecModel<TabItem>>,
     crumbs: Rc<VecModel<Crumb>>,
+    completions: Rc<VecModel<SharedString>>,
 }
 
 impl fmt::Debug for PaneModels {
@@ -135,7 +137,67 @@ impl PaneModels {
             },
             active,
             can_reopen: pane.can_reopen(),
+            completion: FolderMenuView::default(),
+            chevron: -1,
         }
+    }
+
+    /// Gives `view` the address bar's part of the pane: the completion list of its path field
+    /// (`completion`), and the piece of its path row whose `›` has its list of folders open
+    /// (`chevron`).
+    pub fn show_address(
+        &self,
+        view: &mut PaneView,
+        completion: Option<&Completion>,
+        chevron: Option<usize>,
+    ) {
+        let list = completion.map(|completion| (completion.names(), completion.cursor()));
+        view.completion = folder_menu(&self.completions, list, false);
+        view.chevron = chevron
+            .and_then(|index| i32::try_from(index).ok())
+            .unwrap_or(-1);
+    }
+}
+
+/// What a list of the address bar shows of `list` (its names and the keyboard's row; `None`
+/// when it is closed), with `model` as its rows. The list of a piece's folders (`notes`) shows
+/// from the click on, and says while the folder is listed, when it could not be, and when it has
+/// no folder; the completion list shows only while it has names. Both say how many folders more
+/// there are than their rows.
+pub fn folder_menu(
+    model: &Rc<VecModel<SharedString>>,
+    list: Option<(&Names, Option<usize>)>,
+    notes: bool,
+) -> FolderMenuView {
+    let Some((names, cursor)) = list else {
+        set_rows(model, Vec::new());
+        return FolderMenuView {
+            rows: ModelRc::from(Rc::clone(model)),
+            cursor: -1,
+            ..FolderMenuView::default()
+        };
+    };
+    let rows: Vec<SharedString> = names
+        .rows()
+        .iter()
+        .map(|name| name.to_string_lossy().as_ref().into())
+        .collect();
+    let note = match names {
+        Names::Listed { more, .. } if *more > 0 => words::more_folders(*more),
+        Names::Listed { names, .. } if names.is_empty() && notes => {
+            words::no_subfolders().to_owned()
+        }
+        Names::Loading if notes => words::listing_folders().to_owned(),
+        Names::Failed(kind) if notes => words::cannot_open(*kind),
+        Names::Listed { .. } | Names::Loading | Names::Failed(_) => String::new(),
+    };
+    let open = notes || !rows.is_empty();
+    set_rows(model, rows);
+    FolderMenuView {
+        open,
+        rows: ModelRc::from(Rc::clone(model)),
+        cursor: cursor.and_then(|row| i32::try_from(row).ok()).unwrap_or(-1),
+        note: note.into(),
     }
 }
 

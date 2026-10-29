@@ -23,7 +23,8 @@
 //! When the other pane cannot follow (no folder of that name among its rows, a listing that
 //! failed, a root to go up from, nothing to go back or forward to), sync turns off and a notice
 //! says why; the active pane moves all the same. Any other move (a piece of the path row, a
-//! typed path, the tree, a link, another tab) moves the active pane alone, and sync stays on;
+//! folder of the address bar's lists, a typed path, the tree, a link, another tab) moves the
+//! active pane alone, and sync stays on;
 //! a move of the other pane drops a decision that waits for its listing, and a swap of the
 //! panes turns sync off while one waits.
 

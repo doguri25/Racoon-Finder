@@ -228,6 +228,48 @@ pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
     }
 }
 
+/// What a key does while the list of a folder's subfolders shows under a `›` of a path row
+/// (NAV-03, KEY-02): the moves of a drop-down list, as in the system's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ListKey {
+    /// ↑: the row above (from no row, the last one).
+    Up,
+    /// ↓: the row below (from no row, the first one).
+    Down,
+    /// Enter (and the system's key to open): the active pane goes to the row's folder.
+    Choose,
+    /// Esc: the list closes.
+    Close,
+}
+
+/// What `text`, held with `mods`, does in the list of subfolders on `os`; `None` for a key that
+/// is the window's ([`command_for`]), which closes the list and does its own work.
+pub fn list_key(text: &str, mods: Mods, os: Os) -> Option<ListKey> {
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        let (c, held) = pressed(c, mods);
+        let plain = [
+            (Key::UpArrow, ListKey::Up),
+            (Key::DownArrow, ListKey::Down),
+            (Key::Return, ListKey::Choose),
+            (Key::Escape, ListKey::Close),
+        ];
+        let found = plain
+            .into_iter()
+            .find(|&(key, _)| char::from(key) == c)
+            .map(|(_, list)| list);
+        if let Some(list) = found
+            && held == Mods::NONE
+        {
+            return Some(list);
+        }
+    }
+    match command_for(text, mods, os)? {
+        Command::Open => Some(ListKey::Choose),
+        _ => None,
+    }
+}
+
 /// The key of a shortcut: a special key, or a character as typed without Shift (a lowercase
 /// letter, a digit or a punctuation mark of the US layout).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1112,6 +1154,39 @@ mod tests {
         // The system's own key to open opens too.
         assert_eq!(t(Os::MacOs, &key(Key::DownArrow), CMD), Some(TreeKey::Open));
         assert_eq!(t(Os::MacOs, "o", CMD), Some(TreeKey::Open));
+    }
+
+    #[test]
+    fn the_list_of_subfolders_takes_the_arrows_enter_and_esc() {
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            for (k, wanted) in [
+                (Key::UpArrow, ListKey::Up),
+                (Key::DownArrow, ListKey::Down),
+                (Key::Return, ListKey::Choose),
+                (Key::Escape, ListKey::Close),
+            ] {
+                assert_eq!(list_key(&key(k), NONE, os), Some(wanted), "{os:?} {k:?}");
+            }
+            // Other keys are the window's: they close the list and do their own work.
+            for (text, mods) in [
+                (key(Key::Tab), NONE),
+                (key(Key::UpArrow), SHIFT),
+                (key(Key::UpArrow), ALT),
+                (key(Key::LeftArrow), NONE),
+                (key(Key::Home), NONE),
+                (text("a"), NONE),
+                (text("t"), CTRL),
+                (key(Key::F2), NONE),
+            ] {
+                assert_eq!(list_key(&text, mods, os), None, "{os:?} {text:?} {mods:?}");
+            }
+        }
+        // The system's own key to open chooses too.
+        assert_eq!(
+            list_key(&key(Key::DownArrow), CMD, Os::MacOs),
+            Some(ListKey::Choose)
+        );
+        assert_eq!(list_key("o", CMD, Os::MacOs), Some(ListKey::Choose));
     }
 
     #[test]

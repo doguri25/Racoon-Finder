@@ -5,8 +5,10 @@
 //! whether hidden items show, how the window lays them out ([`Layout`]) and whether navigation
 //! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
-//! tree and recent targets ([`AppState::shown_picker`]), and the items a drag of rows carries
-//! ([`AppState::drag`]). Its methods change it and return the [`Effect`]s that need a worker
+//! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
+//! ([`AppState::drag`]), and the address bar's lists (module `address`: a folder's subfolders
+//! under the `›` of a piece of the path row, and the path field's completions). Its methods
+//! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
 //! follow or a vanished folder's nearest parent to find, a file to open, a job to submit or a
@@ -20,20 +22,21 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use rf_core::{ErrorKind, VPath};
+use rf_core::VPath;
 use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
 use crate::jobs::{History, JobEffect, JobRows};
 use crate::keys::{Command, Mods};
-use crate::loader::{Followed, LoadEvent, LoadRequest};
+use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, Tab, ancestors};
 use crate::places::Place;
 use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
+mod address;
 mod copies;
 mod drag;
 mod jobs;
@@ -42,6 +45,10 @@ mod pick;
 mod sidebar;
 mod tabs;
 
+pub use address::{
+    Completion, Environment, MAX_NAMES, Names, Subfolders, Typed, expand_user_path, is_remote_url,
+    read_typed, split_last,
+};
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
@@ -102,6 +109,10 @@ pub enum Effect {
     /// Scroll the folder tree so that row `row`, the active pane's folder just found there,
     /// shows.
     ScrollTree(usize),
+    /// List the names of folders for a list of the address bar
+    /// ([`Loader::list_names`](crate::loader::Loader::list_names)); they come back to
+    /// [`AppState::loaded`].
+    ListNames(NamesRequest),
     /// Find out on a worker thread what is at `path`, the destination picker's target or a
     /// path typed into it ([`Loader::inspect_target`](crate::loader::Loader::inspect_target),
     /// with `from_dir`, the folder the items are in), and hand it to
@@ -223,6 +234,12 @@ pub struct AppState {
     drag: Option<Drag>,
     /// The click a press on a selected row left for its release.
     pending_click: Option<drag::PendingClick>,
+    /// The list of a folder's subfolders that the `›` after a piece of a path row opened.
+    subfolders: Option<Subfolders>,
+    /// The completion list of the path field being edited.
+    completion: Option<Completion>,
+    /// Where `~` and the variables of a typed path come from.
+    environment: Environment,
 }
 
 impl AppState {
@@ -303,6 +320,9 @@ impl AppState {
             copies: copies::Copies::default(),
             drag: None,
             pending_click: None,
+            subfolders: None,
+            completion: None,
+            environment: Environment::default(),
         };
         (state, effects)
     }
@@ -365,8 +385,8 @@ impl AppState {
         &self.tree
     }
 
-    /// The generation of every tab's last request and of every listing the tree waits for:
-    /// the loads still worth running.
+    /// The generation of every tab's last request, of every listing the trees wait for and of
+    /// the listings of the address bar's lists: the loads still worth running.
     pub fn generations(&self) -> HashSet<u64> {
         self.panes
             .iter()
@@ -374,6 +394,7 @@ impl AppState {
             .map(Tab::generation)
             .chain(self.tree.generations())
             .chain(self.pick_tree.generations())
+            .chain(self.address_generations())
             .collect()
     }
 
@@ -393,6 +414,9 @@ impl AppState {
         page: usize,
         now: Instant,
     ) -> Option<Vec<Effect>> {
+        // A command of the window closes the list of subfolders under a `›` (the keys of the
+        // list itself, `keys::list_key`, go to `AppState::subfolders_key` instead).
+        self.subfolders = None;
         // A window over the main window takes the keys itself; one that comes here anyway (or
         // one pressed while the app ends) does nothing.
         if self.modal.is_some() || self.quitting {
@@ -585,24 +609,6 @@ impl AppState {
             .collect()
     }
 
-    /// Goes to the path typed into the path row of pane `side`. Text that is no path gives
-    /// a notice and changes nothing.
-    pub fn enter_path(&mut self, side: usize, text: &str) -> Vec<Effect> {
-        self.activate(side);
-        let text = text.trim();
-        if text.is_empty() {
-            return Vec::new();
-        }
-        match VPath::parse(text) {
-            Ok(folder) => self
-                .navigate_shown(side, folder)
-                .map(Effect::Load)
-                .into_iter()
-                .collect(),
-            Err(_) => vec![Effect::Notice(words::cannot_open(ErrorKind::InvalidPath))],
-        }
-    }
-
     /// Sorts pane `side` by `key`, the other way round when it already sorts by it.
     pub fn sort(&mut self, side: usize, key: SortKey) -> Vec<Effect> {
         self.activate(side);
@@ -750,8 +756,13 @@ impl AppState {
 
     /// Takes an event of the loader. A rescan lists the folder again; a vanished folder is
     /// looked for on a worker thread. The ticket of a vanished folder stays: its listing, if
-    /// still running, still comes. An event that no tab asked for goes to the folder tree.
+    /// still running, still comes. The names a list of the address bar waits for go to it; an
+    /// event that no tab asked for goes to the folder tree.
     pub fn loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
+        // The listing of a list of the address bar.
+        let Some(event) = self.address_loaded(event) else {
+            return Vec::new();
+        };
         let Some(side) = self.side_of(event.generation()) else {
             return self.tree_loaded(event);
         };
@@ -938,7 +949,8 @@ impl AppState {
             LoadEvent::Changes { .. }
             | LoadEvent::Rescan { .. }
             | LoadEvent::Vanished { .. }
-            | LoadEvent::Space { .. } => Vec::new(),
+            | LoadEvent::Space { .. }
+            | LoadEvent::Names { .. } => Vec::new(),
         };
         let mut effects = if in_picker {
             self.with_pick_tree(take)

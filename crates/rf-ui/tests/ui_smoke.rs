@@ -15,13 +15,14 @@ use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, JobRowView, MainWindow, MessageView,
-    NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView, RecoveryView, Theme,
+    ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuView, JobRowView, MainWindow,
+    MessageView, NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView,
+    RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
 use slint::platform::{Key, WindowEvent};
-use slint::{Color, ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc};
+use slint::{Color, ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc, SharedString};
 
 /// A shown main window at the default size, on the testing backend.
 fn window() -> MainWindow {
@@ -248,6 +249,245 @@ fn keys_go_to_the_path_field_while_it_is_open() {
     assert_eq!(seen.borrow().as_slice(), []);
 }
 
+/// The end of the name of each `›` of a path row: "‘docs’ 하위 폴더".
+const SUBFOLDERS: &str = "하위 폴더";
+
+/// A list of the address bar with `rows`, the cursor on row `cursor` (-1 for none) and `note`
+/// under them.
+fn folder_menu(rows: &[&str], cursor: i32, note: &str) -> FolderMenuView {
+    let rows: Vec<SharedString> = rows.iter().map(|row| (*row).into()).collect();
+    FolderMenuView {
+        open: true,
+        rows: ModelRc::new(slint::VecModel::from(rows)),
+        cursor,
+        note: note.into(),
+    }
+}
+
+/// Presses and releases the left button at `(x, y)` of the window.
+fn click_at(window: &MainWindow, x: f32, y: f32) {
+    let position = LogicalPosition::new(x, y);
+    let button = slint::platform::PointerEventButton::Left;
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+}
+
+#[test]
+fn a_pieces_chevron_asks_for_its_folders_and_the_list_takes_clicks() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&calls);
+    window.on_subfolders_clicked(move |side, index| {
+        record.borrow_mut().push(format!("clicked {side} {index}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_subfolder_chosen(move |index| record.borrow_mut().push(format!("chosen {index}")));
+    let record = Rc::clone(&calls);
+    window.on_subfolders_dismissed(move || record.borrow_mut().push("dismissed".to_owned()));
+    let pane = listed_pane(vec![]);
+    let pieces = rf_ui::pane::ancestors(pane.active_tab().location()).len();
+    let models = PaneModels::default();
+    window.set_right_pane(models.view(&pane, true));
+    // Each piece has a `›` after it, named for its folder: the last one lists the pane's own.
+    let chevrons = || {
+        let right = labelled(&window, "오른쪽 패널", AccessibleRole::Groupbox).remove(0);
+        right
+            .query_descendants()
+            .match_accessible_role(AccessibleRole::Button)
+            .find_all()
+            .into_iter()
+            .filter(|button| {
+                button
+                    .accessible_label()
+                    .is_some_and(|label| label.ends_with(SUBFOLDERS))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(chevrons().len(), pieces);
+    let last = chevrons().pop().expect("the last piece's chevron");
+    assert_eq!(
+        last.accessible_label().as_deref(),
+        Some("‘listed’ 하위 폴더")
+    );
+    last.mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        [format!("clicked 1 {}", pieces - 1)]
+    );
+
+    // The list Rust gives shows under it, with the keys' row and the note; a click on a row
+    // chooses it.
+    window.set_subfolders(folder_menu(&["docs", "src"], 1, "외 3개"));
+    let row = |name: &str| labelled(&window, name, AccessibleRole::ListItem).remove(0);
+    assert_eq!(row("docs").accessible_item_selected(), Some(false));
+    assert_eq!(row("src").accessible_item_selected(), Some(true));
+    assert_eq!(labelled(&window, "외 3개", AccessibleRole::Text).len(), 1);
+    let (chevron, docs) = (last.absolute_position(), row("docs").absolute_position());
+    assert!(
+        docs.y > chevron.y,
+        "the list is under the chevron: {docs:?} {chevron:?}"
+    );
+    row("src").mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["chosen 1"]
+    );
+
+    // A press anywhere else closes it.
+    click_at(&window, 40.0, 780.0);
+    click_at(&window, 1000.0, 600.0);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["dismissed", "dismissed"]
+    );
+    // So do the keys leaving the panes (here for the filter box).
+    window.invoke_focus_filter();
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["dismissed"]
+    );
+    // Closed, it takes no click.
+    window.set_subfolders(FolderMenuView::default());
+    click_at(&window, 1000.0, 600.0);
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+}
+
+#[test]
+fn the_path_field_asks_for_completions_and_takes_the_lists_keys() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&calls);
+    window.on_path_edited(move |side, text| {
+        record.borrow_mut().push(format!("edited {side} {text}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_completion_step(move |side, delta| {
+        record.borrow_mut().push(format!("step {side} {delta}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_path_completed(move |side, text| {
+        record.borrow_mut().push(format!("complete {side} {text}"));
+        "/srv/docs/".into()
+    });
+    let record = Rc::clone(&calls);
+    window.on_completion_dismissed(move |side| {
+        record.borrow_mut().push(format!("dismissed {side}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_completion_chosen(move |side, index| {
+        record.borrow_mut().push(format!("chosen {side} {index}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_path_entered(move |side, text| {
+        record.borrow_mut().push(format!("entered {side} {text}"));
+    });
+    let record = Rc::clone(&calls);
+    window.on_key(move |text, _, _, _, _| {
+        record.borrow_mut().push(format!("key {text}"));
+        true
+    });
+    let taken = || calls.borrow_mut().drain(..).collect::<Vec<_>>();
+    let key = |k: Key| char::from(k).to_string();
+    let (down, up, tab, escape) = (
+        key(Key::DownArrow),
+        key(Key::UpArrow),
+        key(Key::Tab),
+        key(Key::Escape),
+    );
+    let mut view = window.get_right_pane();
+    view.path_text = "/srv".into();
+    window.set_right_pane(view);
+    window.invoke_edit_path(1);
+    // The field that shows: the other pane's is hidden.
+    let field = || labelled(&window, "경로", AccessibleRole::TextInput).remove(0);
+
+    // The text goes to Rust as it changes (→ ends the selection at the end of the text).
+    chord(&window, &[&key(Key::RightArrow)]);
+    chord(&window, &["/"]);
+    chord(&window, &["d"]);
+    assert_eq!(taken(), ["edited 1 /srv/", "edited 1 /srv/d"]);
+    // Without a list, the arrows are the field's own.
+    chord(&window, &[&down]);
+    assert_eq!(taken(), Vec::<String>::new());
+
+    // With the list Rust gives: its rows show under the field, ↑↓ step through them, Tab
+    // completes the text, Esc closes the list and keeps the field.
+    let mut view = window.get_right_pane();
+    view.completion = folder_menu(&["docs", "downloads"], -1, "");
+    window.set_right_pane(view);
+    assert_eq!(
+        labelled(&window, "downloads", AccessibleRole::ListItem).len(),
+        1
+    );
+    chord(&window, &[&down]);
+    chord(&window, &[&up]);
+    chord(&window, &[&tab]);
+    assert_eq!(taken(), ["step 1 1", "step 1 -1", "complete 1 /srv/d"]);
+    assert_eq!(field().accessible_value().as_deref(), Some("/srv/docs/"));
+    chord(&window, &[&escape]);
+    assert_eq!(taken(), ["dismissed 1"]);
+    chord(&window, &["x"]);
+    assert_eq!(taken(), ["edited 1 /srv/docs/x"]);
+    // A click on a row chooses it, and the field closes.
+    labelled(&window, "downloads", AccessibleRole::ListItem)
+        .remove(0)
+        .mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(taken(), ["chosen 1 1"]);
+    chord(&window, &["y"]);
+    assert_eq!(taken(), ["key y"]);
+
+    // Rust closed the list: Esc closes the field, which drops the list too.
+    let mut view = window.get_right_pane();
+    view.completion = FolderMenuView::default();
+    window.set_right_pane(view);
+    window.invoke_edit_path(1);
+    chord(&window, &[&escape]);
+    chord(&window, &["z"]);
+    assert_eq!(taken(), ["dismissed 1", "key z"]);
+}
+
+#[test]
+fn no_completion_key_acts_while_a_syllable_is_composed() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&calls);
+    window.on_completion_step(move |_, delta| record.borrow_mut().push(format!("step {delta}")));
+    let record = Rc::clone(&calls);
+    window.on_path_completed(move |_, text| {
+        record.borrow_mut().push(format!("complete {text}"));
+        SharedString::new()
+    });
+    let record = Rc::clone(&calls);
+    window.on_path_entered(move |_, text| record.borrow_mut().push(format!("entered {text}")));
+    let key = |k: Key| char::from(k).to_string();
+    let mut view = window.get_left_pane();
+    view.path_text = "/srv/".into();
+    view.completion = folder_menu(&["docs"], 0, "");
+    window.set_left_pane(view);
+    window.invoke_edit_path(0);
+    chord(&window, &[&key(Key::RightArrow)]);
+    // A syllable is being composed: Tab, the arrows and Enter leave it to the input method (the
+    // arrows move the field's own cursor, ↑ to the start and ↓ back to the end).
+    compose(&window, "ㄷ");
+    for k in [Key::Tab, Key::UpArrow, Key::DownArrow, Key::Return] {
+        chord(&window, &[&key(k)]);
+    }
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+    // Once it is committed, they act again.
+    commit_composition(&window, "다");
+    chord(&window, &[&key(Key::DownArrow)]);
+    chord(&window, &[&key(Key::Tab)]);
+    chord(&window, &[&key(Key::Return)]);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        ["step 1", "complete /srv/다", "entered /srv/다"]
+    );
+}
+
 #[test]
 fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
     let window = window();
@@ -282,10 +522,18 @@ fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
         .min_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
         .expect("the left pane's path row");
     let (row_x, row_width) = (row.absolute_position().x, row.size().width);
-    let mut pieces = row
+    // The pieces, without the `›` between them (each a button that lists a folder's folders).
+    let mut pieces: Vec<ElementHandle> = row
         .query_descendants()
         .match_accessible_role(AccessibleRole::Button)
-        .find_all();
+        .find_all()
+        .into_iter()
+        .filter(|piece| {
+            !piece
+                .accessible_label()
+                .is_some_and(|label| label.ends_with(SUBFOLDERS))
+        })
+        .collect();
     pieces.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
     let place = |piece: &ElementHandle| {
         let x = piece.absolute_position().x - row_x;
@@ -308,11 +556,11 @@ fn a_long_path_starts_with_the_ellipsis_and_its_folders_follow() {
     assert!(hidden >= 1, "the path is cut after the root: {shown:?}");
     assert_eq!(at(&first.0), Some(hidden + 1), "{shown:?}");
     assert_eq!(shown.len(), crumbs.len() - hidden, "{shown:?}");
-    // The "…" piece starts the row, and the first folder shown follows it after the `›`,
-    // with no gap.
+    // The "…" piece starts the row, and the first folder shown follows it after the `›`
+    // (16px wide), with no gap.
     assert!(ellipsis.1 <= 8.0, "the … piece starts the row: {shown:?}");
     assert!(
-        first.1 - ellipsis.2 <= 12.0,
+        first.1 - ellipsis.2 <= 18.0,
         "the first folder shown follows the … piece: {shown:?}"
     );
     assert_eq!(last.0, "last");
@@ -1080,7 +1328,7 @@ fn pick_view() -> PickView {
             selected: false,
         },
     ];
-    let chips: Vec<slint::SharedString> = vec!["설계안.pdf".into(), "assets".into()];
+    let chips: Vec<SharedString> = vec!["설계안.pdf".into(), "assets".into()];
     PickView {
         title: "어디로 이동할까요?".into(),
         summary: "항목 2개 · 파일 1.2 MB와 폴더 1개".into(),
@@ -2264,10 +2512,10 @@ fn the_failures_window_is_closed_and_scrolled_from_the_keys() {
     let calls = Calls::default();
     let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("closed"));
-    let lines: Vec<slint::SharedString> = (1..=60)
+    let lines: Vec<SharedString> = (1..=60)
         .map(|i| format!("항목 {i}.txt: 권한이 없습니다").into())
         .collect();
-    let head: Vec<slint::SharedString> = lines[..12].to_vec();
+    let head: Vec<SharedString> = lines[..12].to_vec();
     window.set_message_view(MessageView {
         title: "처리하지 못한 항목".into(),
         lines: ModelRc::new(slint::VecModel::from(lines)),
@@ -2313,7 +2561,7 @@ fn recovered_jobs_are_answered_from_the_keys_starting_on_close() {
     let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("closed"));
     let show = |rows: &[&str]| {
-        let rows: Vec<slint::SharedString> = rows.iter().map(|&row| row.into()).collect();
+        let rows: Vec<SharedString> = rows.iter().map(|&row| row.into()).collect();
         window.set_recovery_view(RecoveryView {
             title: "끝나지 않은 작업".into(),
             note: "다시 실행하거나 버립니다".into(),
@@ -2419,7 +2667,7 @@ fn the_notice_window_closes_from_the_keys_on_its_button() {
 }
 
 fn preflight_view(has_blocked: bool) -> PreflightView {
-    let lines: Vec<slint::SharedString> = vec!["a.txt: 이름이 너무 깁니다".into()];
+    let lines: Vec<SharedString> = vec!["a.txt: 이름이 너무 깁니다".into()];
     PreflightView {
         title: "복사하기 전에 확인할 것이 있습니다".into(),
         lines: ModelRc::new(slint::VecModel::from(lines.clone())),

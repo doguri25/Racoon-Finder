@@ -155,6 +155,27 @@ pub fn cannot_open(kind: ErrorKind) -> String {
     format!("열 수 없습니다: {}", error_kind(kind))
 }
 
+/// The notice for the address of a remote place typed into a path field (`sftp://…`): the app
+/// opens local folders alone for now.
+pub fn remote_location() -> &'static str {
+    "아직 지원하지 않는 위치입니다"
+}
+
+/// What the list of a folder's subfolders under a `›` says while a worker lists the folder.
+pub fn listing_folders() -> &'static str {
+    "불러오는 중…"
+}
+
+/// What the list of a folder's subfolders says when the folder has none (that the panes show).
+pub fn no_subfolders() -> &'static str {
+    "하위 폴더가 없습니다"
+}
+
+/// Under the names a list of the address bar shows: how many more folders there are.
+pub fn more_folders(count: usize) -> String {
+    format!("외 {count}개")
+}
+
 /// The notice of a drop the window did not make: the rows changed under the pointer (a
 /// folder's watch) since it showed where the items would go, so they would go elsewhere.
 pub fn drop_moved() -> &'static str {

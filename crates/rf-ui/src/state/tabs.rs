@@ -8,10 +8,11 @@
 //!   its own last ten, and they go with it when the panes swap. A reopened tab, like a copy of a
 //!   tab, is a new tab: it lists its folder under a new generation.
 //! - **A pinned tab** stays at its folder: a move to another one (a folder of its list, a piece
-//!   of the path row, a typed path, the tree, Up, Back, Forward, a link, the other pane's F9 or
-//!   navigation sync) opens in a new tab beside it, which goes on from the pinned tab's history
-//!   ([`AppState::navigate_shown`], [`AppState::move_shown`]). Its own folder is listed again in
-//!   it. A folder that vanishes moves it as it moves any tab: there is nothing left to show.
+//!   of the path row, a folder of the address bar's lists, a typed path, the tree, Up, Back,
+//!   Forward, a link, the other pane's F9 or navigation sync) opens in a new tab beside it, which
+//!   goes on from the pinned tab's history ([`AppState::navigate_shown`],
+//!   [`AppState::move_shown`]). Its own folder is listed again in it. A folder that vanishes
+//!   moves it as it moves any tab: there is nothing left to show.
 //! - **Closing several** (the others, those to the right) spares the pinned tabs; closing one by
 //!   name (Ctrl+W, 닫기 in its menu) does not. They are closed from the right, so that reopening
 //!   them one by one puts each back in its place.

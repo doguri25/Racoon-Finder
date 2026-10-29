@@ -7,7 +7,8 @@
 // and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
 // other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
 // under it takes them (`drop-check`). A tab dragged along its strip, or into the other pane's,
-// moves there (`tab-move-check`).
+// moves there (`tab-move-check`). The `›` of a piece of a pane's path row opens the list of that
+// folder's folders under it (`subfolders`, NAV-03); its keys go to Rust with the window's.
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -15,7 +16,7 @@ import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
-import { Pane, PaneView, TabItem, Crumb, PaneDivider } from "pane.slint";
+import { Pane, PaneView, TabItem, Crumb, PaneDivider, FolderMenu, FolderMenuView } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
 import { JobPanel, JobRowView } from "job-panel.slint";
 import {
@@ -28,7 +29,7 @@ import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 export {
     Theme, FileRow, PaneView, TabItem, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow, Shortcuts
+    NoticeWindow, Shortcuts, FolderMenuView
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -128,6 +129,11 @@ export component MainWindow inherits Window {
     // The size the window opens at: the one of the last run, from the settings.
     in property <length> start-width: 1280px;
     in property <length> start-height: 800px;
+    // The list of the folders in a piece of a path row's folder, under the `›` that asked for
+    // it (one at a time, in either pane), and where that `›` is.
+    in property <FolderMenuView> subfolders;
+    private property <length> subfolders-x;
+    private property <length> subfolders-y;
 
     // A key pressed while no text field has focus: the key's text (a character of
     // `Key` for a special key) and the modifiers (on macOS `ctrl` is Command and `meta`
@@ -160,7 +166,20 @@ export component MainWindow inherits Window {
     callback tab-move-check(data: data-transfer, side: int, slot: int) -> bool;
     callback tab-move-dropped(data: data-transfer, side: int, slot: int) -> bool;
     callback crumb-clicked(side: int, index: int);
+    // The `›` after piece `index` of pane `side`'s path row was clicked; a row of its list was
+    // chosen; the list is to close (a press elsewhere, or the keys left the panes).
+    callback subfolders-clicked(side: int, index: int);
+    callback subfolder-chosen(index: int);
+    callback subfolders-dismissed();
     callback path-entered(side: int, text: string);
+    // The path field of pane `side`: its text was typed, ↑ (-1) or ↓ (1) or Tab while its
+    // completion list shows (Tab gives the completed text, or an empty one), a row of the list
+    // was clicked, the list is to close (Esc, or the field closed).
+    callback path-edited(side: int, text: string);
+    callback completion-step(side: int, delta: int);
+    callback path-completed(side: int, text: string) -> string;
+    callback completion-chosen(side: int, index: int);
+    callback completion-dismissed(side: int);
     // The filter box changed: the active pane shows the rows whose names hold `text`.
     callback filter-edited(text: string);
     callback sort(side: int, column: int);
@@ -420,6 +439,13 @@ export component MainWindow inherits Window {
     }
 
     keys := FocusScope {
+        // The keys leave the panes (a text field, the tree, a menu or a dialog takes them): the
+        // list of subfolders, whose keys came here, closes.
+        focus-lost => {
+            if (root.subfolders.open) {
+                root.subfolders-dismissed();
+            }
+        }
         key-pressed(event) => {
             // A text field that has focus passes up the keys it does not use; they are not
             // shortcuts while it is open, nor while a dialog is.
@@ -955,9 +981,31 @@ export component MainWindow inherits Window {
                             root.crumb-clicked(0, index);
                             keys.focus();
                         }
+                        subfolders-clicked(index, x, y) => {
+                            root.subfolders-x = x;
+                            root.subfolders-y = y;
+                            keys.focus();
+                            root.subfolders-clicked(0, index);
+                        }
                         path-entered(text) => {
                             keys.focus();
                             root.path-entered(0, text);
+                        }
+                        path-edited(text) => {
+                            root.path-edited(0, text);
+                        }
+                        completion-step(delta) => {
+                            root.completion-step(0, delta);
+                        }
+                        path-completed(text) => {
+                            return root.path-completed(0, text);
+                        }
+                        completion-chosen(index) => {
+                            keys.focus();
+                            root.completion-chosen(0, index);
+                        }
+                        completion-dismissed => {
+                            root.completion-dismissed(0);
                         }
                         edit-ended => {
                             keys.focus();
@@ -1063,9 +1111,31 @@ export component MainWindow inherits Window {
                             root.crumb-clicked(1, index);
                             keys.focus();
                         }
+                        subfolders-clicked(index, x, y) => {
+                            root.subfolders-x = x;
+                            root.subfolders-y = y;
+                            keys.focus();
+                            root.subfolders-clicked(1, index);
+                        }
                         path-entered(text) => {
                             keys.focus();
                             root.path-entered(1, text);
+                        }
+                        path-edited(text) => {
+                            root.path-edited(1, text);
+                        }
+                        completion-step(delta) => {
+                            root.completion-step(1, delta);
+                        }
+                        path-completed(text) => {
+                            return root.path-completed(1, text);
+                        }
+                        completion-chosen(index) => {
+                            keys.focus();
+                            root.completion-chosen(1, index);
+                        }
+                        completion-dismissed => {
+                            root.completion-dismissed(1);
                         }
                         edit-ended => {
                             keys.focus();
@@ -1181,6 +1251,29 @@ export component MainWindow inherits Window {
             root.notice = "";
             notice-timer.stop();
             root.notice-closed(root.notice-token);
+        }
+    }
+
+    // While the list of subfolders shows, a press anywhere but on it closes it and does nothing
+    // else (as a system's drop-down list), and the wheel scrolls nothing behind it.
+    if root.subfolders.open: TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.subfolders-dismissed();
+            }
+        }
+        scroll-event(event) => {
+            return accept;
+        }
+    }
+    if root.subfolders.open: FolderMenu {
+        width: 300px;
+        x: max(8px, min(root.subfolders-x - 4px, root.width - self.width - 8px));
+        y: min(root.subfolders-y + 2px, max(8px, root.height - self.height - 8px));
+        view: root.subfolders;
+        label: "하위 폴더";
+        chosen(index) => {
+            root.subfolder-chosen(index);
         }
     }
 

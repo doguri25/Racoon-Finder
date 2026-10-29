@@ -885,6 +885,8 @@ impl Pane {
         };
         let target = &mut self.tabs[tab];
         match event {
+            // A tab never asks for names (`Loader::list_names`).
+            LoadEvent::Names { .. } => return Handled::Stale,
             LoadEvent::Listed { entries, .. } => {
                 target.apply_sorted(generation, entries);
             }

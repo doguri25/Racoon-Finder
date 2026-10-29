@@ -9,21 +9,24 @@
 //! has left.
 //!
 //! [`Loader::list_folders`] is the same work without the watch and the free space, for the
-//! folder tree: one listing of the folders in a folder. [`Loader::follow`] works the same way
-//! for a link a tab opens, and its result carries the tab's generation too.
+//! folder tree: one listing of the folders in a folder. [`Loader::list_names`] lists the names
+//! of the folders in a folder that start with a prefix, for the address bar's lists (NAV-03),
+//! at most a limit of them. [`Loader::follow`] works the same way for a link a tab opens, and
+//! its result carries the tab's generation too.
 //! [`Loader::nearest_existing_parent`], [`Loader::inspect_target`] and [`Loader::check_copy`]
 //! block and are called on a worker thread.
 
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
-use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
+use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_jobs::CreatedItem;
 use rf_vfs::{
-    CancelToken, Capabilities, Change, Provider, SortSpec, Vfs, WatchEvent, WatchHandle,
-    sort_entries,
+    CancelToken, Capabilities, Change, Provider, SortSpec, Vfs, VisibilityFilter, WatchEvent,
+    WatchHandle, fold_name, sort_entries,
 };
 
 use crate::pane::OpenAction;
@@ -39,6 +42,37 @@ pub struct LoadRequest {
     pub path: VPath,
     /// The order the worker sorts the listing in.
     pub sort: SortSpec,
+}
+
+/// What the address bar asks the [`Loader`] for ([`Loader::list_names`]): the names of the
+/// folders in `folder` that start with `prefix`, as the user would see them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamesRequest {
+    /// The generation of the list that asked; every event of this request carries it.
+    pub generation: u64,
+    /// The folder whose folders are listed.
+    pub folder: VPath,
+    /// The start of the names wanted ([`name_starts_with`]); empty for all of them.
+    pub prefix: String,
+    /// Which hidden folders count: those the panes show.
+    pub filter: VisibilityFilter,
+    /// How many names to send at most; the others are only counted.
+    pub limit: usize,
+    /// The system whose rule the prefix follows ([`name_starts_with`]).
+    pub os: Os,
+}
+
+/// Whether the folder name `name` starts with `prefix`, typed into the path field, on `os`:
+/// ignoring case on Windows and macOS, whose file systems mostly do (folded as `rf_vfs` folds
+/// names), and as spelled elsewhere.
+pub fn name_starts_with(name: &OsStr, prefix: &str, os: Os) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    if os == Os::Other {
+        return name.to_string_lossy().starts_with(prefix);
+    }
+    fold_name(name).starts_with(&fold_name(OsStr::new(prefix)))
 }
 
 /// What the work of one [`LoadRequest`] reports, from a worker thread or the watch's thread.
@@ -68,6 +102,14 @@ pub enum LoadEvent {
     /// The bytes the user can still write on the folder's volume. Sent after `Listed`, and
     /// only when the provider can tell.
     Space { generation: u64, available: u64 },
+    /// The names a [`Loader::list_names`] found, in the natural order of the names: at most its
+    /// request's `limit` of them, and how many more there are. Sent once, in place of
+    /// `Listed`; a listing that fails sends `Failed` instead.
+    Names {
+        generation: u64,
+        names: Vec<OsString>,
+        more: usize,
+    },
 }
 
 impl LoadEvent {
@@ -79,7 +121,8 @@ impl LoadEvent {
             | LoadEvent::Changes { generation, .. }
             | LoadEvent::Rescan { generation }
             | LoadEvent::Vanished { generation }
-            | LoadEvent::Space { generation, .. } => *generation,
+            | LoadEvent::Space { generation, .. }
+            | LoadEvent::Names { generation, .. } => *generation,
         }
     }
 }
@@ -132,6 +175,42 @@ impl Loader {
         sink: impl FnMut(LoadEvent) + Send + 'static,
     ) -> LoadTicket {
         self.start(request, Mode::Folders, sink)
+    }
+
+    /// Lists the names of the folders in `request.folder` once, on a new worker thread, for a
+    /// list of the address bar (NAV-03); returns at once, so it may be called on the UI thread.
+    ///
+    /// The worker keeps the folders (no file, no link) that `request.filter` shows and whose
+    /// names start with `request.prefix` ([`name_starts_with`]), sorts them in the natural
+    /// order of their names, and sends one `Names` with the first `request.limit` of them and
+    /// the count of the rest, or one `Failed`, and ends. However large the folder, the UI
+    /// thread gets at most `limit` names, and the ticket stops the listing at its next batch.
+    /// `sink` is called as for [`Loader::request`].
+    pub fn list_names(
+        &self,
+        request: NamesRequest,
+        sink: impl FnMut(LoadEvent) + Send + 'static,
+    ) -> LoadTicket {
+        let NamesRequest {
+            generation,
+            folder,
+            prefix,
+            filter,
+            limit,
+            os,
+        } = request;
+        let request = LoadRequest {
+            generation,
+            path: folder,
+            sort: SortSpec::default(),
+        };
+        let rule = NameRule {
+            prefix,
+            filter,
+            limit,
+            os,
+        };
+        self.start(request, Mode::Names(rule), sink)
     }
 
     /// Starts the worker of `request`, doing the work `mode` names.
@@ -688,7 +767,7 @@ impl Compare<'_> {
         ) else {
             return Original::Unknown;
         };
-        let found: std::collections::HashMap<&std::ffi::OsStr, &Entry> = found
+        let found: std::collections::HashMap<&OsStr, &Entry> = found
             .iter()
             .map(|entry| (entry.name.as_os_str(), entry))
             .collect();
@@ -757,7 +836,7 @@ pub fn holds_volumes(folder: &Path) -> bool {
     if parts.next() != Some(Component::RootDir) {
         return false;
     }
-    let names: Vec<&std::ffi::OsStr> = parts.map(Component::as_os_str).collect();
+    let names: Vec<&OsStr> = parts.map(Component::as_os_str).collect();
     let names: Vec<Option<&str>> = names.iter().map(|name| name.to_str()).collect();
     matches!(
         names.as_slice(),
@@ -845,12 +924,32 @@ fn emit(shared: &Mutex<Shared>, event: LoadEvent) {
 }
 
 /// What a worker does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
     /// A tab's folder ([`Loader::request`]): the watch, the listing and the free space.
     Live,
     /// A tree node's folders ([`Loader::list_folders`]): the listing of the folders alone.
     Folders,
+    /// The names of some folders in a folder, for the address bar ([`Loader::list_names`]).
+    Names(NameRule),
+}
+
+/// Which folders a [`Mode::Names`] listing keeps, and how many of their names it sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NameRule {
+    prefix: String,
+    filter: VisibilityFilter,
+    limit: usize,
+    os: Os,
+}
+
+impl NameRule {
+    /// Whether the listing keeps `entry`.
+    fn keeps(&self, entry: &Entry) -> bool {
+        entry.kind == EntryKind::Dir
+            && self.filter.is_visible(entry)
+            && name_starts_with(&entry.name, &self.prefix, self.os)
+    }
 }
 
 /// The worker thread's part of one request.
@@ -887,15 +986,15 @@ impl Worker {
         }
 
         let mut entries = Vec::new();
-        let listed = provider.list(&path, &self.cancel, &mut |batch| {
-            if live {
-                entries.extend(batch);
-            } else {
-                entries.extend(
-                    batch
-                        .into_iter()
-                        .filter(|entry| entry.kind == EntryKind::Dir),
-                );
+        let listed = provider.list(&path, &self.cancel, &mut |batch| match &self.mode {
+            Mode::Live => entries.extend(batch),
+            Mode::Folders => entries.extend(
+                batch
+                    .into_iter()
+                    .filter(|entry| entry.kind == EntryKind::Dir),
+            ),
+            Mode::Names(rule) => {
+                entries.extend(batch.into_iter().filter(|entry| rule.keeps(entry)));
             }
         });
         if self.cancel.is_cancelled() {
@@ -908,6 +1007,19 @@ impl Worker {
         sort_entries(&mut entries, &sort);
         if self.cancel.is_cancelled() {
             return;
+        }
+        if let Mode::Names(rule) = &self.mode {
+            let more = entries.len().saturating_sub(rule.limit);
+            entries.truncate(rule.limit);
+            let names = entries.into_iter().map(|entry| entry.name).collect();
+            return emit(
+                &self.shared,
+                LoadEvent::Names {
+                    generation,
+                    names,
+                    more,
+                },
+            );
         }
         emit(
             &self.shared,
