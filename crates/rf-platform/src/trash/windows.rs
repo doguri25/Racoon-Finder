@@ -385,10 +385,10 @@ mod sink {
             hrdelete: HRESULT,
             psinewlycreated: Ref<'_, IShellItem>,
         ) -> windows::core::Result<()> {
-            if hrdelete.is_ok() {
-                if let Some(location) = psinewlycreated.as_ref().and_then(file_system_path) {
-                    *self.location.borrow_mut() = Some(location);
-                }
+            if hrdelete.is_ok()
+                && let Some(location) = psinewlycreated.as_ref().and_then(file_system_path)
+            {
+                *self.location.borrow_mut() = Some(location);
             }
             Ok(())
         }

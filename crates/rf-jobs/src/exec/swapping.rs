@@ -187,10 +187,10 @@ impl Provider for Swapping {
         self.inner.delete_leaf(path)
     }
     fn sync_dir(&self, path: &VPath) -> Result<()> {
-        if let When::SyncDir { of } = &self.when {
-            if path.as_local() == Some(of.as_path()) {
-                self.swap();
-            }
+        if let When::SyncDir { of } = &self.when
+            && path.as_local() == Some(of.as_path())
+        {
+            self.swap();
         }
         self.inner.sync_dir(path)
     }

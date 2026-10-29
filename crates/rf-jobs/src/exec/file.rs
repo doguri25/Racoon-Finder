@@ -115,10 +115,10 @@ pub(crate) fn copy_file(
     write_content(ctx, from, &mut *reader, writer, &tmp)?;
     drop(reader);
 
-    if src.scheme() == dst.scheme() {
-        if let Err(error) = dst.copy_extras(source, &tmp) {
-            ctx.warn_metadata(error, Some(source), Some(target));
-        }
+    if src.scheme() == dst.scheme()
+        && let Err(error) = dst.copy_extras(source, &tmp)
+    {
+        ctx.warn_metadata(error, Some(source), Some(target));
     }
     if let Err(error) = dst.set_metadata(&tmp, &MetadataPatch::times_of(entry)) {
         ctx.warn_metadata(error, Some(source), Some(target));

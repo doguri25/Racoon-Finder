@@ -668,10 +668,10 @@ impl<'a> TempGuard<'a> {
 
 impl Drop for TempGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            if let Err(error) = self.provider.delete_leaf(self.path) {
-                self.leftovers.note(error, self.source, self.path);
-            }
+        if self.armed
+            && let Err(error) = self.provider.delete_leaf(self.path)
+        {
+            self.leftovers.note(error, self.source, self.path);
         }
     }
 }
@@ -883,15 +883,15 @@ impl<'e> Ctx<'e> {
         let seq = self.temp_seq;
         self.temp_seq += 1;
         let temp = folder.join(temp_name(self.id, seq))?;
-        if let Some(journal) = self.env.journal {
-            if self.temp_dirs.insert(folder.clone()) {
-                let note = Record::TempDir {
-                    job: self.id,
-                    dir: folder.clone(),
-                };
-                // The journal's own error handler has the failure.
-                let _ = journal.append_durable(note);
-            }
+        if let Some(journal) = self.env.journal
+            && self.temp_dirs.insert(folder.clone())
+        {
+            let note = Record::TempDir {
+                job: self.id,
+                dir: folder.clone(),
+            };
+            // The journal's own error handler has the failure.
+            let _ = journal.append_durable(note);
         }
         Ok(temp)
     }

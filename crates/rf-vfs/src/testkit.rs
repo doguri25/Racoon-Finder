@@ -96,7 +96,7 @@ pub fn check_list_batches(p: &dyn Provider, root: &VPath) -> Vec<usize> {
             } else {
                 EntryKind::File
             };
-            assert_eq!(e.kind, want, "{:?}", e.name);
+            assert_eq!(e.kind, want, "{}", e.name.display());
             assert!(seen.insert(e.name), "duplicate entry");
         }
     })

@@ -38,7 +38,9 @@ pub(crate) fn parse_notify_records(buf: &[u8]) -> Vec<(u32, Vec<u16>)> {
         };
         records.push((
             action,
-            name.chunks_exact(2)
+            name.as_chunks::<2>()
+                .0
+                .iter()
                 .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
                 .collect(),
         ));

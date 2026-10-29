@@ -461,16 +461,16 @@ impl Survey {
             let space = ctx
                 .provider(&folder.path)
                 .and_then(|dst| dst.space(&folder.path));
-            if let Ok(Some(space)) = space {
-                if folder.needed > space.available {
-                    self.issues.push(Issue {
-                        target: folder.path.clone(),
-                        kind: IssueKind::NotEnoughSpace {
-                            needed: folder.needed,
-                            available: space.available,
-                        },
-                    });
-                }
+            if let Ok(Some(space)) = space
+                && folder.needed > space.available
+            {
+                self.issues.push(Issue {
+                    target: folder.path.clone(),
+                    kind: IssueKind::NotEnoughSpace {
+                        needed: folder.needed,
+                        available: space.available,
+                    },
+                });
             }
         }
     }

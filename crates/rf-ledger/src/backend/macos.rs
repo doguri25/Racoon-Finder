@@ -171,10 +171,10 @@ fn same_value(a: &CFType, b: &CFType) -> bool {
     if CFGetTypeID(Some(a)) != CFGetTypeID(Some(b)) {
         return false;
     }
-    if let (Some(x), Some(y)) = (a.downcast_ref::<CFNumber>(), b.downcast_ref::<CFNumber>()) {
-        if x.is_float_type() != y.is_float_type() {
-            return false;
-        }
+    if let (Some(x), Some(y)) = (a.downcast_ref::<CFNumber>(), b.downcast_ref::<CFNumber>())
+        && x.is_float_type() != y.is_float_type()
+    {
+        return false;
     }
     a == b
 }

@@ -525,10 +525,10 @@ pub(crate) fn finish_dir(ctx: &mut Ctx<'_>, source: &VPath, entry: &Entry, to: &
             return;
         }
     };
-    if src.scheme() == dst.scheme() {
-        if let Err(error) = dst.copy_extras(source, to) {
-            ctx.warn_metadata(error, Some(source), Some(to));
-        }
+    if src.scheme() == dst.scheme()
+        && let Err(error) = dst.copy_extras(source, to)
+    {
+        ctx.warn_metadata(error, Some(source), Some(to));
     }
     let mut patch = MetadataPatch::times_of(entry);
     patch.attributes = MetadataPatch::attributes_of(entry).attributes;
@@ -1226,11 +1226,13 @@ fn same_item(from: Source<'_>, target: &VPath, existing: &Entry, fs: FsKind) -> 
     let one_folder = target
         .parent()
         .is_some_and(|other| fold_path(&other, fs) == fold_path(&folder, fs));
-    if fs.case_insensitive() && one_folder && old != new && fold_name(old, fs) == fold_name(new, fs)
+    if fs.case_insensitive()
+        && one_folder
+        && old != new
+        && fold_name(old, fs) == fold_name(new, fs)
+        && let Ok(renamed) = folder.join(new)
     {
-        if let Ok(renamed) = folder.join(new) {
-            return Same::Spelling(renamed);
-        }
+        return Same::Spelling(renamed);
     }
     Same::Itself
 }

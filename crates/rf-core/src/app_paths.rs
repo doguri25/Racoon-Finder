@@ -93,12 +93,11 @@ impl AppPaths {
     /// portable mode, which ignores `base` entirely.
     pub fn resolve(os: Os, exe: &Path, base: &BaseDirs) -> Result<Self> {
         require_absolute(exe)?;
-        if os != Os::MacOs {
-            if let Some(dir) = exe.parent() {
-                if dir.join(PORTABLE_MARKER).is_file() {
-                    return Ok(Self::portable(&dir.join(PORTABLE_DATA_DIR)));
-                }
-            }
+        if os != Os::MacOs
+            && let Some(dir) = exe.parent()
+            && dir.join(PORTABLE_MARKER).is_file()
+        {
+            return Ok(Self::portable(&dir.join(PORTABLE_DATA_DIR)));
         }
         require_absolute(&base.temp)?;
         let temp = base.temp.clone();

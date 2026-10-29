@@ -582,7 +582,7 @@ mod beyond {
     fn a_future_dated_file_keeps_its_copied_folder_but_not_itself() {
         let f = fx();
         write_tree(&f.src, &[("dir/future.txt", "F"), ("future.txt", "G")]);
-        let tomorrow = SystemTime::now() + Duration::from_secs(24 * 60 * 60);
+        let tomorrow = SystemTime::now() + Duration::from_hours(24);
         for path in [
             f.src.join("dir").join("future.txt"),
             f.src.join("future.txt"),

@@ -16,7 +16,8 @@ fn roundtrip(p: &dyn Provider, dir: &VPath, name: &OsString) {
     assert_eq!(
         testkit::names(p, dir),
         BTreeSet::from([name.clone()]),
-        "{name:?}"
+        "{}",
+        name.display()
     );
     assert_eq!(&p.stat(&path).unwrap().name, name);
     let other = dir.join("renamed").unwrap();

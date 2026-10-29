@@ -97,10 +97,10 @@ fn cancel_mid_file_removes_the_temp_file() {
     let control = Control::new();
     let c2 = control.clone();
     let on = move |e: ExecEvent| {
-        if let ExecEvent::Progress(p) = e {
-            if p.done.bytes > 0 {
-                c2.cancel();
-            }
+        if let ExecEvent::Progress(p) = e
+            && p.done.bytes > 0
+        {
+            c2.cancel();
         }
     };
     let (vfs, res) = (Vfs::with_local(), NonInteractive);
@@ -126,13 +126,13 @@ fn pause_holds_the_copy_until_resume() {
         std::thread::spawn(move || {
             let (c2, tx) = (control.clone(), Mutex::new(Some(tx)));
             let on = move |e: ExecEvent| {
-                if let ExecEvent::Progress(p) = e {
-                    if p.done.bytes > 0 && p.done.bytes < p.total.bytes {
-                        if let Some(tx) = tx.lock().unwrap().take() {
-                            c2.pause();
-                            tx.send(()).unwrap();
-                        }
-                    }
+                if let ExecEvent::Progress(p) = e
+                    && p.done.bytes > 0
+                    && p.done.bytes < p.total.bytes
+                    && let Some(tx) = tx.lock().unwrap().take()
+                {
+                    c2.pause();
+                    tx.send(()).unwrap();
                 }
             };
             let (vfs, res) = (Vfs::with_local(), NonInteractive);

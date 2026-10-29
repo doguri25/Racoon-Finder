@@ -177,10 +177,10 @@ fn cancelling_a_move_keeps_every_file_in_one_place() {
     let control = Control::new();
     let c2 = control.clone();
     let on = move |e: ExecEvent| {
-        if let ExecEvent::Progress(pr) = e {
-            if pr.done.files >= 1 {
-                c2.cancel();
-            }
+        if let ExecEvent::Progress(pr) = e
+            && pr.done.files >= 1
+        {
+            c2.cancel();
         }
     };
     let (vfs, res) = (p.vfs(), NonInteractive);

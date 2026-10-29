@@ -105,13 +105,13 @@ fn remove_recycle_record(location: &VPath) {
         return;
     };
     let units: Vec<u16> = name.encode_wide().collect();
-    if let [dollar, r, rest @ ..] = units.as_slice() {
-        if (*dollar, *r) == (u16::from(b'$'), u16::from(b'R')) {
-            let mut record = vec![u16::from(b'$'), u16::from(b'I')];
-            record.extend_from_slice(rest);
-            // The record is the bin's bookkeeping; without the item the shell ignores it.
-            let _ = std::fs::remove_file(local.with_file_name(OsString::from_wide(&record)));
-        }
+    if let [dollar, r, rest @ ..] = units.as_slice()
+        && (*dollar, *r) == (u16::from(b'$'), u16::from(b'R'))
+    {
+        let mut record = vec![u16::from(b'$'), u16::from(b'I')];
+        record.extend_from_slice(rest);
+        // The record is the bin's bookkeeping; without the item the shell ignores it.
+        let _ = std::fs::remove_file(local.with_file_name(OsString::from_wide(&record)));
     }
 }
 
