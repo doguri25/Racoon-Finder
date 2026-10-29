@@ -285,6 +285,46 @@ fn an_undo_that_a_taken_name_stopped_keeps_its_record() {
 }
 
 #[test]
+fn a_redo_that_a_taken_name_stopped_keeps_its_record() {
+    let f = fx();
+    std::fs::write(f.src.join("a"), "A").unwrap();
+    std::fs::write(f.src.join("c"), "C").unwrap();
+    let (e, rx) = engine_on(Vfs::with_local());
+    done(&e, &rx, rename(&f, "a", "b"));
+    done(&e, &rx, rename(&f, "c", "d"));
+    undo(&e, &rx);
+    undo(&e, &rx);
+    let redos = e.redo_history();
+    assert_eq!((redos.len(), e.undo_history().len()), (2, 0));
+    // Another item takes the name the redo gives back: the redo refuses and changes nothing.
+    std::fs::write(f.src.join("b"), "another b").unwrap();
+    let rep = redo(&e, &rx);
+    assert_eq!(rep.spec, JobSpec::Undo(redos[1].clone()));
+    assert_eq!(
+        (rep.outcome, rep.undo.clone()),
+        (Outcome::CompletedWithErrors, None)
+    );
+    assert_eq!(rep.failures[0].kind, rf_core::ErrorKind::AlreadyExists);
+    // The record stays the one to redo next: the next redo tries it again rather than redo
+    // the later rename, which nobody asked for.
+    assert_eq!(
+        (e.redo_history(), e.undo_history()),
+        (redos.clone(), Vec::new())
+    );
+    assert_eq!(redo(&e, &rx).spec, JobSpec::Undo(redos[1].clone()));
+    assert!(f.src.join("a").exists() && f.src.join("c").exists());
+    // Once the name is free, the redo goes through, and the later rename is next.
+    std::fs::remove_file(f.src.join("b")).unwrap();
+    assert_eq!(redo(&e, &rx).outcome, Outcome::Completed);
+    assert_eq!(std::fs::read_to_string(f.src.join("b")).unwrap(), "A");
+    assert_eq!(e.redo_history(), &redos[..1]);
+    assert_eq!(e.undo_history().len(), 1);
+    assert_eq!(redo(&e, &rx).spec, JobSpec::Undo(redos[0].clone()));
+    assert!(f.src.join("d").exists());
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
 fn an_undo_whose_item_is_gone_drops_its_record() {
     let f = fx();
     std::fs::write(f.src.join("a"), "A").unwrap();
