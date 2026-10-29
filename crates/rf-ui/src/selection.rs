@@ -87,17 +87,14 @@ impl Selection {
     }
 
     /// A Shift+click on row `i`: the rows from the anchor to `i` are selected and no others,
-    /// and the cursor goes to `i`. Without an anchor the range starts at the cursor, or at
-    /// `i` itself, which becomes the anchor.
+    /// and the cursor goes to `i`. An anchor past the end of `names` (a list that shrank
+    /// without [`Selection::reconcile`]) starts the range at the last row. Without an anchor
+    /// the range is `i` alone, which becomes the anchor.
     pub fn extend_to(&mut self, i: usize, names: &[impl Named]) {
         if i >= names.len() {
             return;
         }
-        let anchor = self
-            .anchor
-            .or(self.cursor)
-            .unwrap_or(i)
-            .min(names.len() - 1);
+        let anchor = self.anchor.unwrap_or(i).min(names.len() - 1);
         let (first, last) = (anchor.min(i), anchor.max(i));
         self.selected = names[first..=last]
             .iter()
@@ -236,6 +233,17 @@ mod tests {
         fresh.extend_to(2, &names);
         assert_eq!(fresh.indices(&names), [2]);
         assert_eq!(fresh.anchor(), Some(2));
+    }
+
+    #[test]
+    fn an_anchor_past_a_shorter_list_starts_at_its_last_row() {
+        let mut sel = Selection::default();
+        sel.click(4, &list(&ABCDE));
+        // The list shrank without a reconcile: the anchor is at its last row now.
+        let shorter = list(&["a", "b", "c"]);
+        sel.extend_to(0, &shorter);
+        assert_eq!(sel.indices(&shorter), [0, 1, 2]);
+        assert_eq!((sel.cursor(), sel.anchor()), (Some(0), Some(2)));
     }
 
     #[test]

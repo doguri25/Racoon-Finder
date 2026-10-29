@@ -1,5 +1,7 @@
 //! Sizes, times and kinds as the file list shows them.
 
+use std::ffi::OsStr;
+use std::path::Path;
 use std::time::SystemTime;
 
 use jiff::Timestamp;
@@ -12,8 +14,37 @@ const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
 /// A byte count for the size column and the status line: `"{n} 바이트"` below 1 KB, else the
 /// largest unit (KB, MB, GB, TB, 1024 apart) that keeps the number below 1024. A number below
 /// 10 keeps one decimal (`1.4 MB`, but `1 KB` rather than `1.0 KB`); a larger one is rounded to
-/// a whole number (`214 KB`).
+/// a whole number (`214 KB`). It rounds to the nearest; see [`format_size_rounded`].
 pub fn format_size(bytes: u64) -> String {
+    format_size_rounded(bytes, Rounding::Nearest)
+}
+
+/// How [`format_size_rounded`] rounds to the digits it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Rounding {
+    /// To the nearest, halves up: for a size on its own.
+    Nearest,
+    /// Never below the value: for what something needs, or how large it is, next to a limit.
+    Up,
+    /// Never above the value: for a limit or what is free, next to what is needed.
+    Down,
+}
+
+impl Rounding {
+    /// `value / unit`, rounded this way.
+    fn divide(self, value: u128, unit: u128) -> u128 {
+        match self {
+            Rounding::Nearest => (value + unit / 2) / unit,
+            Rounding::Up => value.div_ceil(unit),
+            Rounding::Down => value / unit,
+        }
+    }
+}
+
+/// A byte count in the form of [`format_size`], rounded as `rounding` says. A need rounded
+/// [`Rounding::Up`] next to a limit rounded [`Rounding::Down`] never reads as the same
+/// number when the need is the larger: `4 GB, 최대 3.9 GB` for a 4 GiB file on FAT32.
+pub fn format_size_rounded(bytes: u64, rounding: Rounding) -> String {
     if bytes < 1024 {
         return format!("{bytes} 바이트");
     }
@@ -22,14 +53,14 @@ pub fn format_size(bytes: u64) -> String {
     let mut index = 0;
     loop {
         let name = UNITS[index];
-        let tenths = (bytes * 10 + unit / 2) / unit;
+        let tenths = rounding.divide(bytes * 10, unit);
         if tenths < 100 {
             return match tenths % 10 {
                 0 => format!("{} {name}", tenths / 10),
                 frac => format!("{}.{frac} {name}", tenths / 10),
             };
         }
-        let whole = (bytes + unit / 2) / unit;
+        let whole = rounding.divide(bytes, unit);
         if whole < 1024 || index == UNITS.len() - 1 {
             return format!("{whole} {name}");
         }
@@ -60,8 +91,10 @@ pub fn format_time_in(t: SystemTime, tz: &TimeZone) -> String {
 
 /// The kind column of `entry`: what a folder, a link and a special file are, and for a file
 /// the kind its extension names (`PDF 문서`, `PNG 이미지`, `CSV 파일`), or `파일` without one.
+/// A folder named `….app` is a macOS app bundle and reads `응용 프로그램`.
 pub fn kind_label(entry: &Entry) -> String {
     match entry.kind {
+        EntryKind::Dir if is_app_bundle(&entry.name) => return "응용 프로그램".to_owned(),
         EntryKind::Dir => return "파일 폴더".to_owned(),
         EntryKind::Symlink => return "바로 가기".to_owned(),
         EntryKind::Other => return "특수 파일".to_owned(),
@@ -91,6 +124,13 @@ pub fn kind_label(entry: &Entry) -> String {
     }
 }
 
+/// Whether a folder called `name` is a macOS app bundle: its extension is `app`, in any case.
+fn is_app_bundle(name: &OsStr) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
@@ -118,6 +158,34 @@ mod tests {
     }
 
     #[test]
+    fn sizes_round_up_or_down_on_request() {
+        // Nearest is what `format_size` does.
+        assert_eq!(format_size_rounded(1_477_427, Rounding::Nearest), "1.4 MB");
+        assert_eq!(format_size_rounded(1_477_427, Rounding::Up), "1.5 MB");
+        assert_eq!(format_size_rounded(1_477_427, Rounding::Down), "1.4 MB");
+        assert_eq!(format_size_rounded(219_137, Rounding::Up), "215 KB");
+        assert_eq!(format_size_rounded(219_137, Rounding::Down), "214 KB");
+        // An exact value stays as it is.
+        assert_eq!(format_size_rounded(219_136, Rounding::Up), "214 KB");
+        // Bytes are exact either way.
+        assert_eq!(format_size_rounded(1000, Rounding::Up), "1000 바이트");
+        // Up never shows less than the size, and moves to the next unit at 1024.
+        assert_eq!(format_size_rounded(1024 * 1024 - 1, Rounding::Up), "1 MB");
+        assert_eq!(
+            format_size_rounded(1024 * 1024 - 1, Rounding::Down),
+            "1023 KB"
+        );
+        assert_eq!(format_size_rounded(1024 * 1024 + 1, Rounding::Up), "1.1 MB");
+        assert_eq!(format_size_rounded(1024 * 1024 + 1, Rounding::Down), "1 MB");
+        // The largest file FAT32 holds is a byte short of 4 GiB.
+        let fat32_max = 4 * 1024_u64.pow(3) - 1;
+        assert_eq!(format_size_rounded(fat32_max, Rounding::Down), "3.9 GB");
+        assert_eq!(format_size_rounded(fat32_max + 1, Rounding::Up), "4 GB");
+        assert_eq!(format_size_rounded(u64::MAX, Rounding::Up), "16777216 TB");
+        assert_eq!(format_size_rounded(u64::MAX, Rounding::Down), "16777215 TB");
+    }
+
+    #[test]
     fn times_use_the_given_zone() {
         // 2026-10-30 03:04:59 UTC
         let t = UNIX_EPOCH + Duration::from_secs(1_793_329_499);
@@ -141,6 +209,15 @@ mod tests {
         assert_eq!(
             kind_label(&Entry::new("a.pdf", EntryKind::Dir)),
             "파일 폴더"
+        );
+        // A macOS app is a folder whose name ends in `.app`.
+        assert_eq!(
+            kind_label(&Entry::new("Safari.app", EntryKind::Dir)),
+            "응용 프로그램"
+        );
+        assert_eq!(
+            kind_label(&Entry::new("Tool.APP", EntryKind::Dir)),
+            "응용 프로그램"
         );
         assert_eq!(
             kind_label(&Entry::new("링크.pdf", EntryKind::Symlink)),
