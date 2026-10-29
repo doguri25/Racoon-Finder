@@ -155,6 +155,12 @@ pub fn cannot_open(kind: ErrorKind) -> String {
     format!("열 수 없습니다: {}", error_kind(kind))
 }
 
+/// The notice of a drop the window did not make: the rows changed under the pointer (a
+/// folder's watch) since it showed where the items would go, so they would go elsewhere.
+pub fn drop_moved() -> &'static str {
+    "목록이 바뀌어 놓을 곳이 달라졌습니다. 다시 끌어다 놓으세요"
+}
+
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {

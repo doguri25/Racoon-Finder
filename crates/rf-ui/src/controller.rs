@@ -706,7 +706,10 @@ impl Controller {
         let mut taken = false;
         self.update(|state| {
             let effects = state.drop_items(id, spot, mode);
-            taken = !effects.is_empty();
+            // A notice (the drop was not made) takes nothing.
+            taken = effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Job(_)));
             effects
         });
         if taken { action } else { DragAction::None }

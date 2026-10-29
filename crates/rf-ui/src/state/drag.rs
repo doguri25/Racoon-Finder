@@ -42,6 +42,9 @@ pub struct Drag {
     pub request: PickRequest,
     /// Whether each folder hovered so far takes the items.
     takes: HashMap<VPath, bool>,
+    /// The folder the last hover showed the items would go into; `None` after a hover where
+    /// nothing takes them.
+    shown: Option<VPath>,
 }
 
 /// A place a drag is over.
@@ -84,6 +87,9 @@ impl AppState {
     pub fn press_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
         self.activate(side);
         self.pending_click = None;
+        // A row the window drew and the state no longer has readies no drag, rather than
+        // leaving the last press's.
+        self.drag = None;
         let (selection, rows) = self.tab_mut(side).selection_mut();
         let Some(entry) = rows.get(row) else {
             return Vec::new();
@@ -103,6 +109,7 @@ impl AppState {
                 side,
                 request,
                 takes: HashMap::new(),
+                shown: None,
             });
         effects
     }
@@ -139,18 +146,24 @@ impl AppState {
     /// Whether the place `spot` takes the items of the drag whose payload carries `id`, and
     /// into which folder: never while a window shows over the main window or the app ends,
     /// nor for the payload of another drag. Found from the paths alone, so that it can answer
-    /// at every move of the pointer.
+    /// at every move of the pointer. The drag notes the folder, which the window shows.
     pub fn drop_offer(&mut self, id: u64, spot: DropSpot) -> Option<DropOffer> {
         if self.modal.is_some() || self.quitting {
             return None;
         }
-        let folder = self.spot_folder(spot)?;
+        let folder = self.spot_folder(spot);
         let drag = self.drag.as_mut().filter(|drag| drag.id == id && id != 0)?;
+        drag.shown = None;
+        let folder = folder?;
         let takes = *drag
             .takes
             .entry(folder.clone())
             .or_insert_with(|| validate(&drag.request, &folder, None) == Validity::Ok);
-        takes.then_some(DropOffer {
+        if !takes {
+            return None;
+        }
+        drag.shown = Some(folder.clone());
+        Some(DropOffer {
             folder,
             count: drag.request.sources.len(),
         })
@@ -158,11 +171,18 @@ impl AppState {
 
     /// The drag whose payload carries `id` was dropped on `spot`, to `mode` its items: a
     /// place that takes them gets their transfer, which asks about a name that is taken, and
-    /// the drag is over (one drop each). Elsewhere nothing happens.
+    /// the drag is over (one drop each). Elsewhere nothing happens. Nor where the rows changed
+    /// under a still pointer since the last hover (a folder's watch), so that `spot` now holds
+    /// another folder than the one the window showed: a notice says so, and the next hover
+    /// shows where a drop goes.
     pub fn drop_items(&mut self, id: u64, spot: DropSpot, mode: TransferMode) -> Vec<Effect> {
+        let shown = self.drag.as_ref().and_then(|drag| drag.shown.clone());
         let Some(offer) = self.drop_offer(id, spot) else {
             return Vec::new();
         };
+        if shown.is_some_and(|shown| shown != offer.folder) {
+            return vec![Effect::Notice(words::drop_moved().to_owned())];
+        }
         let Some(drag) = self.drag.take() else {
             return Vec::new();
         };

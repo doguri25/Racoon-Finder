@@ -1226,8 +1226,11 @@ fn a_name_being_composed_holds_the_button() {
 }
 
 #[test]
-fn a_folder_the_picker_cannot_take_is_not_offered_to_screen_readers() {
+fn a_folder_the_picker_cannot_take_is_not_selectable_for_screen_readers() {
     let window = window();
+    let toggled = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&toggled);
+    window.on_pick_tree_toggled(move |index| record.borrow_mut().push(index));
     let rows = Rc::new(slint::VecModel::from(vec![
         rf_ui::TreeRow {
             label: "보관함".into(),
@@ -1237,6 +1240,7 @@ fn a_folder_the_picker_cannot_take_is_not_offered_to_screen_readers() {
             label: "assets".into(),
             depth: 1,
             dimmed: true,
+            expandable: true,
             info: "옮기는 항목이라 고를 수 없음".into(),
             ..rf_ui::TreeRow::default()
         },
@@ -1253,10 +1257,14 @@ fn a_folder_the_picker_cannot_take_is_not_offered_to_screen_readers() {
         assert_eq!(found.len(), 1, "one row {label}");
         found.into_iter().next().expect("a row")
     };
-    assert_eq!(row("보관함").accessible_enabled(), Some(true));
+    // Neither is disabled (unset is enabled).
+    assert_ne!(row("보관함").accessible_enabled(), Some(false));
     assert_eq!(row("보관함").accessible_item_selectable(), Some(true));
-    assert_eq!(row("assets").accessible_enabled(), Some(false));
+    // It cannot be chosen, but a screen reader can still open it for the folders below.
+    assert_ne!(row("assets").accessible_enabled(), Some(false));
     assert_eq!(row("assets").accessible_item_selectable(), Some(false));
+    row("assets").invoke_accessible_expand_action();
+    assert_eq!(toggled.borrow().as_slice(), [1]);
 }
 
 /// What a drag's callbacks told: the payload's id, where, which pane, which row or tab, and
@@ -1456,4 +1464,68 @@ fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
             [(42, place, side, 0, DragAction::Move)]
         );
     }
+}
+
+#[test]
+fn a_drag_carries_the_payload_its_press_made() {
+    let (window, calls, _models, _tree) = drag_window();
+    // As the controller does: the press readies a drag of the items it selects, and the
+    // window has its id before the drag starts.
+    let weak = window.as_weak();
+    let record = Rc::clone(&calls);
+    window.on_row_clicked(move |side, i, _, _| {
+        record.rows.borrow_mut().push(("press", side, i));
+        if let Some(window) = weak.upgrade() {
+            let id = 100 + u64::try_from(i).expect("a row");
+            window.set_drag_data(ui_bridge::drag_payload(id));
+        }
+    });
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let last_id = || calls.checks.borrow().last().map(|call| call.0);
+
+    drag_to(&window, x_txt, backup);
+    assert_eq!(last_id(), Some(101));
+    pointer(&window, "release", backup);
+    drag_to(&window, docs, backup);
+    assert_eq!(last_id(), Some(100));
+    pointer(&window, "release", backup);
+    assert_eq!(
+        calls
+            .drops
+            .borrow()
+            .iter()
+            .map(|call| call.0)
+            .collect::<Vec<_>>(),
+        [101, 100]
+    );
+}
+
+#[test]
+fn a_double_click_on_a_row_opens_it() {
+    let (window, calls, _models, _tree) = drag_window();
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&opened);
+    window.on_row_activated(move |side, i| record.borrow_mut().push((side, i)));
+    let y_txt = centre_of(&window, "y.txt", AccessibleRole::ListItem);
+
+    // Two clicks at once (the testing backend's time stands still) in the right pane's
+    // second row: the drag area around the row lets them through.
+    pointer(&window, "move", y_txt);
+    for _ in 0..2 {
+        pointer(&window, "press", y_txt);
+        pointer(&window, "release", y_txt);
+    }
+    assert_eq!(opened.borrow().as_slice(), [(1, 1)]);
+    assert_eq!(
+        calls.rows.borrow().as_slice(),
+        [
+            ("press", 1, 1),
+            ("release", 1, 1),
+            ("press", 1, 1),
+            ("release", 1, 1)
+        ]
+    );
+    assert!(calls.drops.borrow().is_empty());
 }

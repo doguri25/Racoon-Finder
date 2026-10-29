@@ -249,6 +249,92 @@ fn a_drop_submits_the_transfer_of_the_items_the_drag_started_with() {
 }
 
 #[test]
+fn a_press_where_the_state_has_no_row_readies_no_drag() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 0, false, false);
+    assert_ne!(state.drag_id(), 0);
+    // The window drew a row the state no longer has (it went a moment ago): the drag that
+    // follows carries nothing, not the items of the press before.
+    state.press_row(LEFT, 99, false, false);
+    assert_eq!(state.drag_id(), 0);
+    assert_eq!(state.drag(), None);
+}
+
+#[test]
+fn a_drop_goes_only_where_the_window_showed() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let first_row = DropSpot::Pane {
+        side: RIGHT,
+        row: Some(0),
+    };
+    assert_eq!(offer(&mut state, first_row), Some(in_b("백업")));
+
+    // A folder made in the right pane comes first under the still pointer (its watch): the
+    // first row is another folder than the one the window showed. Nothing moves there.
+    let right = state.panes()[RIGHT].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation: right,
+        changes: vec![rf_vfs::Change::Upsert(dir("가나"))],
+    });
+    assert_eq!(
+        state.drop_items(id, first_row, TransferMode::Move),
+        [Effect::Notice(words::drop_moved().to_owned())]
+    );
+    // The next hover shows the folder, and a drop then goes there.
+    assert_eq!(offer(&mut state, first_row), Some(in_b("가나")));
+    let (spec, _) = the_submit(&state.drop_items(id, first_row, TransferMode::Move));
+    let JobSpec::Transfer(transfer) = spec else {
+        panic!("a transfer: {spec:?}");
+    };
+    assert_eq!(
+        transfer.items[0].target,
+        in_b("가나").join("x.txt").expect("a name")
+    );
+}
+
+#[test]
+fn a_drop_after_its_tab_moved_on_or_closed_takes_the_items_it_started_with() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    // The tab the drag came from goes elsewhere before the drop.
+    let _ = state.go_to(folder("c"));
+    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Move));
+    assert_eq!(origin, Some(LEFT));
+    let JobSpec::Transfer(transfer) = spec else {
+        panic!("a transfer: {spec:?}");
+    };
+    assert_eq!(
+        transfer.items,
+        [TransferItem {
+            source: in_a("x.txt"),
+            target: in_b("x.txt"),
+        }]
+    );
+
+    // A drag from a tab that closes before the drop.
+    let mut state = two_panes();
+    state.press_row(LEFT, 0, false, false);
+    let id = state.drag_id();
+    let _ = state.add_tab(LEFT);
+    let _ = state.close_tab(LEFT, 0);
+    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Copy));
+    assert_eq!(origin, Some(LEFT));
+    let JobSpec::Transfer(transfer) = spec else {
+        panic!("a transfer: {spec:?}");
+    };
+    assert_eq!(
+        transfer.items,
+        [TransferItem {
+            source: in_a("docs"),
+            target: in_b("docs"),
+        }]
+    );
+}
+
+#[test]
 fn a_copy_goes_where_a_move_would() {
     let mut state = two_panes();
     state.press_row(LEFT, 2, false, false);

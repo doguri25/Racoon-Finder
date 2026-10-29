@@ -79,8 +79,8 @@ component TreeItem inherits Rectangle {
         accessible-label: root.item.label;
         accessible-description: root.item.info;
         // A dimmed folder of the picker's tree takes no click, as a quick target that cannot be
-        // chosen; its chevron still opens it.
-        accessible-enabled: !root.item.dimmed;
+        // chosen: it is not selectable. It stays enabled, so that a screen reader can still
+        // open it (its chevron does) to reach the folders below it.
         accessible-item-index: root.index;
         accessible-item-selectable: !root.item.dimmed;
         accessible-item-selected: root.item.selected;
