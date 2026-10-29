@@ -4,6 +4,8 @@
 //! printable key (the shifted letter with Shift, `"N"`), or one character of the private-use
 //! or control range for a special key, which `char::from(slint::platform::Key::F2)` gives. On
 //! macOS Slint reports Command as `control`, so the Ctrl shortcuts below are Command ones there.
+//! macOS keeps ⌘H (hide the app) for itself, so there hidden items also toggle with ⌘⇧. (period),
+//! as in Finder.
 
 use slint::platform::Key;
 
@@ -65,7 +67,7 @@ pub enum Command {
     NewTab,
     /// Ctrl+W.
     CloseTab,
-    /// Ctrl+H: show or hide hidden items.
+    /// Ctrl+H, and on macOS also ⌘⇧. (Command+Shift+Period): show or hide hidden items.
     ToggleHidden,
     /// Text typed with no Ctrl or Alt: go to the first row whose name starts with what was
     /// typed (NAV-14). Joining presses that come within a second is the caller's job, and so
@@ -76,6 +78,15 @@ pub enum Command {
 /// The command for `key`, the text of a Slint key event, held with `mods`; `None` for a key
 /// that is no shortcut (an Alt+letter, a Ctrl+letter not listed, a modifier key on its own).
 pub fn command_for(key: &str, mods: Mods) -> Option<Command> {
+    command_on(key, mods, cfg!(target_os = "macos"))
+}
+
+/// [`command_for`] on macOS (`mac`) or elsewhere.
+fn command_on(key: &str, mods: Mods, mac: bool) -> Option<Command> {
+    // Shift+Period types `>` on most layouts; what comes with Command held differs.
+    if mac && mods.ctrl && mods.shift && !mods.alt && matches!(key, "." | ">") {
+        return Some(Command::ToggleHidden);
+    }
     let mut chars = key.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         if mods.ctrl && !mods.alt && c.is_ascii_alphabetic() {
@@ -239,6 +250,39 @@ mod tests {
         for (text, mods, command) in table {
             assert_eq!(command_for(&text, mods), Some(command), "{text:?} {mods:?}");
         }
+    }
+
+    #[test]
+    fn command_shift_period_shows_hidden_items_on_macos() {
+        for key in [".", ">"] {
+            assert_eq!(
+                command_on(key, CTRL_SHIFT, true),
+                Some(Command::ToggleHidden),
+                "{key:?}"
+            );
+            assert_eq!(command_on(key, CTRL_SHIFT, false), None, "{key:?}");
+            assert_eq!(command_on(key, CTRL, true), None, "{key:?}");
+            assert_eq!(
+                command_on(
+                    key,
+                    Mods {
+                        alt: true,
+                        ..CTRL_SHIFT
+                    },
+                    true
+                ),
+                None,
+                "{key:?}"
+            );
+        }
+        // ⌘H stays a shortcut: macOS takes it first, and other systems use it.
+        assert_eq!(command_on("h", CTRL, true), Some(Command::ToggleHidden));
+        assert_eq!(command_on("h", CTRL, false), Some(Command::ToggleHidden));
+        // Typed alone, a period still selects by name.
+        assert_eq!(
+            command_on(".", NONE, true),
+            Some(Command::TypeToSelect(".".to_owned()))
+        );
     }
 
     #[test]

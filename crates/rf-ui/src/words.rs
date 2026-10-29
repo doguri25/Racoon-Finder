@@ -159,6 +159,12 @@ pub fn background_failed() -> &'static str {
     "시스템 자원이 부족해 일부 내용을 불러오지 못했습니다"
 }
 
+/// The notice when the settings (tabs, theme, window size) could not be written: the next
+/// start may not show them.
+pub fn settings_not_saved() -> &'static str {
+    "설정을 저장하지 못했습니다. 다음 실행 때 탭과 보기 설정이 돌아오지 않을 수 있습니다"
+}
+
 /// The space line of a drive in the sidebar: `128 GB 남음 / 512 GB`. The free space is
 /// rounded down, so a full drive never reads as having room.
 pub fn drive_space(available: u64, total: u64) -> String {

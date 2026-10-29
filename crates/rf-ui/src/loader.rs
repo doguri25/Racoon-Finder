@@ -183,6 +183,16 @@ impl Loader {
         None
     }
 
+    /// Whether `path` is a folder, or a link to one: a folder of the last run that a tab is to
+    /// show again.
+    ///
+    /// Blocks (a slow or sleeping drive, a network folder); call it on a worker thread.
+    pub fn is_folder(&self, path: &VPath) -> bool {
+        self.vfs
+            .provider(path)
+            .is_ok_and(|provider| is_folder(provider.as_ref(), path))
+    }
+
     /// What is at `target`, a folder the destination picker may copy or move items to that
     /// are in the folder `from_dir`: whether it is a folder (following links), whether its
     /// location takes changes, the room free there, and whether it is on the volume of

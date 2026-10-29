@@ -44,7 +44,7 @@ export component MainWindow inherits Window {
     in property <string> app-title;
     // Below 1200px the toolbar drops the name and the button texts. Handlers set it,
     // not a binding: the window's width depends on the toolbar's layout. The full
-    // toolbar needs about 1090px; 1200px only works while that stays below it, so a
+    // toolbar needs about 1140px; 1200px only works while that stays below it, so a
     // change that widens the toolbar must re-check both numbers.
     private property <bool> compact;
 
@@ -80,13 +80,24 @@ export component MainWindow inherits Window {
     in property <bool> notice-action-live: true;
     // How many rows PageUp and PageDown move (the panes are equally tall).
     out property <int> page-rows: left.page-rows;
+    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게) and whether hidden
+    // items show, for the menu's check marks.
+    in property <int> theme-choice;
+    in-out property <bool> show-hidden;
+    // The size the window opens at: the one of the last run, from the settings.
+    in property <length> start-width: 1280px;
+    in property <length> start-height: 800px;
 
     // A key pressed while no text field has focus: the key's text (a character of
     // `Key` for a special key) and the modifiers. `true` when Rust used it.
     callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
-    // rename, undo, open, delete-permanently.
+    // rename, undo, open, delete-permanently, toggle-hidden.
     callback command(name: string);
+    // A theme was chosen in the 보기 menu (the numbers of `theme-choice`).
+    callback theme-chosen(choice: int);
+    // The window's size changed (the settings keep it).
+    callback window-resized();
     callback pane-activated(side: int);
     callback tab-selected(side: int, index: int);
     callback tab-closed(side: int, index: int);
@@ -195,15 +206,24 @@ export component MainWindow inherits Window {
             keys.focus();
         }
     }
-    // The standard widgets (scroll bars) follow the app's theme, not the system's.
-    private property <bool> dark: Theme.dark;
-    changed dark => {
-        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    // The theme. 밝게 and 어둡게 set the scheme of the standard widgets (scroll bars, menus) and
+    // the app's colors. 시스템 설정 따르기 leaves the widgets' scheme to the system (`unknown`),
+    // and the app's colors follow theirs: their background is dark exactly when the system asks
+    // for dark colors. That keeps following the system's setting as it changes, also after
+    // another theme was chosen, which `Palette.color-scheme` itself (a value once set) could not.
+    private property <color> widget-background: Palette.background;
+    private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
+    function show-theme() {
+        Palette.color-scheme = root.theme-choice == 1 ? ColorScheme.light : root.theme-choice == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        Theme.dark = root.theme-choice == 2 || (root.theme-choice == 0 && root.system-dark);
+    }
+    changed system-dark => {
+        root.show-theme();
     }
 
     title: root.app-title;
-    preferred-width: 1280px;
-    preferred-height: 800px;
+    preferred-width: root.start-width;
+    preferred-height: root.start-height;
     min-width: 900px;
     min-height: 560px;
     background: Theme.bg;
@@ -213,10 +233,32 @@ export component MainWindow inherits Window {
 
     init => {
         root.compact = root.width < 1200px;
-        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+        root.mark-theme(root.theme-choice);
+        root.show-theme();
     }
     changed width => {
         root.compact = root.width < 1200px;
+        root.window-resized();
+    }
+    changed height => {
+        root.window-resized();
+    }
+
+    // The check marks of the 보기 menu's themes. A checkable item flips its own `checked` when it
+    // is chosen, which would end a binding, so the items are two-way bound to these, which are
+    // set from `theme-choice` and by the item chosen. 숨김 파일 보기 is bound to `show-hidden`,
+    // which Rust sets back to the state's after the toggle.
+    private property <bool> system-mark: true;
+    private property <bool> light-mark;
+    private property <bool> dark-mark;
+    function mark-theme(choice: int) {
+        root.system-mark = choice == 0;
+        root.light-mark = choice == 1;
+        root.dark-mark = choice == 2;
+    }
+    changed theme-choice => {
+        root.mark-theme(root.theme-choice);
+        root.show-theme();
     }
 
     keys := FocusScope {
@@ -361,10 +403,57 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
-                    // Place of the view menu.
-                    ToolButton {
-                        icon: "list-view";
-                        label: "보기 방식";
+                    // The 보기 menu: the theme and the hidden items.
+                    Rectangle {
+                        view-menu := ContextMenuArea {
+                            Menu {
+                                MenuItem {
+                                    title: "밝게";
+                                    checkable: true;
+                                    checked <=> root.light-mark;
+                                    activated => {
+                                        root.mark-theme(1);
+                                        root.theme-chosen(1);
+                                    }
+                                }
+                                MenuItem {
+                                    title: "어둡게";
+                                    checkable: true;
+                                    checked <=> root.dark-mark;
+                                    activated => {
+                                        root.mark-theme(2);
+                                        root.theme-chosen(2);
+                                    }
+                                }
+                                MenuItem {
+                                    title: "시스템 설정 따르기";
+                                    checkable: true;
+                                    checked <=> root.system-mark;
+                                    activated => {
+                                        root.mark-theme(0);
+                                        root.theme-chosen(0);
+                                    }
+                                }
+                                MenuSeparator { }
+                                MenuItem {
+                                    title: "숨김 파일 보기";
+                                    checkable: true;
+                                    checked <=> root.show-hidden;
+                                    activated => {
+                                        root.command("toggle-hidden");
+                                    }
+                                }
+                            }
+                        }
+
+                        TextButton {
+                            compact: root.compact;
+                            icon: "list-view";
+                            text: "보기";
+                            clicked => {
+                                view-menu.show({ x: 0, y: self.height + 4px });
+                            }
+                        }
                     }
 
                     // Place of the filter box.

@@ -781,3 +781,60 @@ fn the_picker_stays_under_its_name_window() {
     chord(&window, &[&down]);
     assert_eq!(calls.borrow().as_slice(), ["step 1"]);
 }
+
+#[test]
+fn the_theme_follows_the_view_menu() {
+    let window = window();
+    let theme = window.global::<Theme<'_>>();
+    let chosen = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&chosen);
+    window.on_theme_chosen(move |choice| record.borrow_mut().push(choice));
+    let dark_bg = Color::from_rgb_u8(0x15, 0x17, 0x1A);
+    let light_bg = Color::from_rgb_u8(0xF6, 0xF7, 0xF9);
+
+    // The testing backend's system asks for no dark colors: 시스템 설정 따르기 is light.
+    slint::platform::update_timers_and_animations();
+    assert!(!theme.get_dark());
+    for (choice, dark) in [(2, true), (0, false), (1, false), (2, true)] {
+        window.set_theme_choice(choice);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(theme.get_dark(), dark, "theme {choice}");
+        assert_eq!(theme.get_bg(), if dark { dark_bg } else { light_bg });
+    }
+
+    // The 보기 button opens the menu whose items choose a theme.
+    let button = labelled(&window, "보기", AccessibleRole::Button);
+    assert_eq!(button.len(), 1);
+    button[0].invoke_accessible_default_action();
+    let dark = ElementHandle::find_by_accessible_label(&window, "어둡게")
+        .next()
+        .expect("the menu shows 어둡게");
+    // The menu is a popup window of its own: the element clicks there.
+    dark.mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(chosen.borrow().as_slice(), [2]);
+
+    // The marks of the menu: the theme chosen, and 숨김 파일 보기 as `show-hidden` says.
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&commands);
+    window.on_command(move |name| record.borrow_mut().push(name.to_string()));
+    let open_menu = || {
+        button[0].invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&window, "✓").count()
+    };
+    let click = |label: &str| {
+        ElementHandle::find_by_accessible_label(&window, label)
+            .next()
+            .expect("an item of the menu")
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+    };
+    assert_eq!(open_menu(), 1);
+    // Choosing the theme that is chosen keeps its mark.
+    click("어둡게");
+    assert_eq!(chosen.borrow().as_slice(), [2, 2]);
+    assert_eq!(open_menu(), 1);
+    click("어둡게");
+    window.set_show_hidden(true);
+    assert_eq!(open_menu(), 2);
+    click("숨김 파일 보기");
+    assert_eq!(commands.borrow().as_slice(), ["toggle-hidden"]);
+}

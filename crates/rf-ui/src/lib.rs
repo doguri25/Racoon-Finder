@@ -18,6 +18,7 @@ pub mod pick;
 pub mod places;
 pub mod resolver;
 pub mod selection;
+pub mod settings;
 pub mod state;
 pub mod tree;
 pub mod ui_bridge;
@@ -57,14 +58,17 @@ pub enum RunError {
 
 /// Shows the main window and runs the event loop until the app ends.
 ///
-/// `start` is the folder the left pane opens first (the app's first argument); without it the
-/// left pane opens the home folder. The right pane opens the documents folder, or home.
+/// The window opens as the last run left it ([`settings`]): its size, the theme, the tabs of
+/// both panes and the pane with the keyboard, the hidden items shown or not. `start` is the
+/// folder the left pane opens instead of its tabs (the app's first argument). On the first
+/// run the left pane opens `start` or the home folder, the right one the documents folder, or
+/// home.
 ///
 /// One instance of the app runs at a time: it takes the lock in the folder of the job
 /// journal ([`instance`]) before anything else, and a second one only says so, in a small
 /// window, and ends with [`RunError::AlreadyRunning`]. The job engine keeps its journal in
 /// that folder. When the window closes, the engine is shut down and the jobs' questions are
-/// released ([`jobs::close_down`]) before this returns.
+/// released ([`jobs::close_down`]), and then the settings are written, before this returns.
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
@@ -76,6 +80,10 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         }
         Err(error) => return Err(RunError::Lock(error)),
     };
+    // Read here, on the main thread, before the window shows: it is one small local file, read
+    // once, and the window needs its size and theme before its first frame.
+    let settings = settings::load(paths.config_dir());
+    let saver = settings::Saver::new(paths.config_dir().to_owned());
     let window = MainWindow::new()?;
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     let jobs = jobs::Jobs::start(
@@ -84,30 +92,46 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         controller::post_question,
     )
     .map_err(RunError::Thread)?;
-    let controller = controller::begin(&window, start, jobs.clone());
+    let startup = controller::Startup {
+        start,
+        settings,
+        saver: saver.clone(),
+    };
+    let controller = controller::begin(&window, startup, jobs.clone());
     let result = window.run();
+    // `None` when the end through the close button has written them already.
+    let last = controller.final_settings();
     // Stops the listings and the watches before the window goes.
     drop(controller);
     controller::end();
-    if !jobs.is_closed() {
+    if !jobs.is_closed() || last.is_some() {
         // The event loop ended some other way than the window's close button: end the engine
-        // here, on a thread of its own as everywhere, and wait for it.
-        let closing = jobs.clone();
+        // and write the settings here, on a thread of its own as everywhere, and wait for it.
+        let (closing, saving, writing) = (jobs.clone(), saver.clone(), last.clone());
         match std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
-            .spawn(move || closing.close_down(jobs::QUIT_TIMEOUT))
+            .spawn(move || finish(&closing, &saving, writing.as_ref()))
         {
             Ok(thread) => {
                 let _ = thread.join();
             }
-            Err(_) => {
-                jobs.close_down(jobs::QUIT_TIMEOUT);
-            }
+            Err(_) => finish(&jobs, &saver, last.as_ref()),
         }
     }
     drop(lock);
     result?;
     Ok(())
+}
+
+/// The end of the app after the event loop, when the close button did not end it: the engine
+/// shuts down (unless it has) and then `last`, the settings, are written. Blocks.
+fn finish(jobs: &jobs::Jobs, saver: &settings::Saver, last: Option<&settings::Settings>) {
+    if !jobs.is_closed() {
+        jobs.close_down(jobs::QUIT_TIMEOUT);
+    }
+    if let Some(settings) = last {
+        let _ = saver.save(settings);
+    }
 }
 
 /// Tells the user that the app could not start, when `error` says so: in a small window, or,

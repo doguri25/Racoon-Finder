@@ -27,6 +27,7 @@ use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest};
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, Tab, ancestors};
 use crate::places::Place;
+use crate::settings::{Session, SessionPane, Waiting};
 use crate::tree::Tree;
 use crate::words;
 
@@ -158,18 +159,57 @@ pub struct AppState {
     quitting: bool,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
+    /// The tabs of the last run that show home while their folder is looked for, by the
+    /// generation of their request, with that folder ([`AppState::restored_folder`]).
+    restoring: Vec<(u64, VPath)>,
 }
 
 impl AppState {
     /// The left pane at `left`, the right one at `right`, the left one active, and the
     /// requests for their listings.
     pub fn new(left: VPath, right: VPath, home: Option<VPath>) -> (AppState, Vec<Effect>) {
-        let filter = VisibilityFilter::default();
-        let (left_pane, left_request) = Pane::new(left, filter);
-        let (right_pane, right_request) = Pane::new(right, filter);
+        AppState::restore(left, right, Session::default(), &[], home)
+    }
+
+    /// The window as `session` left it: the tabs of each pane with the one that showed, the
+    /// pane with the keyboard, the hidden items shown or not; and the requests for the tabs'
+    /// listings. A pane without tabs opens at `left` or `right`. The tabs of `waiting` show
+    /// home in the session while their folder is looked for; [`AppState::restored_folder`]
+    /// takes what is found.
+    pub fn restore(
+        left: VPath,
+        right: VPath,
+        session: Session,
+        waiting: &[Waiting],
+        home: Option<VPath>,
+    ) -> (AppState, Vec<Effect>) {
+        let filter = VisibilityFilter {
+            show_hidden: session.show_hidden,
+            ..VisibilityFilter::default()
+        };
+        let [left_saved, right_saved] = session.panes;
+        let mut effects = Vec::new();
+        let panes = [(left_saved, left), (right_saved, right)].map(|(saved, default)| {
+            let SessionPane { tabs, active } = saved;
+            let mut tabs = tabs.into_iter();
+            let (mut pane, request) = Pane::new(tabs.next().unwrap_or(default), filter);
+            effects.push(Effect::Load(request));
+            for tab in tabs {
+                effects.push(Effect::Load(pane.add_tab(tab)));
+            }
+            pane.select_tab(active.min(pane.tabs().len() - 1));
+            pane
+        });
+        let restoring = waiting
+            .iter()
+            .filter_map(|waiting| {
+                let tab = panes.get(waiting.side)?.tabs().get(waiting.tab)?;
+                Some((tab.generation(), waiting.path.clone()))
+            })
+            .collect();
         let state = AppState {
-            panes: [left_pane, right_pane],
-            active: LEFT,
+            panes,
+            active: session.active_pane.min(RIGHT),
             show_hidden: filter.show_hidden,
             tree: Tree::new(filter),
             pick_tree: Tree::new(filter),
@@ -186,11 +226,51 @@ impl AppState {
             toast_token: 0,
             quitting: false,
             journal_error_told: false,
+            restoring,
         };
-        (
-            state,
-            vec![Effect::Load(left_request), Effect::Load(right_request)],
-        )
+        (state, effects)
+    }
+
+    /// What the window shows, to keep for the next run. A tab that stands in at home for a
+    /// folder of the last run still being looked for keeps that folder.
+    pub fn session(&self) -> Session {
+        let pane = |pane: &Pane| SessionPane {
+            tabs: pane
+                .tabs()
+                .iter()
+                .map(|tab| {
+                    self.restoring
+                        .iter()
+                        .find(|(generation, _)| *generation == tab.generation())
+                        .map_or_else(|| tab.location().clone(), |(_, path)| path.clone())
+                })
+                .collect(),
+            active: pane.active(),
+        };
+        Session {
+            panes: [pane(&self.panes[LEFT]), pane(&self.panes[RIGHT])],
+            active_pane: self.active,
+            show_hidden: self.show_hidden,
+        }
+    }
+
+    /// Whether `path`, a folder of the last run that tabs stand in for at home, is there, as a
+    /// worker found: each such tab that has not moved since goes to it. Without it they stay.
+    pub fn restored_folder(&mut self, path: &VPath, exists: bool) -> Vec<Effect> {
+        let (found, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.restoring)
+            .into_iter()
+            .partition(|(_, waited)| waited == path);
+        self.restoring = rest;
+        if !exists {
+            return Vec::new();
+        }
+        found
+            .into_iter()
+            .filter_map(|(generation, _)| {
+                let tab = self.tab_by_generation(generation)?;
+                Some(Effect::Load(tab.navigate(path.clone())))
+            })
+            .collect()
     }
 
     pub fn panes(&self) -> &[Pane; 2] {

@@ -13,6 +13,7 @@ use std::sync::Arc;
 mod jobs;
 mod nav;
 mod pick;
+mod session;
 
 fn folder(name: &str) -> VPath {
     VPath::local(std::env::temp_dir().join(name)).expect("a local path")

@@ -4196,10 +4196,12 @@ dependencies = [
  "rf-jobs",
  "rf-platform",
  "rf-vfs",
+ "serde",
  "slint",
  "slint-build",
  "tempfile",
  "thiserror 2.0.21",
+ "toml",
 ]
 
 [[package]]

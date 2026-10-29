@@ -4,19 +4,24 @@
 //! The [`Controller`] lives in a thread-local of the UI thread: Slint's callbacks reach it
 //! there, and so do the results of worker threads, through [`post`], and the events and
 //! questions of the job engine, through [`job_event`] and [`post_question`].
+//!
+//! It also keeps the [`Settings`]: it opens the tabs of the last run, shows the theme chosen,
+//! and after a change writes them again on a worker thread, [`SAVE_DELAY`] later, once for every
+//! change in that time; and a last time as the app ends.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
 use rf_core::VPath;
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use slint::{CloseRequestResponse, ComponentHandle, ModelRc, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, ModelRc, TimerMode, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
@@ -25,6 +30,7 @@ use crate::loader::{LoadEvent, LoadTicket, Loader};
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
+use crate::settings::{Saver, Session, SessionPane, Settings, ThemeChoice, Waiting};
 use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, JobRowView, MainWindow, open, words};
@@ -33,6 +39,15 @@ use crate::{DialogKind, JobRowView, MainWindow, open, words};
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
 /// again instead of being left for its parent.
 pub const VANISHED_SETTLE: Duration = Duration::from_millis(300);
+
+/// How long after a change of what the settings keep they are written: the changes in that
+/// time are written together.
+pub const SAVE_DELAY: Duration = Duration::from_millis(500);
+
+/// How long the start waits to know whether the folders of the last run's tabs are still there.
+/// A tab whose folder is not known by then (a slow or sleeping drive) shows home meanwhile.
+pub const RESTORE_WAIT: Duration = Duration::from_millis(300);
+
 thread_local! {
     static CONTROLLER: RefCell<Option<Rc<Controller>>> = const { RefCell::new(None) };
 }
@@ -61,14 +76,42 @@ pub fn post_question(question: Question) -> bool {
     .is_ok()
 }
 
-/// Connects the window's callbacks to a new controller with the job engine `jobs`, starts
-/// finding the folders to show and the sidebar's places, and returns the controller. It stays
-/// reachable through [`with`] until it is dropped with [`end`].
-pub fn begin(window: &MainWindow, start: Option<PathBuf>, jobs: Jobs) -> Rc<Controller> {
-    let controller = Rc::new(Controller::new(window, jobs));
+/// What the window starts with, besides the job engine.
+#[derive(Debug)]
+pub struct Startup {
+    /// The folder the app's first argument names: the left pane opens it alone, in place of
+    /// the tabs of the last run.
+    pub start: Option<PathBuf>,
+    /// The settings of the last run ([`crate::settings::load`]).
+    pub settings: Settings,
+    /// Writes them back.
+    pub saver: Saver,
+}
+
+/// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
+/// window the theme and the size of the settings (before it shows), starts finding the folders
+/// to show and the sidebar's places, and returns the controller. It stays reachable through
+/// [`with`] until it is dropped with [`end`].
+pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller> {
+    let Startup {
+        start,
+        settings,
+        saver,
+    } = startup;
+    if let Some((width, height)) = settings.window_size() {
+        window.set_start_width(logical(width));
+        window.set_start_height(logical(height));
+    }
+    let mut session = settings.session();
+    if start.is_some() {
+        session.panes[LEFT] = SessionPane::default();
+    }
+    window.set_theme_choice(theme_number(settings.theme));
+    let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
 
+    let loader = controller.loader.clone();
     spawn_worker("rf-ui-start", move || {
         let home = rf_platform::known_folder(KnownFolder::Home);
         let documents = rf_platform::known_folder(KnownFolder::Documents);
@@ -84,8 +127,16 @@ pub fn begin(window: &MainWindow, start: Option<PathBuf>, jobs: Jobs) -> Rc<Cont
             documents.as_ref(),
             root.as_ref(),
         );
-        if let Some((left, right)) = folders {
-            post(move |c| c.open(left, right, home, &tz));
+        let (Some((left, right)), Some(fallback)) = (folders, home.clone().or(root)) else {
+            return;
+        };
+        let checks = look_for(&loader, session.folders());
+        let found = wait_for(&checks, session.folders().len(), RESTORE_WAIT);
+        let (session, waiting) = session.resolve(&fallback, |path| found.get(path).copied());
+        post(move |c| c.open(left, right, session, &waiting, home, &tz));
+        // The folders not known in time, as they come.
+        for (path, exists) in checks {
+            post(move |c| c.update(|state| state.restored_folder(&path, exists)));
         }
     });
     spawn_worker("rf-ui-places", || {
@@ -100,6 +151,85 @@ pub fn begin(window: &MainWindow, start: Option<PathBuf>, jobs: Jobs) -> Rc<Cont
 pub fn end() {
     let controller = CONTROLLER.with(|cell| cell.borrow_mut().take());
     drop(controller);
+}
+
+/// Looks on worker threads, one for each of `folders`, whether they are still there; the
+/// answers come on the receiver as they are found. A folder whose thread cannot start counts as
+/// there: its tab's listing tells.
+fn look_for(loader: &Loader, folders: Vec<VPath>) -> Receiver<(VPath, bool)> {
+    let (sent, checks) = mpsc::channel();
+    for folder in folders {
+        let (loader, answer, asked) = (loader.clone(), sent.clone(), folder.clone());
+        let started = std::thread::Builder::new()
+            .name("rf-ui-restore".to_owned())
+            .spawn(move || {
+                let exists = loader.is_folder(&asked);
+                let _ = answer.send((asked, exists));
+            });
+        if started.is_err() {
+            let _ = sent.send((folder, true));
+        }
+    }
+    checks
+}
+
+/// The answers of `checks` that come within `wait`, until there are `count`.
+fn wait_for(
+    checks: &Receiver<(VPath, bool)>,
+    count: usize,
+    wait: Duration,
+) -> HashMap<VPath, bool> {
+    let deadline = Instant::now() + wait;
+    let mut found = HashMap::new();
+    while found.len() < count {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match checks.recv_timeout(left) {
+            Ok((path, exists)) => {
+                found.insert(path, exists);
+            }
+            Err(_) => break,
+        }
+    }
+    found
+}
+
+/// A size in logical pixels from the settings (at most `settings::MAX_WINDOW`) as a Slint
+/// length.
+fn logical(pixels: u32) -> f32 {
+    f32::from(u16::try_from(pixels).unwrap_or(u16::MAX))
+}
+
+/// A length in logical pixels as a size for the settings; `None` for one below a pixel or past
+/// what a window can be.
+fn whole_pixels(length: f32) -> Option<u32> {
+    let rounded = length.round();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the cast saturates, and its value is kept only for a whole number from 1 to u16::MAX"
+    )]
+    (1.0..=f32::from(u16::MAX))
+        .contains(&rounded)
+        .then_some(rounded as u32)
+}
+
+/// The number the 보기 menu uses for `theme` (`theme-choice` of the window).
+fn theme_number(theme: ThemeChoice) -> i32 {
+    match theme {
+        ThemeChoice::System => 0,
+        ThemeChoice::Light => 1,
+        ThemeChoice::Dark => 2,
+    }
+}
+
+/// The theme of the 보기 menu's number `choice`.
+fn theme_of(choice: i32) -> Option<ThemeChoice> {
+    match choice {
+        0 => Some(ThemeChoice::System),
+        1 => Some(ThemeChoice::Light),
+        2 => Some(ThemeChoice::Dark),
+        _ => None,
+    }
 }
 
 /// Runs `f` on a new thread. A thread that cannot start (the system is out of threads or
@@ -130,6 +260,14 @@ fn connect(window: &MainWindow) {
     });
     window.on_command(|name| {
         with(|c| c.command(&name));
+    });
+    window.on_theme_chosen(|choice| {
+        if let Some(theme) = theme_of(choice) {
+            with(|c| c.choose_theme(theme));
+        }
+    });
+    window.on_window_resized(|| {
+        with(Controller::plan_save);
     });
     window.on_pane_activated(|s| {
         with(|c| {
@@ -332,6 +470,19 @@ pub struct Controller {
     /// The tab (its position) and folder each pane showed at the last redraw: a pane that
     /// shows another folder or tab scrolls to its cursor, or its top.
     shown: RefCell<[Option<(usize, VPath)>; 2]>,
+    /// The settings as last read or written, with the keys of a newer version: a save writes
+    /// them with what the window shows then, and only when that differs.
+    settings: RefCell<Settings>,
+    saver: Saver,
+    /// Runs [`SAVE_DELAY`] after the first change since the last save.
+    save_timer: slint::Timer,
+    /// The settings have been taken for the last write, as the app ends: none is planned any
+    /// more.
+    settings_closed: Cell<bool>,
+    /// Whether a failed save has been told (once is enough).
+    save_failure_told: Cell<bool>,
+    /// The theme chosen in the 보기 menu.
+    theme: Cell<ThemeChoice>,
 }
 
 impl fmt::Debug for Controller {
@@ -351,7 +502,7 @@ enum Early {
 }
 
 impl Controller {
-    fn new(window: &MainWindow, jobs: Jobs) -> Controller {
+    fn new(window: &MainWindow, jobs: Jobs, settings: Settings, saver: Saver) -> Controller {
         let tree_rows = Rc::new(TreeRows::default());
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
         let job_rows = Rc::new(VecModel::default());
@@ -371,17 +522,33 @@ impl Controller {
             tree_rows,
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
+            theme: Cell::new(settings.theme),
+            settings: RefCell::new(settings),
+            saver,
+            save_timer: slint::Timer::default(),
+            settings_closed: Cell::new(false),
+            save_failure_told: Cell::new(false),
         }
     }
 
-    /// Shows `left` and `right` in the panes, with dates in `tz`, once they are known, and the
-    /// tree of the places if they came first.
-    fn open(&self, left: VPath, right: VPath, home: Option<VPath>, tz: &TimeZone) {
+    /// Shows the tabs of `session` in the panes (`left` and `right` for a pane without), with
+    /// dates in `tz`, once they are known, and the tree of the places if they came first. The
+    /// tabs of `waiting` show home until their folders are found.
+    fn open(
+        &self,
+        left: VPath,
+        right: VPath,
+        session: Session,
+        waiting: &[Waiting],
+        home: Option<VPath>,
+        tz: &TimeZone,
+    ) {
         for pane in &self.panes {
             pane.set_time_zone(tz.clone());
         }
         *self.tz.borrow_mut() = tz.clone();
-        let (mut state, mut effects) = AppState::new(left, right, home);
+        let (mut state, mut effects) = AppState::restore(left, right, session, waiting, home);
+        state.set_recent_targets(self.settings.borrow().recent());
         let places = self.places.borrow().clone();
         if !places.is_empty() {
             effects.extend(state.set_places(&places));
@@ -453,22 +620,130 @@ impl Controller {
     }
 
     /// Ends the app: on a worker thread the engine shuts down and the questions are released
-    /// ([`Jobs::close_down`]), and then the event loop ends. The window shows the closing note
-    /// meanwhile. A worker that cannot start leaves the shutdown to [`crate::run`], after the
-    /// event loop.
+    /// ([`Jobs::close_down`]), then the settings are written a last time, and then the event
+    /// loop ends. The window shows the closing note meanwhile. A worker that cannot start
+    /// leaves the shutdown and the settings to [`crate::run`], after the event loop.
     fn quit(&self) {
         let jobs = self.jobs.clone();
+        let saver = self.saver.clone();
+        let last = self.final_settings();
+        let taken = last.is_some();
         let started = std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
             .spawn(move || {
                 jobs.close_down(QUIT_TIMEOUT);
+                if let Some(settings) = last {
+                    // After a write in progress; the app ends either way.
+                    let _ = saver.save(&settings);
+                }
                 let _ = slint::invoke_from_event_loop(|| {
                     let _ = slint::quit_event_loop();
                 });
             });
         if started.is_err() {
+            if taken {
+                self.settings_closed.set(false);
+            }
             let _ = slint::quit_event_loop();
         }
+    }
+
+    /// The settings to write as the app ends: what the window shows now. No save is planned
+    /// after this. `None` before the window shows the panes, or once taken.
+    pub fn final_settings(&self) -> Option<Settings> {
+        if self.settings_closed.replace(true) {
+            return None;
+        }
+        self.save_timer.stop();
+        let now = self.snapshot()?;
+        now.clone_into(&mut self.settings.borrow_mut());
+        Some(now)
+    }
+
+    /// The settings with what the window shows now: the tabs, the active pane, the hidden
+    /// items, the recent targets, the theme and the window's size (kept as it was while the
+    /// window is maximized, full screen or minimized). `None` before the panes show.
+    fn snapshot(&self) -> Option<Settings> {
+        let mut settings = self.settings.borrow().clone();
+        {
+            let state = self.state.borrow();
+            let state = state.as_ref()?;
+            settings.set_session(&state.session());
+            settings.set_recent(state.recent_targets());
+        }
+        settings.theme = self.theme.get();
+        if let Some(size) = self.window_size() {
+            settings.window = Some(size);
+        }
+        Some(settings)
+    }
+
+    /// The window's size in logical pixels, while it has one of its own.
+    fn window_size(&self) -> Option<(u32, u32)> {
+        let window = self.window.upgrade()?;
+        let window = window.window();
+        if window.is_maximized() || window.is_fullscreen() || window.is_minimized() {
+            return None;
+        }
+        let size = window.size().to_logical(window.scale_factor());
+        Some((whole_pixels(size.width)?, whole_pixels(size.height)?))
+    }
+
+    /// After a change: unless one is planned already, a save [`SAVE_DELAY`] from now, when
+    /// what the window shows differs from the settings last written.
+    fn plan_save(&self) {
+        if self.settings_closed.get() || self.save_timer.running() {
+            return;
+        }
+        if self
+            .snapshot()
+            .is_none_or(|now| now == *self.settings.borrow())
+        {
+            return;
+        }
+        self.save_timer
+            .start(TimerMode::SingleShot, SAVE_DELAY, || {
+                with(Controller::save_due);
+            });
+    }
+
+    /// The planned save: what the window shows now, on a worker thread.
+    fn save_due(&self) {
+        if self.settings_closed.get() {
+            return;
+        }
+        let Some(now) = self.snapshot() else {
+            return;
+        };
+        if now == *self.settings.borrow() {
+            return;
+        }
+        now.clone_into(&mut self.settings.borrow_mut());
+        let started = self.saver.save_in_background(now, |result| {
+            if result.is_err() {
+                post(Controller::save_failed);
+            }
+        });
+        if started.is_err() {
+            self.save_failed();
+        }
+    }
+
+    /// A save failed: a notice says so, the first time.
+    fn save_failed(&self) {
+        if !self.save_failure_told.replace(true) {
+            self.notice(words::settings_not_saved());
+        }
+    }
+
+    /// The 보기 menu chose `theme`: the window shows it at once (its colors follow
+    /// `theme-choice`).
+    fn choose_theme(&self, theme: ThemeChoice) {
+        self.theme.set(theme);
+        if let Some(window) = self.window.upgrade() {
+            window.set_theme_choice(theme_number(theme));
+        }
+        self.plan_save();
     }
 
     /// Makes `found` the places of the sidebar: the roots of the tree, now or once the panes'
@@ -512,6 +787,7 @@ impl Controller {
             "open" => Command::Open,
             "undo" => Command::Undo,
             "redo" => Command::Redo,
+            "toggle-hidden" => Command::ToggleHidden,
             _ => return,
         };
         self.update(|state| {
@@ -645,6 +921,8 @@ impl Controller {
         for effect in on_screen {
             self.show(effect);
         }
+        // Any change may be one the settings keep (a tab, the hidden items, a recent target).
+        self.plan_save();
     }
 
     /// Does an effect that shows on the screen.
@@ -756,6 +1034,7 @@ impl Controller {
             window.set_can_back(tab.history().can_back());
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
+            window.set_show_hidden(state.show_hidden());
             self.tree_rows.sync(state.tree(), &self.places.borrow());
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);
@@ -849,4 +1128,45 @@ impl Controller {
 /// The number Slint uses for pane `side`.
 fn side_number(side: usize) -> i32 {
     i32::from(side == RIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(name: &str) -> VPath {
+        VPath::local(std::env::temp_dir().join(name)).expect("a local path")
+    }
+
+    #[test]
+    fn the_start_waits_only_a_moment_for_the_folders() {
+        let (sent, checks) = mpsc::channel();
+        sent.send((folder("fast"), true)).expect("sent");
+        // "slow" never answers in time: its sender stays.
+        let started = Instant::now();
+        let found = wait_for(&checks, 2, Duration::from_millis(100));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(found, HashMap::from([(folder("fast"), true)]));
+
+        // With every answer in, it does not wait.
+        sent.send((folder("slow"), false)).expect("sent");
+        let started = Instant::now();
+        let found = wait_for(&checks, 1, Duration::from_secs(60));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(found, HashMap::from([(folder("slow"), false)]));
+    }
+
+    #[test]
+    fn window_sizes_convert_both_ways() {
+        assert_eq!(whole_pixels(1279.6), Some(1280));
+        assert_eq!(whole_pixels(0.2), None);
+        assert_eq!(whole_pixels(-5.0), None);
+        assert_eq!(whole_pixels(1e9), None);
+        assert!((logical(900) - 900.0).abs() < f32::EPSILON);
+        assert!((logical(u32::MAX) - 65535.0).abs() < f32::EPSILON);
+        for theme in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
+            assert_eq!(theme_of(theme_number(theme)), Some(theme));
+        }
+        assert_eq!(theme_of(3), None);
+    }
 }
