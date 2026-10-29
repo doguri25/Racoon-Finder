@@ -650,7 +650,7 @@ impl AppState {
     }
 
     /// The items a command acts on in pane `side`: the selected rows, or the cursor's row
-    /// when none is selected.
+    /// when none is selected and the user put the cursor there ([`AppState::target_entries`]).
     fn targets(&self, side: usize) -> Vec<VPath> {
         self.target_entries(side)
             .into_iter()
@@ -665,12 +665,13 @@ impl AppState {
         Vec::new()
     }
 
-    /// F2: the name window for the cursor's row (or the selected row without a cursor).
+    /// F2: the name window for the cursor's row, once the user put the cursor there (or else
+    /// the first selected row).
     pub(super) fn rename(&mut self, side: usize) -> Vec<Effect> {
         let tab = self.tab(side);
         let row = tab
             .selection()
-            .cursor()
+            .user_cursor()
             .filter(|&row| row < tab.visible().len())
             .or_else(|| tab.selection().indices(tab.visible()).first().copied());
         let Some(entry) = row.and_then(|row| tab.visible().get(row)) else {

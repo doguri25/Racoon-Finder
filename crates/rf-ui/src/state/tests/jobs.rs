@@ -85,8 +85,10 @@ fn rename_starts_from_the_cursor_row() {
     let mut empty = ready(vec![], vec![]);
     assert_eq!(press(&mut empty, &special(Key::F2), NONE), Some(vec![]));
     assert_eq!(empty.modal(), None);
-    // A folder just listed has the cursor on its first row: F2 renames that.
-    let mut state = ready(vec![dir("docs"), file("설계안.pdf")], vec![]);
+    // Once the user has moved the cursor, F2 renames its row.
+    let mut state = ready(vec![dir("docs"), file("설계안.pdf"), file("x")], vec![]);
+    press(&mut state, &special(Key::DownArrow), NONE);
+    press(&mut state, &special(Key::UpArrow), NONE);
     press(&mut state, &special(Key::F2), NONE);
     assert!(matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.initial == "docs"));
     state.dialog_cancelled();
@@ -110,6 +112,61 @@ fn rename_starts_from_the_cursor_row() {
             },
             Some(LEFT)
         )
+    );
+}
+
+#[test]
+fn a_folder_just_opened_changes_no_file_until_the_user_chooses_a_row() {
+    // The rows come with the cursor on the first one for the keys to start from, but nothing
+    // is chosen: no command that changes files acts on that row.
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![dir("백업")]);
+    assert_eq!(cursor(&state, LEFT), Some(0));
+    for (key, mods) in [
+        (Key::Delete, NONE),
+        (Key::Delete, SHIFT),
+        (Key::F2, NONE),
+        (Key::F5, NONE),
+        (Key::F6, NONE),
+    ] {
+        assert_eq!(
+            press(&mut state, &special(key), mods),
+            Some(vec![]),
+            "{key:?} {mods:?}"
+        );
+        assert_eq!(state.modal(), None, "{key:?} {mods:?}");
+    }
+    let options = TransferOptions::default();
+    assert_eq!(
+        state.transfer(LEFT, TransferMode::Copy, &folder("b"), options),
+        []
+    );
+
+    // An arrow key chooses the row it moves to: Delete and F2 act on it.
+    press(&mut state, &special(Key::DownArrow), NONE);
+    assert_eq!(
+        press(&mut state, &special(Key::Delete), NONE),
+        Some(vec![Effect::CheckTrash {
+            folder: folder("a"),
+            paths: vec![in_a("b.txt")],
+        }])
+    );
+    // So does Up from the first row, which stays there.
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    press(&mut state, &special(Key::UpArrow), NONE);
+    press(&mut state, &special(Key::F2), NONE);
+    assert!(matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.initial == "a.txt"));
+
+    // The row a click or Ctrl+Space chose stays the one acted on with nothing selected.
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    press(&mut state, &special(Key::Space), CTRL);
+    press(&mut state, &special(Key::Space), CTRL);
+    assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
+    assert_eq!(
+        press(&mut state, &special(Key::Delete), NONE),
+        Some(vec![Effect::CheckTrash {
+            folder: folder("a"),
+            paths: vec![in_a("a.txt")],
+        }])
     );
 }
 

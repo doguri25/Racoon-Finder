@@ -489,7 +489,8 @@ impl Tab {
 
     /// Makes the sorted `entries`, with the changes that came before them, the rows. A list
     /// without a cursor (a folder just opened) gets it on its first row, nothing selected, so
-    /// that the keys start from there.
+    /// that the keys start from there; that row is not chosen by the user, and no command that
+    /// changes files acts on it ([`Selection::place_cursor`]).
     fn show_listing(&mut self, entries: Vec<Entry>) {
         self.all = entries;
         let pending = std::mem::take(&mut self.pending);
@@ -499,7 +500,7 @@ impl Tab {
         self.status = LoadStatus::Ready;
         self.refresh_visible();
         if self.selection.cursor().is_none() && self.pending_select.is_none() {
-            self.selection.set_cursor(0, &self.visible);
+            self.selection.place_cursor(0, &self.visible);
         }
     }
 

@@ -409,14 +409,17 @@ impl AppState {
     }
 
     /// The items a command acts on in pane `side`, with their rows: the selected rows, or
-    /// the cursor's row when none is selected.
+    /// the cursor's row when none is selected and the user put the cursor there (not the
+    /// first row of a folder just opened: [`Selection::user_cursor`]).
+    ///
+    /// [`Selection::user_cursor`]: crate::selection::Selection::user_cursor
     pub(super) fn target_entries(&self, side: usize) -> Vec<(VPath, &Entry)> {
         let tab: &Tab = self.tab(side);
         let mut rows = tab.selection().indices(tab.visible());
         if rows.is_empty() {
             rows.extend(
                 tab.selection()
-                    .cursor()
+                    .user_cursor()
                     .filter(|&row| row < tab.visible().len()),
             );
         }

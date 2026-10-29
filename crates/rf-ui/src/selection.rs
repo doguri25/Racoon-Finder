@@ -4,6 +4,11 @@
 //! selection. The cursor and the anchor are row positions in the list the caller shows, and
 //! every method that moves them takes that list (`names`), in its order. A position past the
 //! end of `names` changes nothing.
+//!
+//! A cursor the list puts on its first row when it shows ([`Selection::place_cursor`]) is
+//! there for the keys to start from, as in the system's file managers: the user has not chosen
+//! that row, and a command that changes files acts on it only once the user has moved the
+//! cursor or clicked ([`Selection::user_cursor`]).
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -37,12 +42,22 @@ pub struct Selection {
     anchor: Option<usize>,
     /// The row the keyboard is on, drawn with a focus frame whether or not it is selected.
     cursor: Option<usize>,
+    /// Whether the user put the cursor on its row (a key, a click), rather than the list for
+    /// the keys to start from.
+    cursor_by_user: bool,
 }
 
 impl Selection {
     /// The row the keyboard is on, if any.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor
+    }
+
+    /// The row the keyboard is on when the user put the cursor there (a key, a click): the row
+    /// a command acts on with nothing selected. `None` for a cursor the list placed
+    /// ([`Selection::place_cursor`]), or one left on another row when its own went.
+    pub fn user_cursor(&self) -> Option<usize> {
+        self.cursor.filter(|_| self.cursor_by_user)
     }
 
     /// The row a Shift range starts from, if any.
@@ -71,8 +86,7 @@ impl Selection {
         let Some(row) = names.get(i) else { return };
         self.selected.clear();
         self.selected.insert(row.name().to_owned());
-        self.anchor = Some(i);
-        self.cursor = Some(i);
+        self.put_cursor(i);
     }
 
     /// A Ctrl+click on row `i`: that row flips between selected and not, the others stay, and
@@ -82,8 +96,7 @@ impl Selection {
         if !self.selected.remove(row.name()) {
             self.selected.insert(row.name().to_owned());
         }
-        self.anchor = Some(i);
-        self.cursor = Some(i);
+        self.put_cursor(i);
     }
 
     /// A Shift+click on row `i`: the rows from the anchor to `i` are selected and no others,
@@ -102,6 +115,7 @@ impl Selection {
             .collect();
         self.anchor = Some(anchor);
         self.cursor = Some(i);
+        self.cursor_by_user = true;
     }
 
     /// An arrow, Home, End or page key: the cursor moves `delta` rows (negative is up) and
@@ -130,9 +144,26 @@ impl Selection {
     /// click on a row that is selected already, whose menu acts on the whole selection.
     pub fn set_cursor(&mut self, i: usize, names: &[impl Named]) {
         if i < names.len() {
+            self.put_cursor(i);
+        }
+    }
+
+    /// Puts the cursor and the anchor on row `i` for the keys to start from, the selection as
+    /// it is: a list that has just shown. The user has not chosen the row
+    /// ([`Selection::user_cursor`]).
+    pub fn place_cursor(&mut self, i: usize, names: &[impl Named]) {
+        if i < names.len() {
             self.anchor = Some(i);
             self.cursor = Some(i);
+            self.cursor_by_user = false;
         }
+    }
+
+    /// Puts the cursor and the anchor on row `i`, where the user put them.
+    fn put_cursor(&mut self, i: usize) {
+        self.anchor = Some(i);
+        self.cursor = Some(i);
+        self.cursor_by_user = true;
     }
 
     /// Selects every row; the cursor and the anchor stay.
@@ -157,8 +188,9 @@ impl Selection {
     /// Carries the selection over a change of the list from `old` to `new` (a refresh, a
     /// rename by another app, a new sort). Selected names that are still in `new` stay
     /// selected. The cursor and the anchor stay on their names where those are still there;
-    /// a cursor whose row is gone stays at its position, on the nearest row that is left, and
-    /// an anchor whose row is gone goes to the cursor. An empty `new` drops both.
+    /// a cursor whose row is gone stays at its position, on the nearest row that is left (a
+    /// row the user has not chosen), and an anchor whose row is gone goes to the cursor. An
+    /// empty `new` drops both.
     pub fn reconcile(&mut self, old: &[impl Named], new: &[impl Named]) {
         let position_in_new = |index: Option<usize>| {
             let name = old.get(index?)?.name();
@@ -173,6 +205,7 @@ impl Selection {
             .map(|row| row.name().to_owned())
             .collect();
         let last = new.len().checked_sub(1);
+        self.cursor_by_user &= cursor_follows.is_some();
         self.cursor = cursor_follows.or_else(|| Some(self.cursor?.min(last?)));
         self.anchor = anchor_follows.or(self.cursor);
     }
@@ -352,6 +385,53 @@ mod tests {
         sel.select_all(&new);
         sel.reconcile(&new, &list(&[]));
         assert_eq!(sel, Selection::default());
+    }
+
+    #[test]
+    fn a_cursor_placed_for_the_keys_is_not_the_users_until_they_move_it() {
+        let names = list(&ABCDE);
+        // A list just shown: the cursor is on its first row for the keys to start from, and
+        // the user has chosen nothing.
+        let mut sel = Selection::default();
+        sel.place_cursor(0, &names);
+        assert_eq!((sel.cursor(), sel.user_cursor()), (Some(0), None));
+        assert!(sel.is_empty());
+        // A row past the end changes nothing.
+        let mut past = Selection::default();
+        past.place_cursor(9, &names);
+        assert_eq!(past.cursor(), None);
+
+        // An arrow key moves it from there, and from then on it is where the user put it.
+        sel.move_cursor(1, false, &names);
+        assert_eq!((sel.cursor(), sel.user_cursor()), (Some(1), Some(1)));
+        // Taking the selection away leaves it the user's.
+        sel.clear();
+        assert_eq!(sel.user_cursor(), Some(1));
+
+        // Clicks, Ctrl+clicks, Shift+clicks and right clicks put it there too.
+        for put in [
+            Selection::click,
+            Selection::toggle,
+            Selection::extend_to,
+            Selection::set_cursor,
+        ] {
+            let mut sel = Selection::default();
+            sel.place_cursor(0, &names);
+            put(&mut sel, 2, &names);
+            assert_eq!(sel.user_cursor(), Some(2));
+        }
+
+        // A list that changes keeps it on the user's row; once that row is gone, the cursor
+        // that stays at its place is on a row nobody chose.
+        let mut sel = Selection::default();
+        sel.click(1, &names);
+        sel.clear();
+        let moved = list(&["x", "a", "b", "c", "d", "e"]);
+        sel.reconcile(&names, &moved);
+        assert_eq!(sel.user_cursor(), Some(2));
+        let without_b = list(&["x", "a", "c", "d", "e"]);
+        sel.reconcile(&moved, &without_b);
+        assert_eq!((sel.cursor(), sel.user_cursor()), (Some(2), None));
     }
 
     #[test]
