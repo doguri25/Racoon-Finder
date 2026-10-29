@@ -1,0 +1,20 @@
+Racoon Finder 데모 (Linux)
+
+주의: 이 데모는 실제 파일을 옮기고 지웁니다.
+처음에는 연습용 폴더에서 써 보세요. 예를 들어 홈 폴더에 새 폴더를 만들고
+아무 파일이나 복사해 넣은 뒤 그 안에서만 써 봅니다.
+
+
+실행
+
+이 폴더에서 ./racoon-finder 를 실행합니다.
+
+
+데이터
+
+설정과 작업 기록: ~/.local/share/RacoonFinder
+
+
+지우기
+
+앱을 끈 뒤 이 폴더와 ~/.local/share/RacoonFinder 를 지웁니다.
