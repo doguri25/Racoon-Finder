@@ -1,0 +1,655 @@
+//! What the window asks of the job engine and what it makes of the engine's news: the file
+//! commands, the dialogs over the main window, the job panel, the toasts, the trash check and
+//! the app's end. A child of [`state`](super), so these methods see the fields of
+//! [`AppState`].
+
+use rf_core::{EntryKind, VPath};
+use rf_jobs::{
+    DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobSpec, Outcome,
+    TransferMode, TransferOptions, TransferSpec,
+};
+
+use super::{AppState, Effect, RIGHT, ToastAction};
+use crate::dialogs::{
+    Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
+    NameCheck, NameDialog, PreflightQuestion, Recovery,
+};
+use crate::jobs::{Ended, History, JobEffect, JobRow, Started};
+use crate::loader::LoadRequest;
+use crate::pane::{LoadStatus, Pane, Tab};
+use crate::resolver::{Asked, Question};
+use crate::words::{self, JobWork};
+
+impl AppState {
+    /// Copies or moves the items of pane `side` (the selected rows, or the cursor's row) into
+    /// the folder `dest`, with `options`: the job the destination picker (PICK) submits once a
+    /// target is chosen. Nothing for a pane with no item to act on.
+    pub fn transfer(
+        &mut self,
+        side: usize,
+        mode: TransferMode,
+        dest: &VPath,
+        options: TransferOptions,
+    ) -> Vec<Effect> {
+        let sources = self.targets(side);
+        if sources.is_empty() {
+            return Vec::new();
+        }
+        match TransferSpec::into_dir(mode, &sources, dest, options) {
+            Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(side))],
+            Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
+        }
+    }
+
+    /// [`AppState::transfer`] of the active pane's items into the folder the other pane shows,
+    /// asking about every conflict: what F5 and F6 do in a debug build run with
+    /// `RF_DEBUG_DIRECT_TRANSFER=1`, until the destination picker comes.
+    pub fn transfer_to_other_pane(&mut self, mode: TransferMode) -> Vec<Effect> {
+        if self.modal.is_some() || self.quitting {
+            return Vec::new();
+        }
+        let side = self.active;
+        let dest = self.tab(RIGHT - side).location().clone();
+        self.transfer(side, mode, &dest, TransferOptions::default())
+    }
+
+    /// The window over the main window, if one shows.
+    pub fn modal(&self) -> Option<&Modal> {
+        self.modal.as_ref()
+    }
+
+    /// The rows of the job panel.
+    pub fn job_rows(&self) -> Vec<JobRow> {
+        self.jobs.rows()
+    }
+
+    /// The number of jobs that have not ended.
+    pub fn active_jobs(&self) -> usize {
+        self.jobs.active()
+    }
+
+    /// Whether Undo can start now: there is something to undo, and no undo or redo is under
+    /// way (one runs at a time).
+    pub fn can_undo(&self) -> bool {
+        self.history.top.is_some() && !self.jobs.undo_running()
+    }
+
+    /// Whether Redo can start now.
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo && !self.jobs.undo_running()
+    }
+
+    /// Whether the app is ending.
+    pub fn quitting(&self) -> bool {
+        self.quitting
+    }
+
+    /// Follows the job the engine started for an [`Effect::Job`].
+    pub fn track(&mut self, started: Started) {
+        self.jobs.track(started);
+    }
+
+    /// Takes what the engine's history can undo and redo next.
+    pub fn set_history(&mut self, history: History) {
+        self.history = history;
+    }
+
+    /// Takes an event of the job engine: the job panel follows it, a job that ended is told of
+    /// (a toast, its new item selected, the items the trash refused offered for a permanent
+    /// delete), and the jobs the last run left unfinished are offered again.
+    pub fn job_event(&mut self, event: JobEvent) -> Vec<Effect> {
+        match event {
+            JobEvent::Recovered { jobs, .. } => {
+                if !jobs.is_empty() && !self.quitting {
+                    self.open(Modal::Recovery(Recovery { jobs }));
+                }
+                Vec::new()
+            }
+            JobEvent::JournalError { .. } => {
+                if self.journal_error_told || self.quitting {
+                    return Vec::new();
+                }
+                self.journal_error_told = true;
+                vec![Effect::Notice(words::journal_error().to_owned())]
+            }
+            event => match self.jobs.apply(event) {
+                Some(ended) => self.job_ended(ended),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// Takes a question of a job: it shows once the windows before it have closed. While the
+    /// app ends, it is left unanswered, for the release that follows the engine's shutdown.
+    pub fn question(&mut self, question: Question) -> Vec<Effect> {
+        if self.quitting {
+            return Vec::new();
+        }
+        let Question { id, job, asked } = question;
+        let modal = match asked {
+            Asked::Conflict(conflict) => Modal::Conflict(ConflictQuestion {
+                id,
+                job,
+                conflict,
+                items_left: self.jobs.items_left(job),
+            }),
+            Asked::Preflight(issues) => Modal::Preflight(PreflightQuestion { id, job, issues }),
+        };
+        self.open(modal);
+        Vec::new()
+    }
+
+    /// The name in the name window changed to `text`.
+    pub fn name_edited(&mut self, text: &str) {
+        if let Some(Modal::Name(dialog)) = &mut self.modal {
+            text.clone_into(&mut dialog.text);
+        }
+    }
+
+    /// The name window was confirmed with `text`: its job is submitted and it closes. A name
+    /// that cannot be used keeps it open with its warning, and the name the item has already
+    /// closes it with nothing to do.
+    pub fn name_confirmed(&mut self, text: &str) -> Vec<Effect> {
+        let Some(Modal::Name(dialog)) = &mut self.modal else {
+            return Vec::new();
+        };
+        text.clone_into(&mut dialog.text);
+        match (dialog.check(), dialog.job()) {
+            (_, Ok(Some((spec, origin)))) => {
+                self.close();
+                vec![submit(spec, Some(origin))]
+            }
+            (NameCheck::Unchanged, _) => {
+                self.close();
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The window that shows was closed without its main button (Esc, Cancel, the close
+    /// button): a job question is answered with its cancelling choice, which stops the job.
+    pub fn dialog_cancelled(&mut self) -> Vec<Effect> {
+        let effects = match &self.modal {
+            Some(Modal::Conflict(question)) => vec![Effect::Job(JobEffect::AnswerConflict(
+                question.id,
+                rf_jobs::ConflictAnswer::once(rf_jobs::ConflictAction::Cancel),
+            ))],
+            Some(Modal::Preflight(question)) => vec![Effect::Job(JobEffect::AnswerPreflight(
+                question.id,
+                rf_jobs::PreflightAnswer::Cancel,
+            ))],
+            _ => Vec::new(),
+        };
+        self.close();
+        effects
+    }
+
+    /// The confirmation that shows was accepted: its job is submitted, or the app ends.
+    pub fn confirm_accepted(&mut self) -> Vec<Effect> {
+        let Some(Modal::Confirm(confirm)) = &self.modal else {
+            return Vec::new();
+        };
+        match (&confirm.purpose, confirm.job()) {
+            (ConfirmPurpose::Quit, _) => self.begin_quit(),
+            (_, Some(spec)) => {
+                self.close();
+                vec![submit(spec, None)]
+            }
+            (_, None) => {
+                self.close();
+                Vec::new()
+            }
+        }
+    }
+
+    /// The conflict window was answered with `choice`, for the remaining conflicts of the job
+    /// too when `apply_all`. An overwrite that is not offered does nothing.
+    pub fn conflict_answered(&mut self, choice: ConflictChoice, apply_all: bool) -> Vec<Effect> {
+        let Some(Modal::Conflict(question)) = &self.modal else {
+            return Vec::new();
+        };
+        let Some(answer) = question.answer(choice, apply_all) else {
+            return Vec::new();
+        };
+        let id = question.id;
+        self.close();
+        vec![Effect::Job(JobEffect::AnswerConflict(id, answer))]
+    }
+
+    /// The pre-flight window was answered with button `choice`
+    /// ([`PreflightQuestion::answer`]).
+    pub fn preflight_answered(&mut self, choice: i32) -> Vec<Effect> {
+        let Some(Modal::Preflight(question)) = &self.modal else {
+            return Vec::new();
+        };
+        let id = question.id;
+        self.close();
+        vec![Effect::Job(JobEffect::AnswerPreflight(
+            id,
+            PreflightQuestion::answer(choice),
+        ))]
+    }
+
+    /// Recovered job `index` of the recovery window is run again (`run_again`) or dropped. The
+    /// window closes with its last job.
+    pub fn recovery_chosen(&mut self, index: usize, run_again: bool) -> Vec<Effect> {
+        let Some(Modal::Recovery(recovery)) = &mut self.modal else {
+            return Vec::new();
+        };
+        if index >= recovery.jobs.len() {
+            return Vec::new();
+        }
+        let job = recovery.jobs.remove(index);
+        if recovery.jobs.is_empty() {
+            self.close();
+        }
+        let effect = if run_again {
+            JobEffect::Resubmit {
+                id: job.id,
+                spec: job.spec,
+            }
+        } else {
+            JobEffect::Dismiss(job.id)
+        };
+        vec![Effect::Job(effect)]
+    }
+
+    /// The pause (`0`), resume (`1`) or cancel (`2`) button of row `row` of the job panel.
+    pub fn job_control(&mut self, row: usize, button: i32) -> Vec<Effect> {
+        let Some(id) = self.jobs.row_id(row) else {
+            return Vec::new();
+        };
+        let effect = match button {
+            0 => JobEffect::Pause(id),
+            1 => JobEffect::Resume(id),
+            _ => JobEffect::Cancel(id),
+        };
+        vec![Effect::Job(effect)]
+    }
+
+    /// The button of the toast `token` was clicked. An undo starts only while the toast's job
+    /// is the next one the history undoes; otherwise a notice says why not, so that the button
+    /// never undoes another job.
+    pub fn toast_clicked(&mut self, token: u64) -> Vec<Effect> {
+        let Some((shown, _)) = &self.toast else {
+            return Vec::new();
+        };
+        if *shown != token || self.modal.is_some() || self.quitting {
+            return Vec::new();
+        }
+        let Some((_, action)) = self.toast.take() else {
+            return Vec::new();
+        };
+        match action {
+            ToastAction::Undo(record) => {
+                if self.history.top.as_ref() == Some(&record) && self.can_undo() {
+                    vec![Effect::Job(JobEffect::Undo)]
+                } else {
+                    vec![Effect::Notice(words::undo_order().to_owned())]
+                }
+            }
+            ToastAction::Details(failures) => {
+                self.open(Modal::Failures(failures));
+                Vec::new()
+            }
+        }
+    }
+
+    /// The toast `token` closed (its close button, or its time ran out).
+    pub fn toast_closed(&mut self, token: u64) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(shown, _)| *shown == token)
+        {
+            self.toast = None;
+        }
+    }
+
+    /// The window's close button: with jobs under way, a confirmation first (over any window
+    /// that shows, which comes back if the user stays); without, the app ends.
+    pub fn request_close(&mut self) -> Vec<Effect> {
+        if self.quitting {
+            return Vec::new();
+        }
+        let running = self.jobs.active();
+        if running == 0 {
+            return self.begin_quit();
+        }
+        if let Some(Modal::Confirm(confirm)) = &self.modal
+            && confirm.purpose == ConfirmPurpose::Quit
+        {
+            return Vec::new();
+        }
+        if let Some(shown) = self.modal.take() {
+            self.later.push_front(shown);
+        }
+        self.modal = Some(Modal::Confirm(Confirm::quit(running)));
+        Vec::new()
+    }
+
+    /// The app ends: every window closes, no new one opens, and the questions still open stay
+    /// unanswered here. [`Effect::Quit`] then shuts the engine down before it releases them
+    /// (carry-m1-03 "quit order").
+    pub fn begin_quit(&mut self) -> Vec<Effect> {
+        if self.quitting {
+            return Vec::new();
+        }
+        self.quitting = true;
+        self.modal = None;
+        self.later.clear();
+        self.toast = None;
+        vec![Effect::Quit]
+    }
+
+    /// Whether the location of `paths` has a trash, as the worker found
+    /// ([`Effect::CheckTrash`]): with one they go to it; without, a confirmation asks before
+    /// they are deleted for good, which never happens without it (OPS-03).
+    pub fn trash_checked(&mut self, paths: Vec<VPath>, supported: bool) -> Vec<Effect> {
+        if paths.is_empty() || self.quitting {
+            return Vec::new();
+        }
+        if supported {
+            return vec![submit(
+                JobSpec::Delete(DeleteSpec {
+                    paths,
+                    method: DeleteMethod::Trash,
+                    errors: ErrorPolicy::Continue,
+                }),
+                None,
+            )];
+        }
+        self.open(Modal::Confirm(Confirm::delete_permanently(
+            paths,
+            DeleteWhy::NoTrash,
+        )));
+        Vec::new()
+    }
+
+    /// The folders `folders` changed through a job of this window (a create, a rename, a
+    /// delete, a transfer, an undo). The panes follow their folders' watches, and the tree
+    /// follows a folder a pane shows through that pane's listing ([`AppState::loaded`]); the
+    /// tree's other listed nodes of these folders are listed again.
+    pub fn folders_changed(&mut self, folders: &[VPath]) -> Vec<Effect> {
+        let shown: Vec<&VPath> = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .filter(|tab| tab.status() == LoadStatus::Ready)
+            .map(Tab::location)
+            .collect();
+        let requests: Vec<LoadRequest> = folders
+            .iter()
+            .filter(|folder| !shown.contains(folder))
+            .flat_map(|folder| self.tree.relist_folder(folder))
+            .collect();
+        requests.into_iter().map(Effect::LoadChildren).collect()
+    }
+
+    /// Tells of the job that ended: see [`AppState::job_event`].
+    fn job_ended(&mut self, ended: Ended) -> Vec<Effect> {
+        let Ended {
+            work,
+            origin,
+            report,
+            ..
+        } = ended;
+        let mut effects = self.folders_changed(&touched_folders(&report.spec, &report.outputs));
+        if self.quitting || report.outcome == Outcome::Cancelled {
+            return effects;
+        }
+        if report.outcome == Outcome::Completed
+            && matches!(work, JobWork::Create | JobWork::Rename)
+            && let (Some(side), Some(output)) = (origin, report.outputs.first())
+        {
+            effects.extend(self.select_output(side, output));
+        }
+
+        // The items the trash refused are still there; only the user may delete them for good.
+        let refused: Vec<VPath> = report
+            .failures
+            .iter()
+            .filter(|failure| failure.reason == Some(FailureReason::TrashRefused))
+            .filter_map(|failure| failure.source.clone())
+            .collect();
+        if !refused.is_empty() {
+            self.open(Modal::Confirm(Confirm::delete_permanently(
+                refused,
+                DeleteWhy::TrashRefused,
+            )));
+        }
+        let failures: Vec<&ItemFailure> = report
+            .failures
+            .iter()
+            .filter(|failure| failure.reason != Some(FailureReason::TrashRefused))
+            .collect();
+        if let Some(first) = failures.first() {
+            if matches!(work, JobWork::Create | JobWork::Rename) {
+                effects.push(Effect::Notice(words::name_refused(work, first)));
+            } else {
+                let lines = failures.iter().map(|failure| words::failure_line(failure));
+                let failures_shown = Failures {
+                    title: words::failures_title().to_owned(),
+                    lines: lines.collect(),
+                };
+                effects.push(self.toast(
+                    words::items_failed(failures.len()),
+                    Some(ToastAction::Details(failures_shown)),
+                ));
+            }
+            return effects;
+        }
+        if !report.failures.is_empty() {
+            // Only refusals of the trash, which the confirmation tells of.
+            return effects;
+        }
+        match (report.outcome, work) {
+            (Outcome::Completed, JobWork::Copy | JobWork::Move | JobWork::Trash) => {
+                let work = if report.copied_instead_of_moved {
+                    JobWork::Copy
+                } else {
+                    work
+                };
+                let text = words::items_done(work, top_level_count(&report.spec), report.skipped);
+                let action = report.undo.clone().map(ToastAction::Undo);
+                effects.push(self.toast(text, action));
+            }
+            (Outcome::Completed, JobWork::Undo) => {
+                if let JobSpec::Undo(record) = &report.spec {
+                    effects.push(self.toast(words::undone(record), None));
+                }
+            }
+            (Outcome::Completed, JobWork::Redo) => {
+                effects.push(self.toast(words::outcome(Outcome::Completed, work), None));
+            }
+            (Outcome::Aborted, _) => {
+                effects.push(self.toast(words::outcome(Outcome::Aborted, work), None));
+            }
+            _ => {}
+        }
+        effects
+    }
+
+    /// Selects `output`, the item a create or a rename made, in pane `side` if it still shows
+    /// the item's folder: now if the row is there, else once it comes.
+    fn select_output(&mut self, side: usize, output: &VPath) -> Vec<Effect> {
+        let (Some(folder), Some(name)) = (output.parent(), output.file_name()) else {
+            return Vec::new();
+        };
+        let tab = self.tab_mut(side);
+        if *tab.location() != folder {
+            return Vec::new();
+        }
+        tab.select_name(name.to_os_string())
+            .map(|row| Effect::ScrollTo { side, row })
+            .into_iter()
+            .collect()
+    }
+
+    /// A toast with `text`, whose button does `action`, replacing the one on screen.
+    fn toast(&mut self, text: String, action: Option<ToastAction>) -> Effect {
+        self.toast_token += 1;
+        let token = self.toast_token;
+        let label = match &action {
+            Some(ToastAction::Undo(_)) => words::undo_action(),
+            Some(ToastAction::Details(_)) => words::details_action(),
+            None => "",
+        };
+        self.toast = action.map(|action| (token, action));
+        Effect::Toast {
+            token,
+            text,
+            action: label.to_owned(),
+        }
+    }
+
+    /// Shows `modal` now, or after the windows before it have closed. Nothing opens while the
+    /// app ends.
+    fn open(&mut self, modal: Modal) {
+        if self.quitting {
+            return;
+        }
+        if self.modal.is_none() {
+            self.modal = Some(modal);
+        } else {
+            self.later.push_back(modal);
+        }
+    }
+
+    /// Closes the window that shows; the next one waiting shows instead.
+    fn close(&mut self) {
+        self.modal = self.later.pop_front();
+    }
+
+    /// The items a command acts on in pane `side`: the selected rows, or the cursor's row
+    /// when none is selected.
+    fn targets(&self, side: usize) -> Vec<VPath> {
+        let tab = self.tab(side);
+        let mut rows = tab.selection().indices(tab.visible());
+        if rows.is_empty() {
+            rows.extend(
+                tab.selection()
+                    .cursor()
+                    .filter(|&row| row < tab.visible().len()),
+            );
+        }
+        rows.into_iter()
+            .filter_map(|row| tab.location().join(&tab.visible()[row].name).ok())
+            .collect()
+    }
+
+    /// F7, Ctrl+Shift+N: the name window for a new folder in the active tab's folder.
+    pub(super) fn new_folder(&mut self, side: usize) -> Vec<Effect> {
+        let parent = self.tab(side).location().clone();
+        self.open(Modal::Name(NameDialog::new_folder(parent, side)));
+        Vec::new()
+    }
+
+    /// F2: the name window for the cursor's row (or the selected row without a cursor).
+    pub(super) fn rename(&mut self, side: usize) -> Vec<Effect> {
+        let tab = self.tab(side);
+        let row = tab
+            .selection()
+            .cursor()
+            .filter(|&row| row < tab.visible().len())
+            .or_else(|| tab.selection().indices(tab.visible()).first().copied());
+        let Some(entry) = row.and_then(|row| tab.visible().get(row)) else {
+            return Vec::new();
+        };
+        let is_dir = entry.kind == EntryKind::Dir;
+        let Ok(path) = tab.location().join(&entry.name) else {
+            return Vec::new();
+        };
+        if let Some(dialog) = NameDialog::rename(path, is_dir, side) {
+            self.open(Modal::Name(dialog));
+        }
+        Vec::new()
+    }
+
+    /// Delete: the items go to the trash once a worker has found that their folder has one
+    /// ([`Effect::CheckTrash`]).
+    pub(super) fn trash(&mut self, side: usize) -> Vec<Effect> {
+        let paths = self.targets(side);
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let folder = self.tab(side).location().clone();
+        vec![Effect::CheckTrash { folder, paths }]
+    }
+
+    /// Shift+Delete: a confirmation before the items are deleted for good.
+    pub(super) fn delete_permanently(&mut self, side: usize) -> Vec<Effect> {
+        let paths = self.targets(side);
+        if !paths.is_empty() {
+            self.open(Modal::Confirm(Confirm::delete_permanently(
+                paths,
+                DeleteWhy::Asked,
+            )));
+        }
+        Vec::new()
+    }
+
+    /// Ctrl+Z, or the toolbar's button: the last job is undone, when one can be. The button
+    /// of a toast on screen does nothing from then on: the history has moved.
+    pub(super) fn undo(&mut self) -> Vec<Effect> {
+        if self.can_undo() {
+            self.toast = None;
+            vec![Effect::Job(JobEffect::Undo)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Ctrl+Y, Ctrl+Shift+Z: the last undo is done again, when one can be.
+    pub(super) fn redo(&mut self) -> Vec<Effect> {
+        if self.can_redo() {
+            self.toast = None;
+            vec![Effect::Job(JobEffect::Redo)]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// The effect that submits `spec`, asked for in pane `origin`.
+fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
+    Effect::Job(JobEffect::Submit { spec, origin })
+}
+
+/// The number of items a job was asked to act on at its top level: the items of a transfer,
+/// the paths of a delete, and one for the others.
+fn top_level_count(spec: &JobSpec) -> usize {
+    match spec {
+        JobSpec::Transfer(transfer) => transfer.items.len(),
+        JobSpec::Delete(delete) => delete.paths.len(),
+        JobSpec::Undo(record) => record.item_count(),
+        _ => 1,
+    }
+}
+
+/// The folders a job of `spec` changed, with `outputs`, the paths it made: the folders of its
+/// sources and targets, each once.
+fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
+    let mut paths: Vec<&VPath> = outputs.iter().collect();
+    match spec {
+        JobSpec::Transfer(transfer) => {
+            for item in &transfer.items {
+                paths.push(&item.source);
+                paths.push(&item.target);
+            }
+        }
+        JobSpec::Delete(delete) => paths.extend(&delete.paths),
+        JobSpec::Rename { from, to } => paths.extend([from, to]),
+        // A create's output is the item it made, and an undo's what it put back; a kind of
+        // job added after this was written has its outputs.
+        _ => {}
+    }
+    let mut folders: Vec<VPath> = Vec::new();
+    for folder in paths.into_iter().filter_map(VPath::parent) {
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    folders
+}
