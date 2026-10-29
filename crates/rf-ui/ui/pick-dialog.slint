@@ -6,7 +6,9 @@
 // a filter finds first), Esc cancels. Rust decides what Enter does, and never confirms an
 // overwrite with it: only the button does. A path typed into the path field and not entered
 // turns the button off until it is entered (or another folder is chosen): the button never
-// sends the items anywhere else than where the field says.
+// sends the items anywhere else than where the field says. Nor does a path being composed with
+// an input method (a Korean syllable not yet complete): the field's text and Rust do not have it
+// until it is committed, so the button and 새 폴더 are off meanwhile.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -58,6 +60,9 @@ export struct PickView {
     // How the picker confirms now: the path typed must be entered first, it is being looked
     // at, or an overwrite takes the button; empty for none of these.
     hint: string,
+    // What `hint` says while a path is typed and not entered, also shown while one is being
+    // composed with an input method, which Rust does not hear of until it is committed.
+    unentered-hint: string,
     confirm-text: string,
     can-confirm: bool,
 }
@@ -123,6 +128,9 @@ component Field inherits Rectangle {
     in property <string> icon;
     in property <string> label;
     in-out property <string> text <=> input.text;
+    // An input method is composing text in the field (a Korean syllable not yet complete): it
+    // shows at the cursor but is not in `text`, and `edited` comes only once it is committed.
+    out property <bool> composing: input.preedit-text != "";
     // A key the field does not take itself; return `accept` to stop it there.
     callback key(event: KeyEvent) -> EventResult;
     callback edited(text: string);
@@ -164,7 +172,7 @@ component Field inherits Rectangle {
             horizontal-stretch: 1;
             clip: true;
 
-            if input.text == "": Text {
+            if input.text == "" && !root.composing: Text {
                 width: 100%;
                 height: 100%;
                 accessible-role: none;
@@ -546,7 +554,7 @@ export component PickDialog inherits DialogFrame {
 
                     OutlineButton {
                         text: "새 폴더";
-                        enabled: root.view.can-make-folder;
+                        enabled: root.view.can-make-folder && !path.composing;
                         clicked => {
                             root.new-folder();
                         }
@@ -741,8 +749,8 @@ export component PickDialog inherits DialogFrame {
                         font-weight: 500;
                         wrap: word-wrap;
                     }
-                    if root.view.hint != "": Text {
-                        text: root.view.hint;
+                    if root.view.hint != "" || path.composing: Text {
+                        text: path.composing ? root.view.unentered-hint : root.view.hint;
                         font-size: 13px;
                         color: Theme.text;
                         wrap: word-wrap;
@@ -765,7 +773,7 @@ export component PickDialog inherits DialogFrame {
                     PrimaryButton {
                         button-height: 40px;
                         text: root.view.confirm-text;
-                        enabled: root.view.can-confirm;
+                        enabled: root.view.can-confirm && !path.composing;
                         clicked => {
                             root.confirmed();
                         }

@@ -4190,6 +4190,7 @@ name = "rf-ui"
 version = "0.1.0"
 dependencies = [
  "i-slint-backend-testing",
+ "i-slint-core",
  "jiff",
  "opener",
  "rf-core",

@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
+// The input method's composition has no public event; Slint's own backends send it this way.
+use i_slint_core::input::{InternalKeyEvent, KeyEventType};
 use rf_core::{Entry, EntryKind, VPath};
 use rf_platform::{DiskSpace, KnownFolder};
 use rf_ui::loader::LoadEvent;
@@ -898,4 +900,118 @@ fn a_path_typed_and_not_entered_holds_the_button() {
         calls.borrow().as_slice(),
         ["edited /home/me/다른 곳", "confirmed"]
     );
+}
+
+/// An input method's update of the text being composed (a Korean syllable not yet complete):
+/// the text input shows `preedit` at its cursor, outside its `text`.
+fn compose(window: &MainWindow, preedit: &str) {
+    window
+        .window()
+        .dispatch_event(WindowEvent::internal(InternalKeyEvent {
+            event_type: KeyEventType::UpdateComposition,
+            preedit_text: preedit.into(),
+            ..InternalKeyEvent::default()
+        }));
+}
+
+/// The input method's end of a composition with `text`, which goes into the text input.
+fn commit_composition(window: &MainWindow, text: &str) {
+    let mut event = InternalKeyEvent {
+        event_type: KeyEventType::CommitComposition,
+        ..InternalKeyEvent::default()
+    };
+    event.key_event.text = text.into();
+    window.window().dispatch_event(WindowEvent::internal(event));
+}
+
+#[test]
+fn a_name_being_composed_holds_the_button() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_pick_confirmed(move || record.borrow_mut().push("confirmed".to_owned()));
+    let record = Rc::clone(&calls);
+    window.on_pick_new_folder(move || record.borrow_mut().push("new folder".to_owned()));
+    let record = Rc::clone(&calls);
+    window.on_pick_path_edited(move |text| record.borrow_mut().push(format!("edited {text}")));
+    window.set_pick_view(PickView {
+        unentered_hint: "Enter로 경로를 먼저 확인하세요".into(),
+        ..pick_view()
+    });
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+    let field = || labelled(&window, "대상 경로", AccessibleRole::TextInput).remove(0);
+    let confirm = || labelled(&window, "여기로 이동", AccessibleRole::Button).remove(0);
+    // The picker's, after the toolbar's under the scrim.
+    let new_folder = || {
+        labelled(&window, "새 폴더", AccessibleRole::Button)
+            .pop()
+            .expect("the picker's 새 폴더")
+    };
+    let hint = || {
+        labelled(
+            &window,
+            "Enter로 경로를 먼저 확인하세요",
+            AccessibleRole::Text,
+        )
+        .len()
+    };
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(confirm().accessible_enabled(), Some(true));
+
+    // While a syllable is composed the field's text is still the old target's path, and Rust
+    // has heard of no edit: the buttons are off, so a click cannot send the items there.
+    compose(&window, "ㄷ");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        field().accessible_value().as_deref(),
+        Some("/home/me/작업/백업")
+    );
+    assert_eq!(confirm().accessible_enabled(), Some(false));
+    assert_eq!(new_folder().accessible_enabled(), Some(false));
+    assert_eq!(hint(), 1);
+    confirm().invoke_accessible_default_action();
+    new_folder().invoke_accessible_default_action();
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+
+    // Once the syllable is committed, the edit reaches Rust, which holds the button from then
+    // on (`a_path_typed_and_not_entered_holds_the_button`).
+    commit_composition(&window, "다");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(calls.borrow().as_slice(), ["edited /home/me/작업/백업다"]);
+    assert_eq!(hint(), 0);
+}
+
+#[test]
+fn a_folder_the_picker_cannot_take_is_not_offered_to_screen_readers() {
+    let window = window();
+    let rows = Rc::new(slint::VecModel::from(vec![
+        rf_ui::TreeRow {
+            label: "보관함".into(),
+            ..rf_ui::TreeRow::default()
+        },
+        rf_ui::TreeRow {
+            label: "assets".into(),
+            depth: 1,
+            dimmed: true,
+            info: "옮기는 항목이라 고를 수 없음".into(),
+            ..rf_ui::TreeRow::default()
+        },
+    ]));
+    window.set_pick_view(PickView {
+        tree: ModelRc::from(rows),
+        ..pick_view()
+    });
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+
+    let row = |label: &str| {
+        let found = labelled(&window, label, AccessibleRole::ListItem);
+        assert_eq!(found.len(), 1, "one row {label}");
+        found.into_iter().next().expect("a row")
+    };
+    assert_eq!(row("보관함").accessible_enabled(), Some(true));
+    assert_eq!(row("보관함").accessible_item_selectable(), Some(true));
+    assert_eq!(row("assets").accessible_enabled(), Some(false));
+    assert_eq!(row("assets").accessible_item_selectable(), Some(false));
 }

@@ -669,6 +669,7 @@ impl PickModels {
                 .unwrap_or_default()
                 .into(),
             hint: pick_hint(picker).into(),
+            unentered_hint: words::pick_path_unentered().into(),
             confirm_text: words::pick_confirm(request.mode).into(),
             can_confirm: picker.can_confirm(),
         }
@@ -1379,6 +1380,8 @@ mod tests {
         assert_eq!(first.space, "남은 공간을 확인하는 중…");
         assert_eq!((first.hint.as_str(), first.problem.as_str()), ("", ""));
         assert!(first.can_confirm && !first.path_edited);
+        // What the footer says while a path is composed, which Rust does not see.
+        assert_eq!(first.unentered_hint, "Enter로 경로를 먼저 확인하세요");
         let b = picker.target.clone().expect("the other pane's folder");
         let look = picker.choose(b.clone());
         picker.looked(
