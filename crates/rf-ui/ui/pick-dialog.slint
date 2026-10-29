@@ -383,10 +383,11 @@ export component PickDialog inherits DialogFrame {
     }
 
     // What was typed is no longer pending (another folder was chosen, or the path entered
-    // turned out to be the target): the field shows the target.
+    // turned out to be the target): the field shows the target. An edit that brought the
+    // target's path back is already that, and keeps the cursor where the typing was.
     private property <bool> path-pending: root.view.path-edited;
     changed path-pending => {
-        if (!root.path-pending) {
+        if (!root.path-pending && path.text != root.view.target-path) {
             path.text = root.view.target-path;
             path.to-end();
         }

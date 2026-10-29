@@ -255,6 +255,9 @@ pub struct Picker {
     /// The path field holds text typed into it that is not the target's path: nothing is
     /// confirmed until it is entered and found to be a folder, or another target is chosen.
     pub path_edited: bool,
+    /// The text typed into the path field last is blank (the field was cleared): Enter has
+    /// no path to look at there.
+    pub path_blank: bool,
     /// What the filter of the folder tree holds.
     pub filter: String,
     /// The filter has changed since a target was last chosen: Enter takes the first folder it
@@ -300,6 +303,7 @@ impl Picker {
             typing: 0,
             path_error: String::new(),
             path_edited: false,
+            path_blank: false,
             filter: String::new(),
             filter_fresh: false,
             policy: ConflictPolicy::Ask,
@@ -389,6 +393,7 @@ impl Picker {
             .target
             .as_ref()
             .is_none_or(|target| target.to_string() != text);
+        self.path_blank = text.trim().is_empty();
         self.typed = None;
         self.path_error.clear();
     }

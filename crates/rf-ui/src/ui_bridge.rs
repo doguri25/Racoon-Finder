@@ -23,7 +23,7 @@ use crate::dialogs::{
 use crate::format::{folder_label, format_size, format_time_in, kind_label, short_path};
 use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
-use crate::pick::{POLICIES, Picker, validate};
+use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
 use crate::tree::{NodeId, Tree, TreeRowData};
@@ -610,8 +610,20 @@ pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
 #[derive(Default)]
 pub struct PickModels {
     tree: Rc<TreeRows>,
+    /// What the rows of `tree` were made of last: see [`PickModels::view`].
+    tree_made_of: RefCell<Option<TreeRowsKey>>,
     targets: Rc<VecModel<PickTarget>>,
     chips: Rc<VecModel<SharedString>>,
+}
+
+/// What the rows of the picker's tree are made of: the [`Tree::revision`] of its tree (whose
+/// roots change only with a new revision), what its filter found, and the request whose items
+/// they are marked for.
+#[derive(PartialEq)]
+struct TreeRowsKey {
+    revision: u64,
+    found: Option<Vec<NodeId>>,
+    request: PickRequest,
 }
 
 impl fmt::Debug for PickModels {
@@ -626,7 +638,9 @@ impl fmt::Debug for PickModels {
 impl PickModels {
     /// What `picker` shows, with its folder tree `tree` (whose roots are `places`), or the
     /// folders `found` there while its filter has found some. The models are brought up to
-    /// date and handed over as they are.
+    /// date and handed over as they are. The tree's rows, which look at every folder shown
+    /// for whether it can take the items, are made again only when the tree, what was found
+    /// or the request changed, not at each redraw (each keystroke in a field).
     pub fn view(
         &self,
         picker: &Picker,
@@ -634,7 +648,19 @@ impl PickModels {
         found: Option<&[NodeId]>,
         places: &[Place],
     ) -> PickView {
-        self.tree.show(pick_tree_rows(picker, tree, found, places));
+        let same = self.tree_made_of.borrow().as_ref().is_some_and(|key| {
+            key.revision == tree.revision()
+                && key.found.as_deref() == found
+                && key.request == picker.request
+        });
+        if !same {
+            self.tree.show(pick_tree_rows(picker, tree, found, places));
+            *self.tree_made_of.borrow_mut() = Some(TreeRowsKey {
+                revision: tree.revision(),
+                found: found.map(<[NodeId]>::to_vec),
+                request: picker.request.clone(),
+            });
+        }
         set_rows(&self.targets, pick_targets(picker));
         let request = &picker.request;
         set_rows(
@@ -714,11 +740,14 @@ impl PickModels {
 }
 
 /// What the picker says beside its buttons about how it confirms: that the path typed must be
-/// entered first (the button is off meanwhile), that it is being looked at, or that an
-/// overwrite is confirmed by the button alone; empty for none of these.
+/// entered first (the button is off meanwhile), or a path or a folder given when the field was
+/// cleared, that it is being looked at, or that an overwrite is confirmed by the button alone;
+/// empty for none of these.
 pub fn pick_hint(picker: &Picker) -> &'static str {
     if picker.typed.is_some() {
         words::pick_path_pending()
+    } else if picker.path_edited && picker.path_blank {
+        words::pick_path_blank()
     } else if picker.path_edited {
         words::pick_path_unentered()
     } else if picker.policy == rf_jobs::ConflictPolicy::Overwrite {
@@ -1386,7 +1415,7 @@ mod tests {
     fn picker_over_a() -> (Picker, Tree, Vec<Place>) {
         let temp = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("local");
         let a = temp("a");
-        let pick = crate::pick::PickRequest {
+        let pick = PickRequest {
             mode: TransferMode::Move,
             sources: vec![
                 a.join("docs").expect("a name"),
@@ -1454,6 +1483,53 @@ mod tests {
     }
 
     #[test]
+    fn the_pickers_tree_rows_are_made_again_only_when_they_change() {
+        let (mut picker, mut tree, places) = picker_over_a();
+        let models = PickModels::default();
+        let first_info = |view: &PickView| {
+            view.tree
+                .row_data(0)
+                .map(|row| row.info.to_string())
+                .unwrap_or_default()
+        };
+        let view = models.view(&picker, &tree, None, &places);
+        assert_eq!(first_info(&view), "원래 있던 폴더라 고를 수 없음");
+        // A mark on the rows shown stays while nothing they are made of changes: a keystroke in
+        // a field redraws the picker without making its rows again.
+        let mark = || models.tree.rows.borrow_mut()[0].1.info = "mark".into();
+        mark();
+        picker.edit_path("/somewhere");
+        picker.set_filter("do");
+        assert_eq!(
+            first_info(&models.view(&picker, &tree, None, &places)),
+            "mark"
+        );
+
+        // They are made again for another mode (a copy may go to the items' own folder)...
+        picker.set_mode(TransferMode::Copy);
+        assert_eq!(first_info(&models.view(&picker, &tree, None, &places)), "");
+        // ...for what a filter found...
+        mark();
+        let found = tree.find("docs");
+        let view = models.view(&picker, &tree, Some(&found), &places);
+        assert_eq!(
+            view.tree.row_data(0).map(|row| row.label.to_string()),
+            Some("docs".to_owned())
+        );
+        mark();
+        assert_eq!(
+            first_info(&models.view(&picker, &tree, Some(&found), &places)),
+            "mark"
+        );
+        assert_eq!(first_info(&models.view(&picker, &tree, None, &places)), "");
+        // ...and for a change of the tree.
+        mark();
+        tree.toggle(0);
+        let view = models.view(&picker, &tree, None, &places);
+        assert_eq!((view.tree.row_count(), first_info(&view).as_str()), (1, ""));
+    }
+
+    #[test]
     fn the_pickers_footer_says_how_it_confirms() {
         let (mut picker, tree, places) = picker_over_a();
         let models = PickModels::default();
@@ -1496,6 +1572,13 @@ mod tests {
         assert_eq!(edited.hint, "Enter로 경로를 먼저 확인하세요");
         assert!(edited.path_edited && !edited.can_confirm && !edited.can_make_folder);
         assert_eq!((edited.space.as_str(), edited.problem.as_str()), ("", ""));
+        // A field cleared gives Enter nothing to look at: the footer asks for a path or a
+        // folder instead.
+        picker.edit_path(" ");
+        let cleared = view(&picker);
+        assert_eq!(cleared.hint, "경로를 입력하거나 폴더를 고르세요");
+        assert!(cleared.path_edited && !cleared.can_confirm);
+        picker.edit_path(&somewhere.to_string());
         picker.type_path(somewhere);
         let looking = view(&picker);
         assert_eq!(looking.hint, "입력한 경로를 확인하는 중…");

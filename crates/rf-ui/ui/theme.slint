@@ -13,7 +13,9 @@ export global Theme {
     out property <color> faint: root.dark ? #7D848E : #8A919C;
     out property <color> border: root.dark ? #2C3036 : #E1E4E8;
     out property <color> folder: root.dark ? #E0A84A : #B7791F;
-    // What warns (an overwrite): the folder amber of the palette.
+    // What warns (an overwrite): the folder amber of the palette. For icons only: on the light
+    // panel it is 3.6:1, enough for a graphic (3:1) but not for text (4.5:1); a warning's text
+    // stays Theme.text (an amber that text could take is #9A6316).
     out property <color> warning: root.folder;
     // Dark mode lifts the accent toward white (35%) so it reads on dark panels.
     out property <color> accent: root.dark ? root.accent-base.mix(#FFFFFF, 0.65) : root.accent-base;

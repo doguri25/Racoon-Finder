@@ -977,6 +977,12 @@ pub fn pick_path_unentered() -> &'static str {
     "Enter로 경로를 먼저 확인하세요"
 }
 
+/// What the picker says while its path field has been cleared: there is nothing to enter, and
+/// its button is off until a path is entered or a folder is chosen.
+pub fn pick_path_blank() -> &'static str {
+    "경로를 입력하거나 폴더를 고르세요"
+}
+
 /// What the picker says while its policy overwrites: Enter does not confirm it.
 pub fn pick_overwrite_by_button() -> &'static str {
     "덮어쓰기는 버튼으로만 확인합니다"

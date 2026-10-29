@@ -1077,6 +1077,45 @@ fn a_path_typed_and_not_entered_holds_the_button() {
     );
 }
 
+#[test]
+fn an_edit_that_brings_the_target_back_keeps_the_cursor() {
+    let window = window();
+    let edits = Rc::new(RefCell::new(Vec::new()));
+    // Rust, as the controller does: the field is pending while it says another path.
+    let record = Rc::clone(&edits);
+    let weak = window.as_weak();
+    window.on_pick_path_edited(move |text| {
+        record.borrow_mut().push(text.to_string());
+        if let Some(window) = weak.upgrade() {
+            window.set_pick_view(PickView {
+                path_edited: text != "/home/me/작업/백업",
+                ..pick_view()
+            });
+        }
+    });
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+    let field = || labelled(&window, "대상 경로", AccessibleRole::TextInput).remove(0);
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+
+    // A character typed at the start and taken back: the field says the target again, and the
+    // cursor stays where the typing was.
+    chord(&window, &[&char::from(Key::Home).to_string()]);
+    chord(&window, &["x"]);
+    chord(&window, &[&char::from(Key::Backspace).to_string()]);
+    slint::platform::update_timers_and_animations();
+    chord(&window, &["y"]);
+    assert_eq!(
+        edits.borrow().as_slice(),
+        [
+            "x/home/me/작업/백업",
+            "/home/me/작업/백업",
+            "y/home/me/작업/백업"
+        ]
+    );
+}
+
 /// An input method's update of the text being composed (a Korean syllable not yet complete):
 /// the text input shows `preedit` at its cursor, outside its `text`.
 fn compose(window: &MainWindow, preedit: &str) {
