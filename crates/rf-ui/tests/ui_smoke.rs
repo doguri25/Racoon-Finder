@@ -49,6 +49,19 @@ fn listed_pane(entries: Vec<Entry>) -> Pane {
     pane
 }
 
+/// The root of the system's drive, which `VPath::local` takes on every system (`C:\` on
+/// Windows, where a bare `\` names no drive, and `/` elsewhere), and the sidebar name
+/// `places::drives` gives it.
+fn system_drive() -> (VPath, String) {
+    if cfg!(windows) {
+        let root = VPath::local(r"C:\").expect("the root is local");
+        (root, rf_ui::words::drive_letter('C'))
+    } else {
+        let root = VPath::local("/").expect("the root is local");
+        (root, rf_ui::words::system_disk().to_owned())
+    }
+}
+
 /// The elements whose accessible label is `label` and whose role is `role` (a text's label
 /// is its text, so a button's label is often on its text too).
 fn labelled(window: &MainWindow, label: &str, role: AccessibleRole) -> Vec<ElementHandle> {
@@ -283,7 +296,7 @@ fn the_tree_shows_places_and_folders() {
     window.on_tree_toggled(move |i| record.borrow_mut().push(("toggled", i)));
 
     let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
-    let disk = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+    let (disk, disk_label) = system_drive();
     let places = [
         Place {
             label: "홈".to_owned(),
@@ -292,7 +305,7 @@ fn the_tree_shows_places_and_folders() {
             space: None,
         },
         Place {
-            label: "시스템 디스크".to_owned(),
+            label: disk_label.clone(),
             path: disk,
             kind: PlaceKind::Drive,
             space: Some(DiskSpace {
@@ -314,7 +327,7 @@ fn the_tree_shows_places_and_folders() {
 
     assert_eq!(labelled(&window, "즐겨찾기", AccessibleRole::Text).len(), 1);
     assert_eq!(labelled(&window, "이 PC", AccessibleRole::Text).len(), 1);
-    let drive = labelled(&window, "시스템 디스크", AccessibleRole::ListItem);
+    let drive = labelled(&window, &disk_label, AccessibleRole::ListItem);
     assert_eq!(
         drive[0].accessible_description().as_deref(),
         Some("128 GB 남음 / 512 GB")
@@ -359,7 +372,7 @@ fn the_tree_shows_places_and_folders() {
             (0, "홈".to_owned(), false),
             (1, "a".to_owned(), false),
             (2, "b".to_owned(), true),
-            (3, "시스템 디스크".to_owned(), false),
+            (3, disk_label, false),
         ]
     );
     let home_row = labelled(&window, "홈", AccessibleRole::ListItem);
@@ -497,6 +510,56 @@ fn a_dialog_takes_the_keys_until_it_closes() {
     window.set_dialog(DialogKind::None);
     chord(&window, &[&down]);
     assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn the_failures_window_shows_whole_paths_wrapped() {
+    let window = window();
+    // A Windows path has no place to break a line at its `\`; a short line has one line.
+    let long = format!(
+        "C:\\{}\\a.txt: 권한이 없습니다",
+        "VeryLongFolderNameWithoutBreaks".repeat(4)
+    );
+    let short = "a.txt: 권한이 없습니다".to_owned();
+    let failures = rf_ui::dialogs::Failures {
+        title: "처리하지 못한 항목".to_owned(),
+        lines: vec![long.clone(), short.clone()],
+    };
+    window.set_message_view(ui_bridge::message_view(&failures));
+    window.set_dialog(DialogKind::Message);
+
+    // Each line shows once: the copy the window measures is out of sight.
+    let long_line = labelled(&window, &long, AccessibleRole::Text);
+    let short_line = labelled(&window, &short, AccessibleRole::Text);
+    assert_eq!((long_line.len(), short_line.len()), (1, 1));
+    let (long_line, short_line) = (&long_line[0], &short_line[0]);
+    // The long one wraps within the list, onto more lines than the short one.
+    let list = window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .find_all()
+        .into_iter()
+        .find(|list| {
+            let (at, size) = (list.absolute_position(), list.size());
+            let line = long_line.absolute_position();
+            (at.x..at.x + size.width).contains(&line.x)
+                && (at.y..at.y + size.height).contains(&line.y)
+        })
+        .expect("the list of the window");
+    let (list_at, list_size) = (list.absolute_position(), list.size());
+    let right = long_line.absolute_position().x + long_line.size().width;
+    assert!(
+        right <= list_at.x + list_size.width,
+        "{right} past the list"
+    );
+    assert!(long_line.size().height > short_line.size().height);
+    // The list is as tall as both lines: nothing to scroll to.
+    let bottom = short_line.absolute_position().y + short_line.size().height;
+    assert!(
+        bottom <= list_at.y + list_size.height,
+        "{bottom} below the list"
+    );
 }
 
 #[test]

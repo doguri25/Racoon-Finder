@@ -31,6 +31,8 @@ export struct ConfirmView {
 export struct MessageView {
     title: string,
     lines: [string],
+    // The first lines, which the window lays out out of sight to fit its list to them.
+    head: [string],
 }
 
 export struct RecoveryView {
@@ -209,6 +211,27 @@ export component ConfirmDialog inherits DialogFrame {
     }
 }
 
+// One line of the list of failed items: an item's whole path and why, wrapped. A line breaks
+// between words, and inside a word too long for a line: a Windows path has no place to break
+// at its `\`, and would otherwise run past the list.
+component MessageLine inherits Rectangle {
+    in property <string> text;
+
+    HorizontalLayout {
+        padding-left: Theme.gap-m;
+        padding-right: Theme.gap-m;
+        padding-top: 6px;
+        padding-bottom: 6px;
+
+        Text {
+            text: root.text;
+            color: Theme.text;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+}
+
 // The items a job could not process, and why.
 export component MessageDialog inherits DialogFrame {
     in property <MessageView> view;
@@ -238,26 +261,30 @@ export component MessageDialog inherits DialogFrame {
             Heading {
                 text: root.view.title;
             }
+            // As tall as the lines are once wrapped, up to 360px; the list scrolls past that.
+            // The list makes only the rows it shows, so the first lines are laid out out of
+            // sight (hidden from screen readers too), as wide as the list, to tell their
+            // height.
             Rectangle {
-                height: min(360px, max(48px, root.view.lines.length * 44px));
+                height: min(360px, max(48px, measured.preferred-height + 2px));
                 border-width: 1px;
                 border-color: Theme.border;
                 border-radius: Theme.radius;
 
-                ListView {
-                    for line in root.view.lines: Rectangle {
-                        HorizontalLayout {
-                            padding-left: Theme.gap-m;
-                            padding-right: Theme.gap-m;
-                            padding-top: 6px;
-                            padding-bottom: 6px;
+                Rectangle {
+                    visible: false;
+                    width: list.visible-width;
 
-                            Text {
-                                text: line;
-                                color: Theme.text;
-                                wrap: word-wrap;
-                            }
+                    measured := VerticalLayout {
+                        for line in root.view.head: MessageLine {
+                            text: line;
                         }
+                    }
+                }
+
+                list := ListView {
+                    for line in root.view.lines: MessageLine {
+                        text: line;
                     }
                 }
             }

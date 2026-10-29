@@ -503,7 +503,7 @@ fn the_button_waits_while_the_path_field_says_otherwise() {
 
     // A target chosen elsewhere replaces what was typed.
     press(&mut state, &special(Key::F6), NONE);
-    state.pick_path_edited("/somewhere/else");
+    state.pick_path_edited(&folder("elsewhere").to_string());
     assert_eq!(state.pick_confirmed(), []);
     state.pick_step(1);
     assert!(!picker(&state).path_edited);

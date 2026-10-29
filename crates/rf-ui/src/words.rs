@@ -18,10 +18,10 @@ use rf_platform::KnownFolder;
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::pick::Validity;
 
-/// How many characters a path takes at most where a line shows it with other words (a failed
-/// item, a recovered job beside its buttons): the middle of a longer one is left out
-/// ([`short_path`]), so that the end of the path stays in view, and the words after it.
-const PLACE_CHARS: usize = 32;
+/// How many characters a path takes at most in a row of a recovered job, beside its buttons:
+/// the middle of a longer one is left out ([`short_path`]), so that the end of the path stays
+/// in view, and the words after it. The window of failed items shows whole paths instead
+/// ([`failure_line`]).
 const ROW_PLACE_CHARS: usize = 24;
 
 /// What a job does, as the user sees it: a [`JobKind`] with a delete told apart by where the
@@ -522,11 +522,6 @@ fn detail(spec: &JobSpec, folder: impl Fn(&VPath) -> String) -> String {
     }
 }
 
-/// `path` with the middle of a long one left out, for a line of other words.
-fn place(path: &VPath) -> String {
-    short_path(&path.to_string(), PLACE_CHARS)
-}
-
 /// The notice when items cannot be copied or moved at all (a volume root, a name the target
 /// cannot take): `복사하거나 옮길 수 없습니다: 쓸 수 없는 이름이나 경로입니다`.
 pub fn cannot_transfer(kind: ErrorKind) -> String {
@@ -622,11 +617,13 @@ pub fn item_failure(failure: &ItemFailure) -> String {
 }
 
 /// One line of the window of failed items: the item and why (`/home/me/a.txt: 권한이
-/// 없습니다`). The item is the source, or the target when there is no source.
+/// 없습니다`). The item is the source, or the target when there is no source, with its whole
+/// path: two failed items can differ only in the middle of their paths, so nothing is left out
+/// (the window wraps a long line).
 pub fn failure_line(failure: &ItemFailure) -> String {
     let why = item_failure(failure);
     match failure.source.as_ref().or(failure.target.as_ref()) {
-        Some(path) => format!("{}: {why}", place(path)),
+        Some(path) => format!("{path}: {why}"),
         None => why,
     }
 }
@@ -1607,11 +1604,26 @@ mod tests {
         );
         assert_eq!(
             failure_line(&failure),
-            format!(
-                "{}: 같은 이름의 항목이 이미 있습니다",
-                place(&path("a.txt"))
-            )
+            format!("{}: 같은 이름의 항목이 이미 있습니다", path("a.txt"))
         );
+        // A long path is shown whole: the window wraps it.
+        let deep = VPath::local(
+            std::env::temp_dir()
+                .join("a-long-folder-name")
+                .join("another-long-folder")
+                .join("작업")
+                .join("a.txt"),
+        )
+        .expect("a local path");
+        let deep_failure = ItemFailure {
+            source: Some(deep.clone()),
+            ..failure.clone()
+        };
+        assert_eq!(
+            failure_line(&deep_failure),
+            format!("{deep}: 같은 이름의 항목이 이미 있습니다")
+        );
+        assert!(!failure_line(&deep_failure).contains('…'));
         let refused = ItemFailure {
             reason: Some(FailureReason::Issue(IssueKind::ReservedName)),
             kind: ErrorKind::InvalidPath,

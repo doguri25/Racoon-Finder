@@ -641,8 +641,11 @@ mod tests {
                 group("즐겨찾기", &["홈", "문서"]),
             ]
         );
-        // Each shows its path under its name.
-        assert_eq!(groups[3].items[1].note, docs.to_string());
+        // Each shows its path under its name, the middle of a long one left out (the
+        // temporary folder's path is long on macOS).
+        let note = &groups[3].items[1].note;
+        assert_eq!(*note, short_path(&docs.to_string(), NOTE_CHARS));
+        assert!(note.ends_with("문서"), "{note}");
         let picker = Picker::new(req, 1, groups);
         assert_eq!(picker.target, Some(b));
         assert_eq!(picker.origin, 1);
@@ -877,7 +880,7 @@ mod tests {
         // Editing again forgets a look on its way: its result cannot change the target.
         picker.edit_path(&c.to_string());
         let look = picker.type_path(c.clone());
-        picker.edit_path("/somewhere/else");
+        picker.edit_path(&folder("elsewhere").to_string());
         assert_eq!(picker.looked(look, &c, facts(None, false)), Looked::Stale);
         assert_eq!(picker.target, Some(folder("b")));
         assert!(!picker.can_confirm());

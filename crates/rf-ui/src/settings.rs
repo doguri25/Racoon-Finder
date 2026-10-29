@@ -635,14 +635,38 @@ mod tests {
         assert_eq!(loaded.settings.session(), Session::default());
     }
 
+    /// `text` as a TOML string, quoted and escaped: a Windows path's `\` would otherwise
+    /// start an escape, which makes the file one that does not parse.
+    fn toml_string(text: &str) -> String {
+        toml::Value::String(text.to_owned()).to_string()
+    }
+
+    #[test]
+    fn windows_folders_round_trip_on_every_system() {
+        // A file saved on Windows holds a `\` in every folder; it reads back as it was written.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let folders = [r"local:C:\Users\me\설계 문서", r"local:\\srv\share\"];
+        let settings = Settings {
+            recent_targets: folders.map(str::to_owned).to_vec(),
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        assert_eq!(load(dir.path()), writable(settings));
+        // So does a file the tests write by hand with `toml_string`.
+        let text = format!("recent_targets = [{}]\n", toml_string(folders[0]));
+        std::fs::write(dir.path().join(FILE_NAME), text).expect("written");
+        assert_eq!(load(dir.path()).settings.recent_targets, [folders[0]]);
+    }
+
     #[test]
     fn values_of_a_newer_version_fall_back_one_key_at_a_time() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let a = folder(dir.path(), "a").to_uri();
+        let quoted = toml_string(&a);
         let text = format!(
             "theme = \"high-contrast\"\nshow_hidden = 3\nwindow = \"big\"\nactive_pane = 1\n\
-             recent_targets = [\"{a}\"]\npanes = [{{ tabs = [\"{a}\"], active = \"x\" }}, 5, \
-             {{ tabs = [\"{a}\"], layout = \"grid\" }}]\n"
+             recent_targets = [{quoted}]\npanes = [{{ tabs = [{quoted}], active = \"x\" }}, 5, \
+             {{ tabs = [{quoted}], layout = \"grid\" }}]\n"
         );
         std::fs::write(dir.path().join(FILE_NAME), &text).expect("written");
 
@@ -667,7 +691,7 @@ mod tests {
         // A file with one pane, or none, opens the other with its default.
         std::fs::write(
             dir.path().join(FILE_NAME),
-            format!("[[panes]]\ntabs = [\"{a}\"]\n"),
+            format!("[[panes]]\ntabs = [{quoted}]\n"),
         )
         .expect("written");
         let session = load(dir.path()).settings.session();

@@ -40,6 +40,9 @@ use crate::{
 
 /// How many characters the folder beside a folder the picker's filter found shows.
 const FOUND_PLACE_CHARS: usize = 40;
+/// How many of its first lines the window of failed items lays out to fit its list to them:
+/// enough to fill the list's 360px even when each takes one text line (32px).
+const MEASURED_LINES: usize = 12;
 /// How many names of the items the picker shows before "외 N개".
 const PICK_CHIPS: usize = 3;
 
@@ -808,10 +811,14 @@ pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
     }
 }
 
+/// The window of failed items. Its first [`MEASURED_LINES`] lines go in `head` too: the window
+/// fits its list to their height once wrapped.
 pub fn message_view(failures: &Failures) -> MessageView {
+    let head = &failures.lines[..failures.lines.len().min(MEASURED_LINES)];
     MessageView {
         title: failures.title.as_str().into(),
         lines: lines_model(&failures.lines),
+        head: lines_model(head),
     }
 }
 
@@ -940,6 +947,21 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    /// The root of the system's drive, which `VPath::local` takes on every system: `C:\` on
+    /// Windows, where a bare `\` names no drive, and `/` elsewhere.
+    fn system_root() -> VPath {
+        VPath::local(if cfg!(windows) { r"C:\" } else { "/" }).expect("the root is local")
+    }
+
+    /// The sidebar name of [`system_root`], as `places::drives` gives it.
+    fn system_drive_label() -> String {
+        if cfg!(windows) {
+            words::drive_letter('C')
+        } else {
+            words::system_disk().to_owned()
+        }
     }
 
     /// `old` with `steps` applied the way Slint applies notifications to its rows.
@@ -1133,7 +1155,7 @@ mod tests {
 
     #[test]
     fn folder_labels_name_the_last_folder() {
-        let root = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+        let root = system_root();
         let label = folder_label(&root);
         assert_ne!(label, "");
         let docs = root.join("docs").expect("a plain name");
@@ -1152,16 +1174,16 @@ mod tests {
                 },
             ]
         );
-        #[cfg(unix)]
-        assert_eq!(folder_label(&root), "/");
+        // A root is named by its path without the last separator.
+        assert_eq!(folder_label(&root), if cfg!(windows) { "C:" } else { "/" });
     }
 
     #[test]
     fn drives_show_how_full_they_are() {
         const GB: u64 = 1 << 30;
-        let root = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+        let root = system_root();
         let drive = Place {
-            label: "로컬 디스크 (C:)".to_owned(),
+            label: system_drive_label(),
             path: root.clone(),
             kind: PlaceKind::Drive,
             space: Some(DiskSpace {
@@ -1195,7 +1217,7 @@ mod tests {
     /// The places of `tree_rows_show_places_heads_and_chevrons`: two favorites, then two
     /// drives.
     fn places() -> Vec<Place> {
-        let root = VPath::local(std::path::MAIN_SEPARATOR_STR).expect("the root is local");
+        let root = system_root();
         let place = |label: &str, kind| Place {
             label: label.to_owned(),
             path: root.clone(),
@@ -1307,6 +1329,25 @@ mod tests {
         model.sync(&tree, std::slice::from_ref(&place));
         assert_eq!(labels(&model), ["홈"]);
         assert_eq!(model.row_data(3), None);
+    }
+
+    #[test]
+    fn the_failures_window_measures_its_first_lines() {
+        let failures = |count: usize| Failures {
+            title: "처리하지 못한 항목".to_owned(),
+            lines: (0..count)
+                .map(|i| format!("/a/{i}.txt: 권한이 없습니다"))
+                .collect(),
+        };
+        let shown = |model: &ModelRc<SharedString>| -> Vec<String> {
+            model.iter().map(|line| line.to_string()).collect()
+        };
+        let many = failures(MEASURED_LINES + 5);
+        let view = message_view(&many);
+        assert_eq!(shown(&view.lines), many.lines);
+        assert_eq!(shown(&view.head), many.lines[..MEASURED_LINES]);
+        let few = failures(2);
+        assert_eq!(shown(&message_view(&few).head), few.lines);
     }
 
     #[test]
@@ -1438,12 +1479,15 @@ mod tests {
 
         // A path typed and not entered: the button is off, and the footer says what to do,
         // with nothing about the target the field no longer shows.
-        picker.edit_path("/somewhere/else");
+        let somewhere = system_root()
+            .join("somewhere")
+            .and_then(|path| path.join("else"))
+            .expect("plain names");
+        picker.edit_path(&somewhere.to_string());
         let edited = view(&picker);
         assert_eq!(edited.hint, "Enter로 경로를 먼저 확인하세요");
         assert!(edited.path_edited && !edited.can_confirm && !edited.can_make_folder);
         assert_eq!((edited.space.as_str(), edited.problem.as_str()), ("", ""));
-        let somewhere = VPath::parse("/somewhere/else").expect("a path");
         picker.type_path(somewhere);
         let looking = view(&picker);
         assert_eq!(looking.hint, "입력한 경로를 확인하는 중…");
