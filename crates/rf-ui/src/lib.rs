@@ -4,6 +4,12 @@ use std::path::PathBuf;
 
 use slint::ComponentHandle;
 
+pub mod format;
+pub mod history;
+pub mod keys;
+pub mod selection;
+pub mod words;
+
 #[allow(
     missing_debug_implementations,
     unused_qualifications,
