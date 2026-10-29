@@ -32,7 +32,7 @@ use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
-use crate::state::{AppState, DropSpot, Effect, LEFT, RIGHT, start_folders};
+use crate::state::{AppState, DropSpot, Effect, LEFT, Layout, RIGHT, start_folders};
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, JobRowView, MainWindow, open, words};
 
@@ -104,6 +104,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     let session = settings.session();
     let started_at = start.is_some();
     window.set_theme_choice(theme_number(settings.theme));
+    // The layout of the last run from the start, before the panes' folders are known.
+    show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
@@ -202,6 +204,23 @@ fn connect(window: &MainWindow) {
     });
     window.on_command(|name| {
         with(|c| c.command(&name));
+    });
+    window.on_tree_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        with(|c| c.tree_key(&text, mods)).unwrap_or(false)
+    });
+    window.on_split_changed(|share| {
+        with(|c| {
+            c.update(|state| {
+                state.set_split_share(f64::from(share));
+                Vec::new()
+            });
+        });
     });
     window.on_theme_chosen(|choice| {
         if let Some(theme) = theme_of(choice) {
@@ -686,6 +705,17 @@ impl Controller {
         used
     }
 
+    /// A key while the sidebar's tree has the keys; `true` when it is used there. A key of the
+    /// tree moves in it; one of the panes' rows is used, and does nothing; any other goes on to
+    /// the window's keys (`false`), as from the panes.
+    fn tree_key(&self, text: &str, mods: Mods) -> bool {
+        if let Some(key) = keys::tree_key(text, mods, Os::CURRENT) {
+            self.update(|state| state.tree_key(key));
+            return true;
+        }
+        keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
+    }
+
     /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`)
     /// and asks for `action`: the action the place takes, or `none`. What a drop there would
     /// do goes to the label beside it. Called at every move of the pointer, it changes nothing
@@ -769,6 +799,13 @@ impl Controller {
             "undo" => Command::Undo,
             "redo" => Command::Redo,
             "toggle-hidden" => Command::ToggleHidden,
+            "toggle-tree" => Command::ToggleTree,
+            "toggle-preview" => Command::TogglePreview,
+            "toggle-dual" => Command::ToggleDualPane,
+            "toggle-split" => Command::ToggleSplit,
+            "swap-panes" => Command::SwapPanes,
+            "same-folder" => Command::SameFolderInOther,
+            "toggle-sync" => Command::SyncNavigation,
             _ => return,
         };
         self.update(|state| {
@@ -856,6 +893,8 @@ impl Controller {
                 | Effect::EditPath(_)
                 | Effect::FocusFilter
                 | Effect::ShowViewMenu
+                | Effect::FocusTree
+                | Effect::FocusPanes
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
@@ -959,6 +998,8 @@ impl Controller {
             | Effect::EditPath(_)
             | Effect::FocusFilter
             | Effect::ShowViewMenu
+            | Effect::FocusTree
+            | Effect::FocusPanes
             | Effect::ScrollTo { .. }
             | Effect::ScrollTree(_)
             | Effect::ScrollPickTree(_)
@@ -987,6 +1028,16 @@ impl Controller {
             Effect::ShowViewMenu => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_show_view_menu();
+                }
+            }
+            Effect::FocusTree => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_focus_tree();
+                }
+            }
+            Effect::FocusPanes => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_focus_panes();
                 }
             }
             Effect::ScrollTo { side, row } => self.scroll_to(side, row),
@@ -1102,6 +1153,7 @@ impl Controller {
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
+            show_layout(&window, state.layout(), state.syncing());
             // The active pane's own filter (another pane's, or none once the tab moved on).
             window.invoke_show_filter(state.filter_text().into());
             // The next drag carries the items the last press readied.
@@ -1110,6 +1162,12 @@ impl Controller {
                 window.set_drag_data(ui_bridge::drag_payload(drag));
             }
             self.tree_rows.sync(state.tree(), &self.places.borrow());
+            window.set_tree_cursor(
+                state
+                    .tree_cursor_row()
+                    .and_then(|row| i32::try_from(row).ok())
+                    .unwrap_or(-1),
+            );
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);
         }
@@ -1197,6 +1255,17 @@ impl Controller {
         }
         *self.shown_modal.borrow_mut() = Some(now);
     }
+}
+
+/// Shows `layout` in the window, and whether navigation sync is on (`sync`, for the 보기
+/// menu's mark).
+fn show_layout(window: &MainWindow, layout: Layout, sync: bool) {
+    window.set_dual_pane(layout.dual);
+    window.set_stacked(layout.stacked);
+    window.set_split_share(layout.share());
+    window.set_show_tree(layout.tree);
+    window.set_show_preview(layout.preview);
+    window.set_sync_navigation(sync);
 }
 
 /// The number Slint uses for pane `side`.

@@ -1,7 +1,8 @@
 //! The main window's state, and what its keys, clicks and the loader's events do to it.
 //!
 //! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
-//! whether hidden items show, the folder tree of the sidebar, the jobs of the job panel, the
+//! whether hidden items show, how the window lays them out ([`Layout`]) and whether navigation
+//! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
 //! tree and recent targets ([`AppState::shown_picker`]), and the items a drag of rows carries
 //! ([`AppState::drag`]). Its methods change it and return the [`Effect`]s that need a worker
@@ -35,10 +36,13 @@ use crate::words;
 mod copies;
 mod drag;
 mod jobs;
+mod layout;
 mod pick;
+mod sidebar;
 
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
+pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 
 /// The left pane's position in [`AppState::panes`].
 pub const LEFT: usize = 0;
@@ -81,6 +85,11 @@ pub enum Effect {
     FocusFilter,
     /// Open the 보기 menu.
     ShowViewMenu,
+    /// Give the sidebar's folder tree the keys ([`sidebar`]).
+    FocusTree,
+    /// Give the keys back to the panes (from the tree, or from a part of the window that is
+    /// gone).
+    FocusPanes,
     /// Scroll pane `side` so that `row` shows.
     ScrollTo { side: usize, row: usize },
     /// List the folders in a folder of the tree
@@ -156,12 +165,22 @@ pub enum ToastAction {
 /// The window's state on the UI thread: two panes, the one with the keyboard, whether hidden
 /// items show, and the folder tree that follows the active pane.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact of the window, not states of one machine"
+)]
 pub struct AppState {
     panes: [Pane; 2],
     active: usize,
     show_hidden: bool,
+    /// One pane or two, how they share the room, and the side panels.
+    layout: Layout,
+    /// Navigation sync is on ([`layout`]).
+    sync: bool,
     /// The sidebar's folder tree, whose roots are the places.
     tree: Tree,
+    /// The node of the tree's keyboard cursor ([`sidebar`]), once the tree had the keys.
+    tree_cursor: Option<NodeId>,
     /// The folder tree of the destination picker, whose roots are the places too: made anew
     /// for each picker, and dropped when it closes.
     pick_tree: Tree,
@@ -209,10 +228,11 @@ impl AppState {
     }
 
     /// The window as `session` left it: the tabs of each pane with the one that showed, the
-    /// pane with the keyboard, the hidden items shown or not; and the requests for the tabs'
-    /// listings. A pane without tabs opens at `left` or `right`. The tabs of `waiting` show
-    /// home in place of their folder, which they stand in for ([`Tab::stand_in_for`]) until
-    /// they move, or [`AppState::restored_folder`] takes what is found.
+    /// pane with the keyboard, the hidden items shown or not, the layout; and the requests for
+    /// the tabs' listings. Navigation sync starts off. A pane without tabs opens at `left` or
+    /// `right`. The tabs of `waiting` show home in place of their folder, which they stand in
+    /// for ([`Tab::stand_in_for`]) until they move, or [`AppState::restored_folder`] takes
+    /// what is found.
     pub fn restore(
         left: VPath,
         right: VPath,
@@ -249,7 +269,10 @@ impl AppState {
             panes,
             active: session.active_pane.min(RIGHT),
             show_hidden: filter.show_hidden,
+            layout: session.layout,
+            sync: false,
             tree: Tree::new(filter),
+            tree_cursor: None,
             pick_tree: Tree::new(filter),
             places: Vec::new(),
             recent: Vec::new(),
@@ -286,6 +309,7 @@ impl AppState {
             panes: [pane(&self.panes[LEFT]), pane(&self.panes[RIGHT])],
             active_pane: self.active,
             show_hidden: self.show_hidden,
+            layout: self.layout,
         }
     }
 
@@ -361,8 +385,11 @@ impl AppState {
         let side = self.active;
         let page = isize::try_from(page.max(1)).unwrap_or(isize::MAX);
         let effects = match command {
+            // With one pane, Tab stays on it: the other is hidden.
             Command::SwitchPane => {
-                self.active = RIGHT - side;
+                if self.layout.dual {
+                    self.active = RIGHT - side;
+                }
                 Vec::new()
             }
             Command::NextTab => self.step_tab(side, 1),
@@ -416,6 +443,14 @@ impl AppState {
             Command::Redo => self.redo(),
             Command::CopyTo => self.open_picker(side, TransferMode::Copy),
             Command::MoveTo => self.open_picker(side, TransferMode::Move),
+            Command::ToggleDualPane => self.toggle_dual(),
+            Command::ToggleSplit => self.toggle_split(),
+            Command::ToggleTree => self.toggle_tree(),
+            Command::FocusTree => self.focus_tree(),
+            Command::TogglePreview => self.toggle_preview(),
+            Command::SwapPanes => self.swap_panes(),
+            Command::SameFolderInOther => self.same_folder_in_other(side),
+            Command::SyncNavigation => self.toggle_sync(),
             Command::ReopenTab
             | Command::Refresh
             | Command::Copy
@@ -425,14 +460,7 @@ impl AppState {
             | Command::CopyPath
             | Command::Properties
             | Command::ContextMenu
-            | Command::QuickLook
-            | Command::TogglePreview
-            | Command::ToggleTree
-            | Command::ToggleDualPane
-            | Command::ToggleSplit
-            | Command::SwapPanes
-            | Command::SameFolderInOther
-            | Command::SyncNavigation => return None,
+            | Command::QuickLook => return None,
         };
         Some(effects)
     }
@@ -477,13 +505,21 @@ impl AppState {
         Vec::new()
     }
 
-    /// Opens row `row` of pane `side` (Enter or a double click): a folder shows in the tab, a
-    /// file opens in its app, and a link is followed first.
+    /// Opens row `row` of pane `side` (Enter or a double click): a folder shows in the tab
+    /// (and in the other pane with navigation sync), a file opens in its app, and a link is
+    /// followed first.
     pub fn open_row(&mut self, side: usize, row: usize) -> Vec<Effect> {
         self.activate(side);
         let tab = self.tab_mut(side);
         match tab.open_target(row) {
-            Some(OpenAction::Navigate(folder)) => vec![Effect::Load(tab.navigate(folder))],
+            Some(OpenAction::Navigate(folder)) => {
+                let name = folder.file_name().map(std::ffi::OsStr::to_os_string);
+                let mut effects = vec![Effect::Load(tab.navigate(folder))];
+                if let Some(name) = name {
+                    effects.extend(self.sync_open(side, &name));
+                }
+                effects
+            }
             Some(OpenAction::OpenFile(file)) => vec![Effect::OpenFile(file)],
             Some(OpenAction::Follow(link)) => vec![Effect::Follow {
                 generation: tab.generation(),
@@ -578,6 +614,8 @@ impl AppState {
     /// picker's tree, when a picker is open.
     pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
         places.clone_into(&mut self.places);
+        // The new tree's nodes are other ones.
+        self.tree_cursor = None;
         let mut effects = self.with_tree(|tree| tree.set_roots(pick::tree_roots(places)));
         if self.shown_picker().is_some() {
             effects.extend(self.with_pick_tree(|tree| tree.set_roots(pick::tree_roots(places))));
@@ -667,10 +705,11 @@ impl AppState {
     /// shows is not the one the tree follows (the pane, its tab or its folder changed), the
     /// tree opens the folders on the way to it and selects it. The controller calls this
     /// after every change; it does nothing while the folder stays the same, so a folder the
-    /// user closed in the tree stays closed.
+    /// user closed in the tree stays closed, and nothing while the tree is hidden, which finds
+    /// the folder once it shows again.
     pub fn follow_active(&mut self) -> Vec<Effect> {
         let location = self.tab(self.active).location();
-        if self.tree.target() == Some(location) {
+        if !self.layout.tree || self.tree.target() == Some(location) {
             return Vec::new();
         }
         let location = location.clone();
@@ -923,12 +962,15 @@ impl AppState {
             .position(|pane| pane.tabs().iter().any(|tab| tab.generation() == generation))
     }
 
-    /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go.
+    /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go;
+    /// with navigation sync, the other pane makes the same move.
     fn go(&mut self, side: usize, step: fn(&mut Tab) -> Option<LoadRequest>) -> Vec<Effect> {
-        step(self.tab_mut(side))
-            .map(Effect::Load)
-            .into_iter()
-            .collect()
+        let Some(request) = step(self.tab_mut(side)) else {
+            return Vec::new();
+        };
+        let mut effects = vec![Effect::Load(request)];
+        effects.extend(self.sync_step(side, step));
+        effects
     }
 
     /// Enter: opens the cursor's row of pane `side`. A folder opens from a cursor the list

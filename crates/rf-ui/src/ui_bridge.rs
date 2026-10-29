@@ -613,6 +613,14 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_filter(key(Command::FocusFilter));
     shown.set_new_tab(key(Command::NewTab));
     shown.set_close_tab(key(Command::CloseTab));
+    shown.set_toggle_tree(key(Command::ToggleTree));
+    shown.set_focus_tree(key(Command::FocusTree));
+    shown.set_toggle_preview(key(Command::TogglePreview));
+    shown.set_toggle_dual_pane(key(Command::ToggleDualPane));
+    shown.set_toggle_split(key(Command::ToggleSplit));
+    shown.set_swap_panes(key(Command::SwapPanes));
+    shown.set_same_folder(key(Command::SameFolderInOther));
+    shown.set_sync_navigation(key(Command::SyncNavigation));
 }
 
 /// A row of the job panel.

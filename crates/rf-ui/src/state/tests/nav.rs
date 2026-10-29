@@ -71,9 +71,7 @@ fn keys_of_commands_still_to_come_go_on_to_the_system() {
         (special(Key::F5), NONE),
         ("c".to_owned(), CTRL),
         ("v".to_owned(), CTRL),
-        ("u".to_owned(), CTRL),
-        (special(Key::F9), NONE),
-        (special(Key::F12), NONE),
+        ("T".to_owned(), CTRL_SHIFT),
         (special(Key::Return), ALT),
         (special(Key::F10), SHIFT),
     ] {
@@ -559,11 +557,11 @@ fn late_events_of_a_closed_tab_are_dropped() {
     );
 }
 
-fn temp() -> VPath {
+pub(super) fn temp() -> VPath {
     VPath::local(std::env::temp_dir()).expect("a local path")
 }
 
-fn drive(label: &str, path: &VPath) -> Place {
+pub(super) fn drive(label: &str, path: &VPath) -> Place {
     Place {
         label: label.to_owned(),
         path: path.clone(),
@@ -573,7 +571,7 @@ fn drive(label: &str, path: &VPath) -> Place {
 }
 
 /// The one listing of the folder tree among `effects`.
-fn the_tree_load(effects: &[Effect]) -> LoadRequest {
+pub(super) fn the_tree_load(effects: &[Effect]) -> LoadRequest {
     let requests: Vec<&LoadRequest> = effects
         .iter()
         .filter_map(|effect| match effect {

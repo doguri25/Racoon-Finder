@@ -1268,7 +1268,10 @@ fn the_theme_follows_the_view_menu() {
     dark.mock_single_click(slint::platform::PointerEventButton::Left);
     assert_eq!(chosen.borrow().as_slice(), [2]);
 
-    // The marks of the menu: the theme chosen, and 숨김 파일 보기 as `show-hidden` says.
+    // The marks of the menu: the theme chosen, and 숨김 파일 보기 as `show-hidden` says (with
+    // the marks of the layout's 폴더 트리 and 듀얼 패널, which are on).
+    window.set_show_tree(false);
+    window.set_dual_pane(false);
     let commands = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&commands);
     window.on_command(move |name| record.borrow_mut().push(name.to_string()));
@@ -2353,4 +2356,250 @@ fn the_picker_tabs_round_its_parts() {
     }
     press(&window, Key::RightArrow);
     assert_eq!(calls.take(), ["move false"]);
+}
+
+/// The place and the size of the pane called `label`; `None` while it does not show.
+fn pane_box(window: &MainWindow, label: &str) -> Option<(LogicalPosition, LogicalSize)> {
+    labelled(window, label, AccessibleRole::Groupbox)
+        .first()
+        .map(|pane| (pane.absolute_position(), pane.size()))
+}
+
+fn shown_pane(window: &MainWindow, label: &str) -> (LogicalPosition, LogicalSize) {
+    pane_box(window, label).unwrap_or_else(|| panic!("the {label} shows"))
+}
+
+#[test]
+fn the_divider_shares_the_room_and_a_double_click_evens_it() {
+    let window = window();
+    let shares = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&shares);
+    window.on_split_changed(move |share| record.borrow_mut().push(share));
+    let (left_at, left) = shown_pane(&window, "왼쪽 패널");
+    let (right_at, right) = shown_pane(&window, "오른쪽 패널");
+    assert!((left.width - right.width).abs() < 1.0, "even at the start");
+    let gap = right_at.x - (left_at.x + left.width);
+    let room = left.width + right.width;
+    let middle_y = left_at.y + left.height / 2.0;
+    let grip = LogicalPosition::new(left_at.x + left.width + gap / 2.0, middle_y);
+
+    // Dragged to 30% of the room: the panes follow the pointer, and Rust is told at the
+    // release.
+    pointer(&window, "press", grip);
+    let to = LogicalPosition::new(left_at.x + room * 0.3 + gap / 2.0, middle_y);
+    for step in [1.0, 2.0, 3.0, 4.0] {
+        let x = grip.x + (to.x - grip.x) * step / 4.0;
+        pointer(&window, "move", LogicalPosition::new(x, middle_y));
+    }
+    let (_, dragged) = shown_pane(&window, "왼쪽 패널");
+    assert!(
+        (dragged.width - room * 0.3).abs() < 2.0,
+        "{}",
+        dragged.width
+    );
+    assert!(
+        shares.borrow().is_empty(),
+        "nothing is told before the release"
+    );
+    pointer(&window, "release", to);
+    let told = shares.borrow().clone();
+    assert_eq!(told.len(), 1);
+    assert!((told[0] - 0.3).abs() < 0.01, "{told:?}");
+    // Rust's share is the one shown after the release.
+    window.set_split_share(told[0]);
+    let (_, left) = shown_pane(&window, "왼쪽 패널");
+    let (_, right) = shown_pane(&window, "오른쪽 패널");
+    assert!((left.width / (left.width + right.width) - 0.3).abs() < 0.01);
+
+    // Past the edge, the first pane keeps a tenth.
+    let grip = LogicalPosition::new(left_at.x + left.width + gap / 2.0, middle_y);
+    pointer(&window, "press", grip);
+    pointer(
+        &window,
+        "move",
+        LogicalPosition::new(grip.x - 5.0, middle_y),
+    );
+    pointer(&window, "move", LogicalPosition::new(0.0, middle_y));
+    pointer(&window, "release", LogicalPosition::new(0.0, middle_y));
+    let last = *shares.borrow().last().expect("told");
+    assert!((last - 0.1).abs() < 1e-6, "{last}");
+
+    // A double click asks for an even split.
+    window.set_split_share(0.3);
+    shares.borrow_mut().clear();
+    pointer(&window, "move", grip);
+    for _ in 0..2 {
+        pointer(&window, "press", grip);
+        pointer(&window, "release", grip);
+    }
+    assert_eq!(shares.borrow().as_slice(), [0.5]);
+}
+
+#[test]
+fn panes_one_above_the_other_fit_the_smallest_window() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    window.set_stacked(true);
+    let (top_at, top) = shown_pane(&window, "왼쪽 패널");
+    let (bottom_at, bottom) = shown_pane(&window, "오른쪽 패널");
+    assert!(
+        bottom_at.y > top_at.y + top.height,
+        "the right pane is below"
+    );
+    assert!((top_at.x - bottom_at.x).abs() < 1.0);
+    assert!((top.width - bottom.width).abs() < 1.0);
+    assert!((top.height - bottom.height).abs() < 1.0, "split evenly");
+    // Each keeps room for its rows below its tab strip, path row and status bar (110px).
+    assert!(top.height > 200.0, "{}", top.height);
+    assert!(top.width > 500.0, "{}", top.width);
+    assert!(bottom_at.y + bottom.height <= 560.0);
+    // The divider lies between them, and a drag moves it up and down.
+    let shares = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&shares);
+    window.on_split_changed(move |share| record.borrow_mut().push(share));
+    let gap = bottom_at.y - (top_at.y + top.height);
+    let grip = LogicalPosition::new(
+        top_at.x + top.width / 2.0,
+        top_at.y + top.height + gap / 2.0,
+    );
+    drag_to(&window, grip, LogicalPosition::new(grip.x, grip.y + 40.0));
+    pointer(
+        &window,
+        "release",
+        LogicalPosition::new(grip.x, grip.y + 40.0),
+    );
+    let told = shares.borrow().clone();
+    assert_eq!(told.len(), 1);
+    assert!(told[0] > 0.5, "{told:?}");
+}
+
+#[test]
+fn one_pane_shows_only_the_active_one_with_the_whole_room() {
+    let window = window();
+    let (left_at, _) = shown_pane(&window, "왼쪽 패널");
+    let (right_at, right) = shown_pane(&window, "오른쪽 패널");
+    let whole = right_at.x + right.width - left_at.x;
+
+    window.set_dual_pane(false);
+    let (_, alone) = shown_pane(&window, "왼쪽 패널");
+    assert!(pane_box(&window, "오른쪽 패널").is_none());
+    assert!(
+        (alone.width - whole).abs() < 1.0,
+        "{} of {whole}",
+        alone.width
+    );
+
+    // The right pane has the keyboard: it is the one that shows.
+    window.set_right_pane(PaneView {
+        active: true,
+        ..PaneView::default()
+    });
+    assert!(pane_box(&window, "왼쪽 패널").is_none());
+    let (at, alone) = shown_pane(&window, "오른쪽 패널");
+    assert!((at.x - left_at.x).abs() < 1.0);
+    assert!((alone.width - whole).abs() < 1.0);
+}
+
+#[test]
+fn the_tree_and_the_preview_panel_come_and_go() {
+    let window = window();
+    let (wide_at, _) = shown_pane(&window, "왼쪽 패널");
+    assert!(!labelled(&window, "폴더 트리", AccessibleRole::List).is_empty());
+    assert!(pane_box(&window, "미리 보기").is_none());
+
+    // Without the tree, the panes start where it was.
+    window.set_show_tree(false);
+    assert!(labelled(&window, "폴더 트리", AccessibleRole::List).is_empty());
+    let (at, _) = shown_pane(&window, "왼쪽 패널");
+    assert!(at.x < wide_at.x - 200.0, "{} and {}", at.x, wide_at.x);
+
+    // The preview panel's place takes the right end.
+    window.set_show_preview(true);
+    let (preview_at, preview) = shown_pane(&window, "미리 보기");
+    let (right_at, right) = shown_pane(&window, "오른쪽 패널");
+    assert!(preview_at.x > right_at.x + right.width);
+    assert!(preview.width >= 200.0);
+    assert!(preview_at.x + preview.width <= 1280.0);
+}
+
+#[test]
+fn the_view_menu_switches_the_layout() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let record = calls.clone();
+    window.on_split_changed(move |share| record.note(format!("split {share}")));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    for (item, call) in [
+        ("폴더 트리", "toggle-tree"),
+        ("미리 보기 패널", "toggle-preview"),
+        ("듀얼 패널", "toggle-dual"),
+        ("위아래로 나누기", "toggle-split"),
+        ("두 패널을 같은 크기로", "split 0.5"),
+        ("패널 바꾸기", "swap-panes"),
+        ("같은 폴더를 반대편에", "same-folder"),
+        ("탐색 동기화", "toggle-sync"),
+    ] {
+        button.invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&window, item)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {item}"))
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(calls.take(), [call]);
+    }
+    // The marks show the layout as Rust sets it back after each toggle.
+    let marks = || {
+        button.invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&window, "✓").count()
+    };
+    for (tree, preview, dual, stacked, sync, count) in [
+        (true, false, true, false, false, 3),
+        (false, false, false, false, false, 1),
+        (true, true, true, true, true, 6),
+    ] {
+        window.set_show_tree(tree);
+        window.set_show_preview(preview);
+        window.set_dual_pane(dual);
+        window.set_stacked(stacked);
+        window.set_sync_navigation(sync);
+        assert_eq!(marks(), count, "the theme's and {count} - 1 of the layout");
+        ElementHandle::find_by_accessible_label(&window, "밝게")
+            .next()
+            .expect("the menu is open")
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+    }
+}
+
+#[test]
+fn the_tree_takes_the_keys_until_it_gives_them_back() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    // The tree uses ↓ (as its arrows and Esc); F12 is the window's.
+    let down = special(Key::DownArrow);
+    window.on_tree_key(move |text, _, _, _, _| {
+        let used = text == down.as_str();
+        record.note(if used { "tree ↓" } else { "tree other" });
+        used
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+
+    window.invoke_focus_tree();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["tree ↓"]);
+    // A key the tree does not use goes on to the window's keys.
+    press(&window, Key::F12);
+    assert_eq!(calls.take(), ["tree other", "key"]);
+
+    // Back with the panes, the keys are theirs.
+    window.invoke_focus_panes();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
 }

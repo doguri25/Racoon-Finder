@@ -1,6 +1,7 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
-//! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size, the tabs of
-//! both panes and which one has the keyboard, and the destination picker's recent targets.
+//! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size and layout
+//! (`[layout]`), the tabs of both panes and which one has the keyboard, and the destination
+//! picker's recent targets.
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -15,7 +16,9 @@
 //! A newer version's settings read as well as they can: keys this version does not know are
 //! kept in the `extra` tables and written back, a known key with a value this version does not
 //! know (a new theme) takes its default, and a tab whose folder this version cannot read stays
-//! in the file. Running an older version in between loses as little as it can.
+//! in the file. Running an older version in between loses as little as it can. The other way
+//! round, a file of an older version (the first demo's, without `[layout]`) opens with the
+//! default layout.
 //!
 //! Folders are stored as `VPath::to_uri`, which reads back losslessly with `VPath::parse`.
 
@@ -29,6 +32,8 @@ use std::time::Duration;
 use rf_core::VPath;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::state::Layout;
 
 /// The name of the settings file in the config folder.
 pub const FILE_NAME: &str = "settings.toml";
@@ -77,6 +82,64 @@ pub struct PaneSettings {
     pub extra: toml::Table,
 }
 
+/// The window's layout, as stored (`[layout]`). Each key the file lacks, or whose value this
+/// version cannot read, takes its default: two panes side by side, split evenly, the tree shown
+/// and the preview panel not. So the names say what differs from that default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each key is a separate choice of the layout, kept as the file has it"
+)]
+pub struct LayoutSettings {
+    /// One pane rather than two.
+    #[serde(deserialize_with = "or_default")]
+    pub single_pane: bool,
+    /// The panes one above the other rather than side by side.
+    #[serde(deserialize_with = "or_default")]
+    pub stacked: bool,
+    /// The first pane's share of the room, from 0.1 to 0.9 (one outside is taken to the
+    /// nearer end); `None` for an even split.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_default"
+    )]
+    pub split: Option<f64>,
+    /// No sidebar with the folder tree.
+    #[serde(deserialize_with = "or_default")]
+    pub hide_tree: bool,
+    /// The preview panel shows.
+    #[serde(deserialize_with = "or_default")]
+    pub preview: bool,
+    /// The keys of a newer version.
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+impl LayoutSettings {
+    /// The layout these settings say.
+    pub fn layout(&self) -> Layout {
+        let mut layout = Layout::default();
+        layout.dual = !self.single_pane;
+        layout.stacked = self.stacked;
+        layout.tree = !self.hide_tree;
+        layout.preview = self.preview;
+        if let Some(split) = self.split {
+            layout.set_share(split);
+        }
+        layout
+    }
+
+    /// Takes `layout` in, keeping the keys of a newer version.
+    pub fn set(&mut self, layout: Layout) {
+        self.single_pane = !layout.dual;
+        self.stacked = layout.stacked;
+        self.split = Some(f64::from(layout.thousandths()) / 1000.0);
+        self.hide_tree = !layout.tree;
+        self.preview = layout.preview;
+    }
+}
+
 /// Everything `settings.toml` holds. A key the file lacks, or whose value this version cannot
 /// read, takes its default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -99,6 +162,9 @@ pub struct Settings {
     /// The destination picker's recent targets, the last one chosen first, as `VPath::to_uri`.
     #[serde(deserialize_with = "or_default")]
     pub recent_targets: Vec<String>,
+    /// How the window lays out its panes and side panels.
+    #[serde(deserialize_with = "or_default")]
+    pub layout: LayoutSettings,
     /// The left pane, then the right one. Read as a list: a missing pane is an empty one, and
     /// a pane past the second (a newer version's) is kept as it is.
     #[serde(deserialize_with = "panes_or_default")]
@@ -134,7 +200,7 @@ where
 }
 
 /// What the window showed when the app last ended, as folders: the tabs of each pane and the
-/// one that shows, the pane with the keyboard, and whether hidden items show.
+/// one that shows, the pane with the keyboard, whether hidden items show, and the layout.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Session {
     /// The left pane, then the right one.
@@ -142,6 +208,7 @@ pub struct Session {
     /// 0 left, 1 right.
     pub active_pane: usize,
     pub show_hidden: bool,
+    pub layout: Layout,
 }
 
 /// The tabs of one pane: their folders in order, and the position of the one that shows. A pane
@@ -274,7 +341,7 @@ pub struct Loaded {
 }
 
 impl Settings {
-    /// The tabs, the active pane and the hidden items as folders. A tab whose folder does not
+    /// The tabs, the active pane, the hidden items and the layout. A tab whose folder does not
     /// read back as a path is left out (it stays in the file, [`Settings::set_session`]); the
     /// tab that shows stays the same one when it is kept, and is the first otherwise.
     pub fn session(&self) -> Session {
@@ -297,6 +364,7 @@ impl Settings {
             panes: [pane(0), pane(1)],
             active_pane: self.active_pane.min(1),
             show_hidden: self.show_hidden,
+            layout: self.layout.layout(),
         }
     }
 
@@ -318,6 +386,7 @@ impl Settings {
         }
         self.active_pane = session.active_pane;
         self.show_hidden = session.show_hidden;
+        self.layout.set(session.layout);
     }
 
     /// The recent targets that read back as paths, in their order.
@@ -551,6 +620,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::state::Layout;
 
     fn folder(dir: &Path, name: &str) -> VPath {
         VPath::local(dir.join(name)).expect("a local path")
@@ -577,6 +647,7 @@ mod tests {
             ],
             active_pane: 1,
             show_hidden: true,
+            layout: odd_layout(),
         });
         settings.set_recent(&[folder(dir, "r1"), folder(dir, "r2")]);
         settings
@@ -594,6 +665,17 @@ mod tests {
             .extra
             .insert("split".to_owned(), toml::Value::Float(0.5));
         settings
+    }
+
+    /// A layout with every value off its default.
+    fn odd_layout() -> Layout {
+        let mut layout = Layout::default();
+        layout.dual = false;
+        layout.stacked = true;
+        layout.tree = false;
+        layout.preview = true;
+        layout.set_share(0.3);
+        layout
     }
 
     fn writable(settings: Settings) -> Loaded {
@@ -615,6 +697,7 @@ mod tests {
 
         assert_eq!(loaded, writable(settings.clone()));
         assert_eq!(loaded.settings.session(), settings.session());
+        assert_eq!(loaded.settings.session().layout, odd_layout());
         assert_eq!(
             loaded.settings.recent(),
             [folder(dir.path(), "r1"), folder(dir.path(), "r2")]
@@ -685,6 +768,81 @@ mod tests {
         assert_eq!(loaded.settings.theme, ThemeChoice::Light);
         assert!(!loaded.settings.show_hidden);
         assert_eq!(loaded.settings.session(), Session::default());
+    }
+
+    #[test]
+    fn a_file_of_the_first_demo_opens_with_the_default_layout() {
+        // As the first demo wrote it: no layout.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let a = folder(dir.path(), "a");
+        let c = folder(dir.path(), "c");
+        let (qa, qc) = (toml_string(&a.to_uri()), toml_string(&c.to_uri()));
+        let text = format!(
+            "theme = \"dark\"\nshow_hidden = true\nwindow = [1500, 900]\nactive_pane = 1\n\
+             recent_targets = [{qc}]\n\n[[panes]]\ntabs = [{qa}, {qc}]\nactive = 1\n\n\
+             [[panes]]\ntabs = [{qc}]\nactive = 0\n"
+        );
+        std::fs::write(dir.path().join(FILE_NAME), &text).expect("written");
+
+        let loaded = load(dir.path());
+
+        assert!(loaded.writable);
+        let settings = loaded.settings;
+        assert_eq!(settings.theme, ThemeChoice::Dark);
+        assert_eq!(settings.window_size(), Some((1500, 900)));
+        assert_eq!(settings.recent(), std::slice::from_ref(&c));
+        assert!(settings.extra.is_empty());
+        let session = settings.session();
+        assert_eq!(session.panes[0].tabs, [a.clone(), c.clone()]);
+        assert_eq!(session.panes[0].active, 1);
+        assert_eq!(session.active_pane, 1);
+        assert!(session.show_hidden);
+        assert_eq!(session.layout, Layout::default());
+
+        // Saved again with another layout, it keeps the rest as it was.
+        let mut changed = session.clone();
+        changed.layout = odd_layout();
+        let mut saved = settings.clone();
+        saved.set_session(&changed);
+        saved.save(dir.path()).expect("saved");
+        let again = load(dir.path()).settings;
+        assert_eq!(again.session(), changed);
+        assert_eq!(again.theme, ThemeChoice::Dark);
+        assert_eq!(again.recent(), [c]);
+    }
+
+    #[test]
+    fn layout_values_of_a_newer_version_fall_back_one_key_at_a_time() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        std::fs::write(
+            &file,
+            "[layout]\nsingle_pane = \"maybe\"\nstacked = true\nsplit = 7.5\nhide_tree = 1\n\
+             preview = true\ngrid = \"2x2\"\n",
+        )
+        .expect("written");
+
+        let settings = load(dir.path()).settings;
+
+        let layout = settings.session().layout;
+        assert!(layout.dual, "a value it cannot read keeps two panes");
+        assert!(layout.stacked);
+        assert!((layout.share() - 0.9).abs() < 1e-6, "{}", layout.share());
+        assert!(layout.tree);
+        assert!(layout.preview);
+        // The key of a newer version stays, and is written back.
+        let text = settings.to_text().expect("text");
+        assert!(text.contains("grid = \"2x2\""), "{text}");
+
+        // A share that is no number is an even one; a layout that is no table, the default.
+        std::fs::write(&file, "[layout]\nsplit = nan\nstacked = true\n").expect("written");
+        let layout = load(dir.path()).settings.session().layout;
+        assert!(layout.stacked);
+        assert!((layout.share() - 0.5).abs() < 1e-6);
+        std::fs::write(&file, "layout = 5\ntheme = \"light\"\n").expect("written");
+        let settings = load(dir.path()).settings;
+        assert_eq!(settings.theme, ThemeChoice::Light);
+        assert_eq!(settings.session().layout, Layout::default());
     }
 
     /// `text` as a TOML string, quoted and escaped: a Windows path's `\` would otherwise
@@ -901,6 +1059,7 @@ mod tests {
             ],
             active_pane: 1,
             show_hidden: false,
+            layout: Layout::default(),
         });
         stored.save(dir.path()).expect("saved");
         let session = load(dir.path()).settings.session();

@@ -12,6 +12,7 @@ fn session(left: &[&str], left_active: usize, right: &[&str], active_pane: usize
         panes: [pane(left, left_active), pane(right, 0)],
         active_pane,
         show_hidden: true,
+        layout: Layout::default(),
     }
 }
 

@@ -204,6 +204,12 @@ impl Tree {
         self.visible.get(row).copied()
     }
 
+    /// The row of node `id`; `None` when it does not show (a node above it is closed, or it
+    /// is hidden).
+    pub fn row_of(&self, id: NodeId) -> Option<usize> {
+        self.visible.iter().position(|&shown| shown == id)
+    }
+
     /// The node of the folder the tree follows, once found.
     pub fn selected(&self) -> Option<NodeId> {
         self.selected
@@ -212,8 +218,7 @@ impl Tree {
     /// The row of the selected node; `None` when there is none or it does not show (a node
     /// above it is closed, or it is hidden).
     pub fn selected_row(&self) -> Option<usize> {
-        let selected = self.selected?;
-        self.visible.iter().position(|&id| id == selected)
+        self.row_of(self.selected?)
     }
 
     /// The folder the tree follows: the one [`Tree::reveal`] or [`Tree::select`] was last

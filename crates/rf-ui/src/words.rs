@@ -172,6 +172,29 @@ pub fn folder_vanished(name: &str, to_parent: bool) -> String {
     format!("‘{name}’ 폴더가 없어져 {to}로 옮겼습니다")
 }
 
+/// The notice when navigation sync is turned on: a move into a folder, up, back or forward in
+/// one pane is made in the other one too.
+pub fn sync_on() -> &'static str {
+    "탐색 동기화를 켰습니다"
+}
+
+/// The notice when navigation sync is turned off.
+pub fn sync_off() -> &'static str {
+    "탐색 동기화를 껐습니다"
+}
+
+/// The notice when one pane went into its folder `name` and the other has no folder of that
+/// name: sync is off.
+pub fn sync_no_folder(name: &str) -> String {
+    format!("반대편 패널에 ‘{name}’ 폴더가 없어 탐색 동기화를 껐습니다")
+}
+
+/// The notice when one pane went up, back or forward and the other cannot (it is at a root,
+/// or has nothing to go back or forward to): sync is off.
+pub fn sync_cannot_follow() -> &'static str {
+    "반대편 패널이 따라갈 수 없어 탐색 동기화를 껐습니다"
+}
+
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {

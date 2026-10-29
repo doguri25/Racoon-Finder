@@ -44,6 +44,8 @@ component TreeItem inherits Rectangle {
     in property <int> index;
     // Whether the row takes dragged rows into its folder.
     in property <bool> accepts-drops;
+    // The keyboard cursor of the tree is on the row, while the tree has the keys.
+    in property <bool> cursor;
     // A click on the row.
     callback clicked();
     // A click on the chevron.
@@ -198,8 +200,8 @@ component TreeItem inherits Rectangle {
             }
         }
 
-        // The row's folder takes the drag.
-        if drop.has-drag: Rectangle {
+        // The row's folder takes the drag; or the keyboard cursor is on it.
+        if drop.has-drag || root.cursor: Rectangle {
             border-radius: Theme.radius;
             border-width: 2px;
             border-color: Theme.accent;
@@ -216,6 +218,8 @@ export component Sidebar inherits Rectangle {
     in property <bool> accepts-drops;
     // Why the row under a drag does not take it ("여기에 놓을 수 없습니다: …"); empty otherwise.
     in property <string> refusal;
+    // The row of the keyboard cursor, while the tree has the keys; -1 for none.
+    in property <int> cursor-row: -1;
     // A click on row `index`: show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
@@ -277,6 +281,7 @@ export component Sidebar inherits Rectangle {
             item: row;
             index: i;
             accepts-drops: root.accepts-drops;
+            cursor: i == root.cursor-row;
             clicked => {
                 root.row-clicked(i);
             }

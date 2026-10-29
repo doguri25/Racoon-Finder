@@ -208,6 +208,61 @@ component CrumbButton inherits Rectangle {
     }
 }
 
+// The bar between the two panes (LAY-02). Dragged, it shares the room between them, the first
+// pane (the left or top one) keeping from a tenth to nine tenths of it; double-clicked, it
+// shares the room evenly. While it is dragged it moves on its own (`dragging`, `live-share`),
+// and tells the share once, as it is let go.
+export component PaneDivider inherits Rectangle {
+    // Upright between panes side by side, lying between panes one above the other.
+    in property <bool> upright: true;
+    // The room the two panes share along the drag (the divider left out), and the first pane's
+    // share of it, as Rust last set it.
+    in property <length> room;
+    in property <float> share;
+    out property <bool> dragging;
+    out property <float> live-share;
+    // The divider was let go at `share`, or double-clicked (0.5).
+    callback changed(share: float);
+
+    touch := TouchArea {
+        mouse-cursor: root.upright ? MouseCursor.col-resize : MouseCursor.row-resize;
+        pointer-event(event) => {
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+            if (event.kind == PointerEventKind.down) {
+                root.live-share = root.share;
+            } else if (event.kind == PointerEventKind.up && root.dragging) {
+                root.changed(root.live-share);
+                root.dragging = false;
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+            }
+        }
+        // The first pane ends where the pointer is, less where the divider was pressed.
+        moved => {
+            if (root.room <= 0) {
+                return;
+            }
+            let first = root.upright ? root.x + self.mouse-x - self.pressed-x : root.y + self.mouse-y - self.pressed-y;
+            root.live-share = clamp(first / root.room, 0.1, 0.9);
+            root.dragging = true;
+        }
+        double-clicked => {
+            root.dragging = false;
+            root.changed(0.5);
+        }
+    }
+
+    // The grip, which lights up under the pointer.
+    Rectangle {
+        width: root.upright ? 4px : 40px;
+        height: root.upright ? 40px : 4px;
+        border-radius: 2px;
+        background: touch.pressed || touch.has-hover ? Theme.accent : Theme.border;
+    }
+}
+
 export component Pane inherits Rectangle {
     in property <PaneView> view;
     // The pane's name for screen readers.

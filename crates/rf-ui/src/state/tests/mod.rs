@@ -1,6 +1,7 @@
 //! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), the
-//! file commands, the jobs and the dialogs ([`jobs`]), and dragging rows ([`drag`]), with the
-//! helpers they share.
+//! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]), and the layout
+//! and the commands between the panes ([`layout`]), the tree from the keyboard ([`sidebar`]),
+//! with the helpers they share.
 
 use super::*;
 use crate::keys;
@@ -14,9 +15,11 @@ use std::sync::Arc;
 mod copies;
 mod drag;
 mod jobs;
+mod layout;
 mod nav;
 mod pick;
 mod session;
+mod sidebar;
 
 fn folder(name: &str) -> VPath {
     VPath::local(std::env::temp_dir().join(name)).expect("a local path")

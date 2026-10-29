@@ -116,6 +116,8 @@ pub enum Command {
     TogglePreview,
     /// Show or hide the folder tree.
     ToggleTree,
+    /// The sidebar's folder tree takes the keys ([`tree_key`]); shown first if it is hidden.
+    FocusTree,
     /// One pane or two.
     ToggleDualPane,
     /// The two panes side by side, or one above the other.
@@ -130,6 +132,96 @@ pub enum Command {
     /// typed (NAV-14). Joining presses that come within a second is the caller's job, and so
     /// is deciding what a lone space does.
     TypeToSelect(String),
+}
+
+impl Command {
+    /// Whether the command acts on the rows of the active pane: its items, its cursor or its
+    /// selection, or the pane with the keyboard. While the sidebar's tree has the keys, such a
+    /// key does nothing (the tree's rows are not the pane's); the window's other commands work
+    /// from there as from the panes.
+    pub fn acts_on_rows(&self) -> bool {
+        matches!(
+            self,
+            Command::SwitchPane
+                | Command::Open
+                | Command::CursorUp
+                | Command::CursorDown
+                | Command::CursorHome
+                | Command::CursorEnd
+                | Command::PageUp
+                | Command::PageDown
+                | Command::ToggleSelect
+                | Command::SelectAll
+                | Command::ClearSelection
+                | Command::Rename
+                | Command::NewFolder
+                | Command::Trash
+                | Command::DeletePermanently
+                | Command::CopyTo
+                | Command::MoveTo
+                | Command::Copy
+                | Command::Cut
+                | Command::Paste
+                | Command::PasteMove
+                | Command::CopyPath
+                | Command::Properties
+                | Command::ContextMenu
+                | Command::QuickLook
+                | Command::TypeToSelect(_)
+        )
+    }
+}
+
+/// What a key does while the sidebar's folder tree has the keys (KEY-02): the moves of a tree
+/// view, as in the system's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TreeKey {
+    /// ↑: the row above.
+    Up,
+    /// ↓: the row below.
+    Down,
+    /// →: opens a closed row, or goes to the first folder of an open one.
+    Expand,
+    /// ←: closes an open row, or goes to the folder above.
+    Collapse,
+    /// Enter (and the system's key to open): the active pane shows the row's folder.
+    Open,
+    /// Esc, Tab, Shift+Tab, and the key that gave the tree the keys: back to the active pane.
+    Leave,
+}
+
+/// What `text`, held with `mods`, does in the sidebar's tree on `os`; `None` for a key that is
+/// the window's ([`command_for`]).
+pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        let (c, held) = pressed(c, mods);
+        let plain = [
+            (Key::UpArrow, TreeKey::Up),
+            (Key::DownArrow, TreeKey::Down),
+            (Key::RightArrow, TreeKey::Expand),
+            (Key::LeftArrow, TreeKey::Collapse),
+            (Key::Return, TreeKey::Open),
+            (Key::Escape, TreeKey::Leave),
+            (Key::Tab, TreeKey::Leave),
+        ];
+        let found = plain
+            .into_iter()
+            .find(|&(key, _)| char::from(key) == c)
+            .map(|(_, tree)| tree);
+        match found {
+            Some(tree) if held == Mods::NONE => return Some(tree),
+            Some(TreeKey::Leave) if held == SHIFT && c == char::from(Key::Tab) => {
+                return Some(TreeKey::Leave);
+            }
+            _ => {}
+        }
+    }
+    match command_for(text, mods, os)? {
+        Command::Open => Some(TreeKey::Open),
+        Command::FocusTree => Some(TreeKey::Leave),
+        _ => None,
+    }
 }
 
 /// The key of a shortcut: a special key, or a character as typed without Shift (a lowercase
@@ -399,6 +491,7 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::Menu, NONE), C::ContextMenu),
     (c('p', ALT), C::TogglePreview),
     (c('b', CTRL), C::ToggleTree),
+    (k(Key::F6, NONE), C::FocusTree),
     (k(Key::F9, NONE), C::SameFolderInOther),
     (k(Key::F9, SHIFT), C::SyncNavigation),
     (k(Key::F12, NONE), C::ToggleDualPane),
@@ -461,6 +554,7 @@ static MACOS: &[(Chord, Command)] = &[
     (c('y', CMD), C::QuickLook),
     (c('p', CMD_SHIFT), C::TogglePreview),
     (c('s', CMD_OPT), C::ToggleTree),
+    (k(Key::F6, NONE), C::FocusTree),
     (k(Key::F9, NONE), C::SameFolderInOther),
     (k(Key::F9, SHIFT), C::SyncNavigation),
     (k(Key::F12, NONE), C::ToggleDualPane),
@@ -593,6 +687,7 @@ mod tests {
             (key(Key::F12), NONE, C::ToggleDualPane),
             (key(Key::F12), SHIFT, C::ToggleSplit),
             (text("u"), CTRL, C::SwapPanes),
+            (key(Key::F6), NONE, C::FocusTree),
         ];
         cases.extend(cursor_moves());
         check(Os::Windows, &cases);
@@ -651,6 +746,7 @@ mod tests {
             (key(Key::F12), NONE, C::ToggleDualPane),
             (key(Key::F12), SHIFT, C::ToggleSplit),
             (text("u"), CMD, C::SwapPanes),
+            (key(Key::F6), NONE, C::FocusTree),
         ];
         cases.extend(cursor_moves());
         check(Os::MacOs, &cases);
@@ -920,6 +1016,7 @@ mod tests {
             (C::FocusFilter, Some("Ctrl+F"), Some("⌘F")),
             (C::EditPath, Some("Ctrl+L"), Some("⇧⌘G")),
             (C::SwapPanes, Some("Ctrl+U"), Some("⌘U")),
+            (C::FocusTree, Some("F6"), Some("F6")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];
@@ -935,6 +1032,81 @@ mod tests {
                 "{command:?}"
             );
             assert_eq!(shortcut(&command, Os::MacOs).as_deref(), mac, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn the_tree_takes_the_arrows_and_gives_the_keys_back() {
+        let t = |os: Os, text: &str, mods: Mods| tree_key(text, mods, os);
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            for (k, wanted) in [
+                (Key::UpArrow, TreeKey::Up),
+                (Key::DownArrow, TreeKey::Down),
+                (Key::RightArrow, TreeKey::Expand),
+                (Key::LeftArrow, TreeKey::Collapse),
+                (Key::Return, TreeKey::Open),
+                (Key::Escape, TreeKey::Leave),
+                (Key::Tab, TreeKey::Leave),
+                // F6, which gave the tree the keys, gives them back.
+                (Key::F6, TreeKey::Leave),
+            ] {
+                assert_eq!(t(os, &key(k), NONE), Some(wanted), "{os:?} {k:?}");
+            }
+            assert_eq!(t(os, &key(Key::Tab), SHIFT), Some(TreeKey::Leave));
+            assert_eq!(t(os, &key(Key::Backtab), SHIFT), Some(TreeKey::Leave));
+            // Other keys are the window's.
+            for (text, mods) in [
+                (text("b"), CTRL),
+                (text("a"), NONE),
+                (key(Key::UpArrow), SHIFT),
+                (key(Key::Delete), NONE),
+                (key(Key::F12), NONE),
+            ] {
+                assert_eq!(t(os, &text, mods), None, "{os:?} {text:?} {mods:?}");
+            }
+        }
+        // The system's own key to open opens too.
+        assert_eq!(t(Os::MacOs, &key(Key::DownArrow), CMD), Some(TreeKey::Open));
+        assert_eq!(t(Os::MacOs, "o", CMD), Some(TreeKey::Open));
+    }
+
+    #[test]
+    fn the_commands_of_the_rows_are_known_apart_from_the_window_s() {
+        for command in [
+            C::Open,
+            C::CursorDown,
+            C::SelectAll,
+            C::ClearSelection,
+            C::Rename,
+            C::NewFolder,
+            C::Trash,
+            C::DeletePermanently,
+            C::CopyTo,
+            C::MoveTo,
+            C::Copy,
+            C::Paste,
+            C::Properties,
+            C::QuickLook,
+            C::SwitchPane,
+            C::TypeToSelect("a".to_owned()),
+        ] {
+            assert!(command.acts_on_rows(), "{command:?}");
+        }
+        for command in [
+            C::ToggleTree,
+            C::ToggleDualPane,
+            C::SwapPanes,
+            C::SyncNavigation,
+            C::ViewMenu,
+            C::FocusFilter,
+            C::EditPath,
+            C::NewTab,
+            C::Back,
+            C::Up,
+            C::Undo,
+            C::ToggleHidden,
+        ] {
+            assert!(!command.acts_on_rows(), "{command:?}");
         }
     }
 
@@ -977,8 +1149,8 @@ mod tests {
             (key(Key::F2), SHIFT),
             (key(Key::F5), CTRL),
             (key(Key::F1), NONE),
-            // Explorer moves the focus among its parts with F6, and goes full screen with F11.
-            (key(Key::F6), NONE),
+            // Explorer goes full screen with F11.
+            (key(Key::F6), SHIFT),
             (key(Key::F11), NONE),
             (key(Key::Return), CTRL),
             (key(Key::Backspace), CTRL),
