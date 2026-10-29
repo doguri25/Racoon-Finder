@@ -1,0 +1,187 @@
+// Main window: toolbar on top, the two panes below.
+
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { ToolButton, TextButton } from "widgets.slint";
+
+export { Theme }
+
+export component MainWindow inherits Window {
+    // Window title and the name beside the logo; Rust passes the product name.
+    in property <string> app-title;
+    // Below 1200px the toolbar drops the name and the button texts. Handlers set it,
+    // not a binding: the window's width depends on the toolbar's layout.
+    private property <bool> compact;
+
+    title: root.app-title;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 900px;
+    min-height: 560px;
+    background: Theme.bg;
+    default-font-size: Theme.font-body;
+
+    init => {
+        root.compact = root.width < 1200px;
+    }
+    changed width => {
+        root.compact = root.width < 1200px;
+    }
+
+    VerticalLayout {
+        Rectangle {
+            background: Theme.panel;
+
+            HorizontalLayout {
+                padding-left: Theme.gap-l;
+                padding-right: Theme.gap-l;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: Theme.gap-s;
+
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    padding-right: Theme.gap-s;
+                    spacing: 10px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        width: 26px;
+                        height: 26px;
+                        name: "logo";
+                        color: Theme.accent;
+                    }
+                    if !root.compact: Text {
+                        text: root.app-title;
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.gap-xs;
+
+                    ToolButton {
+                        icon: "back";
+                        label: "뒤로";
+                    }
+                    ToolButton {
+                        icon: "forward";
+                        label: "앞으로";
+                    }
+                    ToolButton {
+                        icon: "up";
+                        label: "위로";
+                    }
+                }
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 1px;
+                    height: 28px;
+                    background: Theme.border;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.gap-xs;
+
+                    TextButton {
+                        compact: root.compact;
+                        icon: "new-folder";
+                        text: "새 폴더";
+                    }
+                    TextButton {
+                        compact: root.compact;
+                        icon: "copy";
+                        text: "복사…";
+                    }
+                    TextButton {
+                        compact: root.compact;
+                        icon: "move";
+                        text: "이동…";
+                    }
+                    TextButton {
+                        compact: root.compact;
+                        icon: "delete";
+                        text: "삭제";
+                    }
+                    TextButton {
+                        compact: root.compact;
+                        icon: "rename";
+                        text: "이름 바꾸기";
+                    }
+                    TextButton {
+                        compact: root.compact;
+                        icon: "undo";
+                        text: "되돌리기";
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                // Place of the view menu.
+                ToolButton {
+                    icon: "list-view";
+                    label: "보기 방식";
+                }
+
+                // Place of the filter box.
+                Rectangle {
+                    min-width: 120px;
+                    preferred-width: 260px;
+                    max-width: 260px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    border-radius: Theme.radius;
+                    background: Theme.bg;
+
+                    HorizontalLayout {
+                        padding-left: Theme.gap-m;
+                        padding-right: Theme.gap-m;
+                        spacing: Theme.gap-s;
+
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            width: 18px;
+                            height: 18px;
+                            name: "search";
+                            color: Theme.muted;
+                        }
+                        Text {
+                            text: "이 폴더에서 거르기";
+                            color: Theme.faint;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        HorizontalLayout {
+            padding: Theme.gap-m;
+            spacing: Theme.gap-m;
+            vertical-stretch: 1;
+
+            for side in ["왼쪽 패널", "오른쪽 패널"]: Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+                accessible-role: groupbox;
+                accessible-label: side;
+            }
+        }
+    }
+}

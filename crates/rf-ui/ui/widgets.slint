@@ -1,0 +1,241 @@
+// Buttons, progress bar and toast of the demo UI. Buttons are a TouchArea plus
+// accessible-* properties, not a FocusScope: keyboard focus stays with the window's
+// key handler.
+
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// Icon-only 32×32 button. `label` is required: it is the button's only name for
+// screen readers.
+export component ToolButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 32px;
+    height: 32px;
+    border-radius: Theme.radius;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    Icon {
+        name: root.icon;
+        color: root.enabled ? Theme.text : Theme.faint;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Flat button with an optional icon in front of its text. `compact` shows the icon
+// alone (the text stays its accessible name) where a toolbar runs out of room.
+export component TextButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> compact;
+    callback clicked();
+
+    height: 32px;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.gap-m;
+        padding-right: Theme.gap-m;
+        spacing: Theme.gap-s;
+        alignment: center;
+
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 18px;
+            height: 18px;
+            name: root.icon;
+            color: root.enabled ? Theme.text : Theme.faint;
+        }
+        if !root.compact || root.icon == "": Text {
+            text: root.text;
+            color: root.enabled ? Theme.text : Theme.faint;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The one emphasized action of a dialog: accent background, on-accent text.
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 32px;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius;
+    background: !root.enabled ? Theme.border : touch.pressed ? Theme.accent.darker(0.2) : touch.has-hover ? Theme.accent.darker(0.1) : Theme.accent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.gap-l;
+        padding-right: Theme.gap-l;
+        alignment: center;
+
+        Text {
+            text: root.text;
+            color: root.enabled ? Theme.on-accent : Theme.faint;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Thin bar filled to `value` (0..1).
+export component ProgressBar inherits Rectangle {
+    in property <float> value;
+    in property <brush> bar-color: Theme.accent;
+
+    height: 6px;
+    border-radius: self.height / 2;
+    background: Theme.border;
+    accessible-role: progress-indicator;
+    accessible-value: round(clamp(root.value, 0, 1) * 100) + "%";
+    accessible-value-minimum: 0;
+    accessible-value-maximum: 1;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width * clamp(root.value, 0, 1);
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: root.bar-color;
+    }
+}
+
+// Text-only button on the dark toast background.
+component ToastButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <string> label;
+    callback clicked();
+
+    min-width: 32px;
+    height: 32px;
+    border-radius: Theme.radius;
+    background: touch.pressed ? #FFFFFF33 : touch.has-hover ? #FFFFFF1F : transparent;
+    accessible-role: button;
+    accessible-label: root.label != "" ? root.label : root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    HorizontalLayout {
+        padding-left: root.text != "" ? Theme.gap-m : 0;
+        padding-right: root.text != "" ? Theme.gap-m : 0;
+        alignment: center;
+
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            name: root.icon;
+            color: Theme.toast-text;
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: Theme.toast-link;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Notice in the lower right corner: a message, an optional action (`action` is its
+// label; empty hides it) and a close button.
+export component Toast inherits Rectangle {
+    in property <string> message;
+    in property <string> action;
+    callback action-clicked();
+    callback closed();
+
+    border-radius: 12px;
+    background: Theme.toast-bg;
+    drop-shadow-blur: 24px;
+    drop-shadow-offset-y: 8px;
+    drop-shadow-color: #0000003D;
+    accessible-role: text;
+    accessible-label: root.message;
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 6px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: Theme.gap-s;
+
+        Text {
+            text: root.message;
+            color: Theme.toast-text;
+            vertical-alignment: center;
+        }
+        if root.action != "": ToastButton {
+            text: root.action;
+            clicked => {
+                root.action-clicked();
+            }
+        }
+        ToastButton {
+            icon: "close";
+            label: "알림 닫기";
+            clicked => {
+                root.closed();
+            }
+        }
+    }
+}
