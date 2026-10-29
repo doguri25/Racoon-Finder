@@ -24,6 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rf_core::{Attributes, Entry, EntryKind, VPath};
 use rf_vfs::{SortSpec, VisibilityFilter, sort_entries};
@@ -85,7 +86,7 @@ pub struct TreeRowData {
 /// The folder tree: its nodes, which of them show, and the folder it follows.
 ///
 /// The fields change only through the methods, which keep `visible` (the rows) up to date
-/// and count every change of the rows in `revision`.
+/// and give every change of the rows a new `revision`, one no other tree has had either.
 #[derive(Debug)]
 pub struct Tree {
     /// Every node made since the tree started; a node a reconciliation dropped stays here,
@@ -106,7 +107,7 @@ pub struct Tree {
     loads: HashMap<u64, NodeId>,
     /// The nodes the rows show, in order.
     visible: Vec<NodeId>,
-    /// Goes up with every change of the rows.
+    /// Changes with every change of the rows ([`next_revision`]).
     revision: u64,
 }
 
@@ -123,7 +124,7 @@ impl Tree {
             relisted: HashSet::new(),
             loads: HashMap::new(),
             visible: Vec::new(),
-            revision: 0,
+            revision: next_revision(),
         }
     }
 
@@ -203,8 +204,9 @@ impl Tree {
         self.target.as_ref()
     }
 
-    /// A number that changes whenever the rows may have: a model of the rows can skip a
-    /// redraw while it stays the same.
+    /// A number that changes whenever the rows may have, and that no other tree has had: a
+    /// model of the rows can skip a redraw while it stays the same, even when it is given
+    /// another tree (the picker's, made anew each time the picker opens).
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -362,6 +364,37 @@ impl Tree {
         self.waiting = None;
         self.refresh();
         true
+    }
+
+    /// The folders listed so far whose names hold `query` (its spaces at the ends left out),
+    /// ignoring letter case: what a filter of the tree shows, flat. They come in the order of
+    /// the tree, below closed nodes too, and each folder once, at the first node that has it.
+    /// A folder out of sight (hidden while hidden folders do not show, or below such a one)
+    /// is left out, and so is one never listed. An empty `query` finds nothing.
+    pub fn find(&self, query: &str) -> Vec<NodeId> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        let mut paths: HashSet<&VPath> = HashSet::new();
+        let mut stack: Vec<NodeId> = self.roots.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            let node = &self.nodes[id];
+            if node.label.to_lowercase().contains(&query) && paths.insert(&node.path) {
+                found.push(id);
+            }
+            if let Some(children) = &node.children {
+                stack.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .copied()
+                        .filter(|&child| self.shows(child)),
+                );
+            }
+        }
+        found
     }
 
     /// Shows the hidden folders, or hides them. When the folder the tree follows was not found
@@ -598,8 +631,14 @@ impl Tree {
             }
         }
         self.visible = visible;
-        self.revision += 1;
+        self.revision = next_revision();
     }
+}
+
+/// A revision no tree has had yet.
+fn next_revision() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl TreeNode {
@@ -1229,6 +1268,56 @@ mod tests {
         assert_eq!(tree.target(), Some(&pictures));
         assert!(!tree.select(99));
         assert_eq!(tree.selected_row(), Some(3));
+    }
+
+    #[test]
+    fn find_lists_the_listed_folders_that_match_flat() {
+        let home = folder("home");
+        let docs = under(&home, &["문서"]);
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home), ("문서", &docs)]));
+        let request = tree.toggle(0).expect("listed");
+        tree.apply_children(
+            request.generation,
+            vec![dir("문서"), dir("Backup"), hidden(dir(".backup-old"))],
+        );
+        let nested = tree.node_at(1).expect("home's documents");
+        let request = tree.toggle(nested).expect("listed");
+        tree.apply_children(request.generation, vec![dir("백업"), dir("backups 2026")]);
+        // Closed again: what was listed below it is still searched.
+        tree.toggle(nested);
+        assert_eq!(shown(&tree).len(), 4);
+
+        let labels = |found: Vec<NodeId>| -> Vec<String> {
+            found
+                .into_iter()
+                .map(|id| tree.node(id).expect("a node").label.clone())
+                .collect()
+        };
+        // Letter case does not matter; a hidden folder stays out of sight.
+        assert_eq!(labels(tree.find("BACK")), ["backups 2026", "Backup"]);
+        assert_eq!(labels(tree.find(" 백업 ")), ["백업"]);
+        // The documents place and home's documents are one folder: it shows once, where the
+        // tree has it first.
+        let found = tree.find("문서");
+        assert_eq!(found, [nested]);
+        assert_eq!(tree.find(""), Vec::<NodeId>::new());
+        assert_eq!(tree.find("없는 이름"), Vec::<NodeId>::new());
+        // A folder not listed yet is not found: the documents place was never opened.
+        assert_eq!(tree.find("new"), Vec::<NodeId>::new());
+    }
+
+    #[test]
+    fn two_trees_never_share_a_revision() {
+        // The picker gets a new tree each time it opens, and the model of its rows skips a
+        // redraw while the revision stays the same: a new tree must not take an old one's.
+        let home = folder("home");
+        let mut first = Tree::new(VisibilityFilter::default());
+        first.set_roots(roots(&[("홈", &home)]));
+        let mut second = Tree::new(VisibilityFilter::default());
+        assert_ne!(second.revision(), first.revision());
+        second.set_roots(roots(&[("USB", &folder("usb"))]));
+        assert_ne!(second.revision(), first.revision());
     }
 
     #[test]

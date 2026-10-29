@@ -1,8 +1,9 @@
 //! The main window's state, and what its keys, clicks and the loader's events do to it.
 //!
 //! [`AppState`] is plain data on the UI thread: the two panes, which one has the keyboard,
-//! whether hidden items show, the folder tree of the sidebar, the jobs of the job panel, and
-//! the window that shows over the main window (a [`Modal`]). Its methods change it and return
+//! whether hidden items show, the folder tree of the sidebar, the jobs of the job panel, the
+//! window that shows over the main window (a [`Modal`]), and the destination picker's folder
+//! tree and recent targets ([`pick`]). Its methods change it and return
 //! the [`Effect`]s that need a worker thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
 //! follow or a vanished folder's nearest parent to find, a file to open, a job to submit or a
@@ -17,7 +18,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rf_core::{ErrorKind, VPath};
-use rf_jobs::UndoRecord;
+use rf_jobs::{TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
@@ -30,6 +31,7 @@ use crate::tree::Tree;
 use crate::words;
 
 mod jobs;
+mod pick;
 
 /// The left pane's position in [`AppState::panes`].
 pub const LEFT: usize = 0;
@@ -77,6 +79,17 @@ pub enum Effect {
     /// Scroll the folder tree so that row `row`, the active pane's folder just found there,
     /// shows.
     ScrollTree(usize),
+    /// Find out on a worker thread what is at `path`, the destination picker's target or a
+    /// path typed into it ([`Loader::inspect_target`](crate::loader::Loader::inspect_target),
+    /// with `from_dir`, the folder the items are in), and hand it to
+    /// [`AppState::target_inspected`] with `generation`.
+    InspectTarget {
+        generation: u64,
+        path: VPath,
+        from_dir: VPath,
+    },
+    /// Scroll the picker's folder tree so that row `row`, its target just found there, shows.
+    ScrollPickTree(usize),
     /// Ask the job engine for something ([`Jobs::carry_out`](crate::jobs::Jobs::carry_out)).
     /// A job it starts goes to [`AppState::track`], and what the history can do next then to
     /// [`AppState::set_history`].
@@ -114,6 +127,14 @@ pub struct AppState {
     show_hidden: bool,
     /// The sidebar's folder tree, whose roots are the places.
     tree: Tree,
+    /// The folder tree of the destination picker, whose roots are the places too: made anew
+    /// for each picker, and dropped when it closes.
+    pick_tree: Tree,
+    /// The sidebar's places, once found: the roots of both trees, and the favorites the
+    /// picker offers.
+    places: Vec<Place>,
+    /// The folders the picker offers as recent targets, the last one chosen first.
+    recent: Vec<VPath>,
     /// Where a tab goes when its folder and every parent of it are gone.
     home: Option<VPath>,
     /// When each folder was last reloaded because its watch ended ([`AUTO_RELOAD_GAP`]).
@@ -151,6 +172,9 @@ impl AppState {
             active: LEFT,
             show_hidden: filter.show_hidden,
             tree: Tree::new(filter),
+            pick_tree: Tree::new(filter),
+            places: Vec::new(),
+            recent: Vec::new(),
             home,
             auto_reloads: HashMap::new(),
             pending_reloads: HashSet::new(),
@@ -195,6 +219,7 @@ impl AppState {
             .flat_map(Pane::tabs)
             .map(Tab::generation)
             .chain(self.tree.generations())
+            .chain(self.pick_tree.generations())
             .collect()
     }
 
@@ -273,9 +298,8 @@ impl AppState {
             Command::DeletePermanently => self.delete_permanently(side),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
-            // Copy and move pick their destination first (PICK), which this window does not
-            // have yet; their keys are left to the system.
-            Command::CopyTo | Command::MoveTo => return None,
+            Command::CopyTo => self.open_picker(side, TransferMode::Copy),
+            Command::MoveTo => self.open_picker(side, TransferMode::Move),
         };
         Some(effects)
     }
@@ -391,12 +415,15 @@ impl AppState {
     }
 
     /// Makes `places` (the favorites, then the drives) the roots of the folder tree, which
-    /// starts again from them, closed, and finds the folder it follows again.
+    /// starts again from them, closed, and finds the folder it follows again; and of the
+    /// picker's tree, when a picker is open.
     pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
-        let roots = places
-            .iter()
-            .map(|place| (place.label.clone(), place.path.clone()));
-        self.with_tree(|tree| tree.set_roots(roots))
+        places.clone_into(&mut self.places);
+        let mut effects = self.with_tree(|tree| tree.set_roots(pick::tree_roots(places)));
+        if self.shown_picker().is_some() {
+            effects.extend(self.with_pick_tree(|tree| tree.set_roots(pick::tree_roots(places))));
+        }
+        effects
     }
 
     /// Shows the folder of row `row` of the tree in the active pane (a click on the row). The
@@ -447,10 +474,11 @@ impl AppState {
             Handled::Stale => Vec::new(),
             // A row a job made may have come: it was selected, and shows.
             Handled::Applied { tab } => {
-                // The tree's nodes of the folder take its folders, once the listing is whole.
+                // The trees' nodes of the folder take its folders, once the listing is whole.
                 let listed = &self.panes[side].tabs()[tab];
                 if new_rows && listed.status() == LoadStatus::Ready {
                     self.tree.sync_folder(listed.location(), listed.all());
+                    self.pick_tree.sync_folder(listed.location(), listed.all());
                 }
                 let shows = tab == self.panes[side].active();
                 self.panes[side].tabs_mut()[tab]
@@ -551,16 +579,18 @@ impl AppState {
         }
     }
 
-    /// Takes an event of a listing of the folder tree; one that no node waits for is dropped.
-    /// A listing that failed leaves the node empty, with no notice.
+    /// Takes an event of a listing of a folder tree: the picker's, when it waits for it, or
+    /// else the sidebar's. One that no node waits for is dropped. A listing that failed leaves
+    /// the node empty, with no notice.
     fn tree_loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
-        match event {
+        let generation = event.generation();
+        let take = |tree: &mut Tree| match event {
             LoadEvent::Listed {
                 generation,
                 entries,
-            } => self.with_tree(|tree| tree.apply_children(generation, entries)),
+            } => tree.apply_children(generation, entries),
             LoadEvent::Failed { generation, .. } => {
-                self.tree.listing_failed(generation);
+                tree.listing_failed(generation);
                 Vec::new()
             }
             // A listing of folders sends nothing else.
@@ -568,6 +598,15 @@ impl AppState {
             | LoadEvent::Rescan { .. }
             | LoadEvent::Vanished { .. }
             | LoadEvent::Space { .. } => Vec::new(),
+        };
+        if self
+            .pick_tree
+            .generations()
+            .any(|waited| waited == generation)
+        {
+            self.with_pick_tree(take)
+        } else {
+            self.with_tree(take)
         }
     }
 
@@ -628,7 +667,7 @@ impl AppState {
     }
 
     /// Shows or hides the hidden items in every tab of both panes, and the hidden folders of
-    /// the tree.
+    /// the trees.
     fn toggle_hidden(&mut self) -> Vec<Effect> {
         self.show_hidden = !self.show_hidden;
         for pane in &mut self.panes {
@@ -637,7 +676,9 @@ impl AppState {
             }
         }
         let show = self.show_hidden;
-        self.with_tree(|tree| tree.set_show_hidden(show))
+        let mut effects = self.with_tree(|tree| tree.set_show_hidden(show));
+        effects.extend(self.with_pick_tree(|tree| tree.set_show_hidden(show)));
+        effects
     }
 }
 

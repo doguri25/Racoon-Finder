@@ -13,7 +13,8 @@ use rf_ui::selection::Selection;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, JobRowView, MainWindow, NameView, PaneView, Theme,
+    ConfirmView, ConflictView, DialogKind, JobRowView, MainWindow, NameView, PaneView, PickTarget,
+    PickView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::platform::{Key, WindowEvent};
@@ -603,4 +604,180 @@ fn the_conflict_dialog_keeps_both_unless_overwrite_is_clicked() {
             .accessible_checked(),
         Some(true)
     );
+}
+
+/// A picker of a move whose target, the other pane's folder, is chosen; the items' own folder
+/// is offered too, and cannot be chosen.
+fn pick_view() -> PickView {
+    let targets = vec![
+        PickTarget {
+            head: "반대편 패널".into(),
+            label: "백업".into(),
+            note: "/home/me/작업/백업".into(),
+            enabled: true,
+            selected: true,
+        },
+        PickTarget {
+            head: "열린 탭".into(),
+            label: "원본".into(),
+            note: "원래 있던 폴더라 고를 수 없음".into(),
+            enabled: false,
+            selected: false,
+        },
+    ];
+    let chips: Vec<slint::SharedString> = vec!["설계안.pdf".into(), "assets".into()];
+    PickView {
+        title: "어디로 이동할까요?".into(),
+        summary: "항목 2개 · 파일 1.2 MB와 폴더 1개".into(),
+        chips: ModelRc::new(slint::VecModel::from(chips)),
+        is_move: true,
+        target_path: "/home/me/작업/백업".into(),
+        can_make_folder: true,
+        targets: ModelRc::new(slint::VecModel::from(targets)),
+        policy_note: "같은 이름이 있으면 그때 묻습니다".into(),
+        space: "남은 공간 212 GB".into(),
+        confirm_text: "여기로 이동".into(),
+        can_confirm: true,
+        ..PickView::default()
+    }
+}
+
+#[test]
+fn the_picker_takes_the_keys_until_it_closes() {
+    let window = window();
+    let keys = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&keys);
+    window.on_key(move |text, _, _, _| {
+        record.borrow_mut().push(text.to_string());
+        true
+    });
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_pick_step(move |delta| record.borrow_mut().push(format!("step {delta}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_enter(move || record.borrow_mut().push("enter".to_owned()));
+    let record = Rc::clone(&calls);
+    window.on_pick_confirmed(move || record.borrow_mut().push("confirmed".to_owned()));
+    let record = Rc::clone(&calls);
+    window.on_pick_filter_edited(move |text| record.borrow_mut().push(format!("filter {text}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_target_clicked(move |i| record.borrow_mut().push(format!("target {i}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_policy(move |i| record.borrow_mut().push(format!("policy {i}")));
+    let record = Rc::clone(&calls);
+    window.on_dialog_cancelled(move || record.borrow_mut().push("cancelled".to_owned()));
+
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    assert_eq!(
+        labelled(&window, "어디로 이동할까요?", AccessibleRole::Text).len(),
+        1
+    );
+    // Letters go to the filter (PICK-04); the arrows and Enter go to Rust, the panes get none.
+    let down = char::from(Key::DownArrow).to_string();
+    let up = char::from(Key::UpArrow).to_string();
+    let enter = char::from(Key::Return).to_string();
+    chord(&window, &["백"]);
+    chord(&window, &[&down]);
+    chord(&window, &[&up]);
+    chord(&window, &[&enter]);
+    chord(&window, &[&char::from(Key::F5).to_string()]);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["filter 백", "step 1", "step -1", "enter"]
+    );
+    assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
+    // A click between its parts leaves the keys with the filter: the letters still go there.
+    let position = slint::LogicalPosition::new(640.0, 184.0);
+    let button = slint::platform::PointerEventButton::Left;
+    let shown = window.window();
+    shown.dispatch_event(WindowEvent::PointerPressed { position, button });
+    shown.dispatch_event(WindowEvent::PointerReleased { position, button });
+    chord(&window, &["업"]);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["filter 백업"]
+    );
+
+    // The target the items' own folder is shows why it cannot be chosen, and takes no click.
+    let items: Vec<ElementHandle> = labelled(&window, "원본", AccessibleRole::ListItem);
+    assert_eq!(items[0].accessible_enabled(), Some(false));
+    assert_eq!(
+        items[0].accessible_description().as_deref(),
+        Some("원래 있던 폴더라 고를 수 없음")
+    );
+    items[0].invoke_accessible_default_action();
+    labelled(&window, "백업", AccessibleRole::ListItem)[0].invoke_accessible_default_action();
+    labelled(&window, "덮어쓰기", AccessibleRole::RadioButton)[0]
+        .invoke_accessible_default_action();
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["target 0", "policy 1"]
+    );
+
+    // The button confirms while the target can be chosen; Esc cancels.
+    let confirm = labelled(&window, "여기로 이동", AccessibleRole::Button);
+    confirm[0].invoke_accessible_default_action();
+    window.set_pick_view(PickView {
+        can_confirm: false,
+        problem: "옮기는 항목 안이라 고를 수 없음".into(),
+        ..pick_view()
+    });
+    let confirm = labelled(&window, "여기로 이동", AccessibleRole::Button);
+    assert_eq!(confirm[0].accessible_enabled(), Some(false));
+    assert_eq!(
+        labelled(
+            &window,
+            "옮기는 항목 안이라 고를 수 없음",
+            AccessibleRole::Text
+        )
+        .len(),
+        1
+    );
+    chord(&window, &[&char::from(Key::Escape).to_string()]);
+    assert_eq!(
+        calls.borrow_mut().drain(..).collect::<Vec<_>>(),
+        ["confirmed", "cancelled"]
+    );
+
+    // Closed, the panes have the keys again.
+    window.set_dialog(DialogKind::None);
+    chord(&window, &[&down]);
+    assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn the_picker_stays_under_its_name_window() {
+    let window = window();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&calls);
+    window.on_pick_step(move |delta| record.borrow_mut().push(format!("step {delta}")));
+    let record = Rc::clone(&calls);
+    window.on_pick_filter_edited(move |text| record.borrow_mut().push(format!("filter {text}")));
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    let down = char::from(Key::DownArrow).to_string();
+
+    // A name window over it (its 새 폴더) has the keys; the picker stays in view under it.
+    window.set_pick_behind(true);
+    window.set_name_view(NameView {
+        title: "새 폴더".into(),
+        initial: "새 폴더".into(),
+        select_end: i32::try_from("새 폴더".len()).expect("short"),
+        warning: "".into(),
+        ok_enabled: true,
+    });
+    window.set_dialog(DialogKind::Name);
+    chord(&window, &[&down]);
+    chord(&window, &["x"]);
+    assert_eq!(calls.borrow().as_slice(), Vec::<String>::new());
+    assert_eq!(
+        labelled(&window, "어디로 이동할까요?", AccessibleRole::Text).len(),
+        1
+    );
+    // Back on top, it has them again.
+    window.set_dialog(DialogKind::Pick);
+    window.set_pick_behind(false);
+    chord(&window, &[&down]);
+    assert_eq!(calls.borrow().as_slice(), ["step 1"]);
 }

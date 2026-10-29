@@ -1,6 +1,6 @@
-//! What the Slint screens are given: the row models of a file list and of the folder tree,
-//! the conversions from the panes' state to Slint structs, and [`post`], which brings a worker
-//! thread's result back to the UI thread.
+//! What the Slint screens are given: the row models of a file list and of the folder trees,
+//! the conversions from the panes' state, the dialogs and the destination picker to Slint
+//! structs, and [`post`], which brings a worker thread's result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -25,14 +25,20 @@ const CARD_PLACE_CHARS: usize = 36;
 const SENTENCE_PLACE_CHARS: usize = 48;
 use crate::jobs::JobRow;
 use crate::pane::{LoadStatus, Pane, ancestors};
+use crate::pick::{POLICIES, Picker};
 use crate::places::{Place, PlaceKind};
 use crate::selection::Selection;
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ConfirmView, ConflictView, Crumb, DialogKind, FileRow, JobRowView, MessageView, NameView,
-    PaneView, PreflightView, RecoveryView, SectionHead, TabItem, TreeRow,
+    PaneView, PickTarget, PickView, PreflightView, RecoveryView, SectionHead, TabItem, TreeRow,
 };
+
+/// How many characters the folder beside a folder the picker's filter found shows.
+const FOUND_PLACE_CHARS: usize = 40;
+/// How many names of the items the picker shows before "외 N개".
+const PICK_CHIPS: usize = 3;
 
 /// Runs `f` with the controller on the UI thread, from any thread, and returns at once. Once
 /// the window has closed nothing runs and `f` is dropped.
@@ -241,11 +247,12 @@ fn tell(notify: &ModelNotify, changes: Option<Vec<RowChange>>) {
     }
 }
 
-/// The rows of the sidebar's folder tree as a Slint model.
+/// The rows of a folder tree (the sidebar's, the picker's) as a Slint model.
 ///
 /// [`TreeRows::sync`] makes them the tree's rows and tells the list which rows came, went or
 /// changed (a node opened or closed, the selection moved), so the list keeps its scroll
 /// position and draws only the rows on screen, however many folders are open.
+/// [`TreeRows::sync_found`] shows what a filter found instead, flat.
 #[derive(Default)]
 pub struct TreeRows {
     rows: RefCell<Vec<(NodeId, TreeRow)>>,
@@ -272,7 +279,18 @@ impl TreeRows {
         if self.revision.replace(revision) == revision {
             return;
         }
-        let new = tree_rows(&tree.rows(), places);
+        self.replace(tree_rows(&tree.rows(), places));
+    }
+
+    /// Makes the rows the folders `found` of `tree` (a filter's, [`Tree::find`]), flat, and
+    /// tells the list what changed.
+    pub fn sync_found(&self, tree: &Tree, found: &[NodeId]) {
+        // The next `sync` draws the tree again, whatever its revision.
+        self.revision.set(None);
+        self.replace(found_rows(tree, found));
+    }
+
+    fn replace(&self, new: Vec<(NodeId, TreeRow)>) {
         let changes = {
             let old = self.rows.borrow();
             diff_rows(&old, &new, |(id, _)| *id)
@@ -333,6 +351,35 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
                 selected: row.selected,
             };
             (row.id, shown)
+        })
+        .collect()
+}
+
+/// The rows of the folders `found` in `tree`, flat: each with the folder it is in beside it,
+/// and marked when it is the folder the tree follows.
+pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
+    found
+        .iter()
+        .filter_map(|&id| {
+            let node = tree.node(id)?;
+            let info = node
+                .path
+                .parent()
+                .map(|folder| short_path(&folder.to_string(), FOUND_PLACE_CHARS))
+                .unwrap_or_default();
+            let row = TreeRow {
+                label: node.label.as_str().into(),
+                depth: 0,
+                head: SectionHead::None,
+                is_place: false,
+                is_drive: false,
+                info: info.into(),
+                fill: 0.0,
+                expandable: false,
+                expanded: false,
+                selected: tree.target() == Some(&node.path),
+            };
+            Some((id, row))
         })
         .collect()
 }
@@ -530,7 +577,141 @@ pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
         Some(Modal::Recovery(_)) => DialogKind::Recovery,
         Some(Modal::Conflict(_)) => DialogKind::Conflict,
         Some(Modal::Preflight(_)) => DialogKind::Preflight,
+        Some(Modal::Pick(_)) => DialogKind::Pick,
     }
+}
+
+/// The models the picker's view keeps between redraws.
+#[derive(Default)]
+pub struct PickModels {
+    tree: Rc<TreeRows>,
+    targets: Rc<VecModel<PickTarget>>,
+    chips: Rc<VecModel<SharedString>>,
+}
+
+impl fmt::Debug for PickModels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PickModels")
+            .field("tree", &self.tree)
+            .field("targets", &self.targets.row_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PickModels {
+    /// What `picker` shows, with its folder tree `tree` (whose roots are `places`), or the
+    /// folders `found` there while its filter has found some. The models are brought up to
+    /// date and handed over as they are.
+    pub fn view(
+        &self,
+        picker: &Picker,
+        tree: &Tree,
+        found: Option<&[NodeId]>,
+        places: &[Place],
+    ) -> PickView {
+        match found {
+            Some(found) => self.tree.sync_found(tree, found),
+            None => self.tree.sync(tree, places),
+        }
+        set_rows(&self.targets, pick_targets(picker));
+        let request = &picker.request;
+        set_rows(
+            &self.chips,
+            request
+                .sources
+                .iter()
+                .take(PICK_CHIPS)
+                .map(|path| folder_label(path).into())
+                .collect(),
+        );
+        let more = request.sources.len().saturating_sub(PICK_CHIPS);
+        let validity = picker.validity();
+        let folder_ok = picker
+            .facts
+            .as_ref()
+            .is_none_or(|facts| facts.folder.is_ok());
+        let space = picker
+            .facts
+            .as_ref()
+            .filter(|facts| facts.folder.is_ok())
+            .and_then(|facts| facts.available)
+            .map(words::pick_space)
+            .unwrap_or_default();
+        let (policy_note, policy_danger) = words::pick_policy(picker.policy);
+        PickView {
+            title: words::pick_title(request.mode).into(),
+            summary: crate::pick::summary(request).into(),
+            chips: ModelRc::from(Rc::clone(&self.chips)),
+            more: if more > 0 {
+                words::pick_more(more).into()
+            } else {
+                SharedString::new()
+            },
+            is_move: request.mode == rf_jobs::TransferMode::Move,
+            target_path: picker
+                .target
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+                .into(),
+            path_error: picker.path_error.as_str().into(),
+            can_make_folder: picker.target.is_some() && folder_ok,
+            filter: picker.filter.as_str().into(),
+            tree: ModelRc::from(Rc::clone(&self.tree)),
+            tree_note: match found {
+                Some([]) => words::pick_no_match().into(),
+                _ => SharedString::new(),
+            },
+            targets: ModelRc::from(Rc::clone(&self.targets)),
+            policy: POLICIES
+                .iter()
+                .position(|&policy| policy == picker.policy)
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0),
+            policy_note: policy_note.into(),
+            policy_danger,
+            space: space.into(),
+            problem: validity
+                .map(|validity| {
+                    words::pick_problem(validity, request.mode, request.folder_count > 0)
+                })
+                .unwrap_or_default()
+                .into(),
+            confirm_text: words::pick_confirm(request.mode).into(),
+            can_confirm: picker.can_confirm(),
+        }
+    }
+}
+
+/// The quick targets of `picker`, one row each: the head over the first of a group, the
+/// path under the name, or why it cannot be chosen.
+pub fn pick_targets(picker: &Picker) -> Vec<PickTarget> {
+    let request = &picker.request;
+    picker
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group.items.iter().enumerate().map(move |(i, item)| {
+                let enabled = item.validity.can_choose();
+                let note = if enabled {
+                    item.note.clone()
+                } else {
+                    words::pick_problem(item.validity, request.mode, request.folder_count > 0)
+                };
+                PickTarget {
+                    head: if i == 0 {
+                        group.title.as_str().into()
+                    } else {
+                        SharedString::new()
+                    },
+                    label: item.label.as_str().into(),
+                    note: note.into(),
+                    enabled,
+                    selected: picker.target.as_ref() == Some(&item.path),
+                }
+            })
+        })
+        .collect()
 }
 
 /// What the name dialog shows: the warning of the name typed so far, and whether OK takes it.

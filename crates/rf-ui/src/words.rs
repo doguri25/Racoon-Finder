@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use rf_core::{EntryKind, ErrorKind, VPath};
 use rf_jobs::{
-    DeleteMethod, FailureReason, IssueKind, ItemFailure, JobKind, JobSpec, JobState, Outcome,
-    Severity, UndoRecord,
+    ConflictPolicy, DeleteMethod, FailureReason, IssueKind, ItemFailure, JobKind, JobSpec,
+    JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
 use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
+use crate::pick::Validity;
 
 /// How many characters a path takes at most where a line shows it with other words (a failed
 /// item, a recovered job beside its buttons): the middle of a longer one is left out
@@ -853,6 +854,119 @@ pub fn preflight_line(target: &VPath, issue: &IssueKind) -> String {
         issue_kind(issue),
         preflight_follows(issue)
     )
+}
+
+/// The title of the destination picker.
+pub fn pick_title(mode: TransferMode) -> &'static str {
+    match mode {
+        TransferMode::Copy => "어디로 복사할까요?",
+        TransferMode::Move => "어디로 이동할까요?",
+    }
+}
+
+/// The confirm button of the destination picker.
+pub fn pick_confirm(mode: TransferMode) -> &'static str {
+    match mode {
+        TransferMode::Copy => "여기로 복사",
+        TransferMode::Move => "여기로 이동",
+    }
+}
+
+/// What the picker copies or moves: `항목 3개 · 1.2 GB` for `count` items that are all files
+/// of `bytes` together, `항목 3개 · 파일 1.2 MB와 폴더 1개` with `folders` folders among
+/// them (whose size is not known before the job looks inside), `항목 2개 · 폴더 2개` for
+/// folders alone. Every unit of a size ends in a vowel when read, so `와` always follows it.
+pub fn pick_summary(count: usize, files: usize, bytes: u64, folders: usize) -> String {
+    let what = match (files, folders) {
+        (_, 0) => format_size(bytes),
+        (0, folders) => format!("폴더 {folders}개"),
+        (_, folders) => format!("파일 {}와 폴더 {folders}개", format_size(bytes)),
+    };
+    format!("{} · {what}", item_count(count))
+}
+
+/// After the names of the first items the picker shows: how many more there are.
+pub fn pick_more(count: usize) -> String {
+    format!("외 {count}개")
+}
+
+/// The heads of the picker's quick targets.
+pub fn pick_opposite() -> &'static str {
+    "반대편 패널"
+}
+
+pub fn pick_tabs() -> &'static str {
+    "열린 탭"
+}
+
+pub fn pick_recent() -> &'static str {
+    "최근 위치"
+}
+
+pub fn pick_favorites() -> &'static str {
+    "즐겨찾기"
+}
+
+/// Why a folder cannot be chosen, or what to beware of when it is; empty for a folder with
+/// no problem. A need for room is rounded up and the room free rounded down, so that the two
+/// never read as the same number; `at_least` when folders are among the items, whose content
+/// adds to the need.
+pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> String {
+    match validity {
+        Validity::Ok => String::new(),
+        Validity::IntoSource if mode == TransferMode::Copy => {
+            "복사하는 항목 안이라 고를 수 없음".to_owned()
+        }
+        Validity::IntoSource => "옮기는 항목 안이라 고를 수 없음".to_owned(),
+        Validity::SameFolder => "원래 있던 폴더라 고를 수 없음".to_owned(),
+        Validity::NotAFolder => "폴더를 찾을 수 없어 고를 수 없음".to_owned(),
+        Validity::NotWritable => "읽기 전용 위치라 작업이 실패할 수 있습니다".to_owned(),
+        Validity::NotEnoughSpace { need, available } => format!(
+            "공간이 부족할 수 있습니다: 필요 {}{}, 남은 공간 {}",
+            format_size_rounded(need, Rounding::Up),
+            if at_least { " 이상" } else { "" },
+            format_size_rounded(available, Rounding::Down)
+        ),
+    }
+}
+
+/// The free room at the picker's target: `남은 공간 212 GB`, rounded down like the status
+/// bar's.
+pub fn pick_space(available: u64) -> String {
+    format!(
+        "남은 공간 {}",
+        format_size_rounded(available, Rounding::Down)
+    )
+}
+
+/// Why a path typed into the picker cannot be the target.
+pub fn pick_path_error(kind: ErrorKind) -> String {
+    match kind {
+        ErrorKind::NotADirectory => "폴더가 아닙니다".to_owned(),
+        kind => error_kind(kind).to_owned(),
+    }
+}
+
+/// What the picker's conflict policy does, said under its buttons; `true` with it when the
+/// policy destroys something, which the picker then shows in the text's color and never
+/// confirms with Enter alone.
+pub fn pick_policy(policy: ConflictPolicy) -> (&'static str, bool) {
+    match policy {
+        ConflictPolicy::Overwrite => (
+            "같은 이름의 파일을 바꿉니다. 있던 파일의 내용은 되살릴 수 없습니다.",
+            true,
+        ),
+        ConflictPolicy::Skip => ("같은 이름이 있는 항목은 건너뜁니다", false),
+        ConflictPolicy::AutoRename => ("같은 이름이 있으면 번호를 붙여 둘 다 둡니다", false),
+        // `Ask`, and the policies the picker does not offer.
+        _ => ("같은 이름이 있으면 그때 묻습니다", false),
+    }
+}
+
+/// What the picker's folder tree shows when its filter finds nothing: it looks only among
+/// the folders listed so far.
+pub fn pick_no_match() -> &'static str {
+    "펼쳐 본 폴더 중에 맞는 이름이 없습니다"
 }
 
 /// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.

@@ -1,7 +1,8 @@
 //! The windows that open over the main window, as plain data: the name of a new folder or of a
 //! rename, a confirmation, the failed items of a job, the jobs the last run left unfinished,
-//! and the questions of the jobs. [`AppState`](crate::state::AppState) keeps the one that
-//! shows and the ones waiting behind it; `dialogs.slint` and `conflict-dialog.slint` draw them.
+//! the questions of the jobs, and the destination picker ([`Picker`]).
+//! [`AppState`](crate::state::AppState) keeps the one that shows and the ones waiting behind
+//! it; `dialogs.slint`, `conflict-dialog.slint` and `pick-dialog.slint` draw them.
 //!
 //! Nothing here touches a file: a dialog that is answered gives the job to submit, and the
 //! state hands it to the engine.
@@ -15,6 +16,7 @@ use rf_jobs::{
     numbered_name,
 };
 
+use crate::pick::Picker;
 use crate::resolver::QuestionId;
 use crate::words;
 
@@ -27,6 +29,8 @@ pub enum Modal {
     Recovery(Recovery),
     Conflict(ConflictQuestion),
     Preflight(PreflightQuestion),
+    /// Where to copy or move the items to (PICK).
+    Pick(Box<Picker>),
 }
 
 impl Modal {
@@ -35,7 +39,11 @@ impl Modal {
         match self {
             Modal::Conflict(question) => Some(question.id),
             Modal::Preflight(question) => Some(question.id),
-            Modal::Name(_) | Modal::Confirm(_) | Modal::Failures(_) | Modal::Recovery(_) => None,
+            Modal::Name(_)
+            | Modal::Confirm(_)
+            | Modal::Failures(_)
+            | Modal::Recovery(_)
+            | Modal::Pick(_) => None,
         }
     }
 }
@@ -47,6 +55,9 @@ pub enum NamePurpose {
     NewFolder { parent: VPath, origin: usize },
     /// A new name for `from`, asked for in pane `origin`.
     Rename { from: VPath, origin: usize },
+    /// A new folder in `parent`, asked for by the destination picker's 새 폴더, which takes it
+    /// as its target once it is made.
+    PickFolder { parent: VPath },
 }
 
 /// The window that asks for a name.
@@ -87,6 +98,18 @@ impl NameDialog {
         }
     }
 
+    /// The window for a new folder in `parent` that the destination picker asks for, with the
+    /// default name.
+    pub fn pick_folder(parent: VPath) -> NameDialog {
+        let name = words::new_folder_name().to_owned();
+        NameDialog {
+            purpose: NamePurpose::PickFolder { parent },
+            select_end: name.len(),
+            text: name.clone(),
+            initial: name,
+        }
+    }
+
     /// The window for a new name of `from`, a folder when `is_dir`; `None` for a path without
     /// a name (a root).
     pub fn rename(from: VPath, is_dir: bool, origin: usize) -> Option<NameDialog> {
@@ -101,7 +124,9 @@ impl NameDialog {
 
     pub fn title(&self) -> &'static str {
         match self.purpose {
-            NamePurpose::NewFolder { .. } => words::new_folder_title(),
+            NamePurpose::NewFolder { .. } | NamePurpose::PickFolder { .. } => {
+                words::new_folder_title()
+            }
             NamePurpose::Rename { .. } => words::rename_title(),
         }
     }
@@ -120,10 +145,10 @@ impl NameDialog {
         NameCheck::Ready
     }
 
-    /// The job the field asks for, with the pane that asked; `Err` with the warning when the
-    /// name cannot be used, `Ok(None)` when there is nothing to do (an empty or unchanged
-    /// name).
-    pub fn job(&self) -> Result<Option<(JobSpec, usize)>, String> {
+    /// The job the field asks for, with the pane that asked (none for the picker's folder);
+    /// `Err` with the warning when the name cannot be used, `Ok(None)` when there is nothing
+    /// to do (an empty or unchanged name).
+    pub fn job(&self) -> Result<Option<(JobSpec, Option<usize>)>, String> {
         match self.check() {
             NameCheck::Ready => {}
             NameCheck::Empty | NameCheck::Unchanged => return Ok(None),
@@ -137,7 +162,15 @@ impl NameDialog {
                     name,
                     kind: CreateKind::Dir,
                 },
-                *origin,
+                Some(*origin),
+            ))),
+            NamePurpose::PickFolder { parent } => Ok(Some((
+                JobSpec::Create {
+                    parent: parent.clone(),
+                    name,
+                    kind: CreateKind::Dir,
+                },
+                None,
             ))),
             NamePurpose::Rename { from, origin } => {
                 let to = from
@@ -149,7 +182,7 @@ impl NameDialog {
                         from: from.clone(),
                         to,
                     },
-                    *origin,
+                    Some(*origin),
                 )))
             }
         }
@@ -450,7 +483,22 @@ mod tests {
                     name: OsString::from("자료"),
                     kind: CreateKind::Dir,
                 },
-                1
+                Some(1)
+            )))
+        );
+        // The picker's folder belongs to no pane.
+        let mut picked = NameDialog::pick_folder(path("parent"));
+        assert_eq!(picked.title(), "새 폴더");
+        picked.text = "자료".to_owned();
+        assert_eq!(
+            picked.job(),
+            Ok(Some((
+                JobSpec::Create {
+                    parent: path("parent"),
+                    name: OsString::from("자료"),
+                    kind: CreateKind::Dir,
+                },
+                None
             )))
         );
     }
@@ -466,7 +514,7 @@ mod tests {
                     from: path("a.txt"),
                     to: path("b.txt"),
                 },
-                0
+                Some(0)
             )))
         );
     }

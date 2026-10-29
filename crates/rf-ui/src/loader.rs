@@ -11,7 +11,8 @@
 //! [`Loader::list_folders`] is the same work without the watch and the free space, for the
 //! folder tree: one listing of the folders in a folder. [`Loader::follow`] works the same way
 //! for a link a tab opens, and its result carries the tab's generation too.
-//! [`Loader::nearest_existing_parent`] blocks and is called on a worker thread.
+//! [`Loader::nearest_existing_parent`] and [`Loader::inspect_target`] block and are called on
+//! a worker thread.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -23,6 +24,7 @@ use rf_vfs::{
 };
 
 use crate::pane::OpenAction;
+use crate::pick::TargetFacts;
 
 /// What a tab asks the [`Loader`] for: the listing of `path` in the order `sort`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +181,51 @@ impl Loader {
             candidate = folder.parent();
         }
         None
+    }
+
+    /// What is at `target`, a folder the destination picker may copy or move items to that
+    /// are in the folder `from_dir`: whether it is a folder (following links), whether its
+    /// location takes changes, the room free there, and whether it is on the volume of
+    /// `from_dir`. A target that is no folder tells only that.
+    ///
+    /// Blocks (a slow or sleeping drive, a network folder); call it on a worker thread.
+    pub fn inspect_target(&self, target: &VPath, from_dir: &VPath) -> TargetFacts {
+        let refused = |kind: ErrorKind| TargetFacts {
+            folder: Err(kind),
+            writable: false,
+            available: None,
+            same_volume: false,
+        };
+        let provider = match self.vfs.provider(target) {
+            Ok(provider) => provider,
+            Err(error) => return refused(error.kind()),
+        };
+        let entry = match provider.stat_target(target) {
+            Ok(entry) if entry.kind == EntryKind::Dir => entry,
+            Ok(_) => return refused(ErrorKind::NotADirectory),
+            Err(error) => return refused(error.kind()),
+        };
+        let writable = provider.capabilities(target).contains(Capabilities::WRITE);
+        let available = provider
+            .space(target)
+            .ok()
+            .flatten()
+            .map(|space| space.available);
+        let same_volume = self
+            .vfs
+            .provider(from_dir)
+            .ok()
+            .filter(|source| source.scheme() == provider.scheme())
+            .and_then(|source| source.stat_target(from_dir).ok())
+            .is_some_and(|source| {
+                source.volume_id.is_some() && source.volume_id == entry.volume_id
+            });
+        TargetFacts {
+            folder: Ok(()),
+            writable,
+            available,
+            same_volume,
+        }
     }
 
     /// Finds out on a new worker thread what opening the link at `link` does (the

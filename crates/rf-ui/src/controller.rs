@@ -22,16 +22,12 @@ use crate::dialogs::{ConflictChoice, Modal};
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{LoadEvent, LoadTicket, Loader};
+use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::resolver::Question;
 use crate::state::{AppState, Effect, LEFT, RIGHT, start_folders};
-use crate::ui_bridge::{self, PaneModels, TreeRows, post};
+use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, JobRowView, MainWindow, open, words};
-
-/// The environment variable that, set to `1` in a debug build, makes F5 and F6 copy and move
-/// the active pane's items straight into the other pane's folder, until the destination
-/// picker comes. A release build ignores it.
-pub const DIRECT_TRANSFER_VAR: &str = "RF_DEBUG_DIRECT_TRANSFER";
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -179,6 +175,62 @@ fn connect(window: &MainWindow) {
         with(|c| c.update_at(i, AppState::toggle_tree_row));
     });
     connect_jobs(window);
+    connect_pick(window);
+}
+
+/// The callbacks of the destination picker.
+fn connect_pick(window: &MainWindow) {
+    window.on_pick_target_clicked(|i| {
+        with(|c| c.update_at(i, AppState::pick_clicked));
+    });
+    window.on_pick_step(|delta| {
+        let delta = if delta < 0 { -1 } else { 1 };
+        with(|c| c.update(|state| state.pick_step(delta)));
+    });
+    window.on_pick_enter(|| {
+        with(|c| c.update(AppState::pick_enter));
+    });
+    window.on_pick_confirmed(|| {
+        with(|c| c.update(AppState::pick_confirmed));
+    });
+    window.on_pick_mode(|is_move| {
+        let mode = if is_move {
+            TransferMode::Move
+        } else {
+            TransferMode::Copy
+        };
+        with(|c| {
+            c.update(|state| {
+                state.pick_mode(mode);
+                Vec::new()
+            });
+        });
+    });
+    window.on_pick_policy(|i| {
+        if let Some(&policy) = index(i).and_then(|i| POLICIES.get(i)) {
+            with(|c| {
+                c.update(|state| {
+                    state.pick_policy(policy);
+                    Vec::new()
+                });
+            });
+        }
+    });
+    window.on_pick_filter_edited(|text| {
+        with(|c| c.update(|state| state.pick_filter(&text)));
+    });
+    window.on_pick_path_entered(|text| {
+        with(|c| c.update(|state| state.pick_path_entered(&text)));
+    });
+    window.on_pick_tree_clicked(|i| {
+        with(|c| c.update_at(i, AppState::pick_tree_clicked));
+    });
+    window.on_pick_tree_toggled(|i| {
+        with(|c| c.update_at(i, AppState::pick_tree_toggled));
+    });
+    window.on_pick_new_folder(|| {
+        with(|c| c.update(AppState::pick_new_folder));
+    });
 }
 
 /// The callbacks of the dialogs, the job panel and the toast, and the close button.
@@ -269,8 +321,8 @@ pub struct Controller {
     /// The dialog the screen shows, as it was last handed over: a view is set again only when
     /// it changed, so a list in it keeps its scroll position while the jobs report progress.
     shown_modal: RefCell<Option<(DialogKind, Option<Modal>)>>,
-    /// Whether F5 and F6 transfer straight into the other pane ([`DIRECT_TRANSFER_VAR`]).
-    direct_transfer: bool,
+    /// The models of the destination picker's view.
+    pick: PickModels,
     /// The running loads of the tabs and the tree, by the generation of their request.
     tickets: RefCell<HashMap<u64, LoadTicket>>,
     /// The sidebar's places, the roots of the tree, once found.
@@ -304,8 +356,6 @@ impl Controller {
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
         let job_rows = Rc::new(VecModel::default());
         window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
-        let direct_transfer = cfg!(debug_assertions)
-            && std::env::var_os(DIRECT_TRANSFER_VAR).is_some_and(|value| value == "1");
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
@@ -315,7 +365,7 @@ impl Controller {
             tz: RefCell::new(TimeZone::UTC),
             job_rows,
             shown_modal: RefCell::new(None),
-            direct_transfer,
+            pick: PickModels::default(),
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
             tree_rows,
@@ -433,10 +483,6 @@ impl Controller {
         let Some(command) = keys::command_for(text, mods) else {
             return false;
         };
-        if let Some(mode) = self.direct_mode(&command) {
-            self.update(|state| state.transfer_to_other_pane(mode));
-            return true;
-        }
         let page = self
             .window
             .upgrade()
@@ -468,27 +514,11 @@ impl Controller {
             "redo" => Command::Redo,
             _ => return,
         };
-        if let Some(mode) = self.direct_mode(&command) {
-            self.update(|state| state.transfer_to_other_pane(mode));
-            return;
-        }
         self.update(|state| {
             state
                 .key(command, Mods::default(), 1, Instant::now())
                 .unwrap_or_default()
         });
-    }
-
-    /// The transfer F5 or F6 makes at once in a debug build with [`DIRECT_TRANSFER_VAR`].
-    fn direct_mode(&self, command: &Command) -> Option<TransferMode> {
-        if !self.direct_transfer {
-            return None;
-        }
-        match command {
-            Command::CopyTo => Some(TransferMode::Copy),
-            Command::MoveTo => Some(TransferMode::Move),
-            _ => None,
-        }
     }
 
     /// Changes the state with `f`, lets the tree follow the active pane, then carries out what
@@ -578,10 +608,24 @@ impl Controller {
                 } => slint::Timer::single_shot(after, move || {
                     with(|c| c.update(|state| state.reload_due(generation, &path, Instant::now())));
                 }),
+                Effect::InspectTarget {
+                    generation,
+                    path,
+                    from_dir,
+                } => {
+                    let loader = self.loader.clone();
+                    spawn_worker("rf-ui-pick", move || {
+                        let facts = loader.inspect_target(&path, &from_dir);
+                        post(move |c| {
+                            c.update(|state| state.target_inspected(generation, &path, facts));
+                        });
+                    });
+                }
                 Effect::Notice(_)
                 | Effect::EditPath(_)
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollTree(_)
+                | Effect::ScrollPickTree(_)
                 | Effect::Toast { .. } => {
                     on_screen.push(effect);
                 }
@@ -618,6 +662,11 @@ impl Controller {
                     window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
                 }
             }
+            Effect::ScrollPickTree(row) => {
+                if let Some(window) = self.window.upgrade() {
+                    window.invoke_pick_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
+                }
+            }
             Effect::Toast {
                 token,
                 text,
@@ -638,6 +687,7 @@ impl Controller {
             | Effect::OpenFile(_)
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
+            | Effect::InspectTarget { .. }
             | Effect::Quit => {}
         }
     }
@@ -736,11 +786,32 @@ impl Controller {
     }
 
     /// Shows the dialog of the state, setting its view before its kind (the dialog reads the
-    /// view when it opens), and only when it changed.
+    /// view when it opens), and only when it changed. The destination picker's view is set at
+    /// every redraw while it is on screen, under another dialog too: its tree and what a
+    /// worker found at its target change without a change of the dialog.
     fn show_dialog(&self, window: &MainWindow, state: &AppState) {
         let kind = ui_bridge::dialog_kind(state.modal(), state.quitting());
+        let picker = state.shown_picker();
+        if let Some(picker) = picker {
+            let found = state.pick_found();
+            window.set_pick_view(self.pick.view(
+                picker,
+                state.pick_tree(),
+                found.as_deref(),
+                &self.places.borrow(),
+            ));
+        }
+        // The picker goes under the other dialog before that one shows, and comes on top
+        // after it is the dialog again, so that it stays one picker all along.
+        let behind = picker.is_some() && kind != DialogKind::Pick;
+        if behind {
+            window.set_pick_behind(true);
+        }
         let now = (kind, state.modal().cloned());
         if self.shown_modal.borrow().as_ref() == Some(&now) {
+            if !behind {
+                window.set_pick_behind(false);
+            }
             return;
         }
         let tz = self.tz.borrow();
@@ -764,9 +835,13 @@ impl Controller {
             Some(Modal::Preflight(question)) => {
                 window.set_preflight_view(ui_bridge::preflight_view(question));
             }
-            None => {}
+            // Set above.
+            Some(Modal::Pick(_)) | None => {}
         }
         window.set_dialog(kind);
+        if !behind {
+            window.set_pick_behind(false);
+        }
         *self.shown_modal.borrow_mut() = Some(now);
     }
 }

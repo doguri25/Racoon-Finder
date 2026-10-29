@@ -9,10 +9,10 @@ use rf_jobs::{
     JobSpec, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 
-use super::{AppState, Effect, RIGHT, ToastAction};
+use super::{AppState, Effect, ToastAction};
 use crate::dialogs::{
     Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
-    NameCheck, NameDialog, PreflightQuestion, Recovery,
+    NameCheck, NameDialog, NamePurpose, PreflightQuestion, Recovery,
 };
 use crate::jobs::{Ended, History, JobEffect, JobRow, Started};
 use crate::loader::LoadRequest;
@@ -22,8 +22,8 @@ use crate::words::{self, JobWork};
 
 impl AppState {
     /// Copies or moves the items of pane `side` (the selected rows, or the cursor's row) into
-    /// the folder `dest`, with `options`: the job the destination picker (PICK) submits once a
-    /// target is chosen. Nothing for a pane with no item to act on.
+    /// the folder `dest`, with `options`, at once: for a target already known, without the
+    /// destination picker. Nothing for a pane with no item to act on.
     pub fn transfer(
         &mut self,
         side: usize,
@@ -39,18 +39,6 @@ impl AppState {
             Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(side))],
             Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
         }
-    }
-
-    /// [`AppState::transfer`] of the active pane's items into the folder the other pane shows,
-    /// asking about every conflict: what F5 and F6 do in a debug build run with
-    /// `RF_DEBUG_DIRECT_TRANSFER=1`, until the destination picker comes.
-    pub fn transfer_to_other_pane(&mut self, mode: TransferMode) -> Vec<Effect> {
-        if self.modal.is_some() || self.quitting {
-            return Vec::new();
-        }
-        let side = self.active;
-        let dest = self.tab(RIGHT - side).location().clone();
-        self.transfer(side, mode, &dest, TransferOptions::default())
     }
 
     /// The window over the main window, if one shows.
@@ -148,16 +136,24 @@ impl AppState {
 
     /// The name window was confirmed with `text`: its job is submitted and it closes. A name
     /// that cannot be used keeps it open with its warning, and the name the item has already
-    /// closes it with nothing to do.
+    /// closes it with nothing to do. The destination picker under a window for its 새 폴더
+    /// shows again, and waits for the folder.
     pub fn name_confirmed(&mut self, text: &str) -> Vec<Effect> {
         let Some(Modal::Name(dialog)) = &mut self.modal else {
             return Vec::new();
         };
         text.clone_into(&mut dialog.text);
+        let for_picker = matches!(dialog.purpose, NamePurpose::PickFolder { .. });
         match (dialog.check(), dialog.job()) {
             (_, Ok(Some((spec, origin)))) => {
                 self.close();
-                vec![submit(spec, Some(origin))]
+                if for_picker
+                    && let JobSpec::Create { parent, name, .. } = &spec
+                    && let Some(Modal::Pick(picker)) = &mut self.modal
+                {
+                    picker.making = Some((parent.clone(), name.clone()));
+                }
+                vec![submit(spec, origin)]
             }
             (NameCheck::Unchanged, _) => {
                 self.close();
@@ -355,6 +351,7 @@ impl AppState {
         self.quitting = true;
         self.modal = None;
         self.later.clear();
+        self.drop_closed_picker();
         self.toast = None;
         vec![Effect::Quit]
     }
@@ -395,11 +392,11 @@ impl AppState {
             .filter(|tab| tab.status() == LoadStatus::Ready)
             .map(Tab::location)
             .collect();
-        let requests: Vec<LoadRequest> = folders
-            .iter()
-            .filter(|folder| !shown.contains(folder))
-            .flat_map(|folder| self.tree.relist_folder(folder))
-            .collect();
+        let mut requests: Vec<LoadRequest> = Vec::new();
+        for folder in folders.iter().filter(|folder| !shown.contains(folder)) {
+            requests.extend(self.tree.relist_folder(folder));
+            requests.extend(self.pick_tree.relist_folder(folder));
+        }
         requests.into_iter().map(Effect::LoadChildren).collect()
     }
 
@@ -412,6 +409,7 @@ impl AppState {
             ..
         } = ended;
         let mut effects = self.folders_changed(&touched_folders(&report.spec, &report.outputs));
+        effects.extend(self.pick_made(&report));
         if self.quitting || report.outcome == Outcome::Cancelled {
             return effects;
         }
@@ -560,7 +558,7 @@ impl AppState {
 
     /// Shows `modal` now, or after the windows before it have closed. Nothing opens while the
     /// app ends.
-    fn open(&mut self, modal: Modal) {
+    pub(super) fn open(&mut self, modal: Modal) {
         if self.quitting {
             return;
         }
@@ -580,24 +578,17 @@ impl AppState {
     }
 
     /// Closes the window that shows; the next one waiting shows instead.
-    fn close(&mut self) {
+    pub(super) fn close(&mut self) {
         self.modal = self.later.pop_front();
+        self.drop_closed_picker();
     }
 
     /// The items a command acts on in pane `side`: the selected rows, or the cursor's row
     /// when none is selected.
     fn targets(&self, side: usize) -> Vec<VPath> {
-        let tab = self.tab(side);
-        let mut rows = tab.selection().indices(tab.visible());
-        if rows.is_empty() {
-            rows.extend(
-                tab.selection()
-                    .cursor()
-                    .filter(|&row| row < tab.visible().len()),
-            );
-        }
-        rows.into_iter()
-            .filter_map(|row| tab.location().join(&tab.visible()[row].name).ok())
+        self.target_entries(side)
+            .into_iter()
+            .map(|(path, _)| path)
             .collect()
     }
 
@@ -675,7 +666,7 @@ impl AppState {
 }
 
 /// The effect that submits `spec`, asked for in pane `origin`.
-fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
+pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
     Effect::Job(JobEffect::Submit { spec, origin })
 }
 

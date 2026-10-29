@@ -11,16 +11,6 @@ use crate::jobs::{History, JobEffect, Started};
 use crate::resolver::{Asked, Question};
 use crate::words::JobWork;
 
-#[test]
-fn copy_and_move_keys_wait_for_the_picker() {
-    let mut state = ready(vec![file("x")], vec![]);
-    state.click_row(LEFT, 0, false, false);
-    for text in [special(Key::F5), special(Key::F6)] {
-        assert_eq!(press(&mut state, &text, NONE), None, "{text:?}");
-    }
-    assert_eq!(state.modal(), None);
-}
-
 /// The one job `effects` submit, and the pane that asked for it.
 fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
     let submits: Vec<(JobSpec, Option<usize>)> = effects

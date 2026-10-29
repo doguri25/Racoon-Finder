@@ -15,7 +15,8 @@ export enum SectionHead {
 }
 
 // One row of the tree, as Rust makes it. A place (a root) is a favorite or a drive; a drive
-// has a space line (`info`) and a bar filled to its used share (`fill`, 0..1).
+// has a space line (`info`) and a bar filled to its used share (`fill`, 0..1). A folder a
+// filter found shows the folder it is in beside its name (`info` too).
 export struct TreeRow {
     label: string,
     // 0 for a place, one more for each folder below it.
@@ -120,6 +121,7 @@ component TreeItem inherits Rectangle {
                 color: root.item.is-drive ? Theme.text : Theme.folder;
             }
             VerticalLayout {
+                horizontal-stretch: 1;
                 alignment: center;
                 spacing: 4px;
 
@@ -150,6 +152,16 @@ component TreeItem inherits Rectangle {
                     overflow: elide;
                 }
             }
+            if !root.item.is-drive && root.item.info != "": Text {
+                horizontal-stretch: 1;
+                accessible-role: none;
+                text: root.item.info;
+                font-size: Theme.font-small;
+                color: Theme.faint;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
     }
 }
@@ -157,6 +169,8 @@ component TreeItem inherits Rectangle {
 export component Sidebar inherits Rectangle {
     // The places and the folders open below them, in order.
     in property <[TreeRow]> rows;
+    // The list's name for screen readers.
+    in property <string> label: "폴더 트리";
     // A click on row `index`: show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
@@ -203,7 +217,7 @@ export component Sidebar inherits Rectangle {
         y: 8px;
         width: parent.width - 2px;
         height: parent.height - 16px;
-        accessible-label: "폴더 트리";
+        accessible-label: root.label;
         changed content-height => {
             root.bring-into-view();
         }

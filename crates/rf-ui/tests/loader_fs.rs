@@ -630,3 +630,36 @@ fn links_open_by_what_they_lead_to() {
         ]
     );
 }
+
+#[test]
+fn inspect_target_tells_folder_room_and_volume() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir(t.path().join("from")).unwrap();
+    std::fs::create_dir(t.path().join("to")).unwrap();
+    std::fs::write(t.path().join("notes.txt"), b"x").unwrap();
+    let at = |name: &str| local(&t.path().join(name));
+    let loader = loader();
+
+    // A folder beside the items' folder: on its volume, with room and writable.
+    let facts = loader.inspect_target(&at("to"), &at("from"));
+    assert_eq!(facts.folder, Ok(()));
+    assert!(facts.writable);
+    assert!(facts.available.is_some_and(|room| room > 0), "{facts:?}");
+    assert!(facts.same_volume, "{facts:?}");
+
+    // A file and nothing at all are no folders, and tell nothing more.
+    let file = loader.inspect_target(&at("notes.txt"), &at("from"));
+    assert_eq!(file.folder, Err(ErrorKind::NotADirectory));
+    assert!(!file.writable && file.available.is_none() && !file.same_volume);
+    let gone = loader.inspect_target(&at("gone"), &at("from"));
+    assert_eq!(gone.folder, Err(ErrorKind::NotFound));
+
+    // A link to a folder is the folder.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("to", t.path().join("to-link")).unwrap();
+        let linked = loader.inspect_target(&at("to-link"), &at("from"));
+        assert_eq!(linked.folder, Ok(()));
+        assert!(linked.same_volume);
+    }
+}
