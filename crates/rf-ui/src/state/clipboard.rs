@@ -583,7 +583,10 @@ impl AppState {
                 Some(effect) => effect == DropEffect::Move,
                 None => our_cut,
             };
+        // What is no local path, and what the system's reading left out already (macOS: a
+        // file URL of another computer).
         let (sources, left_out) = local_paths(&files.paths);
+        let left_out = left_out + files.skipped;
         if sources.is_empty() {
             return vec![Effect::Notice(words::nothing_to_paste().to_owned())];
         }

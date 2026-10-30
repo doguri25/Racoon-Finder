@@ -9,10 +9,12 @@
 //! The file URLs are this module's own (`file_url_of`) and are read back by its own decoding
 //! (`path_of_file_url`), byte for byte: `NSURL` hands a path back with its names decomposed
 //! (NFD; `fileURLWithPath` and `path` go through the file system representation), so a name
-//! written composed (NFC) would come back as other bytes. A URL this decoding does not take, as
-//! Finder's file reference URLs (`file:///.file/id=…`), is read through `NSURL`'s path URL, in
-//! the form the system gives: APFS finds a file whatever the form of its name, and nothing here
-//! normalizes a name another app wrote.
+//! written composed (NFC) would come back as other bytes. Only Finder's file reference URLs
+//! (`file:///.file/id=…`), whose path names no item, are read through `NSURL`'s path URL, in the
+//! form the system gives: APFS finds a file whatever the form of its name, and nothing here
+//! normalizes a name another app wrote. Any other URL the decoding refuses is left out and
+//! counted (`ClipboardFiles::skipped`, `pasted_url`): `NSURL` would read another computer's
+//! `file://server/share/a` as the local `/share/a`, and an encoded `/` as part of another name.
 //!
 //! The pasteboard does not say whether files are to be moved: Finder moves what was copied with
 //! ⌥⌘V. So the [`DropEffect`] of [`put_files`] is not kept, and [`get_files`] gives none.
@@ -30,7 +32,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSString, NSURL};
 
-use super::{ClipboardFiles, DropEffect, file_url_of, path_of_file_url};
+use super::{ClipboardFiles, DropEffect, PastedUrl, file_url_of, pasted_url};
 
 /// `public.file-url`.
 fn file_url_type() -> &'static NSPasteboardType {
@@ -101,7 +103,7 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
         // while they were read, and they may be half its and half what was there.
         for _ in 0..READ_TRIES {
             let change = board.changeCount();
-            let paths = file_paths(&board);
+            let (paths, skipped) = file_paths(&board);
             if board.changeCount() != change {
                 continue;
             }
@@ -109,6 +111,7 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
                 paths,
                 effect: None,
                 change: count(change),
+                skipped,
             }));
         }
         Err(io::Error::new(
@@ -118,32 +121,44 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     })
 }
 
-/// The paths of the file URLs of the pasteboard's items.
-fn file_paths(board: &NSPasteboard) -> Vec<PathBuf> {
+/// The paths of the file URLs of the pasteboard's items, and how many of those URLs name no
+/// path that can be read safely (`PastedUrl::Skipped`, and a file reference URL whose item the
+/// system does not find).
+fn file_paths(board: &NSPasteboard) -> (Vec<PathBuf>, usize) {
     let items = board
         .pasteboardItems()
         .map(|items| items.to_vec())
         .unwrap_or_default();
-    items
-        .iter()
-        .filter_map(|item| {
-            let text = item.stringForType(file_url_type())?;
-            // A path URL as it was written, byte for byte; not a file reference URL, whose
-            // path names no item.
-            if let Some(bytes) = path_of_file_url(&text.to_string())
-                .filter(|bytes| !bytes.starts_with(b"/.file/id="))
-            {
-                return Some(PathBuf::from(OsString::from_vec(bytes)));
-            }
+    let mut paths = Vec::with_capacity(items.len());
+    let mut skipped = 0;
+    for item in &items {
+        let Some(text) = item.stringForType(file_url_type()) else {
+            continue;
+        };
+        let path = match pasted_url(&text.to_string()) {
+            // A path URL as it was written, byte for byte.
+            PastedUrl::Path(bytes) => Some(PathBuf::from(OsString::from_vec(bytes))),
             // A file reference URL (Finder's) becomes the path URL of its item.
-            let url = NSURL::URLWithString(&text)?;
-            let url = url.filePathURL()?;
-            url.isFileURL()
-                .then(|| url.path())
-                .flatten()
-                .map(|path| PathBuf::from(path.to_string()))
-        })
-        .collect()
+            PastedUrl::Reference => reference_path(&text),
+            PastedUrl::Skipped => None,
+        };
+        match path {
+            Some(path) => paths.push(path),
+            None => skipped += 1,
+        }
+    }
+    (paths, skipped)
+}
+
+/// The path of the item the file reference URL `text` refers to; `None` when the system does
+/// not find it.
+fn reference_path(text: &NSString) -> Option<PathBuf> {
+    let url = NSURL::URLWithString(text)?;
+    let url = url.filePathURL()?;
+    url.isFileURL()
+        .then(|| url.path())
+        .flatten()
+        .map(|path| PathBuf::from(path.to_string()))
 }
 
 pub fn put_text(text: &str) -> io::Result<u64> {

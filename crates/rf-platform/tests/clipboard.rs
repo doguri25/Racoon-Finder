@@ -60,7 +60,8 @@ fn files_put_on_the_clipboard_read_back_with_their_count() {
         ClipboardFiles {
             paths: paths.clone(),
             effect,
-            change
+            change,
+            skipped: 0,
         }
     );
     // A copy in their place: the count moves on.

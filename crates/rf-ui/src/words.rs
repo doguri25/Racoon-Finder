@@ -970,7 +970,7 @@ pub fn clipboard_not_emptied() -> &'static str {
 }
 
 /// A paste that left out `count` paths of the clipboard, which name no folder or file it can
-/// take (a device or a volume of Windows).
+/// take (a device or a volume of Windows, a file URL of another computer on macOS).
 pub fn paste_left_out(count: usize) -> String {
     format!("클립보드의 항목 {count}개는 붙여넣을 수 없는 경로라 건너뛰었습니다")
 }

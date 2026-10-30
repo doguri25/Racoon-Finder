@@ -253,6 +253,7 @@ mod tests {
                 paths: paths.to_vec(),
                 effect: Some(effect),
                 change,
+                skipped: 0,
             });
             *self.text.lock().expect("the lock") = None;
             Ok(change)
@@ -326,6 +327,7 @@ mod tests {
             paths: paths.iter().map(local).collect(),
             effect: Some(DropEffect::Move),
             change: 1,
+            skipped: 0,
         };
         assert_eq!(
             read,

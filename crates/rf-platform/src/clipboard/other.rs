@@ -50,6 +50,7 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
         paths: paths.clone(),
         effect: Some(*effect),
         change: store.change,
+        skipped: 0,
     }))
 }
 

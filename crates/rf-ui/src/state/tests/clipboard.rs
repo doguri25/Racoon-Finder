@@ -102,6 +102,7 @@ fn files(paths: &[VPath], effect: Option<DropEffect>, change: u64) -> ClipboardF
         paths: paths.iter().map(local).collect(),
         effect,
         change,
+        skipped: 0,
     }
 }
 
@@ -489,6 +490,7 @@ fn nothing_to_paste_and_a_clipboard_that_cannot_be_read_say_so() {
         paths: vec![PathBuf::from("relative.txt")],
         effect: Some(DropEffect::Copy),
         change: 2,
+        skipped: 0,
     };
     assert_eq!(
         state.clipboard_read(token, Ok(Some(relative))),
@@ -774,6 +776,7 @@ fn a_device_path_on_the_clipboard_is_left_out_and_told() {
         paths: vec![shadow.clone(), local(&in_b("z.txt"))],
         effect: Some(DropEffect::Copy),
         change: 90,
+        skipped: 0,
     };
     let effects = state.clipboard_read(read, Ok(Some(found)));
     assert_eq!(
@@ -784,12 +787,46 @@ fn a_device_path_on_the_clipboard_is_left_out_and_told() {
     // Nothing but such paths: nothing to paste.
     let read = paste(&mut state, LEFT);
     let only = ClipboardFiles {
-        paths: vec![shadow],
+        paths: vec![shadow.clone()],
         effect: Some(DropEffect::Copy),
         change: 91,
+        skipped: 0,
     };
     assert_eq!(
         state.clipboard_read(read, Ok(Some(only))),
+        [Effect::Notice(words::nothing_to_paste().to_owned())]
+    );
+}
+
+#[test]
+fn file_urls_the_system_left_out_are_told_with_the_paths_left_out() {
+    // macOS: two file URLs that name no path of this computer (another computer's, an encoded
+    // `/`), which the system's reading left out, and a device path that is no local one.
+    let mut state = two_panes();
+    let read = paste(&mut state, LEFT);
+    let shadow = PathBuf::from(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\a.txt");
+    let found = ClipboardFiles {
+        paths: vec![local(&in_b("z.txt")), shadow],
+        effect: None,
+        change: 92,
+        skipped: 2,
+    };
+    let effects = state.clipboard_read(read, Ok(Some(found)));
+    assert_eq!(
+        the_submit(&effects).0,
+        transfer(TransferMode::Copy, &[(in_b("z.txt"), in_a("z.txt"))])
+    );
+    assert!(effects.contains(&Effect::Notice(words::paste_left_out(3))));
+    // The left-out URLs alone, with no path: nothing to paste.
+    let read = paste(&mut state, LEFT);
+    let none = ClipboardFiles {
+        paths: Vec::new(),
+        effect: None,
+        change: 93,
+        skipped: 2,
+    };
+    assert_eq!(
+        state.clipboard_read(read, Ok(Some(none))),
         [Effect::Notice(words::nothing_to_paste().to_owned())]
     );
 }

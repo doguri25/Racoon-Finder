@@ -258,6 +258,7 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
         paths,
         effect: Some(effect),
         change,
+        skipped: 0,
     }))
 }
 

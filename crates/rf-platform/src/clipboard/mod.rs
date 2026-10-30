@@ -10,6 +10,8 @@
 //!   first one with the paths as text too (`public.utf8-plain-text`, one a line). The URLs are
 //!   written and read by this module's own percent-encoding, byte for byte, so a name keeps its
 //!   Unicode form (NFC or NFD) through the pasteboard; `NSURL` would hand it back decomposed.
+//!   Only Finder's file reference URLs (`file:///.file/id=…`) are read through `NSURL`; another
+//!   URL that is no path of this computer is left out and counted ([`ClipboardFiles::skipped`]).
 //!   The pasteboard has no way to say "move": Finder moves what was copied with ⌥⌘V, and a cut
 //!   is the app's own mark. So [`get_files`] gives no [`DropEffect`] there.
 //! - **Elsewhere** (Linux, which is for development): the files stay in this process, where
@@ -68,6 +70,11 @@ pub struct ClipboardFiles {
     pub effect: Option<DropEffect>,
     /// The clipboard's change count when they were read.
     pub change: u64,
+    /// How many of the clipboard's files are left out of `paths` as no path that can be read
+    /// safely: on macOS a file URL of another computer (`file://server/share/a`), one with an
+    /// encoded `/`, or a file reference URL whose item is gone; 0 elsewhere. A paste goes on
+    /// with `paths` and says how many it left out.
+    pub skipped: usize,
 }
 
 /// Puts `paths` on the clipboard in the place of what it held, to be copied or moved
@@ -85,7 +92,8 @@ pub fn put_files(paths: &[PathBuf], effect: DropEffect) -> io::Result<u64> {
     imp::put_files(paths, effect)
 }
 
-/// The files on the clipboard; `None` when it holds none (text, an image, nothing).
+/// The files on the clipboard; `None` when it holds none (text, an image, nothing), or when
+/// none of them can be read ([`ClipboardFiles::skipped`]).
 pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     imp::get_files()
 }
@@ -389,24 +397,34 @@ fn file_url_of(path: &[u8]) -> String {
 }
 
 /// The bytes of the absolute path that the `file:` URL `url` names on this computer (no
-/// computer, or `localhost`), each `%XX` turned back into its byte and nothing normalized:
-/// a name comes back in the Unicode form it was written in. `None` for anything else, which
-/// the system's own reading is left to: another computer, a query or a fragment, a `%` not
-/// followed by two hexadecimal digits, an encoded `/` or NUL (which would change the names),
-/// and a path that is not absolute.
+/// authority, `file:/a`; an empty one, `file:///a`; or `localhost`), each `%XX` turned back into
+/// its byte and nothing normalized: a name comes back in the Unicode form it was written in.
+/// `None` for anything else: another computer, a query or a fragment, a `%` not followed by two
+/// hexadecimal digits, an encoded `/` or NUL (which would change the names), and a path that is
+/// not absolute.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
 )]
 fn path_of_file_url(url: &str) -> Option<Vec<u8>> {
-    let scheme = url.get(..7)?;
-    if !scheme.eq_ignore_ascii_case("file://") {
+    let scheme = url.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("file:") {
         return None;
     }
-    let rest = &url[7..];
-    let at = rest.find('/')?;
-    let (host, path) = rest.split_at(at);
-    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) || path.contains(['?', '#']) {
+    let rest = &url[5..];
+    let path = match rest.strip_prefix("//") {
+        Some(rest) => {
+            let (host, path) = rest.split_at(rest.find('/')?);
+            if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+                return None;
+            }
+            path
+        }
+        // `file:/a`: a path with no authority at all (RFC 8089).
+        None if rest.starts_with('/') => rest,
+        None => return None,
+    };
+    if path.contains(['?', '#']) {
         return None;
     }
     let bytes = path.as_bytes();
@@ -431,6 +449,40 @@ fn path_of_file_url(url: &str) -> Option<Vec<u8>> {
         }
     }
     Some(decoded)
+}
+
+/// What a paste makes of a file URL on the macOS pasteboard ([`pasted_url`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+enum PastedUrl {
+    /// A path URL of this computer: the path's bytes, decoded byte for byte
+    /// ([`path_of_file_url`]).
+    Path(Vec<u8>),
+    /// Finder's file reference URL (`file:///.file/id=…`), whose path names no item: the system
+    /// finds the item it refers to.
+    Reference,
+    /// A URL that names no path of this computer that can be read safely: another computer's
+    /// (`file://server/share/a`, which `NSURL` would take for the local `/share/a`), one with an
+    /// encoded `/` or NUL, a query or a fragment, or no file URL at all. The paste leaves it out
+    /// and says how many it left out ([`ClipboardFiles::skipped`]).
+    Skipped,
+}
+
+/// What a paste makes of the file URL `url` of a pasteboard item: only Finder's file reference
+/// URLs go to the system's reading, which turns them into the path of their item.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn pasted_url(url: &str) -> PastedUrl {
+    match path_of_file_url(url) {
+        Some(path) if path.starts_with(b"/.file/id=") => PastedUrl::Reference,
+        Some(path) => PastedUrl::Path(path),
+        None => PastedUrl::Skipped,
+    }
 }
 
 /// The value of the hexadecimal digit `byte` (`0`–`9`, `a`–`f`, `A`–`F`); `None` for any other
@@ -599,6 +651,13 @@ mod tests {
         let finder = format!("file://localhost{}", &file_url_of(NFD.as_bytes())[7..]);
         assert_eq!(path_of_file_url(&finder).as_deref(), Some(NFD.as_bytes()));
         assert_eq!(path_of_file_url("FILE:///a").as_deref(), Some(&b"/a"[..]));
+        // A path with no authority at all is one of this computer too (RFC 8089).
+        assert_eq!(path_of_file_url("file:/a").as_deref(), Some(&b"/a"[..]));
+        assert_eq!(
+            path_of_file_url("file:/a%20b/c").as_deref(),
+            Some(&b"/a b/c"[..])
+        );
+        assert_eq!(path_of_file_url("file:/").as_deref(), Some(&b"/"[..]));
         for url in [
             "file://server/share/a",
             "file:///a?b",
@@ -612,11 +671,56 @@ mod tests {
             "file:///a%-1b",
             "file:///a%4",
             "file:a",
-            "file:/a",
+            "file:/a?b",
+            "file:/a%2Fb",
+            "file:",
             "http://example.com/a",
             "file://",
         ] {
             assert_eq!(path_of_file_url(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn only_finder_s_reference_urls_go_to_the_system_and_the_rest_is_skipped() {
+        // This module's own URLs, and any other path URL of this computer, are read as they are.
+        assert_eq!(
+            pasted_url(&file_url_of(NFD.as_bytes())),
+            PastedUrl::Path(NFD.as_bytes().to_vec())
+        );
+        assert_eq!(
+            pasted_url("file://localhost/Users/me/a.txt"),
+            PastedUrl::Path(b"/Users/me/a.txt".to_vec())
+        );
+        assert_eq!(pasted_url("file:/a"), PastedUrl::Path(b"/a".to_vec()));
+        // A folder that only looks like the place of reference URLs is a path.
+        assert_eq!(
+            pasted_url("file:///.file/notes.txt"),
+            PastedUrl::Path(b"/.file/notes.txt".to_vec())
+        );
+        // Finder's file reference URLs, whose path names no item, go to the system.
+        for url in [
+            "file:///.file/id=6571367.2773272/",
+            "file://localhost/.file/id=6571367.2773272",
+            "file:///%2Efile/id=6571367.2773272",
+        ] {
+            assert_eq!(pasted_url(url), PastedUrl::Reference, "{url}");
+        }
+        // Nothing else does: the system would read another computer's URL as a local path
+        // (`/share/a`), and an encoded `/` as another name.
+        for url in [
+            "file://server/share/a",
+            "file://server/.file/id=6571367.2773272",
+            "file:///a%2Fb",
+            "file:///a%00b",
+            "file:///a%+Fb",
+            "file:///a?b",
+            "file:///a#b",
+            "file:a",
+            "http://example.com/a",
+            "",
+        ] {
+            assert_eq!(pasted_url(url), PastedUrl::Skipped, "{url}");
         }
     }
 
