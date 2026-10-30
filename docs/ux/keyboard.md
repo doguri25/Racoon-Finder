@@ -575,8 +575,8 @@ F6 두 번) 작업 패널이 키를 받고, 첫 줄의 첫 버튼에 키가 놓�
 - 경로 입력, 거르기 칸, 이름 입력과 대화상자의 입력란이 키를 가진 동안 Ctrl+C·X·V(macOS ⌘C·⌘V)는 그 입력란의
   글자를 복사·잘라내기·붙여넣기한다. 한글을 조합하는 동안에도 파일을 붙여넣지 않는다.
 - **손으로 확인할 것(Windows 11·macOS 15, 데모 QA).** 실제 클립보드 왕복 테스트는 CI의 Windows·macOS 작업에서
-  정보용으로 돈다(`cargo test -p rf-platform --test clipboard --locked -- --ignored --test-threads=1`). 앱과 탐색기·Finder
-  사이는 손으로 확인한다:
+  돌고, 실패하면 CI가 실패한다(`cargo test -p rf-platform --test clipboard --locked -- --ignored --test-threads=1`).
+  앱과 탐색기·Finder 사이는 손으로 확인한다:
   1. 탐색기에서 파일을 Ctrl+C, 앱에서 Ctrl+V: 복사되고 원본은 그대로다(탐색기의 복사는 DROPEFFECT 5).
   2. 탐색기에서 Ctrl+X, 앱에서 Ctrl+V: 옮겨진다. 그 뒤 클립보드가 비었는지(탐색기에서 Ctrl+V가 아무 일도 하지
      않는지) 적는다.
