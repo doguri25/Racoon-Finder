@@ -452,7 +452,8 @@ impl Tab {
     }
 
     /// Shows only the rows whose names hold `text`, ignoring case, and on macOS the Unicode form
-    /// ([`search_key`]), or every row for an empty one. The selection keeps the rows that still show.
+    /// ([`search_key`]), or every row for an empty one. The selection keeps the rows that still
+    /// show.
     pub fn set_name_filter(&mut self, text: &str) {
         if self.name_filter != text {
             text.clone_into(&mut self.name_filter);
@@ -685,11 +686,10 @@ impl Tab {
         }
     }
 
-    /// Moves the cursor to the first row whose name starts with what was typed, ignoring
-    /// case, and on macOS the Unicode form ([`search_key`]), and selects that row alone
-    /// (NAV-14). Keys typed within
-    /// [`TYPE_TO_SELECT_WINDOW`] of the last one add to the prefix; after a pause `text`
-    /// starts a new one, and a prefix of spaces alone does nothing. Returns the row moved
+    /// Moves the cursor to the first row whose name starts with what was typed, ignoring case,
+    /// and on macOS the Unicode form ([`search_key`]), and selects that row alone (NAV-14). Keys
+    /// typed within [`TYPE_TO_SELECT_WINDOW`] of the last one add to the prefix; after a pause
+    /// `text` starts a new one, and a prefix of spaces alone does nothing. Returns the row moved
     /// to, or `None` (and the selection stays) when no name matches. The user chooses here: a
     /// name that a job or [`Tab::go_up`] waits to select is forgotten, as for
     /// [`Tab::selection_mut`].

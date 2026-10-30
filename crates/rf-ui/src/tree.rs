@@ -431,10 +431,10 @@ impl Tree {
 
     /// The folders listed so far whose names hold `query` (its spaces at the ends left out),
     /// ignoring letter case, and on macOS the Unicode form ([`search_key`]): what a filter of the
-    /// tree shows, flat. They come in the order of
-    /// the tree, below closed nodes too, and each folder once, at the first node that has it.
-    /// A folder out of sight (hidden while hidden folders do not show, or below such a one)
-    /// is left out, and so is one never listed. An empty `query` finds nothing.
+    /// tree shows, flat. They come in the order of the tree, below closed nodes too, and each
+    /// folder once, at the first node that has it. A folder out of sight (hidden while hidden
+    /// folders do not show, or below such a one) is left out, and so is one never listed. An
+    /// empty `query` finds nothing.
     pub fn find(&self, query: &str) -> Vec<NodeId> {
         let query = search_key(OsStr::new(query.trim()), Os::CURRENT);
         if query.is_empty() {

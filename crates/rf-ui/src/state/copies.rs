@@ -233,9 +233,9 @@ impl AppState {
     /// Takes the end of the job that gave `report` when it is a delete of copies the user
     /// confirmed: with every copy gone, the copy's record leaves the history (the window has
     /// undone it) and a toast says so, counting the copies it deleted (not those that were gone
-    /// already). `None` for any other job; for one that did not delete
-    /// them all (a copy or an original changed after the offer: the job kept that copy), the
-    /// usual notice tells why, and the record stays to be undone again.
+    /// already). `None` for any other job; for one that did not delete them all (a copy or an
+    /// original changed after the offer: the job kept that copy), the usual notice tells why,
+    /// and the record stays to be undone again.
     pub(super) fn copies_deleted(&mut self, report: &JobReport) -> Option<Vec<Effect>> {
         let index = self
             .copies

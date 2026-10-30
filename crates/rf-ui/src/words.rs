@@ -502,8 +502,10 @@ pub fn failure_reason(reason: &FailureReason) -> String {
         FailureReason::CopyKept(found) => {
             copy_kept(CopyKept::of(*found).unwrap_or(CopyKept::CopyUnknown))
         }
+        // As the engine's message says, it may have been: a change of the folder by anyone looks
+        // the same.
         FailureReason::CopyPartlyDeleted => {
-            "복사본의 일부를 이미 지워 나머지는 안전하게 비교할 수 없어 남겨 두었습니다"
+            "복사본의 일부를 이미 지웠을 수 있어 나머지는 안전하게 비교할 수 없으므로 남겨 두었습니다"
         }
         FailureReason::ChangedSinceCreated => "만든 뒤 다른 종류로 바뀌어 되돌리지 않았습니다",
         FailureReason::NotEmpty => "만든 뒤 내용이 생겨 되돌리지 않았습니다",
@@ -2235,6 +2237,11 @@ mod tests {
         assert_eq!(
             kept(Compared::Changed, Compared::Unknown),
             "복사본이 바뀌어 지우지 않았습니다"
+        );
+        // The engine cannot tell its own delete from another change: it may have been one.
+        assert_eq!(
+            failure_reason(&FailureReason::CopyPartlyDeleted),
+            "복사본의 일부를 이미 지웠을 수 있어 나머지는 안전하게 비교할 수 없으므로 남겨 두었습니다"
         );
 
         let mut seen = HashSet::new();
