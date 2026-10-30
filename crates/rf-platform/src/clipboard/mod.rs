@@ -414,8 +414,12 @@ fn path_of_file_url(url: &str) -> Option<Vec<u8>> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            let byte = u8::from_str_radix(hex, 16).ok()?;
+            // Each of the two must be a hexadecimal digit: `u8::from_str_radix` would take a
+            // sign too (`%+F`).
+            let &[high, low] = bytes.get(i + 1..i + 3)? else {
+                return None;
+            };
+            let byte = (hex_digit(high)? << 4) | hex_digit(low)?;
             if byte == b'/' || byte == 0 {
                 return None;
             }
@@ -427,6 +431,14 @@ fn path_of_file_url(url: &str) -> Option<Vec<u8>> {
         }
     }
     Some(decoded)
+}
+
+/// The value of the hexadecimal digit `byte` (`0`–`9`, `a`–`f`, `A`–`F`); `None` for any other
+/// byte.
+fn hex_digit(byte: u8) -> Option<u8> {
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 #[cfg(test)]
@@ -595,6 +607,9 @@ mod tests {
             "file:///a%2fb",
             "file:///a%00b",
             "file:///a%zz",
+            // Two hexadecimal digits, no sign: `%+F` is no byte 0x0F.
+            "file:///a%+Fb",
+            "file:///a%-1b",
             "file:///a%4",
             "file:a",
             "file:/a",
