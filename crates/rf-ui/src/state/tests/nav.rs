@@ -67,13 +67,9 @@ fn the_filter_box_and_the_view_menu_take_the_keys() {
 #[test]
 fn keys_of_commands_still_to_come_go_on_to_the_system() {
     let mut state = ready(vec![file("x")], vec![file("z")]);
-    for (text, mods) in [
-        ("c".to_owned(), CTRL),
-        ("v".to_owned(), CTRL),
-        ("x".to_owned(), CTRL),
-        (special(Key::Return), ALT),
-        (special(Key::F10), SHIFT),
-    ] {
+    // The properties (Task 9) and the item menu's key (Task 10); the clipboard's keys are the
+    // window's (`tests::clipboard`).
+    for (text, mods) in [(special(Key::Return), ALT), (special(Key::F10), SHIFT)] {
         assert_eq!(press(&mut state, &text, mods), None, "{text:?} {mods:?}");
     }
     // Nothing changed meanwhile.

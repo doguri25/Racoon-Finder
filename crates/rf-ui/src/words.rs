@@ -18,7 +18,7 @@ use rf_platform::KnownFolder;
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
-use crate::state::Column;
+use crate::state::{ClipboardFailure, Column};
 
 /// How many characters a path takes at most in a row of a recovered job, beside its buttons:
 /// the middle of a longer one is left out ([`short_path`]), so that the end of the path stays
@@ -743,6 +743,37 @@ fn detail(spec: &JobSpec, folder: impl Fn(&VPath) -> String) -> String {
 /// cannot take): `복사하거나 옮길 수 없습니다: 쓸 수 없는 이름이나 경로입니다`.
 pub fn cannot_transfer(kind: ErrorKind) -> String {
     format!("복사하거나 옮길 수 없습니다: {}", error_kind(kind))
+}
+
+/// Why the clipboard did not take or give what was asked: the system has no clipboard for it
+/// (text on Linux), or another app held it or the system refused.
+pub fn clipboard_failed(failure: ClipboardFailure) -> &'static str {
+    match failure {
+        ClipboardFailure::Unsupported => "이 시스템에서는 클립보드에 글자를 넣을 수 없습니다",
+        ClipboardFailure::Unavailable => {
+            "클립보드를 쓸 수 없습니다. 다른 앱이 쓰고 있다면 잠시 뒤에 다시 해 보세요"
+        }
+    }
+}
+
+/// A paste with no files or folders on the clipboard (text, an image, nothing).
+pub fn nothing_to_paste() -> &'static str {
+    "클립보드에 붙여넣을 파일이나 폴더가 없습니다"
+}
+
+/// A paste of a folder into itself or into a folder inside it.
+pub fn paste_into_itself() -> &'static str {
+    "폴더를 그 폴더 안에 붙여넣을 수 없습니다"
+}
+
+/// A paste of items cut, into the folder they are in already: nothing moves.
+pub fn paste_already_here() -> &'static str {
+    "잘라낸 항목이 이미 이 폴더에 있습니다"
+}
+
+/// The same cut pasted again while its first paste still moves the items.
+pub fn paste_moving() -> &'static str {
+    "잘라낸 항목을 옮기는 중입니다"
 }
 
 /// `항목 3개`.

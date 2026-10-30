@@ -9,8 +9,9 @@
 //! ([`AppState::drag`]), the address bar's lists (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
-//! tools, listing a folder again and the extensions shown or not (module `select`), and the
-//! item the preview panel and quick look show (module `preview`). Its methods
+//! tools, listing a folder again and the extensions shown or not (module `select`), the
+//! item the preview panel and quick look show (module `preview`), and what it put on the
+//! system's clipboard and pastes from there (module `clipboard`). Its methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -25,7 +26,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use rf_core::{ErrorKind, VPath};
+use rf_core::{ErrorKind, Os, VPath};
 use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
@@ -42,6 +43,7 @@ use crate::tree::{NodeId, Tree};
 use crate::words;
 
 mod address;
+mod clipboard;
 mod copies;
 mod drag;
 mod jobs;
@@ -57,6 +59,7 @@ pub use address::{
     Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
     is_remote_url, read_file_url, read_typed, split_last,
 };
+pub use clipboard::{ClipboardFailure, ClipboardWork, PathForm, file_url, path_text};
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
@@ -190,6 +193,9 @@ pub enum Effect {
         copies: Vec<(CreatedItem, VPath)>,
         at: Option<SystemTime>,
     },
+    /// Ask the clipboard's worker for something; it carries out one request at a time, in the
+    /// order they come, and hands the answer to the method the request names.
+    Clipboard(ClipboardWork),
     /// Show a toast with the message `text` and the button `action`, whose click comes back
     /// to [`AppState::toast_clicked`] with `token`.
     Toast {
@@ -289,6 +295,8 @@ pub struct AppState {
     pattern: select::PatternWork,
     /// What the preview panel and quick look show (module `preview`).
     preview: preview::PreviewWork,
+    /// What the window put on the clipboard and the pastes on their way (module `clipboard`).
+    clipboard: clipboard::ClipWork,
 }
 
 impl AppState {
@@ -376,6 +384,7 @@ impl AppState {
             views: ViewStore::default(),
             pattern: select::PatternWork::default(),
             preview: preview::PreviewWork::default(),
+            clipboard: clipboard::ClipWork::default(),
         };
         (state, effects)
     }
@@ -523,6 +532,13 @@ impl AppState {
             Command::CursorEnd => self.step_cursor(side, KeyMove::End, pick, paging),
             Command::PageUp => self.step_cursor(side, KeyMove::PageUp, pick, paging),
             Command::PageDown => self.step_cursor(side, KeyMove::PageDown, pick, paging),
+            // Esc with nothing selected cancels a cut, as File Explorer's does (and leaves the
+            // cursor's row unchosen, as any Esc).
+            Command::ClearSelection if self.tab(side).selection().is_empty() => {
+                let effects = self.cancel_cut().unwrap_or_default();
+                self.select(side, &command);
+                effects
+            }
             Command::ToggleSelect
             | Command::SelectAll
             | Command::ClearSelection
@@ -567,13 +583,12 @@ impl AppState {
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
             Command::FitColumns => self.fit_columns(side),
             Command::QuickLook => self.toggle_quick_look(side),
-            Command::Copy
-            | Command::Cut
-            | Command::Paste
-            | Command::PasteMove
-            | Command::CopyPath
-            | Command::Properties
-            | Command::ContextMenu => return None,
+            Command::Copy => self.put_on_clipboard(side, false),
+            Command::Cut => self.put_on_clipboard(side, true),
+            Command::Paste => self.paste(side, false),
+            Command::PasteMove => self.paste(side, true),
+            Command::CopyPath => self.copy_paths(side, PathForm::of_key(Os::CURRENT)),
+            Command::Properties | Command::ContextMenu => return None,
         };
         Some(effects)
     }

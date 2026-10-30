@@ -35,6 +35,16 @@ export struct FileRow {
     is-link: bool,
     selected: bool,
     hidden: bool,
+    // Cut to the clipboard (Ctrl+X), until it is pasted, the cut is cancelled or the clipboard
+    // holds something else: it shows dimmed (DND-10).
+    cut: bool,
+}
+
+// What a screen reader hears of an item besides its name: that it was cut.
+export global RowWords {
+    public pure function description(row: FileRow) -> string {
+        return row.cut ? "잘라낸 항목" : "";
+    }
 }
 
 
@@ -236,6 +246,7 @@ export component FileList inherits Rectangle {
                             accessible-item-index: i;
                             accessible-item-selectable: true;
                             accessible-item-selected: row.selected;
+                            accessible-description: RowWords.description(row);
                             accessible-action-default => {
                                 root.row-activated(i);
                             }
@@ -277,12 +288,12 @@ export component FileList inherits Rectangle {
                                 }
                             }
 
-                            // Hidden items show at half strength. Its least width is the
-                            // row's (a ListView's content is as wide as its rows' least width,
-                            // which a row takes from such a child).
+                            // Hidden items show at half strength, cut ones fainter still. Its
+                            // least width is the row's (a ListView's content is as wide as its
+                            // rows' least width, which a row takes from such a child).
                             Rectangle {
                                 min-width: head.content-width;
-                                opacity: row.hidden ? 0.5 : 1;
+                                opacity: row.cut ? 0.4 : row.hidden ? 0.5 : 1;
 
                                 Icon {
                                     x: head.pad;

@@ -427,6 +427,8 @@ impl AppState {
         } = ended;
         let touched = touched_folders(&report.spec, &report.outputs);
         let mut effects = self.folders_changed(&touched);
+        // A move a paste submitted empties the clipboard once it has moved everything.
+        effects.extend(self.paste_ended(&report));
         effects.extend(self.pick_made(&report));
         // Whatever it did, a cancelled job too, it may have changed the room left.
         if !self.quitting {
@@ -653,7 +655,7 @@ impl AppState {
 
     /// The items a command acts on in pane `side`: the selected rows, or the cursor's row
     /// when none is selected and the user put the cursor there ([`AppState::target_entries`]).
-    fn targets(&self, side: usize) -> Vec<VPath> {
+    pub(super) fn targets(&self, side: usize) -> Vec<VPath> {
         self.target_entries(side)
             .into_iter()
             .map(|(path, _)| path)

@@ -244,7 +244,7 @@ fn delete_checks_for_a_trash_and_never_deletes_for_good_unasked() {
 
 /// Ends the job `id` that `spec` describes and the state followed as `work`, with the
 /// report `edit` makes, and gives what the state asks for.
-fn finish(
+pub(super) fn finish(
     state: &mut AppState,
     id: u64,
     spec: &JobSpec,

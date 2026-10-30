@@ -4,13 +4,17 @@
 // the place it scrolled to after a long jump.
 
 import { Theme } from "theme.slint";
-import { Shortcuts } from "shortcuts.slint";
+import { Shortcuts, PathForms } from "shortcuts.slint";
 
-// The menu of an item: move and copy first (OPS-05), each command with its key (KEY-03). It wraps
-// what is right-clicked; the press selects the item first, then calls `show`.
+// The menu of an item: move and copy first (OPS-05), then the clipboard, each command with its
+// key (KEY-03). It wraps what is right-clicked; the press selects the item first, then calls
+// `show`. The clipboard's items are the system's: 잘라내기 where File Explorer has it (not on
+// macOS), 여기로 이동 where Finder has it (macOS only); 붙여넣기 and 여기로 이동 paste into the
+// item when it is a folder, as File Explorer does, and else into the pane's folder.
 export component RowMenu inherits ContextMenuArea {
-    // An item of the menu: the name of the toolbar command it runs (move, copy, open,
-    // quick-look, rename, delete, delete-permanently).
+    // An item of the menu: the name of the window's command it runs (move, copy, cut,
+    // copy-files, paste-into, paste-move-into, copy-path-<form>, open, quick-look, rename,
+    // delete, delete-permanently).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -28,6 +32,41 @@ export component RowMenu inherits ContextMenuArea {
             title: Shortcuts.titled("복사…", Shortcuts.copy-to);
             activated => {
                 root.command("copy");
+            }
+        }
+        MenuSeparator { }
+        if Shortcuts.cut != "": MenuItem {
+            title: Shortcuts.titled("잘라내기", Shortcuts.cut);
+            activated => {
+                root.command("cut");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("복사", Shortcuts.copy);
+            activated => {
+                root.command("copy-files");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            activated => {
+                root.command("paste-into");
+            }
+        }
+        if Shortcuts.paste-move != "": MenuItem {
+            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            activated => {
+                root.command("paste-move-into");
+            }
+        }
+        Menu {
+            title: "경로 복사";
+
+            for form[i] in PathForms.titles: MenuItem {
+                title: PathForms.title(i);
+                activated => {
+                    root.command("copy-path-\{i}");
+                }
             }
         }
         MenuSeparator { }
@@ -65,10 +104,12 @@ export component RowMenu inherits ContextMenuArea {
     }
 }
 
-// The menu of the part of a list without items: a new folder there, and the folder listed again
-// (NAV-13), each with its key (KEY-03). It wraps that part of the list.
+// The menu of the part of a list without items: a new folder there, a paste into the folder,
+// and the folder listed again (NAV-13), each with its key (KEY-03). It wraps that part of the
+// list.
 export component BlankMenu inherits ContextMenuArea {
-    // An item of the menu: the name of the window's command it runs (new-folder, refresh).
+    // An item of the menu: the name of the window's command it runs (new-folder, paste,
+    // paste-move, refresh).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -79,6 +120,19 @@ export component BlankMenu inherits ContextMenuArea {
             title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
             activated => {
                 root.command("new-folder");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            activated => {
+                root.command("paste");
+            }
+        }
+        if Shortcuts.paste-move != "": MenuItem {
+            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            activated => {
+                root.command("paste-move");
             }
         }
         MenuSeparator { }

@@ -4779,3 +4779,152 @@ fn quick_look_takes_every_key_while_it_shows() {
     chord(&window, &[&down]);
     assert_eq!(keys.borrow().as_slice(), [down]);
 }
+
+#[test]
+fn the_menus_have_the_clipboard_with_the_keys_of_the_system() {
+    use slint::platform::PointerEventButton;
+    let (window, _calls, _models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let row_menu = || {
+        labelled(&window, "x.txt", AccessibleRole::ListItem)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    let blank_menu = || {
+        labelled(&window, "항목 목록", AccessibleRole::List)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    let view_menu = || {
+        labelled(&window, "보기", AccessibleRole::Button)
+            .remove(0)
+            .invoke_accessible_default_action();
+    };
+    let shows = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .is_some()
+    };
+
+    // File Explorer's: cut, copy, paste, and its 경로로 복사 in quotes.
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    for (item, command) in [
+        ("잘라내기  (Ctrl+X)", "cut"),
+        ("복사  (Ctrl+C)", "copy-files"),
+        ("붙여넣기  (Ctrl+V)", "paste-into"),
+    ] {
+        row_menu();
+        choose_item(&window, item);
+        assert_eq!(commands.take(), [command], "{item}");
+    }
+    row_menu();
+    assert!(!shows("여기로 이동"), "Finder's move alone");
+    choose_item(&window, "경로 복사");
+    for title in ["전체 경로", "이름만", "UNC 경로", "슬래시 형식", "파일 URL"] {
+        assert!(shows(title), "{title}");
+    }
+    choose_item(&window, "따옴표 포함  (Ctrl+Shift+C)");
+    assert_eq!(commands.take(), ["copy-path-2"]);
+    // The part without items pastes into the pane's folder.
+    blank_menu();
+    choose_item(&window, "붙여넣기  (Ctrl+V)");
+    assert_eq!(commands.take(), ["paste"]);
+    // The 보기 menu has 경로 복사 too, for the keyboard (F10).
+    view_menu();
+    choose_item(&window, "경로 복사");
+    choose_item(&window, "파일 URL");
+    assert_eq!(commands.take(), ["copy-path-5"]);
+
+    // Finder's: no cut of files, ⌥⌘V moves here, and its 경로 이름 복사 as it is.
+    ui_bridge::show_shortcuts(&window, Os::MacOs);
+    row_menu();
+    assert!(!shows("잘라내기"), "Finder cuts no files");
+    choose_item(&window, "여기로 이동  (⌥⌘V)");
+    assert_eq!(commands.take(), ["paste-move-into"]);
+    row_menu();
+    choose_item(&window, "복사  (⌘C)");
+    assert_eq!(commands.take(), ["copy-files"]);
+    row_menu();
+    choose_item(&window, "경로 복사");
+    choose_item(&window, "전체 경로  (⌥⌘C)");
+    assert_eq!(commands.take(), ["copy-path-0"]);
+    blank_menu();
+    choose_item(&window, "여기로 이동  (⌥⌘V)");
+    assert_eq!(commands.take(), ["paste-move"]);
+}
+
+#[test]
+fn a_cut_item_tells_screen_readers_in_every_view() {
+    let (window, _calls, models, _tree) = drag_window();
+    let described = |name: &str| {
+        labelled(&window, name, AccessibleRole::ListItem)
+            .remove(0)
+            .accessible_description()
+            .map(|text| text.to_string())
+    };
+    models[0].set_cut(std::collections::HashSet::from([std::ffi::OsString::from(
+        "x.txt",
+    )]));
+    for mode in [ViewMode::Details, ViewMode::List, ViewMode::LargeIcons] {
+        left_in(&window, &models, mode);
+        assert_eq!(
+            described("x.txt").as_deref(),
+            Some("잘라낸 항목"),
+            "{mode:?}"
+        );
+        assert_eq!(described("docs").as_deref(), Some(""), "{mode:?}");
+    }
+    models[0].set_cut(std::collections::HashSet::new());
+    left_in(&window, &models, ViewMode::Details);
+    assert_eq!(described("x.txt").as_deref(), Some(""));
+}
+
+#[test]
+fn the_text_fields_keep_their_own_clipboard_keys() {
+    let window = window();
+    let keys = Calls::default();
+    let record = keys.clone();
+    let control = special(Key::Control);
+    let shift = special(Key::Shift);
+    let modifier = [control.clone(), shift.clone()];
+    window.on_key(move |text, ctrl, shift, _, _| {
+        if !modifier.contains(&text.to_string()) {
+            record.note(format!("{text} {ctrl} {shift}"));
+        }
+        true
+    });
+    let clipboard_keys = |window: &MainWindow| {
+        for key in ["c", "x", "v"] {
+            chord(window, &[&control, key]);
+        }
+        chord(window, &[&control, &shift, "C"]);
+    };
+    // The panes take them as shortcuts.
+    clipboard_keys(&window);
+    assert_eq!(
+        keys.take(),
+        [
+            "c true false",
+            "x true false",
+            "v true false",
+            "C true true"
+        ]
+    );
+    // The filter box copies, cuts and pastes its text itself.
+    let field = labelled(&window, "이 폴더에서 거르기", AccessibleRole::TextInput).remove(0);
+    field.mock_single_click(slint::platform::PointerEventButton::Left);
+    clipboard_keys(&window);
+    assert_eq!(keys.take(), Vec::<String>::new());
+    press(&window, Key::Escape);
+    // So does the path field, while a syllable is composed too.
+    let mut view = window.get_left_pane();
+    view.path_text = "/start".into();
+    window.set_left_pane(view);
+    window.invoke_edit_path(0);
+    clipboard_keys(&window);
+    compose(&window, "ㄱ");
+    clipboard_keys(&window);
+    assert_eq!(keys.take(), Vec::<String>::new());
+}

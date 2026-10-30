@@ -1,8 +1,8 @@
 //! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), the
 //! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]), and the layout
 //! and the commands between the panes ([`layout`]), the tree from the keyboard ([`sidebar`]),
-//! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), with the helpers they
-//! share.
+//! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), the system clipboard
+//! ([`clipboard`]), with the helpers they share.
 
 use super::*;
 use crate::keys;
@@ -14,6 +14,7 @@ use slint::platform::Key;
 use std::sync::Arc;
 
 mod address;
+mod clipboard;
 mod copies;
 mod drag;
 mod jobs;

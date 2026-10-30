@@ -4,7 +4,8 @@
 //! the menus show, and [`post`], which brings a worker thread's result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -35,7 +36,7 @@ use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::preview::PreviewContent;
 use crate::selection::Selection;
-use crate::state::{Column, Completion, Names, PreviewShown};
+use crate::state::{Column, Completion, Names, PathForm, PreviewShown};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
@@ -98,6 +99,12 @@ impl PaneModels {
     /// Shows the extensions of the files' names or not ([`FileRows::set_show_extensions`]).
     pub fn set_show_extensions(&self, show: bool) {
         self.rows.set_show_extensions(show);
+    }
+
+    /// Shows the rows named `names` dimmed from the next [`PaneModels::view`] on: the items cut
+    /// to the clipboard ([`FileRows::set_cut`]).
+    pub fn set_cut(&self, names: HashSet<OsString>) {
+        self.rows.set_cut(names);
     }
 
     /// The texts of `column` in `count` rows of the list from row `first` on, one a line, as
@@ -281,6 +288,8 @@ pub struct FileRows {
     tz: RefCell<TimeZone>,
     /// The names show their extensions (NAV-11): on until [`FileRows::set_show_extensions`].
     extensions: Cell<bool>,
+    /// The names of the rows that show dimmed, cut to the clipboard ([`FileRows::set_cut`]).
+    cut: RefCell<HashSet<OsString>>,
 }
 
 /// One row as [`FileRows`] keeps it.
@@ -288,6 +297,8 @@ pub struct FileRows {
 struct ShownRow {
     entry: Entry,
     selected: bool,
+    /// Cut to the clipboard: it shows dimmed.
+    cut: bool,
 }
 
 impl fmt::Debug for FileRows {
@@ -308,6 +319,7 @@ impl Default for FileRows {
             notify: ModelNotify::default(),
             tz: RefCell::new(TimeZone::UTC),
             extensions: Cell::new(true),
+            cut: RefCell::default(),
         }
     }
 }
@@ -328,10 +340,18 @@ impl FileRows {
         }
     }
 
-    /// Makes the rows `entries`, in that order, selected as `selection` says, and tells the
-    /// list what changed: only the selection (a click or a key), a few rows (a change another
-    /// app made), or everything (another folder), in the cheapest way that keeps it right.
+    /// Shows the rows named `names` dimmed, and the others not, from the next
+    /// [`FileRows::sync`] on, which tells the list of the rows that changed.
+    pub fn set_cut(&self, names: HashSet<OsString>) {
+        *self.cut.borrow_mut() = names;
+    }
+
+    /// Makes the rows `entries`, in that order, selected as `selection` says and dimmed as
+    /// [`FileRows::set_cut`] said, and tells the list what changed: only the selection or the
+    /// dimming (a click or a key, a cut), a few rows (a change another app made), or everything
+    /// (another folder), in the cheapest way that keeps it right.
     pub fn sync(&self, entries: &[Entry], selection: &Selection) {
+        let cut = self.cut.borrow();
         let same_entries = {
             let rows = self.rows.borrow();
             rows.len() == entries.len() && rows.iter().zip(entries).all(|(row, e)| row.entry == *e)
@@ -343,8 +363,10 @@ impl FileRows {
                     .enumerate()
                     .filter_map(|(i, row)| {
                         let selected = selection.is_selected(&row.entry.name);
-                        (row.selected != selected).then(|| {
+                        let dimmed = cut.contains(&row.entry.name);
+                        (row.selected != selected || row.cut != dimmed).then(|| {
                             row.selected = selected;
+                            row.cut = dimmed;
                             i
                         })
                     })
@@ -361,6 +383,7 @@ impl FileRows {
             .iter()
             .map(|entry| ShownRow {
                 selected: selection.is_selected(&entry.name),
+                cut: cut.contains(&entry.name),
                 entry: entry.clone(),
             })
             .collect();
@@ -418,12 +441,14 @@ impl Model for FileRows {
     fn row_data(&self, row: usize) -> Option<FileRow> {
         let rows = self.rows.borrow();
         let shown = rows.get(row)?;
-        Some(file_row(
+        let mut file = file_row(
             &shown.entry,
             shown.selected,
             &self.tz.borrow(),
             self.extensions.get(),
-        ))
+        );
+        file.cut = shown.cut;
+        Some(file)
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -676,8 +701,9 @@ pub fn diff_rows<'a, T: PartialEq, K: Eq + Hash>(
     (steps.len() <= MAX_ROW_CHANGES).then_some(steps)
 }
 
-/// The row the list shows for `entry`. Only a file has a size; a time that is not known (the
-/// creation time on a file system that keeps none) or beyond what can be shown shows nothing.
+/// The row the list shows for `entry`, not dimmed. Only a file has a size; a time that is not
+/// known (the creation time on a file system that keeps none) or beyond what can be shown shows
+/// nothing.
 pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: bool) -> FileRow {
     let time = |time: Option<std::time::SystemTime>| -> SharedString {
         time.map(|time| format_time_in(time, tz))
@@ -705,6 +731,7 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         is_link: entry.kind == EntryKind::Symlink,
         selected,
         hidden: entry.attributes.contains(Attributes::HIDDEN),
+        cut: false,
     }
 }
 
@@ -846,6 +873,12 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_select_same_extension(key(Command::SelectSameExtension));
     shown.set_refresh(key(Command::Refresh));
     shown.set_quick_look(key(Command::QuickLook));
+    shown.set_cut(key(Command::Cut));
+    shown.set_copy(key(Command::Copy));
+    shown.set_paste(key(Command::Paste));
+    shown.set_paste_move(key(Command::PasteMove));
+    shown.set_copy_path(key(Command::CopyPath));
+    shown.set_copy_path_form(PathForm::of_key(os).number());
 }
 
 /// The models the view of the preview panel and quick look keeps between redraws: the lines of
@@ -1568,6 +1601,39 @@ mod tests {
         // The selection is by name.
         assert!(shown[2].selected && !shown[1].selected);
         assert_eq!(model.row_data(3), None);
+    }
+
+    #[test]
+    fn file_rows_dim_the_items_cut_by_name() {
+        let model = FileRows::default();
+        let selection = Selection::default();
+        let list = vec![
+            entry("a", EntryKind::Dir, 0),
+            entry("b.txt", EntryKind::File, 10),
+        ];
+        let cut = |model: &FileRows| -> Vec<bool> {
+            (0..model.row_count())
+                .filter_map(|i| model.row_data(i).map(|row| row.cut))
+                .collect()
+        };
+        model.sync(&list, &selection);
+        assert_eq!(cut(&model), [false, false]);
+        // Dimmed from the next sync on, the rows as they are.
+        model.set_cut(HashSet::from([OsString::from("b.txt")]));
+        assert_eq!(cut(&model), [false, false]);
+        model.sync(&list, &selection);
+        assert_eq!(cut(&model), [false, true]);
+        // A row that comes keeps the dimming of its name; one that goes takes it along.
+        let mut changed = list.clone();
+        changed.insert(0, entry("0.txt", EntryKind::File, 1));
+        model.sync(&changed, &selection);
+        assert_eq!(cut(&model), [false, false, true]);
+        model.set_cut(HashSet::new());
+        model.sync(&changed, &selection);
+        assert_eq!(cut(&model), [false, false, false]);
+        // The row of `file_row` alone is never dimmed.
+        let row = file_row(&list[1], false, &TimeZone::UTC, true);
+        assert!(!row.cut);
     }
 
     #[test]

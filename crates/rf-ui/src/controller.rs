@@ -8,12 +8,18 @@
 //! It also keeps the [`Settings`] (module `persist`): it opens the tabs of the last run, shows the
 //! theme chosen, and after a change writes them again on a worker thread, [`SAVE_DELAY`] later,
 //! once for every change in that time; and a last time as the app ends.
+//!
+//! The system clipboard has a worker of its own (module `clipboard`), which carries out the
+//! state's requests in order; while items the window cut are on the clipboard, the controller
+//! asks it for the clipboard's change count every [`CLIPBOARD_POLL`], so that the dimming goes
+//! once another app has put something else there.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
@@ -34,18 +40,20 @@ use crate::preview::{self, PREVIEW_DELAY};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
-    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, RIGHT, Subfolders, preview_width,
-    start_folders,
+    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, PathForm, RIGHT, Subfolders,
+    preview_width, start_folders,
 };
 use crate::ui_bridge::{self, PaneModels, PickModels, PreviewModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
+pub mod clipboard;
 mod matcher;
 mod newest;
 mod persist;
 mod previewer;
 mod sorter;
 
+use clipboard::{Clipper, Done, OsClipboard};
 use matcher::Matcher;
 use newest::Outcome;
 pub(crate) use persist::theme_number;
@@ -58,6 +66,9 @@ use sorter::Sorter;
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
 /// again instead of being left for its parent.
 pub const VANISHED_SETTLE: Duration = Duration::from_millis(300);
+
+/// How often the clipboard's change count is asked while items the window cut are on it.
+pub const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
 thread_local! {
     static CONTROLLER: RefCell<Option<Rc<Controller>>> = const { RefCell::new(None) };
@@ -682,6 +693,10 @@ pub struct Controller {
     previewer: Previewer,
     /// The models of the preview's view.
     preview: PreviewModels,
+    /// The worker of the system clipboard.
+    clipper: Clipper,
+    /// Asks the clipboard's change count while items the window cut are on it.
+    clipboard_timer: slint::Timer,
 }
 
 impl fmt::Debug for Controller {
@@ -766,6 +781,10 @@ impl Controller {
                 )
             },
             preview: PreviewModels::default(),
+            clipper: Clipper::start(Arc::new(OsClipboard), Os::CURRENT, |done| {
+                post(move |c| c.clipboard_done(done));
+            }),
+            clipboard_timer: slint::Timer::default(),
         }
     }
 
@@ -1153,8 +1172,21 @@ impl Controller {
         completed
     }
 
-    /// A toolbar button or a menu item: the same command as its key.
+    /// A toolbar button or a menu item: the same command as its key. A row menu's 붙여넣기 and
+    /// 여기로 이동 paste into the folder of its row, and 경로 복사 has a form for each item.
     fn command(&self, name: &str) {
+        match name {
+            "paste-into" => return self.update(|state| state.paste_from_menu(false)),
+            "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
+            _ => {}
+        }
+        if let Some(form) = name
+            .strip_prefix("copy-path-")
+            .and_then(|number| number.parse().ok())
+            .and_then(PathForm::from_number)
+        {
+            return self.update(|state| state.copy_paths_as(form));
+        }
         let command = match name {
             "back" => Command::Back,
             "forward" => Command::Forward,
@@ -1191,6 +1223,10 @@ impl Controller {
             "view-large-icons" => Command::ViewLargeIcons,
             "fit-columns" => Command::FitColumns,
             "quick-look" => Command::QuickLook,
+            "cut" => Command::Cut,
+            "copy-files" => Command::Copy,
+            "paste" => Command::Paste,
+            "paste-move" => Command::PasteMove,
             _ => return,
         };
         self.update(|state| {
@@ -1261,6 +1297,11 @@ impl Controller {
                 }
                 Effect::Preview(request) => self.preview_on_worker(request),
                 Effect::StopPreview => self.previewer.stop(),
+                Effect::Clipboard(work) => {
+                    if !self.clipper.submit(work) {
+                        on_screen.push(Effect::Notice(words::background_failed().to_owned()));
+                    }
+                }
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
@@ -1326,12 +1367,57 @@ impl Controller {
         }
         self.drop_stale_tickets();
         self.redraw();
+        self.watch_clipboard();
         // After the redraw, so that the rows to scroll to are there.
         for effect in on_screen {
             self.show(effect);
         }
         // Any change may be one the settings keep (a tab, the hidden items, a recent target).
         self.plan_save();
+    }
+
+    /// What the clipboard's worker did, for the state.
+    fn clipboard_done(&self, done: Done) {
+        match done {
+            Done::Put { token, result } => self.update(|state| state.clipboard_put(token, result)),
+            Done::Read { token, result } => {
+                self.update(|state| state.clipboard_read(token, result));
+            }
+            Done::Paths(result) => self.update(|state| state.paths_copied(result)),
+            // Most polls find the clipboard as it was: the window is drawn again only for one
+            // that ends the dimming.
+            Done::Polled(change) => {
+                let changed = self
+                    .state
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|state| state.clipboard_polled(change));
+                if changed {
+                    self.apply(Vec::new());
+                }
+            }
+        }
+    }
+
+    /// Asks the clipboard's change count every [`CLIPBOARD_POLL`] while the state watches it
+    /// ([`AppState::clipboard_watched`]), and not otherwise.
+    fn watch_clipboard(&self) {
+        let watched = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(AppState::clipboard_watched);
+        if watched == self.clipboard_timer.running() {
+            return;
+        }
+        if watched {
+            self.clipboard_timer
+                .start(slint::TimerMode::Repeated, CLIPBOARD_POLL, || {
+                    with(|c| c.clipper.poll());
+                });
+        } else {
+            self.clipboard_timer.stop();
+        }
     }
 
     /// Hands `request` to the worker of the previews ([`Previewer`]), in the place of the one
@@ -1413,6 +1499,7 @@ impl Controller {
             | Effect::MatchNames(_)
             | Effect::Preview(_)
             | Effect::StopPreview
+            | Effect::Clipboard(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::Follow { .. }
@@ -1520,6 +1607,7 @@ impl Controller {
             | Effect::MatchNames(_)
             | Effect::Preview(_)
             | Effect::StopPreview
+            | Effect::Clipboard(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::FindExisting { .. }
@@ -1583,6 +1671,7 @@ impl Controller {
             for side in [LEFT, RIGHT] {
                 let pane = &state.panes()[side];
                 self.panes[side].set_show_extensions(state.show_extensions());
+                self.panes[side].set_cut(state.cut_names(pane.active_tab().location()));
                 let mut view = self.panes[side].view(pane, side == state.active());
                 view.own_view = state.views().own(pane.active_tab().location()).is_some();
                 let chevron = state

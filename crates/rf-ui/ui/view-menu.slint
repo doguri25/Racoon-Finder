@@ -1,8 +1,8 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
 // the names, the sidebar and the
-// preview panel, the layout, the panes and the tabs. It is short enough for a 560px window: the
-// themes and the layout are sub-menus of their own. Every item says its key (KEY-03), and the keys
+// preview panel, the layout, the panes and the tabs, and 경로 복사 of the active pane's items. It is
+// short enough for a 560px window: the themes and the layout are sub-menus of their own. Every item says its key (KEY-03), and the keys
 // reach every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
@@ -10,7 +10,7 @@
 // after an item changed the view (`mark`), the theme's from `theme-choice`, and the layout's to the
 // window's, which Rust sets back to the state's after the toggle.
 
-import { Shortcuts } from "shortcuts.slint";
+import { Shortcuts, PathForms } from "shortcuts.slint";
 import { PaneView } from "pane.slint";
 
 export component ViewMenu inherits ContextMenuArea {
@@ -708,6 +708,19 @@ export component ViewMenu inherits ContextMenuArea {
                 enabled: root.view.tabs[root.view.active-tab].can-close-right;
                 activated => {
                     root.tab-command("close-right");
+                    root.done();
+                }
+            }
+        }
+        // 경로 복사 of the active pane's items, as in an item's menu: the forms beside the key's
+        // reach the keyboard here (KEY-02), where no key opens an item's menu (macOS).
+        Menu {
+            title: "경로 복사";
+
+            for form[i] in PathForms.titles: MenuItem {
+                title: PathForms.title(i);
+                activated => {
+                    root.command("copy-path-\{i}");
                     root.done();
                 }
             }

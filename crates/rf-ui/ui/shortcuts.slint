@@ -49,6 +49,15 @@ export global Shortcuts {
     in property <string> refresh;
     // 빠른 보기 (Space).
     in property <string> quick-look;
+    // The clipboard: cut (none on macOS, whose Finder cuts no files), copy, paste, Finder's
+    // 여기로 이동 (⌥⌘V; none elsewhere), and 경로 복사, whose key copies the paths in the form
+    // numbered `copy-path-form` (`PathForms.titles`).
+    in property <string> cut;
+    in property <string> copy;
+    in property <string> paste;
+    in property <string> paste-move;
+    in property <string> copy-path;
+    in property <int> copy-path-form: -1;
 
     // A menu item's title with its key after it, or the title alone for a command without
     // one. A menu of a window (not of the menu bar) has no column for keys.
@@ -59,6 +68,17 @@ export global Shortcuts {
     // A tooltip's text: the name, and the key after it.
     public pure function tip(name: string, keys: string) -> string {
         return keys == "" ? name : "\{name} (\{keys})";
+    }
+}
+
+// The forms of 경로 복사 (OPS-07), in the order of their numbers (`PathForm::number`): a menu
+// item `i` runs the command `copy-path-i`.
+export global PathForms {
+    out property <[string]> titles: ["전체 경로", "이름만", "따옴표 포함", "UNC 경로", "슬래시 형식", "파일 URL"];
+
+    // The title of form `i`, with the key after it for the form the key copies.
+    public pure function title(i: int) -> string {
+        return Shortcuts.titled(PathForms.titles[i], i == Shortcuts.copy-path-form ? Shortcuts.copy-path : "");
     }
 }
 
