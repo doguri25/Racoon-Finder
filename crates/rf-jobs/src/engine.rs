@@ -84,8 +84,8 @@ const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 
 /// How long [`JobEngine::shutdown`] gives the journal's threads to end, after the wait for the
 /// workers: the journal then has its last records to write, which takes a moment however
-/// late the workers ended.
-const JOURNAL_GRACE: Duration = Duration::from_secs(2);
+/// late the workers ended. A shutdown so takes up to its timeout and this.
+pub const JOURNAL_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 thread_local! {

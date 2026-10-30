@@ -234,7 +234,8 @@ impl Jobs {
     }
 
     /// Ends the engine for the app's end, in the order [`close_down`] says, and notes that it
-    /// has. Blocks for up to `timeout` and a little more: call it on a worker thread.
+    /// has. Blocks for up to `timeout` and [`rf_jobs::JOURNAL_GRACE`] more, for the journal's
+    /// last records: call it on a worker thread.
     pub fn close_down(&self, timeout: Duration) -> bool {
         let ended = close_down(&self.engine, self.resolver.as_ref(), timeout);
         self.closed.store(true, Ordering::SeqCst);

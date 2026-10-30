@@ -219,6 +219,18 @@ pub enum ClipboardWork {
     ClearIf(u64),
 }
 
+/// A cut cancelled with Esc that the clipboard may still hold as the app ends
+/// ([`AppState::cut_left_on_clipboard`]), for the clipboard's worker to empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CutLeft {
+    /// The request that put a cut cancelled before the put told its change count: the worker,
+    /// which carried the put out, knows that count. It comes first, being the later cut.
+    pub put: Option<u64>,
+    /// The change count of a cut cancelled once its put had told it, whose emptying has not
+    /// been seen to work.
+    pub change: Option<u64>,
+}
+
 /// Why the clipboard did not do what it was asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardFailure {
@@ -427,13 +439,18 @@ impl AppState {
         (changed || !effects.is_empty()).then_some(effects)
     }
 
-    /// The change count of a cut cancelled with Esc that the clipboard may still hold as the
-    /// app ends: its emptying is on its way, or failed fewer than [`CLEAR_TRIES`] times (after
-    /// that, a notice has told the user). The app's end tries once more to empty it, for a
-    /// moment ([`crate::controller::CLEAR_AT_END`]), so that no paste in another app moves the
-    /// items after all. `None` when nothing waits to be emptied.
-    pub fn cut_left_on_clipboard(&self) -> Option<u64> {
-        self.clipboard.clearing.map(|clearing| clearing.change)
+    /// A cut cancelled with Esc that the clipboard may still hold as the app ends: its put has
+    /// not told its change count yet (the emptying waits for it), or its emptying is on its way,
+    /// or failed fewer than [`CLEAR_TRIES`] times (after that, a notice has told the user). The
+    /// app's end tries once more to empty it, for a moment
+    /// ([`crate::controller::CLEAR_AT_END`]), so that no paste in another app moves the items
+    /// after all. `None` when nothing waits to be emptied.
+    pub fn cut_left_on_clipboard(&self) -> Option<CutLeft> {
+        let left = CutLeft {
+            put: self.clipboard.cancelled,
+            change: self.clipboard.clearing.map(|clearing| clearing.change),
+        };
+        (left.put.is_some() || left.change.is_some()).then_some(left)
     }
 
     /// The worker tried to empty the clipboard if its change count was still `change`:

@@ -47,15 +47,9 @@ pub use generated::*;
 
 /// How long a second start of the app whose request to show the window nobody took goes on
 /// trying the lock ([`instance::take_or_ask`]): an app that is ending takes no request, and lets
-/// the lock go only at the end of its end, once it has emptied the clipboard of a cancelled cut
-/// ([`controller::CLEAR_AT_END`]), written its settings ([`controller::FINAL_SAVE_WAIT`]),
-/// stopped its jobs ([`jobs::QUIT_TIMEOUT`]) and handed its last notifications to the system
-/// ([`notify::NOTICE_WAIT`]), each at most, with [`instance::SHOW_WAIT`] more for the rest.
-pub const QUIT_WAIT: Duration = instance::SHOW_WAIT
-    .saturating_add(controller::CLEAR_AT_END)
-    .saturating_add(controller::FINAL_SAVE_WAIT)
-    .saturating_add(jobs::QUIT_TIMEOUT)
-    .saturating_add(notify::NOTICE_WAIT);
+/// the lock go only at the end of its end ([`controller::END_WAIT`]), with
+/// [`instance::SHOW_WAIT`] more for the rest.
+pub const QUIT_WAIT: Duration = instance::SHOW_WAIT.saturating_add(controller::END_WAIT);
 
 /// Why [`run`] could not keep the main window open.
 #[derive(Debug, thiserror::Error)]

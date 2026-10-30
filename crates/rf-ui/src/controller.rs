@@ -256,8 +256,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
 /// when it is under way; else does that end without its question (the settings written, the
 /// engine shut down, the questions released) and waits for it. The jobs under way are stopped
 /// as at any other end, and the next start offers them again. Nothing when there is no
-/// controller or the end is done. Blocks, for [`FINAL_SAVE_WAIT`], [`QUIT_TIMEOUT`] and
-/// [`NOTICE_WAIT`] at most.
+/// controller or the end is done. Blocks the thread of the event loop (on macOS the main
+/// thread, while the system waits to end the process) for [`END_WAIT`] at most, about 11.5 s.
 pub fn end_at_exit() {
     if let Some(Some(pending)) = with(Controller::end_for_exit) {
         let _ = pending.join();
@@ -267,6 +267,16 @@ pub fn end_at_exit() {
 /// How long the app's end waits for the clipboard to be emptied of a cut cancelled with Esc
 /// that it may still hold ([`AppState::cut_left_on_clipboard`]).
 pub const CLEAR_AT_END: Duration = Duration::from_millis(500);
+
+/// How long the work of the app's end takes at most: the clipboard
+/// ([`CLEAR_AT_END`], 0.5 s), the settings ([`FINAL_SAVE_WAIT`], 2 s), the jobs
+/// ([`QUIT_TIMEOUT`], 5 s) and the journal's last records after them
+/// ([`rf_jobs::JOURNAL_GRACE`], 2 s), and the last notifications ([`NOTICE_WAIT`], 2 s).
+pub const END_WAIT: Duration = CLEAR_AT_END
+    .saturating_add(FINAL_SAVE_WAIT)
+    .saturating_add(QUIT_TIMEOUT)
+    .saturating_add(rf_jobs::JOURNAL_GRACE)
+    .saturating_add(NOTICE_WAIT);
 
 /// What the app's end does on a worker, after the window's part ([`End`]): the cancelled cut
 /// the clipboard may still hold is emptied (waiting [`CLEAR_AT_END`] at most; one that stays is
@@ -297,6 +307,41 @@ fn end_work(end: End) {
     jobs.close_down(QUIT_TIMEOUT);
     // The last notification is not cut off by the end of the app.
     notifier.wait_idle(NOTICE_WAIT);
+}
+
+/// The end at the loop's exit apart from the controller ([`Controller::end_for_exit`]): the
+/// worker of the end under way, `pending`, to wait for; else, unless the end is done
+/// (`closed`), the work of an end, made by `work` only then, on a worker that `spawn` starts.
+/// A worker that cannot start leaves the work to this thread, which does it before it returns
+/// `None`. Either way the work runs once.
+fn end_once<W: FnOnce() + Send + 'static>(
+    pending: Option<JoinHandle<()>>,
+    closed: bool,
+    work: impl FnOnce() -> W,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+) -> Option<JoinHandle<()>> {
+    if pending.is_some() {
+        return pending;
+    }
+    if closed {
+        return None;
+    }
+    // Shared, so that the work is still here when the worker could not take it.
+    let work = Arc::new(Mutex::new(Some(work())));
+    let taken = Arc::clone(&work);
+    let started = spawn(Box::new(move || {
+        if let Some(work) = taken.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            work();
+        }
+    }));
+    if let Ok(worker) = started {
+        return Some(worker);
+    }
+    // No worker: the end is done here, the loop being over anyway.
+    if let Some(work) = work.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        work();
+    }
+    None
 }
 
 /// What the work of the app's end takes along to its worker ([`end_work`]).
@@ -1202,29 +1247,20 @@ impl Controller {
     /// without its question. `None` when the end is done, or when no worker could start and
     /// the end was done here.
     fn end_for_exit(&self) -> Option<JoinHandle<()>> {
-        if let Some(pending) = self.quitting.borrow_mut().take() {
-            return Some(pending);
-        }
-        if self.jobs.is_closed() {
-            return None;
-        }
-        let end = Arc::new(Mutex::new(Some(self.end_parts())));
-        let taken = Arc::clone(&end);
-        let started = std::thread::Builder::new()
-            .name("rf-ui-exit".to_owned())
-            .spawn(move || {
-                if let Some(end) = taken.lock().unwrap_or_else(PoisonError::into_inner).take() {
-                    end_work(end);
-                }
-            });
-        if let Ok(worker) = started {
-            return Some(worker);
-        }
-        // No worker: the end is done here, the loop being over anyway.
-        if let Some(end) = end.lock().unwrap_or_else(PoisonError::into_inner).take() {
-            end_work(end);
-        }
-        None
+        let pending = self.quitting.borrow_mut().take();
+        end_once(
+            pending,
+            self.jobs.is_closed(),
+            || {
+                let end = self.end_parts();
+                move || end_work(end)
+            },
+            |work| {
+                std::thread::Builder::new()
+                    .name("rf-ui-exit".to_owned())
+                    .spawn(work)
+            },
+        )
     }
 
     /// Makes `found` the places of the sidebar: the roots of the tree, now or once the panes'
@@ -2449,8 +2485,6 @@ fn side_number(side: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
     use crate::settings;
 
@@ -2462,12 +2496,10 @@ mod tests {
         let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
         let config = dir.path().join("config");
         let saver = Saver::new(config.clone(), true);
-        // A notification on its way, which the system takes a while to show.
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let noted = Arc::clone(&sent);
+        // A notification on its way to the system.
+        let (sent, shown) = std::sync::mpsc::channel();
         let notifier = OsNotifier::new(move |title, _| {
-            std::thread::sleep(Duration::from_millis(200));
-            noted.lock().expect("the list").push(title.to_owned());
+            let _ = sent.send(title.to_owned());
             Ok(())
         });
         notifier.notify(crate::notify::Notice {
@@ -2491,7 +2523,11 @@ mod tests {
         });
         answering.join().expect("the answer");
         assert!(jobs.is_closed());
-        assert_eq!(*sent.lock().expect("the list"), ["복사를 마쳤습니다"]);
+        // Shown, however long the system took (the end waits for it a while, `NOTICE_WAIT`).
+        assert_eq!(
+            shown.recv_timeout(Duration::from_secs(30)).as_deref(),
+            Ok("복사를 마쳤습니다")
+        );
         assert_eq!(
             std::fs::read_to_string(config.join(settings::FILE_NAME)).expect("the settings"),
             "theme = \"dark\"\n"
@@ -2509,5 +2545,66 @@ mod tests {
         });
         assert!(started.elapsed() >= CLEAR_AT_END);
         assert!(jobs.is_closed());
+    }
+
+    #[test]
+    fn the_end_at_the_loop_s_exit_waits_for_the_end_under_way_or_does_it_once() {
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let work = || {
+            let runs = Arc::clone(&runs);
+            move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let made = Cell::new(false);
+        let making = || {
+            made.set(true);
+            work()
+        };
+
+        // The close button's end is under way: its worker is the one to wait for, and no other
+        // end is made.
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        let under_way = std::thread::Builder::new()
+            .name("under way".to_owned())
+            .spawn(move || {
+                let _ = gate.recv();
+            })
+            .expect("a thread");
+        let handed = end_once(Some(under_way), false, making, |_| {
+            panic!("no second worker")
+        })
+        .expect("the worker under way");
+        assert_eq!(handed.thread().name(), Some("under way"));
+        go.send(()).expect("the worker");
+        handed.join().expect("the worker");
+        assert!(!made.get());
+
+        // The end is done (the engine is closed): nothing.
+        let making = || {
+            made.set(true);
+            work()
+        };
+        assert!(end_once(None, true, making, |_| panic!("no worker")).is_none());
+        assert!(!made.get());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        // Else the end runs once on a worker of its own.
+        let worker = end_once(None, false, work, |job| {
+            std::thread::Builder::new().spawn(job)
+        })
+        .expect("a worker");
+        worker.join().expect("the worker");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // No worker can start: it runs once here, before the call returns.
+        let refused = end_once(None, false, work, |_job| {
+            Err(std::io::Error::other("no threads left"))
+        });
+        assert!(refused.is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 }

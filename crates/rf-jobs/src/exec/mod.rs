@@ -703,6 +703,17 @@ impl<'e> Ctx<'e> {
         self.env.control.checkpoint()
     }
 
+    /// Fails with `Error::Cancelled` once the job is cancelled, as [`check`](Self::check) does,
+    /// but never waits while it is paused: for a step between its last look at an item and what
+    /// it does to the item, where a wait for a pause would let the item change unseen.
+    pub(crate) fn check_cancelled(&self) -> rf_core::Result<()> {
+        if self.env.control.is_cancelled() {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     /// The provider that serves `path`.
     pub(crate) fn provider(&self, path: &VPath) -> rf_core::Result<Arc<dyn Provider>> {
         self.env.vfs.provider(path)

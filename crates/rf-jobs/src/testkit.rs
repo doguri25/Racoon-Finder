@@ -329,6 +329,11 @@ pub enum Fault {
     /// Like [`Fault::HoldAt`], for a `delete_leaf` of `path` alone: a job holds there once it
     /// has looked at the item and decided to delete it.
     HoldAtDelete { path: VPath },
+    /// A `stat` of `path` waits, as at a [`Fault::HoldAt`], but at a second hold with signals
+    /// of its own: [`FaultyProvider::wait_held_again`] wakes as it waits, and
+    /// [`FaultyProvider::release_again`] lets it go (and every later call). A job can so be held
+    /// twice: first at a `HoldAt` or `HoldAtDelete`, then here.
+    SecondHoldAt { path: VPath },
     /// Like a killed process: a `delete_leaf` or `remove_dir` of `path` deletes nothing, wakes
     /// [`FaultyProvider::wait_crashed`], and stops the deleting thread for good. No later code,
     /// no `Drop`, runs on it.
@@ -421,9 +426,18 @@ struct Counters {
 /// What the held and crashed writers have signalled, shared with them.
 #[derive(Debug, Default)]
 struct Signals {
+    /// The hold of [`Fault::Hold`], [`Fault::HoldAt`] and [`Fault::HoldAtDelete`].
+    first: Gate,
+    /// The hold of [`Fault::SecondHoldAt`].
+    second: Gate,
+    crashed: bool,
+}
+
+/// One hold: whether a call has stopped at it, and whether it was let go.
+#[derive(Debug, Default)]
+struct Gate {
     held: bool,
     released: bool,
-    crashed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -507,12 +521,22 @@ impl FaultyProvider {
 
     /// Waits up to `timeout` for a writer to stop at a [`Fault::Hold`]; true if one has.
     pub fn wait_held(&self, timeout: Duration) -> bool {
-        self.shared.wait_for(timeout, |signals| signals.held)
+        self.shared.wait_for(timeout, |signals| signals.first.held)
     }
 
     /// Lets the writer held by [`Fault::Hold`] go on, and any that reaches it later.
     pub fn release(&self) {
-        self.shared.set(|signals| signals.released = true);
+        self.shared.set(|signals| signals.first.released = true);
+    }
+
+    /// Waits up to `timeout` for a call to stop at a [`Fault::SecondHoldAt`]; true if one has.
+    pub fn wait_held_again(&self, timeout: Duration) -> bool {
+        self.shared.wait_for(timeout, |signals| signals.second.held)
+    }
+
+    /// Lets the call held at a [`Fault::SecondHoldAt`] go on, and any that reaches one later.
+    pub fn release_again(&self) {
+        self.shared.set(|signals| signals.second.released = true);
     }
 
     /// Waits up to `timeout` for a writer to stop at a [`Fault::Crash`]; true if one has.
@@ -554,12 +578,24 @@ impl FaultyProvider {
         self.hold_if(|fault| matches!(fault, Fault::HoldAtDelete { path: at } if at == path));
     }
 
+    /// Waits at a [`Fault::SecondHoldAt`] of `path` until [`FaultyProvider::release_again`].
+    fn hold_again_at(&self, path: &VPath) {
+        let held = self
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::SecondHoldAt { path: at } if at == path));
+        if held {
+            self.shared.set(|signals| signals.second.held = true);
+            self.shared.wait_until(|signals| signals.second.released);
+        }
+    }
+
     /// Waits until [`FaultyProvider::release`] when a fault is one `holds`.
     fn hold_if(&self, holds: impl Fn(&Fault) -> bool) {
         let held = self.faults.iter().any(holds);
         if held {
-            self.shared.set(|signals| signals.held = true);
-            self.shared.wait_until(|signals| signals.released);
+            self.shared.set(|signals| signals.first.held = true);
+            self.shared.wait_until(|signals| signals.first.released);
         }
     }
 
@@ -653,6 +689,7 @@ impl Provider for FaultyProvider {
 
     fn stat(&self, path: &VPath) -> Result<Entry> {
         self.hold_at(path);
+        self.hold_again_at(path);
         let refused = self.faults.iter().any(|fault| {
             matches!(fault, Fault::FailStat { name } if path.file_name() == Some(name.as_os_str()))
         });
@@ -928,8 +965,8 @@ impl FaultyWriter {
             "injected panic"
         );
         if self.has(|fault| matches!(fault, Fault::Hold { .. })) {
-            self.shared.set(|signals| signals.held = true);
-            self.shared.wait_until(|signals| signals.released);
+            self.shared.set(|signals| signals.first.held = true);
+            self.shared.wait_until(|signals| signals.first.released);
         }
     }
 

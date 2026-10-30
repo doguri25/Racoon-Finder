@@ -661,6 +661,139 @@ fn a_copy_whose_original_goes_while_the_job_is_paused_is_kept() {
     assert!(f.dst.join("docs").is_dir());
 }
 
+/// A job deleting the copied folder `docs` of `a.txt` and `b.txt`, held inside the look at the
+/// original of the second file it deletes: it was paused and resumed as it held at the first
+/// one, so the second one's step looks at its original again, and holds there
+/// ([`Fault::SecondHoldAt`] on both originals, as either file may come first). The job runs
+/// on, not paused.
+struct HeldInTheRecheck {
+    f: Fx,
+    p: Arc<FaultyProvider>,
+    e: JobEngine,
+    rx: std::sync::mpsc::Receiver<rf_jobs::JobEvent>,
+    id: rf_jobs::JobId,
+    /// The copy of the file whose original the job is looking at.
+    second: PathBuf,
+}
+
+fn held_in_the_recheck() -> HeldInTheRecheck {
+    let f = fx();
+    std::fs::create_dir_all(f.src.join("docs")).unwrap();
+    std::fs::write(f.src.join("docs").join("a.txt"), "A").unwrap();
+    std::fs::write(f.src.join("docs").join("b.txt"), "B").unwrap();
+    let spec = copied(&f, &["docs"]);
+    after_the_copy();
+    let (copied_docs, original_docs) = (f.dst.join("docs"), f.src.join("docs"));
+    let mut faults = Vec::new();
+    for name in ["a.txt", "b.txt"] {
+        faults.push(Fault::HoldAtDelete {
+            path: v(copied_docs.join(name)),
+        });
+        // The look at the copied folder lists the originals and does not `stat` them: only a
+        // step's look at its file's original does.
+        faults.push(Fault::SecondHoldAt {
+            path: v(original_docs.join(name)),
+        });
+    }
+    let p = FaultyProvider::local(faults);
+    let (e, rx) = engine_on(&p);
+    let id = e.submit(JobSpec::DeleteCopies(spec));
+    assert!(p.wait_held(WAIT));
+    assert!(e.pause(id));
+    p.release();
+    assert!(e.resume(id));
+    assert!(p.wait_held_again(WAIT));
+    // The first file went before the second one's step began.
+    let left: Vec<PathBuf> = ["a.txt", "b.txt"]
+        .map(|name| copied_docs.join(name))
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+    let second = left[0].clone();
+    HeldInTheRecheck {
+        f,
+        p,
+        e,
+        rx,
+        id,
+        second,
+    }
+}
+
+/// Whether `path` is gone within `ceiling`.
+fn gone_within(path: &Path, ceiling: Duration) -> bool {
+    let started = std::time::Instant::now();
+    while path.exists() {
+        if started.elapsed() > ceiling {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+#[test]
+fn a_pause_inside_the_look_at_an_original_never_holds_the_job_before_its_delete() {
+    let held = held_in_the_recheck();
+    // Paused while the job looks at the original, which is as it was.
+    assert!(held.e.pause(held.id));
+    held.p.release_again();
+    // That look is the job's last before the delete: the job does not wait for the pause
+    // between the two, so the file goes as the look found it.
+    assert!(
+        gone_within(&held.second, WAIT),
+        "the job waited for the pause between its look at the original and the delete"
+    );
+    // It waits at its next step, the removal of the copied folder. The original goes meanwhile.
+    std::fs::remove_dir_all(held.f.src.join("docs")).unwrap();
+    assert!(held.e.resume(held.id));
+    let report = wait_finished(&held.rx, held.id, WAIT);
+    assert!(held.e.shutdown(WAIT));
+    // That step looks at the original again: gone, so the copied folder stays.
+    let docs = held.f.dst.join("docs");
+    assert_eq!(
+        kept(&report),
+        [(
+            docs.clone(),
+            CopyFound {
+                copy: Compared::Same,
+                original: Compared::Missing,
+            }
+        )]
+    );
+    assert!(docs.is_dir());
+}
+
+#[test]
+fn a_copy_written_while_the_job_looks_at_its_original_is_kept() {
+    let held = held_in_the_recheck();
+    // Paused while the job looks at the original, and the copy is written meanwhile.
+    assert!(held.e.pause(held.id));
+    std::fs::write(&held.second, "written while paused").unwrap();
+    held.p.release_again();
+    // The job ends by itself or once resumed, whichever comes first.
+    held.e.resume(held.id);
+    let report = wait_finished(&held.rx, held.id, WAIT);
+    assert!(held.e.shutdown(WAIT));
+    // The copy is looked at once more after its original, right before it would go: written
+    // since the copy job, so it stays.
+    assert_eq!(
+        kept(&report),
+        [(
+            held.second.clone(),
+            CopyFound {
+                copy: Compared::Changed,
+                original: Compared::Unknown,
+            }
+        )]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&held.second).unwrap(),
+        "written while paused"
+    );
+}
+
 #[test]
 fn a_copy_whose_original_is_written_while_the_job_is_paused_is_kept() {
     let f = fx();

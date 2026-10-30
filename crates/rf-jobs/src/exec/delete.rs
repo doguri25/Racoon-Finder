@@ -94,9 +94,11 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
 ///
 /// Once the job has been paused after the look of a copy, the original may have changed too:
 /// each step that then deletes an item of that copy first compares the item with its original
-/// again (see [`Recheck`]). The first item whose original is gone or changed stays and fails
-/// with `CopyKept` (the original changed or went); the rest of that copy stays with it. Between
-/// two steps of a walk the job was not paused in, only the copy is held to the look.
+/// again (see [`Recheck`]), then looks at the item itself once more. The first item whose
+/// original is gone or changed stays and fails with `CopyKept` (the original changed or went);
+/// the rest of that copy stays with it. Between two steps of a walk the job was not paused in,
+/// only the copy is held to the look. No step waits for a pause between its last look and its
+/// delete: a pause takes hold at the next step's checkpoint, before that step's looks.
 pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
     let mut totals = Totals::default();
     for copy in &spec.copies {
@@ -137,8 +139,9 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
                 &copy.original,
                 &cancel,
             );
-            // A look that a cancel cut short stops the job, rather than keep the copy for it.
-            ctx.check().at(Stage::Delete)?;
+            // A look that a cancel cut short stops the job, rather than keep the copy for it. No
+            // wait for a pause here: the delete's own step looks again after its checkpoint.
+            ctx.check_cancelled().at(Stage::Delete)?;
             if found == CopyFound::SAME {
                 Ok(Some((now, pauses)))
             } else if spec.resumed && copy.made.is_dir && found.copy != Compared::Same {
@@ -233,9 +236,13 @@ struct Recheck {
 impl Recheck {
     /// Whether the item `path` of the copy, which its step's `stat` found as `now`, may go: its
     /// original `twin` (the original of the copy, or the item of the same names below it) still
-    /// holds it, unless the job has not paused since the look. Fails with `CopyKept` (the
-    /// original gone or changed, or a `twin` that cannot be named) and keeps the rest of the
-    /// copy.
+    /// holds it, unless the job has not paused since the look. `Ok(true)` when it looked at the
+    /// original: that took a while, so the step looks at the item once more before it goes.
+    /// Fails with `CopyKept` (the original gone or changed, or a `twin` that cannot be named)
+    /// and keeps the rest of the copy.
+    ///
+    /// It never waits for a pause, between its look and the delete that follows: a pause
+    /// asked for meanwhile takes hold at the next step's checkpoint, and that step looks again.
     fn allows(
         &self,
         ctx: &Ctx<'_>,
@@ -243,9 +250,9 @@ impl Recheck {
         path: &VPath,
         now: &Entry,
         twin: Option<&VPath>,
-    ) -> Result<(), Failed> {
+    ) -> Result<bool, Failed> {
         if ctx.env.control.pauses() == self.pauses {
-            return Ok(());
+            return Ok(false);
         }
         let original = match twin {
             Some(twin) if now.kind == EntryKind::Dir => still_a_folder(ctx, twin),
@@ -254,13 +261,13 @@ impl Recheck {
                 let vfs = ctx.env.vfs;
                 let original = copies::original_beside(vfs, provider, path, now, twin, &cancel);
                 // A look that a cancel cut short stops the job, rather than keep the item for it.
-                ctx.check().at(Stage::Delete)?;
+                ctx.check_cancelled().at(Stage::Delete)?;
                 original
             }
             None => Compared::Unknown,
         };
         if original == Compared::Same {
-            return Ok(());
+            return Ok(true);
         }
         self.lost.set(true);
         let found = CopyFound {
@@ -613,8 +620,22 @@ fn delete_leaf(
         {
             return Err(changed_copy(path));
         }
-        if let Some(recheck) = walk.recheck {
-            recheck.allows(ctx, &*provider, path, &now, twin)?;
+        let looked = match walk.recheck {
+            Some(recheck) => recheck.allows(ctx, &*provider, path, &now, twin)?,
+            None => false,
+        };
+        if looked {
+            // The look at the original took a while: the item itself is the last one looked at
+            // before it goes, with nothing to wait for between (see [`Recheck::allows`]).
+            let own = restat(&*provider, path, &now);
+            let Some(now) = checked(&*provider, parent, own)? else {
+                return Ok(None);
+            };
+            if let Some(guard) = walk.guard
+                && !guard.allows(level, &now)
+            {
+                return Err(changed_copy(path));
+            }
         }
         unless_gone(
             provider.delete_leaf(path).at(Stage::Delete),
@@ -754,6 +775,8 @@ fn delete_dir(
             return Ok(None);
         };
         // Emptied by now: its original must still be a folder, if the job paused since the look.
+        // A folder needs no look of its own after that one: `remove_dir` removes only an empty
+        // folder, and nothing waits for a pause in between.
         if let Some(recheck) = walk.recheck {
             recheck.allows(ctx, &*provider, path, &now, twin)?;
         }

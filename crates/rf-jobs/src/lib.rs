@@ -22,7 +22,8 @@ pub use copies::{
     COMPARE_ITEMS, Compared, CopyFound, check_copy, compare_with_made, compare_with_original,
 };
 pub use engine::{
-    DefaultLanes, EngineConfig, JobEngine, JobEvent, JobSnapshot, JobState, LaneId, LanePolicy,
+    DefaultLanes, EngineConfig, JOURNAL_GRACE, JobEngine, JobEvent, JobSnapshot, JobState, LaneId,
+    LanePolicy,
 };
 pub use exec::{ExecEnv, ExecEvent, MAX_DEPTH, execute};
 pub use id::JobId;

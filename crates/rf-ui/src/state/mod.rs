@@ -72,7 +72,9 @@ pub use address::{
     Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
     is_remote_url, read_file_url, read_typed, split_last,
 };
-pub use clipboard::{CLEAR_TRIES, ClipboardFailure, ClipboardWork, PathForm, file_url, path_text};
+pub use clipboard::{
+    CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
+};
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;

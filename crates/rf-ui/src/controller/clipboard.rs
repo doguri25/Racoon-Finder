@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use rf_core::Os;
 use rf_platform::clipboard::{self, ClipboardFiles, DropEffect};
 
-use crate::state::{ClipboardFailure, ClipboardWork, PathForm, path_text};
+use crate::state::{ClipboardFailure, ClipboardWork, CutLeft, PathForm, path_text};
 
 /// The clipboard, as the worker uses it: the functions of `rf_platform::clipboard`.
 pub trait SystemClipboard: Send + Sync {
@@ -144,14 +144,35 @@ pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -
     }
 }
 
+/// Empties `clipboard` of `cut` if it still holds it, `last_put` being the request and the
+/// change count of the last put of files that worked: a cut whose put the window has not heard
+/// of yet is known by that put's count, else by the count the window knows. `Ok(false)` when
+/// neither is the clipboard's now, or when the cut's put did not work.
+fn clear_cut(
+    clipboard: &dyn SystemClipboard,
+    cut: CutLeft,
+    last_put: Option<(u64, u64)>,
+) -> Result<bool, ClipboardFailure> {
+    let by_put = cut
+        .put
+        .zip(last_put)
+        .and_then(|(token, (put, change))| (token == put).then_some(change));
+    match by_put.or(cut.change) {
+        Some(change) => clipboard
+            .clear_if_unchanged(change)
+            .map_err(|error| ClipboardFailure::from(&error)),
+        None => Ok(false),
+    }
+}
+
 /// A request to the worker's thread.
 enum Job {
     Work(ClipboardWork),
     /// Ask the change count ([`Done::Polled`]).
     Poll,
-    /// Empty the clipboard if its change count is still the one given, and answer on the
-    /// channel rather than to the window ([`Clipper::clear_now`]).
-    ClearNow(u64, Sender<Result<bool, ClipboardFailure>>),
+    /// Empty the clipboard of the cut given, if its change count is still the cut's, and answer
+    /// on the channel rather than to the window ([`Clipper::clear_now`]).
+    ClearNow(CutLeft, Sender<Result<bool, ClipboardFailure>>),
 }
 
 /// The worker. Dropping it ends its thread once the requests sent before are done.
@@ -185,6 +206,8 @@ impl Clipper {
         let _ = std::thread::Builder::new()
             .name("rf-ui-clipboard".to_owned())
             .spawn(move || {
+                // The last put of files that worked: its request, and the change count it gave.
+                let mut last_put: Option<(u64, u64)> = None;
                 for job in requests {
                     let answer = match job {
                         Job::Work(work) => carry_out(work, &*clipboard, os),
@@ -192,14 +215,18 @@ impl Clipper {
                             waiting.store(false, Ordering::Relaxed);
                             Done::Polled(clipboard.change_count())
                         }
-                        Job::ClearNow(change, answer) => {
-                            let result = clipboard
-                                .clear_if_unchanged(change)
-                                .map_err(|error| ClipboardFailure::from(&error));
-                            let _ = answer.send(result);
+                        Job::ClearNow(cut, answer) => {
+                            let _ = answer.send(clear_cut(&*clipboard, cut, last_put));
                             continue;
                         }
                     };
+                    if let Done::Put {
+                        token,
+                        result: Ok(change),
+                    } = answer
+                    {
+                        last_put = Some((token, change));
+                    }
                     done(answer);
                 }
             });
@@ -211,14 +238,14 @@ impl Clipper {
         self.jobs.send(Job::Work(work)).is_ok()
     }
 
-    /// Asks the worker to empty the clipboard if its change count is still `change`, after the
-    /// requests sent before, and gives the channel its answer comes on (`Ok(true)` it did,
-    /// `Ok(false)` something else is there now, or why it could not): for the app's end, which
-    /// waits for it a moment rather than for the window ([`Done::Cleared`] is not sent). `None`
-    /// when the worker has no thread.
-    pub fn clear_now(&self, change: u64) -> Option<Receiver<Result<bool, ClipboardFailure>>> {
+    /// Asks the worker to empty the clipboard of `cut` if it still holds it, after the requests
+    /// sent before (the cut's put among them), and gives the channel its answer comes on
+    /// (`Ok(true)` it did, `Ok(false)` something else is there now, or why it could not): for
+    /// the app's end, which waits for it a moment rather than for the window
+    /// ([`Done::Cleared`] is not sent). `None` when the worker has no thread.
+    pub fn clear_now(&self, cut: CutLeft) -> Option<Receiver<Result<bool, ClipboardFailure>>> {
         let (answer, answered) = mpsc::channel();
-        self.jobs.send(Job::ClearNow(change, answer)).ok()?;
+        self.jobs.send(Job::ClearNow(cut, answer)).ok()?;
         Some(answered)
     }
 
@@ -563,12 +590,17 @@ mod tests {
             paths: vec![temp("a")],
             cut: true,
         }));
-        // Not the put's count: what came since stays.
-        let other = clipper.clear_now(9).expect("a worker");
+        let cut = |put, change| CutLeft { put, change };
+        // Not the put's count, nor its request: what came since stays.
+        let other = clipper.clear_now(cut(Some(5), Some(9))).expect("a worker");
         assert_eq!(other.recv(), Ok(Ok(false)));
-        let ours = clipper.clear_now(1).expect("a worker");
+        // The put's request, whose count the window has not heard of yet: the worker knows it.
+        let ours = clipper.clear_now(cut(Some(1), None)).expect("a worker");
         assert_eq!(ours.recv(), Ok(Ok(true)));
         assert_eq!(fake.get_files().expect("a read"), None);
+        // Nothing known to empty.
+        let none = clipper.clear_now(cut(Some(7), None)).expect("a worker");
+        assert_eq!(none.recv(), Ok(Ok(false)));
         // The window hears of the put alone.
         assert!(matches!(done.recv(), Ok(Done::Put { token: 1, .. })));
         assert!(done.try_recv().is_err());

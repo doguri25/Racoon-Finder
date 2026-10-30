@@ -727,10 +727,13 @@ fn move_file(
 /// `super::replaced`): of another kind or, when both identities are known, another file, as
 /// when a program replaced it while it was copied or a folder above it was swapped for a link.
 /// The folder it is in is checked too (see [`move_entry`]): one swapped for a link is a link
-/// now. Either fails as "changed while it was moved" (`ChangedWhileMoved`). The source goes
-/// with `Provider::delete_leaf`, which removes a link itself, never what it leads to, and never
-/// removes a folder: an item that turned into one after those checks, or a path that leads
-/// into another folder by then, fails and stays with everything in it.
+/// now. A file must also be of the size and modification time `fresh` gave it: the copy reads
+/// it a chunk at a time and waits at each chunk while the job is paused, so a file written
+/// meanwhile (in place, as many editors save) is no longer what the copy holds. Each fails as
+/// "changed while it was moved" (`ChangedWhileMoved`), and the source stays beside its copy.
+/// The source goes with `Provider::delete_leaf`, which removes a link itself, never what it
+/// leads to, and never removes a folder: an item that turned into one after those checks, or a
+/// path that leads into another folder by then, fails and stays with everything in it.
 fn delete_source(
     ctx: &Ctx<'_>,
     source: &VPath,
@@ -743,7 +746,10 @@ fn delete_source(
         dst.sync_dir(&folder).at(Stage::DeleteSource)?;
     }
     let src = ctx.provider(source).at(Stage::DeleteSource)?;
-    restat(&*src, source, fresh, Stage::DeleteSource, Walking::Moving)?;
+    let now = restat(&*src, source, fresh, Stage::DeleteSource, Walking::Moving)?;
+    if now.kind == EntryKind::File && (now.size != fresh.size || now.modified != fresh.modified) {
+        return Err(Walking::Moving.changed(Stage::DeleteSource, source));
+    }
     check_parent(&*src, parent, Stage::DeleteSource, Walking::Moving)?;
     src.delete_leaf(source).at(Stage::DeleteSource)
 }

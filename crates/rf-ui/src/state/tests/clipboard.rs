@@ -1212,12 +1212,12 @@ fn a_cancelled_cut_still_on_the_clipboard_is_left_for_the_end_to_empty() {
     );
     // Its emptying is on its way, then failed once (another app held the clipboard): the app's
     // end is to try once more if it comes now, within the next look at the clipboard.
-    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+    assert_eq!(state.cut_left_on_clipboard(), Some(left_at(70)));
     assert_eq!(state.clipboard_cleared(70, busy()), []);
-    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+    assert_eq!(state.cut_left_on_clipboard(), Some(left_at(70)));
     // The end asks the state no more once it has begun.
     assert_eq!(state.begin_quit(), [Effect::Quit]);
-    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+    assert_eq!(state.cut_left_on_clipboard(), Some(left_at(70)));
 
     // Emptied: nothing left.
     let mut state = two_panes();
@@ -1242,4 +1242,41 @@ fn a_cancelled_cut_still_on_the_clipboard_is_left_for_the_end_to_empty() {
         [Effect::Notice(words::clipboard_not_emptied().to_owned())]
     );
     assert_eq!(state.cut_left_on_clipboard(), None);
+
+    // Cancelled before its put told its count: the worker, which knows it, is to empty it.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(
+        state.cut_left_on_clipboard(),
+        Some(CutLeft {
+            put: Some(token),
+            change: None,
+        })
+    );
+    // Once the put has told it, the window empties it itself, as above.
+    assert_eq!(
+        state.clipboard_put(token, Ok(73)),
+        [Effect::Clipboard(ClipboardWork::ClearIf(73))]
+    );
+    assert_eq!(state.cut_left_on_clipboard(), Some(left_at(73)));
+    // A put that failed left nothing to empty.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(
+        state.clipboard_put(token, Err(ClipboardFailure::Unavailable)),
+        []
+    );
+    assert_eq!(state.cut_left_on_clipboard(), None);
+}
+
+/// A cut cancelled with Esc that the clipboard holds with the change count `change`.
+fn left_at(change: u64) -> CutLeft {
+    CutLeft {
+        put: None,
+        change: Some(change),
+    }
 }

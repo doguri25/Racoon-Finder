@@ -7,15 +7,18 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
 use rf_core::ErrorKind;
-use rf_jobs::testkit::{Fault, FaultyProvider, ScriptedResolver, temp_files, tree, write_tree};
+use rf_jobs::testkit::{
+    Fault, FaultyProvider, ScriptedResolver, temp_files, tree, wait_finished, write_tree,
+};
 use rf_jobs::{
-    ConflictPolicy, Control, ErrorAction, ErrorAnswer, ErrorPolicy, ExecEnv, JobId, JobSpec,
-    MovedItem, NonInteractive, Outcome, Stage, Totals, TransferItem, TransferMode, TransferOptions,
-    TransferSpec, UndoRecord, execute,
+    ConflictPolicy, Control, EngineConfig, ErrorAction, ErrorAnswer, ErrorPolicy, ExecEnv,
+    FailureReason, JobEngine, JobId, JobSpec, MovedItem, NonInteractive, Outcome, Stage, Totals,
+    TransferItem, TransferMode, TransferOptions, TransferSpec, UndoRecord, execute,
 };
 
 fn mv(sources: &[PathBuf], dest: &Path) -> JobSpec {
@@ -166,6 +169,40 @@ fn a_partial_cross_volume_move_keeps_what_failed() {
         assert_eq!(std::fs::read_to_string(place).unwrap(), body);
     }
     assert!(f.src.join("dir").is_dir());
+}
+
+#[test]
+fn a_file_written_while_a_move_copies_it_stays() {
+    // Two chunks: the copy waits for the pause between them.
+    let f = fx();
+    let source = f.src.join("big.bin");
+    std::fs::write(&source, pattern(2 << 20)).unwrap();
+    let p = FaultyProvider::local(vec![Fault::CrossDevice, Fault::Hold { file: 0 }]);
+    let (e, rx) = JobEngine::start(EngineConfig::new(p.vfs(), Arc::new(NonInteractive)));
+    let id = e.submit(mv(std::slice::from_ref(&source), &f.dst));
+    assert!(p.wait_held(Duration::from_secs(30)));
+    assert!(e.pause(id));
+    p.release();
+    // The copy has read the first chunk and waits for the pause before the next. Meanwhile an
+    // editor writes the file again, in place.
+    let written = vec![7_u8; 3 << 20];
+    std::fs::write(&source, &written).unwrap();
+    assert!(e.resume(id));
+    let report = wait_finished(&rx, id, Duration::from_secs(30));
+    assert!(e.shutdown(Duration::from_secs(30)));
+    // What was copied is not the file any more: the file stays, with what was written, beside
+    // its copy.
+    assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(
+        report
+            .failures
+            .iter()
+            .map(|failure| (failure.stage, failure.reason.clone()))
+            .collect::<Vec<_>>(),
+        [(Stage::DeleteSource, Some(FailureReason::ChangedWhileMoved))]
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), written);
+    assert!(f.dst.join("big.bin").is_file());
 }
 
 #[test]
@@ -1158,7 +1195,7 @@ fn a_move_never_enters_a_folder_on_another_volume() {
         "{}",
         failure.message
     );
-    assert_eq!(failure.reason, Some(rf_jobs::FailureReason::OtherVolume));
+    assert_eq!(failure.reason, Some(FailureReason::OtherVolume));
 }
 
 /// The undo of a folder moved across volumes makes the source folders again with the times
@@ -1264,10 +1301,7 @@ fn undoing_a_move_that_overwrote_says_what_cannot_come_back() {
             "{}",
             undo.warnings[0].message
         );
-        assert_eq!(
-            undo.warnings[0].reason,
-            Some(rf_jobs::FailureReason::Overwritten)
-        );
+        assert_eq!(undo.warnings[0].reason, Some(FailureReason::Overwritten));
     }
 }
 
@@ -1339,7 +1373,7 @@ fn a_marker_that_cannot_be_looked_for_keeps_the_merged_folder() {
         (
             Stage::DeleteSource,
             Some(v(f.src.join("dir/empty"))),
-            Some(rf_jobs::FailureReason::CannotTellOwnFolder)
+            Some(FailureReason::CannotTellOwnFolder)
         )
     );
     let kept = format!(
@@ -1378,7 +1412,7 @@ fn a_marker_that_cannot_be_removed_is_reported() {
         [(
             Stage::Write,
             Some(v(&left)),
-            Some(rf_jobs::FailureReason::TempLeftBehind)
+            Some(FailureReason::TempLeftBehind)
         )]
     );
 }
