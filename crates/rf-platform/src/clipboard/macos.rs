@@ -107,12 +107,16 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
             if board.changeCount() != change {
                 continue;
             }
-            return Ok((!paths.is_empty()).then_some(ClipboardFiles {
-                paths,
-                effect: None,
-                change: count(change),
-                skipped,
-            }));
+            // File URLs that are all left out still answer, with no path: a paste says why it
+            // pasted nothing.
+            return Ok(
+                (!paths.is_empty() || skipped > 0).then_some(ClipboardFiles {
+                    paths,
+                    effect: None,
+                    change: count(change),
+                    skipped,
+                }),
+            );
         }
         Err(io::Error::new(
             io::ErrorKind::ResourceBusy,

@@ -355,9 +355,9 @@ pub fn start_folder_gone(folder: &VPath) -> String {
 
 /// The notice when the system could not start the work behind part of the window (it is out
 /// of threads or memory): a listing, a preview, a look at the clipboard, a worker of the app's
-/// start. Each of them can be asked for again.
+/// start. Each of them can be asked for again. "일", not "작업": no file job failed.
 pub fn background_failed() -> &'static str {
-    "시스템 자원이 부족해 작업을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
+    "시스템 자원이 부족해 일을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
 }
 
 /// The notice when the settings (tabs, theme, window size) could not be written: the next
@@ -2061,7 +2061,7 @@ mod tests {
         );
         assert_eq!(
             background_failed(),
-            "시스템 자원이 부족해 작업을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
+            "시스템 자원이 부족해 일을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
         );
     }
 

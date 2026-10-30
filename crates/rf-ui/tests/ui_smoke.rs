@@ -5464,6 +5464,43 @@ fn the_menu_of_a_list_s_empty_part_lists_the_folder_again_in_every_view() {
 }
 
 #[test]
+fn a_choice_in_a_pane_s_menu_gives_the_keys_to_the_panes() {
+    let window = window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_tree_key(move |_, _, _, _, _| {
+        record.note("tree");
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    let pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    // The tree has the keys; a right click on the left list's empty part, and its 새로 고침.
+    window.invoke_focus_tree();
+    let item = labelled(&window, "a.txt", AccessibleRole::ListItem).remove(0);
+    let at = item.absolute_position();
+    let position = LogicalPosition::new(at.x + 4.0, at.y + 300.0);
+    let button = slint::platform::PointerEventButton::Right;
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    window
+        .window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    choose_item(&window, "새로 고침  (F5)");
+    settle();
+    // The pane it was of has the keys now, as after a click in it.
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+}
+
+#[test]
 fn the_menu_of_a_list_s_empty_part_undoes_and_does_again_while_it_can() {
     let window = window();
     ui_bridge::show_shortcuts(&window, Os::Windows);

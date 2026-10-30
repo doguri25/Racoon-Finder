@@ -92,8 +92,9 @@ pub fn put_files(paths: &[PathBuf], effect: DropEffect) -> io::Result<u64> {
     imp::put_files(paths, effect)
 }
 
-/// The files on the clipboard; `None` when it holds none (text, an image, nothing), or when
-/// none of them can be read ([`ClipboardFiles::skipped`]).
+/// The files on the clipboard; `None` when it holds none (text, an image, nothing). Files it
+/// cannot read are left out and counted ([`ClipboardFiles::skipped`]); when they are all it
+/// holds, the answer has no path and that count.
 pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     imp::get_files()
 }
@@ -103,8 +104,7 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
 /// `CF_HDROP` is there, which needs no hold of the clipboard; macOS asks the pasteboard whether
 /// an item has a file URL; elsewhere it is whether this process put files there. Files that
 /// [`get_files`] then leaves out ([`ClipboardFiles::skipped`]) count too, so 붙여넣기 stays on
-/// for them; when they are all the clipboard holds, [`get_files`] gives `None`, and a paste
-/// says only that there are no files to paste.
+/// for them: a paste of them says why it pasted nothing.
 pub fn has_files() -> bool {
     imp::has_files()
 }

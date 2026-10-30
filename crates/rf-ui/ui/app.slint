@@ -1138,6 +1138,8 @@ export component MainWindow inherits Window {
                             root.pane-activated(0);
                             root.command(name);
                             root.give-quick-look-keys();
+                            // The keys are the panes' once the menu has closed.
+                            pane-menu-keys-later.running = true;
                         }
                         retry => {
                             root.retry(0);
@@ -1278,6 +1280,8 @@ export component MainWindow inherits Window {
                             root.pane-activated(1);
                             root.command(name);
                             root.give-quick-look-keys();
+                            // The keys are the panes' once the menu has closed.
+                            pane-menu-keys-later.running = true;
                         }
                         retry => {
                             root.retry(1);
@@ -1493,6 +1497,22 @@ export component MainWindow inherits Window {
             self.running = false;
             if (root.dialog == DialogKind.none && !left.editing && !right.editing && !filter-box.has-focus) {
                 root.give-keys-back();
+            }
+        }
+    }
+
+    // A choice in a pane's own menu (its items', its empty part's) is the panes' part of the
+    // window: the menu gives the keys back, as it closes, to what had them (the tree or the job
+    // panel, maybe), and once it has they go to the panes, now or as a window the choice opened
+    // closes. Quick look that the choice opened keeps them.
+    pane-menu-keys-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.keys-region = 0;
+            if (root.dialog == DialogKind.none && !root.quick-look && !left.editing && !right.editing && !filter-box.has-focus) {
+                keys.focus();
             }
         }
     }
