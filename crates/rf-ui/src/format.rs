@@ -149,6 +149,19 @@ pub fn folder_label(path: &VPath) -> String {
     }
 }
 
+/// The name the rows show for `entry`: the whole name, or, with the extensions hidden
+/// (`show_extensions` off, NAV-11), the name without the dot and the extension the 확장자
+/// column shows. A folder, a name without an extension and a dot file (`.bashrc`) show whole.
+pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
+    let name = entry.name.to_string_lossy();
+    let extension = entry.extension().filter(|_| !show_extensions);
+    let stem = extension.and_then(|extension| {
+        name.strip_suffix(&*extension.to_string_lossy())?
+            .strip_suffix('.')
+    });
+    stem.map_or_else(|| name.clone().into_owned(), str::to_owned)
+}
+
 /// The kind column of `entry`: what a folder, a link and a special file are, and for a file
 /// the kind its extension names (`PDF 문서`, `PNG 이미지`, `CSV 파일`), or `파일` without one.
 /// A folder named `….app` is a macOS app bundle and reads `응용 프로그램`.
@@ -249,6 +262,32 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn hidden_extensions_leave_the_name_before_them() {
+        let shown =
+            |name: &str, kind: EntryKind, show: bool| shown_name(&Entry::new(name, kind), show);
+        assert_eq!(shown("설계안.pdf", EntryKind::File, true), "설계안.pdf");
+        assert_eq!(shown("설계안.pdf", EntryKind::File, false), "설계안");
+        assert_eq!(shown("a.tar.gz", EntryKind::File, false), "a.tar");
+        assert_eq!(shown("PHOTO.JPG", EntryKind::File, false), "PHOTO");
+        // A link's name is a file's; a folder's has no extension.
+        assert_eq!(shown("문서.lnk", EntryKind::Symlink, false), "문서");
+        assert_eq!(shown("photos.2026", EntryKind::Dir, false), "photos.2026");
+        // Nothing after the dot, or nothing before it: no extension.
+        assert_eq!(shown(".bashrc", EntryKind::File, false), ".bashrc");
+        assert_eq!(shown("README", EntryKind::File, false), "README");
+        assert_eq!(shown("끝.", EntryKind::File, false), "끝.");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_no_text_loses_its_extension_as_it_shows() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut entry = Entry::new("x", EntryKind::File);
+        entry.name = OsStr::from_bytes(b"ph\xffoto.jpg").to_os_string();
+        assert_eq!(shown_name(&entry, false), "ph\u{FFFD}oto");
+    }
 
     #[test]
     fn long_paths_lose_their_middle() {

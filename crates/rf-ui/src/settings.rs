@@ -1,5 +1,6 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
-//! (`AppPaths::config_dir`): the theme, whether hidden items show, the window's size and layout
+//! (`AppPaths::config_dir`): the theme, whether hidden items show and whether the names show
+//! their extensions (`hide_extensions`, NAV-11), the window's size and layout
 //! (`[layout]`), the tabs of both panes (in their order, pinned or not) and which one has the
 //! keyboard, the destination picker's recent targets, and the views remembered per folder
 //! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
@@ -20,8 +21,8 @@
 //! know (a new theme) takes its default, and a tab whose folder this version cannot read stays
 //! in the file. Running an older version in between loses as little as it can. The other way
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
-//! with the default layout and no tab pinned, and one without `[[folder_views]]` with no view
-//! remembered. A folder view falls back one key at a time too: a mode or a key of the order this
+//! with the default layout and no tab pinned, one without `[[folder_views]]` with no view
+//! remembered, and one without `hide_extensions` with the extensions shown. A folder view falls back one key at a time too: a mode or a key of the order this
 //! version does not know shows as the default one, and a column it does not know is left out of
 //! the view; all of them are kept as written (`UnknownParts`) and written back, until the user
 //! changes that part here, and the keys of a newer version stay in its `extra`.
@@ -181,6 +182,9 @@ pub struct Settings {
     pub theme: ThemeChoice,
     #[serde(deserialize_with = "or_default")]
     pub show_hidden: bool,
+    /// The names of files show no extensions (NAV-11); a file without the key shows them.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub hide_extensions: bool,
     /// The window's last size in logical pixels (width, height), when it was neither maximized
     /// nor full screen; `None` until the first save.
     #[serde(
@@ -464,6 +468,8 @@ pub struct Session {
     /// 0 left, 1 right.
     pub active_pane: usize,
     pub show_hidden: bool,
+    /// The names of files show no extensions.
+    pub hide_extensions: bool,
     pub layout: Layout,
 }
 
@@ -634,6 +640,7 @@ impl Settings {
             panes: [pane(0), pane(1)],
             active_pane: self.active_pane.min(1),
             show_hidden: self.show_hidden,
+            hide_extensions: self.hide_extensions,
             layout: self.layout.layout(),
         }
     }
@@ -669,6 +676,7 @@ impl Settings {
         }
         self.active_pane = session.active_pane;
         self.show_hidden = session.show_hidden;
+        self.hide_extensions = session.hide_extensions;
         self.layout.set(session.layout);
     }
 
@@ -723,6 +731,7 @@ impl Settings {
         let head = Settings {
             theme: self.theme,
             show_hidden: self.show_hidden,
+            hide_extensions: self.hide_extensions,
             window: self.window,
             active_pane: self.active_pane,
             recent_targets: self.recent_targets.clone(),
@@ -998,6 +1007,7 @@ mod tests {
             ],
             active_pane: 1,
             show_hidden: true,
+            hide_extensions: true,
             layout: odd_layout(),
         });
         settings.set_recent(&[folder(dir, "r1"), folder(dir, "r2")]);
@@ -1074,6 +1084,9 @@ mod tests {
         assert_eq!(loaded, writable(settings.clone()));
         assert_eq!(loaded.settings.session(), settings.session());
         assert_eq!(loaded.settings.session().layout, odd_layout());
+        assert!(loaded.settings.session().hide_extensions);
+        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).expect("read");
+        assert!(text.contains("hide_extensions = true"), "{text}");
         assert_eq!(
             loaded.settings.recent(),
             [folder(dir.path(), "r1"), folder(dir.path(), "r2")]
@@ -1134,6 +1147,22 @@ mod tests {
         assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
         assert_eq!(std::fs::read_to_string(&file).expect("read"), broken);
         assert!(!dir.path().join(BAD_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn the_extensions_are_written_only_when_hidden() {
+        let shown = Settings::default().to_text().expect("text");
+        assert!(!shown.contains("hide_extensions"), "{shown}");
+        let hidden = Settings {
+            hide_extensions: true,
+            ..Settings::default()
+        };
+        let text = hidden.to_text().expect("text");
+        assert!(text.contains("hide_extensions = true"), "{text}");
+        // A value this version cannot read shows them.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(dir.path().join(FILE_NAME), "hide_extensions = \"yes\"\n").expect("written");
+        assert!(!load(dir.path()).settings.hide_extensions);
     }
 
     #[test]
@@ -1329,6 +1358,8 @@ mod tests {
         assert_eq!(session.panes[1].pinned, Vec::<bool>::new());
         assert_eq!(session.active_pane, 1);
         assert!(session.show_hidden);
+        // The extensions show, as they did then.
+        assert!(!session.hide_extensions);
         assert_eq!(session.layout, Layout::default());
         assert!(settings.views().is_empty());
 
@@ -1677,6 +1708,7 @@ mod tests {
             ],
             active_pane: 1,
             show_hidden: false,
+            hide_extensions: false,
             layout: Layout::default(),
         });
         stored.save(dir.path()).expect("saved");

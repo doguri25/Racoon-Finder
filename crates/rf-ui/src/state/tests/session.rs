@@ -13,6 +13,7 @@ fn session(left: &[&str], left_active: usize, right: &[&str], active_pane: usize
         panes: [pane(left, left_active), pane(right, 0)],
         active_pane,
         show_hidden: true,
+        hide_extensions: true,
         layout: Layout::default(),
     }
 }
@@ -43,6 +44,7 @@ fn a_session_opens_its_tabs() {
     assert_eq!(locations(&state, RIGHT), [folder("d")]);
     assert_eq!(state.active(), RIGHT);
     assert!(state.show_hidden());
+    assert!(!state.show_extensions());
     assert!(state.panes()[LEFT].tabs()[0].filter().show_hidden);
     // Every tab lists its folder.
     let listed: Vec<VPath> = loads(&effects).iter().map(|r| r.path.clone()).collect();

@@ -17,8 +17,8 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuRow, FolderMenuView, JobRowView,
-    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PickTarget, PickView, PreflightView,
-    RecoveryView, Theme,
+    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
+    PreflightView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -2217,6 +2217,7 @@ fn the_theme_follows_the_view_menu() {
     // the marks of the layout's 폴더 트리 and 듀얼 패널, which are on).
     window.set_show_tree(false);
     window.set_dual_pane(false);
+    window.set_show_extensions(false);
     let commands = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&commands);
     window.on_command(move |name| record.borrow_mut().push(name.to_string()));
@@ -4061,7 +4062,9 @@ fn the_view_menu_switches_the_layout() {
     }
     default_layout(&window);
     // The marks show the layout as Rust sets it back after each toggle: 폴더 트리, 미리 보기
-    // 패널 and 탐색 동기화 in the menu, 듀얼 패널 and 위아래로 나누기 in its 배치 menu.
+    // 패널 and 탐색 동기화 in the menu, 듀얼 패널 and 위아래로 나누기 in its 배치 menu (and no
+    // other: the extensions are not shown).
+    window.set_show_extensions(false);
     let marks = || {
         open("배치");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
@@ -4237,4 +4240,335 @@ fn marked(window: &MainWindow, title: &str) -> bool {
     texts
         .windows(2)
         .any(|pair| pair[0] == "✓" && pair[1] == title)
+}
+
+/// The pattern window as Rust shows it: the last pattern, `*.jpg`, as wildcards ignoring case,
+/// in place of the selection.
+fn pattern_view(count: &str, problem: &str, ok_enabled: bool) -> PatternView {
+    PatternView {
+        initial: "*.jpg".into(),
+        regex: false,
+        ignore_case: true,
+        add: false,
+        count: count.into(),
+        problem: problem.into(),
+        ok_enabled,
+    }
+}
+
+/// A window that shows `view` in the pattern window and notes each of its calls.
+fn pattern_window(view: PatternView) -> (MainWindow, Calls) {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_pattern_edited(move |text| record.note(format!("edited {text}")));
+    let record = calls.clone();
+    window.on_pattern_accepted(move |text| record.note(format!("accepted {text}")));
+    let record = calls.clone();
+    window.on_pattern_syntax(move |regex| record.note(format!("regex {regex}")));
+    let record = calls.clone();
+    window.on_pattern_case(move |ignore| record.note(format!("ignore case {ignore}")));
+    let record = calls.clone();
+    window.on_pattern_mode(move |add| record.note(format!("add {add}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    let record = calls.clone();
+    window.on_key(move |text, _, _, _, _| {
+        record.note(format!("key {text}"));
+        true
+    });
+    window.set_pattern_view(view);
+    window.set_dialog(DialogKind::Pattern);
+    slint::platform::update_timers_and_animations();
+    (window, calls)
+}
+
+/// The pattern window's 선택: after the toolbar's 선택 under the scrim.
+fn select_button(window: &MainWindow) -> ElementHandle {
+    labelled(window, "선택", AccessibleRole::Button)
+        .pop()
+        .expect("the window's 선택")
+}
+
+#[test]
+fn the_pattern_window_shows_its_count_and_hands_the_pattern_over() {
+    let (window, calls) = pattern_window(pattern_view("맞는 항목 3개", "", true));
+    assert_eq!(
+        labelled(&window, "맞는 항목 3개", AccessibleRole::Text).len(),
+        1
+    );
+    let field = || labelled(&window, "패턴", AccessibleRole::TextInput).remove(0);
+    // The last pattern, all selected: what is typed replaces it.
+    assert_eq!(field().accessible_value().as_deref(), Some("*.jpg"));
+    chord(&window, &["*"]);
+    chord(&window, &["."]);
+    chord(&window, &["p"]);
+    assert_eq!(calls.take(), ["edited *", "edited *.", "edited *.p"]);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["accepted *.p"]);
+    select_button(&window).invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["accepted *.p"]);
+    // The choices are radio buttons and a box, each named.
+    labelled(&window, "정규식", AccessibleRole::RadioButton)[0].invoke_accessible_default_action();
+    labelled(&window, "대소문자 무시", AccessibleRole::Checkbox)[0]
+        .invoke_accessible_default_action();
+    labelled(&window, "선택에 더하기", AccessibleRole::RadioButton)[0]
+        .invoke_accessible_default_action();
+    assert_eq!(
+        calls.take(),
+        ["regex true", "ignore case false", "add true"]
+    );
+    // Esc closes it; no key reached the panes meanwhile.
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["cancelled"]);
+}
+
+#[test]
+fn a_pattern_that_is_no_pattern_says_why_and_holds_the_button() {
+    let (window, calls) = pattern_window(pattern_view("", "올바른 정규식이 아닙니다", false));
+    assert_eq!(
+        labelled(&window, "올바른 정규식이 아닙니다", AccessibleRole::Text).len(),
+        1
+    );
+    assert_eq!(select_button(&window).accessible_enabled(), Some(false));
+    select_button(&window).invoke_accessible_default_action();
+    press(&window, Key::Return);
+    // Tab passes the button over: from 취소 back to the field.
+    for _ in 0..5 {
+        press(&window, Key::Tab);
+    }
+    chord(&window, &["x"]);
+    assert_eq!(calls.take(), ["edited x"]);
+}
+
+#[test]
+fn a_pattern_being_composed_holds_the_pattern_window() {
+    let (window, calls) = pattern_window(pattern_view("맞는 항목 3개", "", true));
+    let field = || labelled(&window, "패턴", AccessibleRole::TextInput).remove(0);
+    // The cursor after the text, as after a click there.
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    press(&window, Key::RightArrow);
+    // While a syllable is composed, Rust has the pattern before it: neither the button, nor
+    // Enter, nor Tab takes it.
+    compose(&window, "ㅅ");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(field().accessible_value().as_deref(), Some("*.jpg"));
+    assert_eq!(select_button(&window).accessible_enabled(), Some(false));
+    select_button(&window).invoke_accessible_default_action();
+    press(&window, Key::Return);
+    press(&window, Key::Tab);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    // Committed, the syllable is part of the pattern, which Enter hands over.
+    commit_composition(&window, "사");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(select_button(&window).accessible_enabled(), Some(true));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["edited *.jpg사", "accepted *.jpg사"]);
+}
+
+#[test]
+fn the_pattern_window_s_choices_take_the_keys_in_turn() {
+    let (window, calls) = pattern_window(pattern_view("맞는 항목 3개", "", true));
+    // Tab: 와일드카드/정규식, where ← → choose.
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    press(&window, Key::LeftArrow);
+    // Tab: 대소문자 무시, which Space turns off.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    // Tab: 선택 바꾸기/선택에 더하기.
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    assert_eq!(
+        calls.take(),
+        ["regex true", "regex false", "ignore case false", "add true"]
+    );
+    // Tab: 취소, then 선택, which Space presses with the field's text.
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["accepted *.jpg"]);
+    // Shift+Tab back to 취소, which Enter presses.
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["cancelled"]);
+}
+
+#[test]
+fn the_select_menu_says_its_keys_and_runs_the_commands() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "선택", AccessibleRole::Button).remove(0);
+    for (os, items) in [
+        (
+            Os::Windows,
+            [
+                "모두 선택  (Ctrl+A)",
+                "선택 해제  (Esc)",
+                "선택 반전  (Ctrl+Shift+I)",
+                "패턴으로 선택…  (Ctrl+S)",
+                "같은 확장자 선택  (Ctrl+Shift+S)",
+            ],
+        ),
+        (
+            Os::MacOs,
+            [
+                "모두 선택  (⌘A)",
+                "선택 해제  (⎋)",
+                "선택 반전  (⌥⇧⌘A)",
+                "패턴으로 선택…  (⌘S)",
+                "같은 확장자 선택  (⇧⌘S)",
+            ],
+        ),
+    ] {
+        ui_bridge::show_shortcuts(&window, os);
+        for item in items {
+            button.invoke_accessible_default_action();
+            choose_item(&window, item);
+        }
+        assert_eq!(
+            calls.take(),
+            [
+                "select-all",
+                "clear-selection",
+                "invert-selection",
+                "select-pattern",
+                "select-same-extension"
+            ],
+            "{os:?}"
+        );
+    }
+}
+
+#[test]
+fn the_view_menu_shows_and_hides_the_extensions() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    button.invoke_accessible_default_action();
+    // On by default, as the names show them.
+    assert!(marked(&window, "파일 확장명 보기"));
+    choose_item(&window, "파일 확장명 보기");
+    assert_eq!(calls.take(), ["toggle-extensions"]);
+    window.set_show_extensions(false);
+    button.invoke_accessible_default_action();
+    assert!(!marked(&window, "파일 확장명 보기"));
+    assert_eq!(
+        labelled(&window, "파일 확장명 보기", AccessibleRole::Text).len(),
+        1
+    );
+    press(&window, Key::Escape);
+}
+
+#[test]
+fn hidden_extensions_leave_the_names_before_them_in_every_view() {
+    let window = window();
+    let mut pane = listed_pane(vec![
+        entry("photos.2026", EntryKind::Dir, 0),
+        entry(".bashrc", EntryKind::File, 1),
+        entry("설계안.pdf", EntryKind::File, 10),
+    ]);
+    let models = PaneModels::default();
+    models.set_show_extensions(false);
+    for mode in [
+        ViewMode::Details,
+        ViewMode::List,
+        ViewMode::SmallIcons,
+        ViewMode::MediumIcons,
+        ViewMode::LargeIcons,
+    ] {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        let shown = |name: &str| labelled(&window, name, AccessibleRole::ListItem).len();
+        assert_eq!(shown("설계안"), 1, "{mode:?}");
+        assert_eq!(shown("설계안.pdf"), 0, "{mode:?}");
+        // A folder's name and a dot file's have no extension to leave out.
+        assert_eq!(shown("photos.2026"), 1, "{mode:?}");
+        assert_eq!(shown(".bashrc"), 1, "{mode:?}");
+    }
+    // Shown again: the whole names, at once.
+    models.set_show_extensions(true);
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(
+        labelled(&window, "설계안.pdf", AccessibleRole::ListItem).len(),
+        1
+    );
+}
+
+#[test]
+fn a_list_listed_again_stays_where_it_was_scrolled() {
+    let window = window();
+    let rows = |modified: Option<std::time::SystemTime>| -> Vec<Entry> {
+        (0..3_000)
+            .map(|i| {
+                let mut row = entry(&format!("f{i:04}"), EntryKind::File, 1);
+                row.modified = modified;
+                row
+            })
+            .collect()
+    };
+    let mut pane = listed_pane(rows(None));
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    window.invoke_scroll_to(0, 2_000);
+    let place = |name: &str| {
+        labelled(&window, name, AccessibleRole::ListItem)
+            .first()
+            .map(|row| row.absolute_position().y)
+    };
+    let before = place("f2000").expect("scrolled to it");
+    assert_eq!(place("f0001"), None);
+    // F5: the folder is listed again, and every row's date has changed (more rows than the list
+    // is told one by one: it starts over its rows). It stays where it was.
+    let request = pane.active_tab_mut().reload();
+    let handled = pane.handle(LoadEvent::Listed {
+        generation: request.generation,
+        entries: rows(Some(
+            std::time::UNIX_EPOCH + std::time::Duration::from_hours(1),
+        )),
+    });
+    assert!(matches!(handled, rf_ui::pane::Handled::Applied { .. }));
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(place("f2000"), Some(before));
+    assert_eq!(place("f0001"), None);
+}
+
+#[test]
+fn the_menu_of_a_list_s_empty_part_lists_the_folder_again_in_every_view() {
+    let window = window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(format!("command {name}")));
+    let record = calls.clone();
+    window.on_pane_activated(move |side| record.note(format!("pane {side}")));
+    let mut pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    let models = PaneModels::default();
+    for mode in [ViewMode::Details, ViewMode::MediumIcons, ViewMode::List] {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        // A right press well below the one item.
+        let item = labelled(&window, "a.txt", AccessibleRole::ListItem).remove(0);
+        let at = item.absolute_position();
+        let position = LogicalPosition::new(at.x + 4.0, at.y + 300.0);
+        let button = slint::platform::PointerEventButton::Right;
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        window
+            .window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        choose_item(&window, "새로 고침  (F5)");
+        assert_eq!(calls.take(), ["pane 0", "command refresh"], "{mode:?}");
+    }
 }

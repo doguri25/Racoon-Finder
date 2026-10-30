@@ -38,9 +38,11 @@ use crate::state::{
 use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
+mod matcher;
 mod persist;
 mod sorter;
 
+use matcher::Matcher;
 pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
@@ -539,6 +541,26 @@ fn connect_jobs(window: &MainWindow) {
     window.on_recovery_chosen(|i, run_again| {
         with(|c| c.update_at(i, |state, i| state.recovery_chosen(i, run_again)));
     });
+    window.on_pattern_edited(|text| {
+        with(|c| c.update(|state| state.pattern_edited(&text)));
+    });
+    window.on_pattern_syntax(|regex| {
+        with(|c| c.update(|state| state.pattern_syntax(regex)));
+    });
+    window.on_pattern_case(|ignore| {
+        with(|c| c.update(|state| state.pattern_case(ignore)));
+    });
+    window.on_pattern_mode(|add| {
+        with(|c| {
+            c.update(|state| {
+                state.pattern_mode(add);
+                Vec::new()
+            });
+        });
+    });
+    window.on_pattern_accepted(|text| {
+        with(|c| c.update(|state| state.pattern_confirmed(&text)));
+    });
     window.on_job_pause(|i| {
         with(|c| c.update_at(i, |state, i| state.job_control(i, 0)));
     });
@@ -623,6 +645,8 @@ pub struct Controller {
     checks: RefCell<CopyChecks>,
     /// Puts the rows of long listings in a new order, the newest sort of each tab only.
     sorter: Sorter,
+    /// Matches the names of the pattern window's rows, the newest request only.
+    matcher: Matcher,
 }
 
 impl fmt::Debug for Controller {
@@ -681,6 +705,9 @@ impl Controller {
             shown_drag: Cell::new(0),
             checks: RefCell::new(CopyChecks::default()),
             sorter: Sorter::new(|sorted| post(move |c| c.update(|state| state.sorted(sorted)))),
+            matcher: Matcher::new(|matched| {
+                post(move |c| c.update(|state| state.pattern_matched(matched)));
+            }),
         }
     }
 
@@ -1048,6 +1075,13 @@ impl Controller {
             "undo" => Command::Undo,
             "redo" => Command::Redo,
             "toggle-hidden" => Command::ToggleHidden,
+            "toggle-extensions" => Command::ToggleExtensions,
+            "select-all" => Command::SelectAll,
+            "clear-selection" => Command::ClearSelection,
+            "invert-selection" => Command::InvertSelection,
+            "select-pattern" => Command::SelectPattern,
+            "select-same-extension" => Command::SelectSameExtension,
+            "refresh" => Command::Refresh,
             "toggle-tree" => Command::ToggleTree,
             "focus-tree" => Command::FocusTree,
             "toggle-preview" => Command::TogglePreview,
@@ -1122,6 +1156,11 @@ impl Controller {
                 Effect::Quit => self.quit(),
                 Effect::Sort(request) => {
                     if self.sorter.sort(request).is_err() {
+                        self.notice(words::background_failed());
+                    }
+                }
+                Effect::MatchNames(request) => {
+                    if self.matcher.match_names(request).is_err() {
                         self.notice(words::background_failed());
                     }
                 }
@@ -1266,6 +1305,7 @@ impl Controller {
             // `apply` carries these out itself: it hands only the ones above to this method.
             Effect::Load(_)
             | Effect::Sort(_)
+            | Effect::MatchNames(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::Follow { .. }
@@ -1370,6 +1410,7 @@ impl Controller {
             // Carried out by `apply`.
             Effect::Load(_)
             | Effect::Sort(_)
+            | Effect::MatchNames(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::FindExisting { .. }
@@ -1432,6 +1473,7 @@ impl Controller {
             let mut shown = self.shown.borrow_mut();
             for side in [LEFT, RIGHT] {
                 let pane = &state.panes()[side];
+                self.panes[side].set_show_extensions(state.show_extensions());
                 let mut view = self.panes[side].view(pane, side == state.active());
                 view.own_view = state.views().own(pane.active_tab().location()).is_some();
                 let chevron = state
@@ -1456,6 +1498,7 @@ impl Controller {
             window.set_can_forward(tab.history().can_forward());
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
+            window.set_show_extensions(state.show_extensions());
             show_layout(&window, state.layout(), state.syncing());
             let list = state.subfolders().map(|list| (list.names(), list.cursor()));
             window.set_subfolders(ui_bridge::folder_menu(&self.subfolder_rows, list, true));
@@ -1550,6 +1593,9 @@ impl Controller {
             }
             Some(Modal::Preflight(question)) => {
                 window.set_preflight_view(ui_bridge::preflight_view(question));
+            }
+            Some(Modal::Pattern(dialog)) => {
+                window.set_pattern_view(ui_bridge::pattern_view(dialog));
             }
             // Set above.
             Some(Modal::Pick(_)) | None => {}

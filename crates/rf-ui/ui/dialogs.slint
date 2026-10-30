@@ -10,7 +10,8 @@
 
 import { ListView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { PrimaryButton, OutlineButton, DialogFrame } from "widgets.slint";
+import { PrimaryButton, OutlineButton, DialogFrame, CheckBox, Segment, SegmentTrack } from "widgets.slint";
+import { Icon } from "icons.slint";
 import { DialogKeys } from "shortcuts.slint";
 
 export struct NameView {
@@ -20,6 +21,21 @@ export struct NameView {
     select-end: int,
     // Why the name cannot be used, as it is typed; empty when it can.
     warning: string,
+    ok-enabled: bool,
+}
+
+export struct PatternView {
+    // The text the field starts with: the last pattern chosen.
+    initial: string,
+    // A regular expression (정규식) rather than wildcards (와일드카드).
+    regex: bool,
+    ignore-case: bool,
+    // The rows join the selection (선택에 더하기) rather than replace it (선택 바꾸기).
+    add: bool,
+    // How many rows match ("맞는 항목 3개", "세는 중…"); empty while there is no pattern.
+    count: string,
+    // Why the text is no pattern; empty when it is one.
+    problem: string,
     ok-enabled: bool,
 }
 
@@ -217,6 +233,270 @@ export component NameDialog inherits DialogFrame {
                     focused: root.on-button == 1;
                     clicked => {
                         root.accepted(input.text);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Selects the rows whose names match a pattern (패턴으로 선택, NAV-15): wildcards (`*.jpg;*.png`) or
+// a regular expression, ignoring case or not, in place of the selection or with it. Rust counts
+// the rows that match as the pattern is typed, on a worker, and says why a text is no pattern
+// (`view.problem`), which turns 선택 off. While an input method composes a syllable the field's
+// text and Rust do not have it until it is committed, so neither 선택 nor Enter takes the
+// pattern meanwhile, and Tab leaves the field only once it is committed.
+//
+// The keys: the field first; Tab and Shift+Tab go round the field, 와일드카드/정규식 (← →), 대소문자
+// 무시 (Space), 선택 바꾸기/선택에 더하기 (← →), 취소 and 선택 (passed over while it is off); Space or
+// Enter presses the button the keys are on; Enter elsewhere selects; Esc cancels.
+export component PatternDialog inherits DialogFrame {
+    in property <PatternView> view;
+    callback edited(text: string);
+    callback syntax-chosen(regex: bool);
+    callback case-chosen(ignore: bool);
+    callback mode-chosen(add: bool);
+    callback accepted(text: string);
+    callback cancelled();
+
+    property <bool> composing: input.preedit-text != "";
+    // Where the keys are: -1 the field, 0 와일드카드/정규식, 1 대소문자 무시, 2 선택 바꾸기/더하기,
+    // 3 취소, 4 선택.
+    property <int> stop: -1;
+    property <bool> can-select: root.view.ok-enabled && !root.composing;
+
+    width: 480px;
+    height: layout.preferred-height;
+    accessible-label: "패턴으로 선택";
+
+    init => {
+        input.text = root.view.initial;
+        input.focus();
+        input.select-all();
+    }
+
+    // The keys go `step` stops on from where they are, past 선택 while it is off.
+    function go(step: int) {
+        let first = DialogKeys.cycle(root.stop + 1, step, 6) - 1;
+        let next = first == 4 && !root.can-select ? DialogKeys.cycle(first + 1, step, 6) - 1 : first;
+        root.stop = next;
+        if (next < 0) {
+            // Back in the field, the pattern is all selected: what is typed replaces it.
+            input.focus();
+            input.select-all();
+        } else {
+            keys.focus();
+        }
+    }
+
+    function select() {
+        if (root.can-select) {
+            root.accepted(input.text);
+        }
+    }
+
+    // A click on a choice: the keys go back to the field, to go on typing.
+    function back-to-field() {
+        root.stop = -1;
+        input.focus();
+    }
+
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            let sideways = event.text == Key.LeftArrow || event.text == Key.RightArrow;
+            if (root.stop == 0 && sideways) {
+                root.syntax-chosen(event.text == Key.RightArrow);
+                return accept;
+            }
+            if (root.stop == 2 && sideways) {
+                root.mode-chosen(event.text == Key.RightArrow);
+                return accept;
+            }
+            if (root.stop == 1 && event.text == " ") {
+                root.case-chosen(!root.view.ignore-case);
+                return accept;
+            }
+            if (root.stop == 3 && DialogKeys.presses(event)) {
+                root.cancelled();
+                return accept;
+            }
+            if ((root.stop == 4 && DialogKeys.presses(event)) || event.text == Key.Return) {
+                root.select();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: "패턴으로 선택";
+            }
+            Rectangle {
+                height: 38px;
+                border-width: 1px;
+                border-color: root.view.problem != "" ? Theme.warning : input.has-focus ? Theme.accent : Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+
+                if input.text == "" && !root.composing: Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    accessible-role: none;
+                    text: root.view.regex ? "예: ^IMG_\\d+\\.jpe?g$" : "예: *.jpg;*.png";
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                input := TextInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.text;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-role: text-input;
+                    accessible-label: "패턴";
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    accepted => {
+                        root.select();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.cancelled();
+                            return accept;
+                        }
+                        let step = DialogKeys.tab-step(event);
+                        if (step != 0) {
+                            if (!root.composing) {
+                                root.go(step);
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                    // A click into the field takes the keys back from the other stops.
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            root.stop = -1;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.gap-l;
+
+                SegmentTrack {
+                    label: "패턴 형식";
+                    focused: root.stop == 0;
+
+                    Segment {
+                        text: "와일드카드";
+                        chosen: !root.view.regex;
+                        clicked => {
+                            root.syntax-chosen(false);
+                            root.back-to-field();
+                        }
+                    }
+                    Segment {
+                        text: "정규식";
+                        chosen: root.view.regex;
+                        clicked => {
+                            root.syntax-chosen(true);
+                            root.back-to-field();
+                        }
+                    }
+                }
+                CheckBox {
+                    text: "대소문자 무시";
+                    checked: root.view.ignore-case;
+                    focused: root.stop == 1;
+                    toggled => {
+                        root.case-chosen(!root.view.ignore-case);
+                        root.back-to-field();
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: start;
+
+                SegmentTrack {
+                    label: "고른 항목";
+                    focused: root.stop == 2;
+
+                    Segment {
+                        text: "선택 바꾸기";
+                        chosen: !root.view.add;
+                        clicked => {
+                            root.mode-chosen(false);
+                            root.back-to-field();
+                        }
+                    }
+                    Segment {
+                        text: "선택에 더하기";
+                        chosen: root.view.add;
+                        clicked => {
+                            root.mode-chosen(true);
+                            root.back-to-field();
+                        }
+                    }
+                }
+            }
+            // How many rows match, or why the text is no pattern.
+            HorizontalLayout {
+                min-height: 20px;
+                spacing: Theme.gap-s;
+
+                if root.view.problem != "": Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    name: "warning";
+                    color: Theme.warning;
+                }
+                Text {
+                    text: root.view.problem != "" ? root.view.problem : root.view.count;
+                    color: root.view.problem != "" ? Theme.text : Theme.muted;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.stop == 3;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "선택";
+                    enabled: root.can-select;
+                    focused: root.stop == 4;
+                    clicked => {
+                        root.select();
                     }
                 }
             }

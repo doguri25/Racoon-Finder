@@ -68,7 +68,6 @@ fn the_filter_box_and_the_view_menu_take_the_keys() {
 fn keys_of_commands_still_to_come_go_on_to_the_system() {
     let mut state = ready(vec![file("x")], vec![file("z")]);
     for (text, mods) in [
-        (special(Key::F5), NONE),
         ("c".to_owned(), CTRL),
         ("v".to_owned(), CTRL),
         ("x".to_owned(), CTRL),

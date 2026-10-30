@@ -1,5 +1,6 @@
 // Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
-// `file-grid.slint`): the menu of an item, what a drag over the list shows, and how a list keeps
+// `file-grid.slint`): the menu of an item and of the part without items, what a drag over the
+// list shows, and how a list keeps
 // the place it scrolled to after a long jump.
 
 import { Theme } from "theme.slint";
@@ -53,6 +54,32 @@ export component RowMenu inherits ContextMenuArea {
             title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
             activated => {
                 root.command("delete-permanently");
+            }
+        }
+    }
+}
+
+// The menu of the part of a list without items: a new folder there, and the folder listed again
+// (NAV-13), each with its key (KEY-03). It wraps that part of the list.
+export component BlankMenu inherits ContextMenuArea {
+    // An item of the menu: the name of the window's command it runs (new-folder, refresh).
+    callback command(name: string);
+
+    // What the menu is of (before the menu: see `RowMenu`).
+    @children
+
+    Menu {
+        MenuItem {
+            title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
+            activated => {
+                root.command("new-folder");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("새로 고침", Shortcuts.refresh);
+            activated => {
+                root.command("refresh");
             }
         }
     }

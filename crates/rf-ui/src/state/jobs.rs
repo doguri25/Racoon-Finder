@@ -368,6 +368,7 @@ impl AppState {
         self.modal = None;
         self.later.clear();
         self.drop_closed_picker();
+        self.drop_closed_pattern();
         self.toast = None;
         vec![Effect::Quit]
     }
@@ -647,6 +648,7 @@ impl AppState {
     pub(super) fn close(&mut self) {
         self.modal = self.later.pop_front();
         self.drop_closed_picker();
+        self.drop_closed_pattern();
     }
 
     /// The items a command acts on in pane `side`: the selected rows, or the cursor's row

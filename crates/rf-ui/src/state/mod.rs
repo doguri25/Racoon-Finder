@@ -8,7 +8,8 @@
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
 //! ([`AppState::drag`]), the address bar's lists (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
-//! remembered per folder (module `view`: the view modes, the columns and the orders). Its methods
+//! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
+//! tools, listing a folder again and the extensions shown or not (module `select`). Its methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -44,6 +45,7 @@ mod drag;
 mod jobs;
 mod layout;
 mod pick;
+mod select;
 mod sidebar;
 mod tabs;
 mod view;
@@ -56,6 +58,7 @@ pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use select::{MATCH_STRETCH, MatchRequest, Matched};
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
     MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
@@ -78,6 +81,9 @@ pub enum Effect {
     /// Put a tab's rows in a new order on a worker thread ([`SortRequest::run`]), then hand them
     /// to [`AppState::sorted`].
     Sort(SortRequest),
+    /// Match the names of the pattern window's rows on a worker thread ([`MatchRequest::run`],
+    /// which a newer request stops), then hand what it found to [`AppState::pattern_matched`].
+    MatchNames(MatchRequest),
     /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
     /// gone: find on a worker thread where to go
     /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
@@ -208,6 +214,8 @@ pub struct AppState {
     panes: [Pane; 2],
     active: usize,
     show_hidden: bool,
+    /// The names of files show their extensions (NAV-11).
+    show_extensions: bool,
     /// One pane or two, how they share the room, and the side panels.
     layout: Layout,
     /// Navigation sync is on ([`layout`]).
@@ -263,6 +271,8 @@ pub struct AppState {
     environment: Environment,
     /// The views remembered per folder (module `view`).
     views: ViewStore,
+    /// What the pattern window works with (module `select`).
+    pattern: select::PatternWork,
 }
 
 impl AppState {
@@ -321,6 +331,7 @@ impl AppState {
             panes,
             active: session.active_pane.min(RIGHT),
             show_hidden: filter.show_hidden,
+            show_extensions: !session.hide_extensions,
             layout: session.layout,
             sync: false,
             sync_wait: None,
@@ -347,6 +358,7 @@ impl AppState {
             completion: None,
             environment: Environment::default(),
             views: ViewStore::default(),
+            pattern: select::PatternWork::default(),
         };
         (state, effects)
     }
@@ -369,6 +381,7 @@ impl AppState {
             panes: [pane(&self.panes[LEFT]), pane(&self.panes[RIGHT])],
             active_pane: self.active,
             show_hidden: self.show_hidden,
+            hide_extensions: !self.show_extensions,
             layout: self.layout,
         }
     }
@@ -483,22 +496,14 @@ impl AppState {
             Command::CursorEnd => self.step_cursor(side, KeyMove::End, pick, paging),
             Command::PageUp => self.step_cursor(side, KeyMove::PageUp, pick, paging),
             Command::PageDown => self.step_cursor(side, KeyMove::PageDown, pick, paging),
-            Command::ToggleSelect => {
-                let (selection, rows) = self.tab_mut(side).selection_mut();
-                if let Some(cursor) = selection.cursor() {
-                    selection.toggle(cursor, rows);
-                }
-                Vec::new()
-            }
-            Command::SelectAll => {
-                let (selection, rows) = self.tab_mut(side).selection_mut();
-                selection.select_all(rows);
-                Vec::new()
-            }
-            Command::ClearSelection => {
-                self.tab_mut(side).selection_mut().0.clear();
-                Vec::new()
-            }
+            Command::ToggleSelect
+            | Command::SelectAll
+            | Command::ClearSelection
+            | Command::InvertSelection
+            | Command::SelectPattern
+            | Command::SelectSameExtension => self.select(side, &command),
+            Command::Refresh => self.refresh(side),
+            Command::ToggleExtensions => self.toggle_extensions(),
             Command::EditPath => vec![Effect::EditPath(side)],
             Command::NewTab => self.add_tab(side),
             Command::CloseTab => {
@@ -534,8 +539,7 @@ impl AppState {
             Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
             Command::FitColumns => self.fit_columns(side),
-            Command::Refresh
-            | Command::Copy
+            Command::Copy
             | Command::Cut
             | Command::Paste
             | Command::PasteMove
@@ -664,10 +668,11 @@ impl AppState {
         self.tab(self.active).name_filter()
     }
 
-    /// Lists the folder of pane `side` again ("다시 시도").
+    /// Lists the folder of pane `side` again ("다시 시도"), as F5 does: the rows stay until
+    /// the new listing replaces them.
     pub fn retry(&mut self, side: usize) -> Vec<Effect> {
         self.activate(side);
-        vec![Effect::Load(self.tab_mut(side).reload())]
+        self.refresh(side)
     }
 
     /// Shows `folder` in the active pane (in a new tab beside a pinned one).
@@ -837,6 +842,10 @@ impl AppState {
                 // Navigation sync may wait for this listing.
                 if finished {
                     effects.extend(self.sync_listed(generation));
+                }
+                // The pattern window may select among its rows.
+                if new_rows {
+                    effects.extend(self.pattern_rows_changed(side, tab));
                 }
                 effects
             }

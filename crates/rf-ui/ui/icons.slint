@@ -5,7 +5,7 @@ import { Theme } from "theme.slint";
 
 export component Icon inherits Path {
     // One of: logo, back, forward, up, new-folder, copy, move, delete, rename, undo,
-    // list-view, search, folder, file, link, drive, star, plus, close, pause, play, check,
+    // list-view, select, search, folder, file, link, drive, star, plus, close, pause, play, check,
     // sort-up, sort-down, chevron-right, chevron-down, warning, pin, and the kinds of files of
     // the icon views: image, audio, video, archive, document, app. Anything else draws nothing.
     in property <string> name;
@@ -57,6 +57,10 @@ export component Icon inherits Path {
         }
         if (name == "list-view") {
             return "M4 6h16M4 12h16M4 18h16";
+        }
+        if (name == "select") {
+            // A box with a check mark, and the lines of the other items.
+            return "M4 4h7v7H4z M5.8 7.6l1.4 1.4 2.4-3 M14 6.5h6 M4 14.5h7v6H4z M14 17.5h6";
         }
         if (name == "search") {
             return "M17 11a6 6 0 1 1-12 0a6 6 0 1 1 12 0z M20 20l-4.5-4.5";

@@ -458,6 +458,65 @@ export component ChoiceRow inherits Rectangle {
     }
 }
 
+// One choice of a few shown side by side (move or copy, what a name conflict does, how a
+// pattern is written).
+export component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> chosen;
+    callback clicked();
+
+    height: 30px;
+    min-width: label.preferred-width + 24px;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    background: root.chosen ? Theme.panel : touch.has-hover ? Theme.border : transparent;
+    drop-shadow-blur: root.chosen ? 3px : 0px;
+    drop-shadow-color: #00000029;
+    accessible-role: radio-button;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.chosen;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    label := Text {
+        accessible-role: none;
+        text: root.text;
+        color: root.chosen ? Theme.text : Theme.muted;
+        font-weight: root.chosen ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The track the segments of one set sit in; a ring while the keys are on it.
+export component SegmentTrack inherits Rectangle {
+    in property <string> label;
+    in property <bool> focused;
+
+    horizontal-stretch: 0;
+    border-radius: 8px;
+    border-width: root.focused ? 2px : 0px;
+    border-color: Theme.accent;
+    background: Theme.raised;
+    accessible-role: radio-group;
+    accessible-label: root.label;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+
+        @children
+    }
+}
+
 // The frame every dialog sits in: the panel color, rounded corners and a shadow over the
 // scrim.
 export component DialogFrame inherits Rectangle {

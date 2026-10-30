@@ -18,6 +18,7 @@ use rf_jobs::{
 
 use crate::pick::Picker;
 use crate::resolver::QuestionId;
+use crate::selection::{NamePattern, PatternError, PatternSyntax};
 use crate::state::FolderView;
 use crate::words::{self, JobWork};
 
@@ -32,6 +33,8 @@ pub enum Modal {
     Preflight(PreflightQuestion),
     /// Where to copy or move the items to (PICK).
     Pick(Box<Picker>),
+    /// Which rows to select by a pattern of their names (NAV-15).
+    Pattern(PatternDialog),
 }
 
 impl Modal {
@@ -44,7 +47,8 @@ impl Modal {
             | Modal::Confirm(_)
             | Modal::Failures(_)
             | Modal::Recovery(_)
-            | Modal::Pick(_) => None,
+            | Modal::Pick(_)
+            | Modal::Pattern(_) => None,
         }
     }
 }
@@ -187,6 +191,77 @@ impl NameDialog {
                 )))
             }
         }
+    }
+}
+
+/// What the pattern window asks for: the pattern, how it is written, whether case counts, and
+/// whether the rows it matches join the selection or replace it. The next window starts with
+/// the choices of the last one confirmed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PatternChoice {
+    pub text: String,
+    pub syntax: PatternSyntax,
+    /// Case counts; off (대소문자 무시) by default.
+    pub match_case: bool,
+    /// The rows join the selection (선택에 더하기); off (선택 바꾸기) by default.
+    pub add: bool,
+}
+
+impl PatternChoice {
+    /// The pattern of the choices; `Ok(None)` for one with nothing to match.
+    pub fn pattern(&self) -> Result<Option<NamePattern>, PatternError> {
+        NamePattern::new(&self.text, self.syntax, !self.match_case)
+    }
+}
+
+/// The window that selects the rows whose names match a pattern (NAV-15 패턴으로 선택). A
+/// worker matches the names as they are typed, for the count it shows: the window keeps how
+/// far that is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternDialog {
+    /// The pane whose rows it selects, and the tab that showed there (its id): a tab that has
+    /// left the pane since takes nothing.
+    pub side: usize,
+    pub tab: u64,
+    pub choice: PatternChoice,
+    /// The text the field starts with.
+    pub initial: String,
+    /// Why the text is no pattern; `None` when it is one, or is empty.
+    pub problem: Option<PatternError>,
+    /// The text has nothing to match: it is empty, or wildcards of nothing but `;` and spaces.
+    pub empty: bool,
+    /// The request of the worker's match for the choices as they are.
+    pub generation: u64,
+    /// How many rows the pattern matches: for `generation` once the worker is done, the last
+    /// count meanwhile.
+    pub count: Option<usize>,
+    /// A worker matches the names for `generation`.
+    pub counting: bool,
+    /// 선택 was chosen while the worker matched: the rows are selected once it is done.
+    pub confirming: bool,
+}
+
+impl PatternDialog {
+    /// The window for the rows of tab `tab` of pane `side`, starting with `choice`.
+    pub fn new(side: usize, tab: u64, choice: PatternChoice) -> PatternDialog {
+        PatternDialog {
+            side,
+            tab,
+            initial: choice.text.clone(),
+            choice,
+            problem: None,
+            empty: true,
+            generation: 0,
+            count: None,
+            counting: false,
+            confirming: false,
+        }
+    }
+
+    /// Whether 선택 can select now: the text is a pattern with something to match, and 선택
+    /// was not chosen already.
+    pub fn can_confirm(&self) -> bool {
+        self.problem.is_none() && !self.empty && !self.confirming
     }
 }
 

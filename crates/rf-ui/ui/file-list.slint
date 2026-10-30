@@ -14,9 +14,8 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { Shortcuts } from "shortcuts.slint";
 import { FileHead, ColumnView } from "file-head.slint";
-import { RowMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
 
 export { ColumnView }
 
@@ -202,17 +201,11 @@ export component FileList inherits Rectangle {
                 }
 
                 // The menu of the part of the list below the rows.
-                ContextMenuArea {
+                BlankMenu {
                     width: parent.width;
                     height: parent.height;
-
-                    Menu {
-                        MenuItem {
-                            title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
-                            activated => {
-                                root.menu-command("new-folder");
-                            }
-                        }
+                    command(name) => {
+                        root.menu-command(name);
                     }
 
                     list := ListView {

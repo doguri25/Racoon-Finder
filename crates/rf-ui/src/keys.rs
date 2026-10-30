@@ -90,6 +90,12 @@ pub enum Command {
     SelectAll,
     /// Select nothing. A modal dialog takes Esc before the window does and closes instead.
     ClearSelection,
+    /// The selected rows become unselected and the others selected (선택 반전).
+    InvertSelection,
+    /// Select the rows whose names match a pattern (패턴으로 선택…).
+    SelectPattern,
+    /// Select the rows with the extension of the cursor's row (같은 확장자 선택).
+    SelectSameExtension,
     Rename,
     NewFolder,
     /// To the trash.
@@ -115,6 +121,8 @@ pub enum Command {
     Properties,
     /// Show or hide hidden items.
     ToggleHidden,
+    /// Show or hide the extensions of the files' names (파일 확장명 보기).
+    ToggleExtensions,
     /// The view modes (NAV-06): one row per item with columns (자세히), names in columns (목록),
     /// and icons of three sizes.
     ViewDetails,
@@ -173,6 +181,9 @@ impl Command {
                 | Command::ToggleSelect
                 | Command::SelectAll
                 | Command::ClearSelection
+                | Command::InvertSelection
+                | Command::SelectPattern
+                | Command::SelectSameExtension
                 | Command::Rename
                 | Command::NewFolder
                 | Command::Trash
@@ -483,6 +494,12 @@ const CMD_OPT: Mods = Mods {
     alt: true,
     ..NONE
 };
+const CMD_OPT_SHIFT: Mods = Mods {
+    ctrl: true,
+    alt: true,
+    shift: true,
+    ..NONE
+};
 const CTL: Mods = Mods { meta: true, ..NONE };
 const CTL_CMD: Mods = Mods {
     ctrl: true,
@@ -565,6 +582,11 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::Space, CTRL), C::ToggleSelect),
     (c('a', CTRL), C::SelectAll),
     (k(Key::Escape, NONE), C::ClearSelection),
+    // File Explorer has the selection tools without keys: GNOME Files' Invert Selection and
+    // Select Items Matching, and that key with Shift for the files like the cursor's.
+    (c('i', CTRL_SHIFT), C::InvertSelection),
+    (c('s', CTRL), C::SelectPattern),
+    (c('s', CTRL_SHIFT), C::SelectSameExtension),
     (k(Key::F2, NONE), C::Rename),
     (c('n', CTRL_SHIFT), C::NewFolder),
     (k(Key::Delete, NONE), C::Trash),
@@ -652,6 +674,12 @@ static MACOS: &[(Chord, Command)] = &[
     (c('a', CMD), C::SelectAll),
     (k(Key::Escape, NONE), C::ClearSelection),
     (c('a', CMD_OPT), C::ClearSelection),
+    // Finder has no selection tools beyond these. ⌥⇧⌘A goes with ⌘A (all) and ⌥⌘A (none);
+    // ⇧⌘I, ⌥⌘I and ⌃⌘I are Finder's (iCloud Drive, the inspector, the summary). ⌘S and ⇧⌘S
+    // are free in Finder, which saves nothing.
+    (c('a', CMD_OPT_SHIFT), C::InvertSelection),
+    (c('s', CMD), C::SelectPattern),
+    (c('s', CMD_SHIFT), C::SelectSameExtension),
     (k(Key::Return, NONE), C::Rename),
     (c('n', CMD_SHIFT), C::NewFolder),
     // The Mac's delete key is Backspace; fn+delete is Delete.
@@ -718,6 +746,10 @@ mod tests {
     const CMD: Mods = CTRL;
     const CMD_SHIFT: Mods = CTRL_SHIFT;
     const CMD_OPT: Mods = CTRL_ALT;
+    const CMD_OPT_SHIFT: Mods = Mods {
+        shift: true,
+        ..CTRL_ALT
+    };
     const CTL: Mods = META;
     const CTL_SHIFT: Mods = Mods {
         meta: true,
@@ -795,6 +827,10 @@ mod tests {
             (key(Key::Space), CTRL, C::ToggleSelect),
             (text("a"), CTRL, C::SelectAll),
             (key(Key::Escape), NONE, C::ClearSelection),
+            // GNOME Files' selection keys; Slint reports the shifted letter.
+            (text("I"), CTRL_SHIFT, C::InvertSelection),
+            (text("s"), CTRL, C::SelectPattern),
+            (text("S"), CTRL_SHIFT, C::SelectSameExtension),
             (key(Key::F2), NONE, C::Rename),
             // Slint reports the shifted letter.
             (text("N"), CTRL_SHIFT, C::NewFolder),
@@ -878,6 +914,10 @@ mod tests {
             (text("a"), CMD, C::SelectAll),
             (key(Key::Escape), NONE, C::ClearSelection),
             (text("a"), CMD_OPT, C::ClearSelection),
+            // With Command held macOS leaves Option out of the character.
+            (text("A"), CMD_OPT_SHIFT, C::InvertSelection),
+            (text("s"), CMD, C::SelectPattern),
+            (text("S"), CMD_SHIFT, C::SelectSameExtension),
             (text("N"), CMD_SHIFT, C::NewFolder),
             // The Mac's delete key is Backspace, its forward delete (fn+delete) Delete.
             (key(Key::Backspace), CMD, C::Trash),
@@ -1180,6 +1220,47 @@ mod tests {
         }
     }
 
+    /// The selection tools beyond selecting all and nothing (NAV-15), which File Explorer and
+    /// Finder have without keys or not at all.
+    const SELECTION_TOOLS: [Command; 3] =
+        [C::InvertSelection, C::SelectPattern, C::SelectSameExtension];
+
+    #[test]
+    fn selection_tools_keep_clear_of_the_file_managers() {
+        for (os, mut taken) in [
+            (Os::Windows, explorer_keys()),
+            (Os::Other, explorer_keys()),
+            (Os::MacOs, finder_keys()),
+        ] {
+            if os == Os::MacOs {
+                taken.extend(macos_reserved_keys());
+            }
+            for command in &SELECTION_TOOLS {
+                let chords: Vec<Chord> = bindings(os)
+                    .filter(|(_, bound)| *bound == command)
+                    .map(|(chord, _)| chord)
+                    .collect();
+                assert_eq!(chords.len(), 1, "{os:?} {command:?}");
+                assert!(
+                    !taken.contains(&chords[0]),
+                    "{os:?} {command:?}: {} is the system's",
+                    label(chords[0], os)
+                );
+            }
+        }
+        // Finder's keys that look like them stay out: ⇧⌘I goes to iCloud Drive, ⌥⌘I shows the
+        // inspector, ⇧⌘A goes to the applications.
+        for (text, mods) in [
+            (text("I"), CMD_SHIFT),
+            (text("i"), CMD_OPT),
+            (text("A"), CMD_SHIFT),
+        ] {
+            assert_eq!(command_for(&text, mods, Os::MacOs), None, "{text:?}");
+        }
+        // Ctrl+Shift+A means opposite things in other apps (all or none); it stays free.
+        assert_eq!(command_for("A", CTRL_SHIFT, Os::Windows), None);
+    }
+
     #[test]
     fn windows_and_linux_use_no_ctrl_alt_keys() {
         // Ctrl+Alt is AltGr on European layouts: it types characters there.
@@ -1255,6 +1336,13 @@ mod tests {
             (C::ViewList, Some("Ctrl+Shift+5"), Some("⌘3")),
             (C::ViewDetails, Some("Ctrl+Shift+6"), Some("⌘2")),
             (C::FitColumns, Some("Ctrl++"), Some("⌃⌘=")),
+            (C::SelectAll, Some("Ctrl+A"), Some("⌘A")),
+            (C::InvertSelection, Some("Ctrl+Shift+I"), Some("⌥⇧⌘A")),
+            (C::SelectPattern, Some("Ctrl+S"), Some("⌘S")),
+            (C::SelectSameExtension, Some("Ctrl+Shift+S"), Some("⇧⌘S")),
+            (C::Refresh, Some("F5"), Some("⌘R")),
+            // File Explorer and Finder show the extensions from a menu or the settings alone.
+            (C::ToggleExtensions, None, None),
             (C::CursorLeft, Some("←"), Some("←")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
@@ -1356,6 +1444,9 @@ mod tests {
             C::CursorRight,
             C::SelectAll,
             C::ClearSelection,
+            C::InvertSelection,
+            C::SelectPattern,
+            C::SelectSameExtension,
             C::Rename,
             C::NewFolder,
             C::Trash,
@@ -1387,6 +1478,8 @@ mod tests {
             C::Up,
             C::Undo,
             C::ToggleHidden,
+            C::ToggleExtensions,
+            C::Refresh,
             C::ViewDetails,
             C::ViewList,
             C::ViewSmallIcons,

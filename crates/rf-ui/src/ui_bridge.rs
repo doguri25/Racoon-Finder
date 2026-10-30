@@ -21,10 +21,12 @@ use slint::{
 
 use crate::controller::{self, Controller};
 use crate::dialogs::{
-    Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PreflightQuestion, Recovery,
+    Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PatternDialog,
+    PreflightQuestion, Recovery,
 };
 use crate::format::{
-    attribute_letters, file_icon, folder_label, format_size, format_time_in, kind_label, short_path,
+    attribute_letters, file_icon, folder_label, format_size, format_time_in, kind_label,
+    short_path, shown_name,
 };
 use crate::jobs::JobRow;
 use crate::keys::{self, Command};
@@ -37,8 +39,8 @@ use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow,
-    FolderMenuView, JobRowView, MainWindow, MessageView, NameView, PaneView, PickTarget, PickView,
-    PreflightView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    FolderMenuView, JobRowView, MainWindow, MessageView, NameView, PaneView, PatternView,
+    PickTarget, PickView, PreflightView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -89,6 +91,11 @@ impl PaneModels {
     /// Shows the dates in `tz` from now on ([`FileRows::set_time_zone`]).
     pub fn set_time_zone(&self, tz: TimeZone) {
         self.rows.set_time_zone(tz);
+    }
+
+    /// Shows the extensions of the files' names or not ([`FileRows::set_show_extensions`]).
+    pub fn set_show_extensions(&self, show: bool) {
+        self.rows.set_show_extensions(show);
     }
 
     /// The texts of `column` in `count` rows of the list from row `first` on, one a line, as
@@ -270,6 +277,8 @@ pub struct FileRows {
     notify: ModelNotify,
     /// The time zone the dates show in: UTC until [`FileRows::set_time_zone`].
     tz: RefCell<TimeZone>,
+    /// The names show their extensions (NAV-11): on until [`FileRows::set_show_extensions`].
+    extensions: Cell<bool>,
 }
 
 /// One row as [`FileRows`] keeps it.
@@ -296,6 +305,7 @@ impl Default for FileRows {
             rows: RefCell::default(),
             notify: ModelNotify::default(),
             tz: RefCell::new(TimeZone::UTC),
+            extensions: Cell::new(true),
         }
     }
 }
@@ -306,6 +316,14 @@ impl FileRows {
     pub fn set_time_zone(&self, tz: TimeZone) {
         *self.tz.borrow_mut() = tz;
         self.notify.reset();
+    }
+
+    /// Shows the extensions of the files' names (`show`) or not, in every view, from now on;
+    /// the rows are drawn again when that changes.
+    pub fn set_show_extensions(&self, show: bool) {
+        if self.extensions.replace(show) != show {
+            self.notify.reset();
+        }
     }
 
     /// Makes the rows `entries`, in that order, selected as `selection` says, and tells the
@@ -363,7 +381,10 @@ impl FileRows {
             .iter()
             .skip(first)
             .take(count)
-            .map(|shown| cell_text(&file_row(&shown.entry, shown.selected, &tz), column))
+            .map(|shown| {
+                let row = file_row(&shown.entry, shown.selected, &tz, self.extensions.get());
+                cell_text(&row, column)
+            })
             .collect();
         texts.sort_unstable();
         texts.dedup();
@@ -395,7 +416,12 @@ impl Model for FileRows {
     fn row_data(&self, row: usize) -> Option<FileRow> {
         let rows = self.rows.borrow();
         let shown = rows.get(row)?;
-        Some(file_row(&shown.entry, shown.selected, &self.tz.borrow()))
+        Some(file_row(
+            &shown.entry,
+            shown.selected,
+            &self.tz.borrow(),
+            self.extensions.get(),
+        ))
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -650,14 +676,14 @@ pub fn diff_rows<'a, T: PartialEq, K: Eq + Hash>(
 
 /// The row the list shows for `entry`. Only a file has a size; a time that is not known (the
 /// creation time on a file system that keeps none) or beyond what can be shown shows nothing.
-pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone) -> FileRow {
+pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: bool) -> FileRow {
     let time = |time: Option<std::time::SystemTime>| -> SharedString {
         time.map(|time| format_time_in(time, tz))
             .unwrap_or_default()
             .into()
     };
     FileRow {
-        name: entry.name.to_string_lossy().as_ref().into(),
+        name: shown_name(entry, show_extensions).into(),
         size: if entry.kind == EntryKind::File {
             format_size(entry.size).into()
         } else {
@@ -811,6 +837,12 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_view_medium_icons(key(Command::ViewMediumIcons));
     shown.set_view_large_icons(key(Command::ViewLargeIcons));
     shown.set_fit_columns(key(Command::FitColumns));
+    shown.set_select_all(key(Command::SelectAll));
+    shown.set_clear_selection(key(Command::ClearSelection));
+    shown.set_invert_selection(key(Command::InvertSelection));
+    shown.set_select_pattern(key(Command::SelectPattern));
+    shown.set_select_same_extension(key(Command::SelectSameExtension));
+    shown.set_refresh(key(Command::Refresh));
 }
 
 /// A row of the job panel.
@@ -839,6 +871,7 @@ pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
         Some(Modal::Conflict(_)) => DialogKind::Conflict,
         Some(Modal::Preflight(_)) => DialogKind::Preflight,
         Some(Modal::Pick(_)) => DialogKind::Pick,
+        Some(Modal::Pattern(_)) => DialogKind::Pattern,
     }
 }
 
@@ -1063,6 +1096,31 @@ pub fn name_view(dialog: &NameDialog) -> NameView {
             NameCheck::Invalid(warning) => warning.into(),
             NameCheck::Ready | NameCheck::Empty | NameCheck::Unchanged => SharedString::new(),
         },
+    }
+}
+
+/// The pattern window (패턴으로 선택): its choices, how many rows match (the last count while a
+/// worker matches again, "세는 중…" before the first), or why the text is no pattern.
+pub fn pattern_view(dialog: &PatternDialog) -> PatternView {
+    let count = match (dialog.problem, dialog.count) {
+        (Some(_), _) => SharedString::new(),
+        _ if dialog.empty => SharedString::new(),
+        (None, Some(count)) => words::pattern_count(count).into(),
+        (None, None) if dialog.counting => words::pattern_counting().into(),
+        (None, None) => SharedString::new(),
+    };
+    PatternView {
+        initial: dialog.initial.as_str().into(),
+        regex: dialog.choice.syntax == crate::selection::PatternSyntax::Regex,
+        ignore_case: !dialog.choice.match_case,
+        add: dialog.choice.add,
+        count,
+        problem: dialog
+            .problem
+            .map(words::pattern_problem)
+            .unwrap_or_default()
+            .into(),
+        ok_enabled: dialog.can_confirm(),
     }
 }
 
@@ -1349,8 +1407,14 @@ mod tests {
     fn rows_show_what_the_list_needs() {
         let mut pdf = entry("설계안.pdf", EntryKind::File, 1_258_291);
         pdf.modified = Some(UNIX_EPOCH + Duration::from_mins(29_356_280));
-        let row = file_row(&pdf, true, &TimeZone::UTC);
+        let row = file_row(&pdf, true, &TimeZone::UTC, true);
         assert_eq!(row.name, "설계안.pdf");
+        // Without the extensions, the name before it; the 확장자 column keeps it.
+        let bare = file_row(&pdf, true, &TimeZone::UTC, false);
+        assert_eq!(
+            (bare.name.as_str(), bare.extension.as_str()),
+            ("설계안", "pdf")
+        );
         assert_eq!(row.size, "1.2 MB");
         assert_eq!(row.modified, "2025-10-25 07:20");
         assert_eq!(row.kind, "PDF 문서");
@@ -1358,7 +1422,7 @@ mod tests {
 
         let mut dot = entry(".config", EntryKind::Dir, 4096);
         dot.attributes |= Attributes::HIDDEN;
-        let row = file_row(&dot, false, &TimeZone::UTC);
+        let row = file_row(&dot, false, &TimeZone::UTC, true);
         // A folder has no size, and no time when none is known.
         assert_eq!((row.size.as_str(), row.modified.as_str()), ("", ""));
         assert!(row.is_dir && row.hidden && !row.selected);
@@ -1367,6 +1431,7 @@ mod tests {
             &entry("latest", EntryKind::Symlink, 9),
             false,
             &TimeZone::UTC,
+            true,
         );
         assert!(link.is_link && !link.is_dir);
         assert_eq!(link.size, "");

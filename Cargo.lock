@@ -4193,6 +4193,7 @@ dependencies = [
  "i-slint-core",
  "jiff",
  "opener",
+ "regex",
  "rf-core",
  "rf-jobs",
  "rf-platform",

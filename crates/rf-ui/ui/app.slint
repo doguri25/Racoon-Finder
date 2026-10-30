@@ -24,16 +24,18 @@ import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
 import { JobPanel, JobRowView } from "job-panel.slint";
 import {
     NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
-    RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow
+    RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow, PatternDialog,
+    PatternView
 } from "dialogs.slint";
 import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 import { ViewMenu } from "view-menu.slint";
+import { SelectMenu } from "select-menu.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow
+    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -54,6 +56,8 @@ export enum DialogKind {
     preflight,
     // Where to copy or move the items to.
     pick,
+    // Which rows to select by a pattern of their names.
+    pattern,
     // The jobs stop before the app ends.
     closing,
 }
@@ -61,11 +65,14 @@ export enum DialogKind {
 export component MainWindow inherits Window {
     // Window title and the name beside the logo; Rust passes the product name.
     in property <string> app-title;
-    // Below 1200px the toolbar drops the name and the button texts. Handlers set it,
-    // not a binding: the window's width depends on the toolbar's layout. The full
-    // toolbar needs about 1140px; 1200px only works while that stays below it, so a
-    // change that widens the toolbar must re-check both numbers.
+    // Below 1400px the toolbar drops the name (the window's title bar has it), and below
+    // 1200px the button texts too. Handlers set them, not a binding: the window's width
+    // depends on the toolbar's layout. The full toolbar needs about 1230px with the name
+    // and 1115px without it (the filter box at its least, 120px); 1400px and 1200px only
+    // work while those stay below them, so a change that widens the toolbar must re-check
+    // these numbers.
     private property <bool> compact;
+    private property <bool> titled;
 
     // The two panes; side 0 is the left one, 1 the right one.
     in property <PaneView> left-pane;
@@ -90,6 +97,7 @@ export component MainWindow inherits Window {
     in property <PreflightView> preflight-view;
     in property <ConflictView> conflict-view;
     in property <PickView> pick-view;
+    in property <PatternView> pattern-view;
     // The picker shows under the dialog on top of it (the name of its new folder): it stays in
     // view, and takes no click or key until it is on top again.
     in property <bool> pick-behind;
@@ -105,10 +113,11 @@ export component MainWindow inherits Window {
     // is the one of the 보기 menu's 탭 items).
     private property <int> active-side: root.right-pane.active ? 1 : 0;
     private property <PaneView> active-view: root.active-side == 1 ? root.right-pane : root.left-pane;
-    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게) and whether hidden
-    // items show, for the menu's check marks.
+    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게), whether hidden
+    // items show and whether the names show their extensions, for the menu's check marks.
     in property <int> theme-choice;
     in-out property <bool> show-hidden;
+    in-out property <bool> show-extensions: true;
     // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
     // readied. And what a drop on the list under the pointer would do ("항목 3개 이동 → 백업").
     in property <data-transfer> drag-data;
@@ -243,6 +252,13 @@ export component MainWindow inherits Window {
     callback conflict-answered(choice: int, apply-all: bool);
     callback preflight-answered(choice: int);
     callback recovery-chosen(index: int, run-again: bool);
+    // The pattern window (패턴으로 선택): its field changed, 와일드카드 or 정규식 was chosen, 대소문자
+    // 무시 turned on or off, 선택 바꾸기 or 선택에 더하기 chosen, 선택 (or Enter) with the field's text.
+    callback pattern-edited(text: string);
+    callback pattern-syntax(regex: bool);
+    callback pattern-case(ignore: bool);
+    callback pattern-mode(add: bool);
+    callback pattern-accepted(text: string);
     // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
     // button, the move/copy toggle, a conflict policy (0 ask, 1 overwrite, 2 skip, 3 rename),
     // the filter changed, a path was typed or entered, a row of its tree or its chevron was
@@ -470,10 +486,12 @@ export component MainWindow inherits Window {
 
     init => {
         root.compact = root.width < 1200px;
+        root.titled = root.width >= 1400px;
         root.show-theme();
     }
     changed width => {
         root.compact = root.width < 1200px;
+        root.titled = root.width >= 1400px;
         root.window-resized();
     }
     changed height => {
@@ -544,7 +562,7 @@ export component MainWindow inherits Window {
                             name: "logo";
                             color: Theme.accent;
                         }
-                        if !root.compact: Text {
+                        if root.titled: Text {
                             text: root.app-title;
                             font-size: 15px;
                             font-weight: 700;
@@ -659,12 +677,31 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                     }
 
+                    // The 선택 menu (`select-menu.slint`), under its button.
+                    Rectangle {
+                        select-menu := SelectMenu {
+                            command(name) => {
+                                root.command(name);
+                            }
+                        }
+
+                        select-button := TextButton {
+                            compact: root.compact;
+                            icon: "select";
+                            text: "선택";
+                            clicked => {
+                                select-menu.open(0, select-button.height + 4px);
+                            }
+                        }
+                    }
+
                     // The 보기 menu (`view-menu.slint`), under its button.
                     Rectangle {
                         view-menu := ViewMenu {
                             view: root.active-view;
                             theme-choice: root.theme-choice;
                             show-hidden <=> root.show-hidden;
+                            show-extensions <=> root.show-extensions;
                             show-tree <=> root.show-tree;
                             show-preview <=> root.show-preview;
                             dual-pane <=> root.dual-pane;
@@ -1376,6 +1413,29 @@ export component MainWindow inherits Window {
             view: root.conflict-view;
             answered(choice, apply-all) => {
                 root.conflict-answered(choice, apply-all);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.pattern: PatternDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.pattern-view;
+            edited(text) => {
+                root.pattern-edited(text);
+            }
+            syntax-chosen(regex) => {
+                root.pattern-syntax(regex);
+            }
+            case-chosen(ignore) => {
+                root.pattern-case(ignore);
+            }
+            mode-chosen(add) => {
+                root.pattern-mode(add);
+            }
+            accepted(text) => {
+                root.pattern-accepted(text);
             }
             cancelled => {
                 root.dialog-cancelled();

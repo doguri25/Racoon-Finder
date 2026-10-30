@@ -747,6 +747,31 @@ fn a_wait_goes_on_through_a_reload_after_the_other_pane_s_watch_ended() {
 }
 
 #[test]
+fn a_wait_goes_on_through_f5_in_the_other_pane() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    // The other pane is listed again by hand before its listing comes: sync waits for the new
+    // listing, and the old one's request is dropped.
+    state.activate(RIGHT);
+    let again = the_load(&press(&mut state, &special(Key::F5), NONE).expect("used"));
+    assert_ne!(again.generation, waiting.generation);
+    state.activate(LEFT);
+    assert_eq!(
+        state.loaded(LoadEvent::Listed {
+            generation: waiting.generation,
+            entries: vec![dir("x")],
+        }),
+        []
+    );
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: again.generation,
+        entries: vec![dir("x")],
+    });
+    assert_eq!(listed(&effects), [in_c("x")]);
+    assert!(state.syncing());
+}
+
+#[test]
 fn swapping_the_panes_while_sync_waits_turns_it_off() {
     let (mut state, waiting) = synced_waiting();
     let _ = state.open_row(LEFT, 0);

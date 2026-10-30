@@ -13,9 +13,8 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { Shortcuts } from "shortcuts.slint";
 import { FileRow } from "file-list.slint";
-import { RowMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
 
 // What the pointer did to an item.
 enum TileEvent {
@@ -255,17 +254,11 @@ export component FileGrid inherits Rectangle {
         }
 
         // The menu of the part of the list without items.
-        blank-menu := ContextMenuArea {
+        blank-menu := BlankMenu {
             width: parent.width;
             height: parent.height;
-
-            Menu {
-                MenuItem {
-                    title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
-                    activated => {
-                        root.menu-command("new-folder");
-                    }
-                }
+            command(name) => {
+                root.menu-command(name);
             }
 
             icons := ListView {

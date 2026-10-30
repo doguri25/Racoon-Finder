@@ -17,6 +17,7 @@ use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::pick::Validity;
+use crate::selection::{MAX_PATTERN_CHARS, PatternError};
 use crate::state::Column;
 
 /// How many characters a path takes at most in a row of a recovered job, beside its buttons:
@@ -250,6 +251,30 @@ pub fn folder_vanished_sync_off(name: &str, to_parent: bool) -> String {
         "홈 폴더"
     };
     format!("‘{name}’ 폴더가 없어져 {to}로 옮겼고 탐색 동기화를 껐습니다")
+}
+
+/// The notice of 같은 확장자 선택 on a row whose name has no extension (a folder, `README`).
+pub fn no_extension(name: &str) -> String {
+    format!("‘{name}’에는 확장자가 없습니다")
+}
+
+/// How many rows the pattern window's pattern matches.
+pub fn pattern_count(count: usize) -> String {
+    format!("맞는 항목 {count}개")
+}
+
+/// What the pattern window shows while a worker matches the names, before its first count.
+pub fn pattern_counting() -> &'static str {
+    "세는 중…"
+}
+
+/// Why the pattern window's text is no pattern.
+pub fn pattern_problem(problem: PatternError) -> String {
+    match problem {
+        PatternError::TooLong => format!("패턴이 너무 깁니다 ({MAX_PATTERN_CHARS}자까지)"),
+        PatternError::Invalid => "올바른 정규식이 아닙니다".to_owned(),
+        PatternError::TooComplex => "패턴이 너무 복잡합니다. 더 짧게 써 주세요".to_owned(),
+    }
 }
 
 /// The notice when navigation sync is turned on: a move into a folder, up, back or forward in

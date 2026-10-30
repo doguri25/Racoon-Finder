@@ -1,5 +1,6 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
-// columns, which its column heads change too), the theme, the hidden items, the sidebar and the
+// columns, which its column heads change too), the theme, the hidden items and the extensions of
+// the names, the sidebar and the
 // preview panel, the layout, the panes and the tabs. It is short enough for a 560px window: the
 // themes and the layout are sub-menus of their own. Every item says its key (KEY-03), and the keys
 // reach every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
@@ -17,8 +18,9 @@ export component ViewMenu inherits ContextMenuArea {
     in property <PaneView> view;
     // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게).
     in property <int> theme-choice;
-    // The layout and the hidden items, two-way with the window's.
+    // The layout, the hidden items and the extensions, two-way with the window's.
     in-out property <bool> show-hidden;
+    in-out property <bool> show-extensions;
     in-out property <bool> show-tree;
     in-out property <bool> show-preview;
     in-out property <bool> dual-pane;
@@ -534,6 +536,15 @@ export component ViewMenu inherits ContextMenuArea {
             checked <=> root.show-hidden;
             activated => {
                 root.command("toggle-hidden");
+            }
+        }
+        // File Explorer's 파일 확장명 (보기 ▸ 표시); no key there, nor in Finder.
+        MenuItem {
+            title: "파일 확장명 보기";
+            checkable: true;
+            checked <=> root.show-extensions;
+            activated => {
+                root.command("toggle-extensions");
             }
         }
         MenuItem {

@@ -1,7 +1,8 @@
 //! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), the
 //! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]), and the layout
 //! and the commands between the panes ([`layout`]), the tree from the keyboard ([`sidebar`]),
-//! the tabs ([`tabs`]), with the helpers they share.
+//! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), with the helpers they
+//! share.
 
 use super::*;
 use crate::keys;
@@ -19,6 +20,7 @@ mod jobs;
 mod layout;
 mod nav;
 mod pick;
+mod select;
 mod session;
 mod sidebar;
 mod tabs;
