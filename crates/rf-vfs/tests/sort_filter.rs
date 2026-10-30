@@ -168,8 +168,8 @@ fn created_and_extension_orders() {
         ["new", "old", "unknown"]
     );
 
-    // The extension alone, in any case; no extension (a folder, `noext`) sorts first, and a
-    // tie goes by the name. A link is not set apart, as the kind sort sets it.
+    // The extension alone, in any case; no extension (a folder, a link, `noext`) sorts first,
+    // and a tie goes by the name.
     let v = vec![
         Entry::new("l.png", EntryKind::Symlink),
         f("b.txt"),
@@ -180,7 +180,56 @@ fn created_and_extension_orders() {
     ];
     assert_eq!(
         sorted(v, spec(by(SortKey::Extension, Ascending), false)),
-        ["noext", "x", "a.png", "c.PNG", "l.png", "b.txt"]
+        ["l.png", "noext", "x", "a.png", "c.PNG", "b.txt"]
+    );
+}
+
+/// Only a file has an extension to sort by, as the 확장자 column shows: a link may lead to a
+/// folder (`앨범.2025`), which the listing does not tell, so it sorts with the items that have
+/// none, by its name, and so does it among the links of a kind sort.
+#[test]
+fn a_link_sorts_as_an_item_without_an_extension() {
+    let link = |name: &str| Entry::new(name, EntryKind::Symlink);
+    let v = || {
+        vec![
+            f("보고서.2025"),
+            link("앨범.2025"),
+            f("가계부.2024"),
+            link("바로 가기.aaa"),
+            d("자료.2025"),
+        ]
+    };
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Extension, Ascending), false)),
+        [
+            "바로 가기.aaa",
+            "앨범.2025",
+            "자료.2025",
+            "가계부.2024",
+            "보고서.2025"
+        ]
+    );
+    // A tie goes by the name ascending, whatever the direction.
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Extension, Descending), false)),
+        [
+            "보고서.2025",
+            "가계부.2024",
+            "바로 가기.aaa",
+            "앨범.2025",
+            "자료.2025"
+        ]
+    );
+    // Folders, files by extension, then the links by name.
+    assert_eq!(
+        sorted(v(), spec(by(Kind, Ascending), false)),
+        [
+            "자료.2025",
+            "가계부.2024",
+            "보고서.2025",
+            "바로 가기.aaa",
+            "앨범.2025"
+        ]
     );
 }
 

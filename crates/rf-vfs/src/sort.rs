@@ -19,11 +19,12 @@ pub enum SortKey {
     Size,
     /// The modification time; an unknown time sorts first.
     Modified,
-    /// The kind (folder, file, symlink, other), then the lowercase extension.
+    /// The kind (folder, file, symlink, other), then the lowercase extension of a file.
     Kind,
     /// The creation time; an unknown time (a file system that keeps none) sorts first.
     Created,
-    /// The lowercase extension alone, whatever the kind; none sorts first.
+    /// The lowercase extension alone; none sorts first. Only a file has one, as the 확장자
+    /// column shows: not a folder, nor a link, which may lead to a folder (`앨범.2025`).
     Extension,
 }
 
@@ -70,7 +71,7 @@ impl Default for SortSpec {
 /// What comparing an entry needs besides the entry itself, built once per entry.
 struct Keys {
     name: NaturalKey,
-    /// The lowercase extension; empty when there is none.
+    /// The lowercase extension of a file; empty for one without, and for any other kind.
     extension: String,
 }
 
@@ -80,6 +81,7 @@ impl Keys {
             name: NaturalKey::new(&entry.name),
             extension: entry
                 .extension()
+                .filter(|_| entry.kind == EntryKind::File)
                 .map(|ext| ext.to_string_lossy().to_lowercase())
                 .unwrap_or_default(),
         }
