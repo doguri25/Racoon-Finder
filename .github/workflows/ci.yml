@@ -37,6 +37,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked --no-fail-fast
+      # The hosted runners have a logged-in desktop with a clipboard. Informational for now: the
+      # result is read, and the step is made blocking later.
+      - name: real clipboard round trips (informational)
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        run: cargo test -p rf-platform --test clipboard --locked -- --ignored --test-threads=1
 
   deny:
     name: cargo-deny
