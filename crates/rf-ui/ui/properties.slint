@@ -11,9 +11,11 @@
 // until it is committed, and Tab leaves the field only once it is.
 //
 // The keys (KEY-02): Esc, and Enter while no button is chosen, close it (닫기 is its main
-// button). Tab and Shift+Tab go round 중지 (while the count goes on), the algorithms (← →), the
-// checksums (↑ ↓ among several files; Space or Enter copies the row's), 비교 and 닫기, past what
-// does not show; Space or Enter presses the button the keys are on.
+// button). Tab and Shift+Tab go round 중지 (while the count goes on), the algorithms (← →; Space
+// chooses the one chosen again, which makes what 계산 중지 left), the checksums (↑ ↓ among several
+// files; Space or Enter copies the row's), 계산 중지 (while checksums are made), 비교 and 닫기,
+// past what does not show; Space or Enter presses the button the keys are on. A fact whose
+// value is shortened (a long path) has the whole of it in a tooltip and for screen readers.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -27,6 +29,8 @@ import { PreviewFont } from "preview.slint";
 export struct FactRow {
     label: string,
     value: string,
+    // The whole value when `value` leaves part of it out (a long path); empty otherwise.
+    full: string,
 }
 
 // A file's checksum.
@@ -57,6 +61,8 @@ export struct PropertiesView {
     count-note: string,
     // There is a file to hash.
     hashable: bool,
+    // Checksums are made: 계산 중지 shows.
+    hashing: bool,
     // The algorithm chosen (`Algorithms.names`); -1 before one is.
     algorithm: int,
     // What to do first, how far several files are, what was left out, why a copy failed; or,
@@ -180,13 +186,14 @@ export component PropertiesDialog inherits DialogFrame {
     in property <length> room: 100000px;
     callback algorithm-chosen(number: int);
     callback count-stopped();
+    callback hashes-stopped();
     callback copy(row: int);
     callback compare-edited(text: string);
     callback cancelled();
 
     property <bool> composing: compare.composing;
-    // Where the keys are: -1 nowhere yet, 0 중지, 1 the algorithms, 2 the checksums, 3 비교,
-    // 4 닫기.
+    // Where the keys are: -1 nowhere yet, 0 중지 (of the count), 1 the algorithms, 2 the
+    // checksums, 3 계산 중지, 4 비교, 5 닫기.
     property <int> stop: -1;
     // The row of the checksums the keys are on, among several files.
     property <int> cursor-row: 0;
@@ -201,9 +208,10 @@ export component PropertiesDialog inherits DialogFrame {
         keys.focus();
     }
 
-    // The count ended while the keys were on 중지, which is gone: they are nowhere again.
+    // A count or checksums ended while the keys were on their 중지, which is gone: the keys are
+    // nowhere again.
     changed view => {
-        if (root.stop == 0 && !root.view.counting) {
+        if ((root.stop == 0 && !root.view.counting) || (root.stop == 3 && !root.view.hashing)) {
             root.stop = -1;
         }
     }
@@ -213,29 +221,33 @@ export component PropertiesDialog inherits DialogFrame {
         if (stop == 0) {
             return root.view.counting;
         }
-        if (stop == 1 || stop == 3) {
+        if (stop == 1 || stop == 4) {
             return root.view.hashable;
         }
         if (stop == 2) {
             return root.listed;
         }
-        return stop == 4;
+        if (stop == 3) {
+            return root.view.hashing;
+        }
+        return stop == 5;
     }
 
-    // The stop `step` places after `stop`, among the five, going round.
+    // The stop `step` places after `stop`, among the six, going round.
     pure function after(stop: int, step: int) -> int {
-        return Math.mod(stop + step + 5, 5);
+        return Math.mod(stop + step + 6, 6);
     }
 
     // The keys go `step` stops on, past those that do not show (닫기 always does).
     function go(step: int) {
-        let first = root.stop < 0 ? (step > 0 ? 0 : 4) : root.after(root.stop, step);
+        let first = root.stop < 0 ? (step > 0 ? 0 : 5) : root.after(root.stop, step);
         let second = root.shows(first) ? first : root.after(first, step);
         let third = root.shows(second) ? second : root.after(second, step);
         let fourth = root.shows(third) ? third : root.after(third, step);
         let fifth = root.shows(fourth) ? fourth : root.after(fourth, step);
-        root.stop = fifth;
-        if (fifth == 3) {
+        let sixth = root.shows(fifth) ? fifth : root.after(fifth, step);
+        root.stop = sixth;
+        if (sixth == 4) {
             // A field the keys go to has all its text selected: what is pasted replaces it.
             compare.take-focus-all();
         } else {
@@ -276,6 +288,11 @@ export component PropertiesDialog inherits DialogFrame {
                 root.step-algorithm(event.text == Key.RightArrow);
                 return accept;
             }
+            // The one chosen, again: what 계산 중지 left is made.
+            if (root.stop == 1 && event.text == " " && root.view.algorithm >= 0) {
+                root.algorithm-chosen(root.view.algorithm);
+                return accept;
+            }
             if (root.stop == 2 && root.view.several && plain && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
                 root.step-row(event.text == Key.DownArrow ? 1 : -1);
                 return accept;
@@ -288,7 +305,11 @@ export component PropertiesDialog inherits DialogFrame {
                 root.count-stopped();
                 return accept;
             }
-            if ((root.stop == 4 && DialogKeys.presses(event)) || event.text == Key.Return) {
+            if (root.stop == 3 && DialogKeys.presses(event)) {
+                root.hashes-stopped();
+                return accept;
+            }
+            if ((root.stop == 5 && DialogKeys.presses(event)) || event.text == Key.Return) {
                 root.cancelled();
                 return accept;
             }
@@ -337,15 +358,25 @@ export component PropertiesDialog inherits DialogFrame {
                         text: fact.label;
                         color: Theme.muted;
                     }
-                    // One line: Rust shortens a long path in its middle, and the end of any
-                    // other long value is left out.
-                    Text {
+                    // One line: Rust shortens a long path in its middle (the whole of it shows
+                    // in a tooltip and goes to screen readers), and the end of any other long
+                    // value is left out.
+                    Rectangle {
                         horizontal-stretch: 1;
                         min-width: 0px;
                         preferred-width: 0px;
-                        text: fact.value;
-                        color: Theme.text;
-                        overflow: elide;
+
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: fact.value;
+                            color: Theme.text;
+                            overflow: elide;
+                            accessible-description: fact.full;
+                        }
+                        if fact.full != "": Tooltip {
+                            text: @markdown("\{fact.full}");
+                        }
                     }
                 }
             }
@@ -434,13 +465,29 @@ export component PropertiesDialog inherits DialogFrame {
                     }
                 }
             }
-            if root.view.hashable && root.view.hash-note != "": Text {
-                min-width: 0px;
-                preferred-width: 0px;
-                text: root.view.hash-note;
-                color: Theme.muted;
-                font-size: Theme.font-small;
-                overflow: elide;
+            // What the checksums say, a line each, and 계산 중지 while they are made: it stops
+            // them, and the ones made stay.
+            if root.view.hashable && (root.view.hash-note != "" || root.view.hashing): HorizontalLayout {
+                spacing: Theme.gap-m;
+
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    text: root.view.hash-note;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.view.hashing: OutlineButton {
+                    button-height: 30px;
+                    text: "계산 중지";
+                    focused: root.stop == 3;
+                    clicked => {
+                        root.hashes-stopped();
+                    }
+                }
             }
             // 비교: always in the window, as the list is, and without room while there is no
             // file.
@@ -480,7 +527,7 @@ export component PropertiesDialog inherits DialogFrame {
                         // A click into the field takes the keys there.
                         changed has-focus => {
                             if (self.has-focus) {
-                                root.stop = 3;
+                                root.stop = 4;
                             }
                         }
                     }
@@ -527,7 +574,7 @@ export component PropertiesDialog inherits DialogFrame {
                 PrimaryButton {
                     button-height: 36px;
                     text: "닫기";
-                    focused: root.stop == 4;
+                    focused: root.stop == 5;
                     clicked => {
                         root.cancelled();
                     }

@@ -313,14 +313,17 @@ fn connect(window: &MainWindow) {
     connect_properties(window);
 }
 
-/// The callbacks of the properties window: an algorithm chosen, 중지, 복사 of a row's
-/// checksum, and the field 비교.
+/// The callbacks of the properties window: an algorithm chosen, the 중지 of the count and of
+/// the checksums, 복사 of a row's checksum, and the field 비교.
 fn connect_properties(window: &MainWindow) {
     window.on_properties_algorithm(|number| {
         with(|c| c.update(|state| state.choose_algorithm(number)));
     });
     window.on_properties_stop(|| {
         with(|c| c.update(AppState::stop_count));
+    });
+    window.on_properties_stop_hashes(|| {
+        with(|c| c.update(AppState::stop_hashes));
     });
     window.on_properties_copy(|row| {
         with(|c| c.update_at(row, AppState::copy_checksum));
@@ -1225,6 +1228,7 @@ impl Controller {
     fn command(&self, name: &str) {
         match name {
             "paste-into" => return self.update(|state| state.paste_from_menu(false)),
+            "folder-properties" => return self.update(AppState::folder_properties),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
             _ => {}
         }
@@ -1847,7 +1851,8 @@ impl Controller {
                 let _ = self.hasher.submit(request);
             }
             Effect::StopHashes => self.hasher.stop(),
-            _ => {}
+            // `apply` sends only the requests above here.
+            other => unreachable!("not a request for a newest-request worker: {other:?}"),
         }
     }
 

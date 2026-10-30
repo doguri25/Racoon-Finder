@@ -4,11 +4,12 @@
 //!
 //! The UI thread never opens a file: it asks for a [`HashRequest`] with a generation
 //! ([`Effect::Hash`](crate::state::Effect::Hash)), the files in the order of the window's rows,
-//! and the worker reads them one after the other, [`HASH_CHUNK`] at a time, telling how far it
-//! is ([`HashNews::Reading`], every [`PROGRESS_GAP`] at most) and what each one gave
-//! ([`HashNews::Hashed`]). It looks at its [`CancelToken`] before every chunk: a newer request
-//! (another algorithm, another window) or the window's end stops it within a chunk, and the
-//! state takes only the news with the generation it waits for.
+//! and the worker reads them one after the other, [`HASH_CHUNK`] at a time into one buffer,
+//! telling how far it is ([`HashNews::Reading`]) and what the files gave ([`HashNews::Hashed`],
+//! those of many small files together), every [`PROGRESS_GAP`] at most. It looks at its
+//! [`CancelToken`] before every chunk: a newer request (another algorithm, another window), the
+//! window's 중지 or its end stops it within a chunk, and the state takes only the news with the
+//! generation it waits for.
 //!
 //! A file is opened only for reading, through the provider, whose `open_read` refuses at once
 //! anything that is no regular file (a FIFO, whose reader would wait for its writer, a device, a
@@ -39,7 +40,8 @@ pub enum Algorithm {
     Sha1,
     Sha256,
     Blake3,
-    /// xxHash3 with 64 bits and the seed 0, as `xxhsum -H3` writes it.
+    /// xxHash3 with 64 bits and the seed 0: the 16 hexadecimal digits `xxhsum -H3` writes
+    /// after its `XXH3_` ([`same_digest`] takes them with it or without).
     Xxh3,
 }
 
@@ -138,24 +140,27 @@ pub enum Stopped {
     Failed(io::Error),
 }
 
-/// The checksum of what `reader` holds, made with `algorithm`, reading `chunk` bytes at a time
-/// (at least one). `read` hears after every chunk how many bytes have been read so far. It looks
-/// at `cancel` before each chunk, and stops there once it is cancelled.
+/// The checksum of what `reader` holds, made with `algorithm`, reading into `buffer` (as much as
+/// it holds at a time; an empty one reads nothing and fails). `read` hears after every chunk how
+/// many bytes have been read so far. It looks at `cancel` before each chunk, and stops there once
+/// it is cancelled.
 pub fn digest_stream(
     reader: &mut dyn Read,
     algorithm: Algorithm,
-    chunk: usize,
+    buffer: &mut [u8],
     cancel: &CancelToken,
     read: &mut dyn FnMut(u64),
 ) -> Result<String, Stopped> {
-    let mut buffer = vec![0; chunk.max(1)];
+    if buffer.is_empty() {
+        return Err(Stopped::Failed(io::ErrorKind::InvalidInput.into()));
+    }
     let mut digester = Digester::new(algorithm);
     let mut done: u64 = 0;
     loop {
         if cancel.is_cancelled() {
             return Err(Stopped::Cancelled);
         }
-        let read_now = match reader.read(&mut buffer) {
+        let read_now = match reader.read(buffer) {
             Ok(0) => break,
             Ok(read_now) => read_now,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -187,11 +192,11 @@ pub enum HashNews {
         done: u64,
         total: u64,
     },
-    /// The file of row `row` gave this checksum, or none for that reason.
+    /// The files of these rows gave these checksums, or none for these reasons: the rows that
+    /// finished since the news before, in order.
     Hashed {
         generation: u64,
-        row: usize,
-        result: Result<String, HashFailure>,
+        results: Vec<(usize, Result<String, HashFailure>)>,
     },
 }
 
@@ -204,10 +209,11 @@ pub enum HashFailure {
     Unreadable(ErrorKind),
 }
 
-/// Hashes the files of `request` through `vfs`, one after the other, `chunk` bytes at a time,
-/// and tells `tell` how far it is (at most every `gap`, and when a file is opened while that much
-/// has passed) and what each file gave. Blocks: call it on a worker thread. `None` once `cancel`
-/// stopped it, which it looks at before each file and each chunk.
+/// Hashes the files of `request` through `vfs`, one after the other, `chunk` bytes at a time
+/// (into one buffer for all of them), and tells `tell` how far it is and what the files gave: at
+/// most every `gap`, with the checksums made since the news before together, and the last ones
+/// at the end. Blocks: call it on a worker thread. `None` once `cancel` stopped it, which it
+/// looks at before each file and each chunk; what it had not told by then is dropped.
 pub fn hash_files(
     request: &HashRequest,
     vfs: &Vfs,
@@ -216,18 +222,19 @@ pub fn hash_files(
     gap: Duration,
     tell: &mut dyn FnMut(HashNews),
 ) -> Option<()> {
-    let generation = request.generation;
-    let mut told = Instant::now();
+    let mut buffer = vec![0; chunk.max(1)];
+    let mut news = Teller {
+        generation: request.generation,
+        tell,
+        told: Instant::now(),
+        gap,
+        hashed: Vec::new(),
+    };
     for (row, path) in &request.files {
         let row = *row;
         if cancel.is_cancelled() {
             return None;
         }
-        let failed = |kind: ErrorKind| HashNews::Hashed {
-            generation,
-            row,
-            result: Err(HashFailure::Unreadable(kind)),
-        };
         let mut stream = match vfs
             .provider(path)
             .and_then(|provider| provider.open_read(path))
@@ -238,15 +245,14 @@ pub fn hash_files(
                     &error,
                     Error::Io { source, .. } if rf_platform::is_not_a_regular_file(source)
                 );
-                tell(if refused {
-                    HashNews::Hashed {
-                        generation,
-                        row,
-                        result: Err(HashFailure::NotAFile),
-                    }
-                } else {
-                    failed(error.kind())
-                });
+                news.hashed(
+                    row,
+                    Err(if refused {
+                        HashFailure::NotAFile
+                    } else {
+                        HashFailure::Unreadable(error.kind())
+                    }),
+                );
                 continue;
             }
         };
@@ -257,50 +263,118 @@ pub fn hash_files(
         let total = match length {
             Ok(total) => total,
             Err(error) => {
-                tell(failed(Error::io("seek", path.clone(), error).kind()));
+                let kind = Error::io("seek", path.clone(), error).kind();
+                news.hashed(row, Err(HashFailure::Unreadable(kind)));
                 continue;
             }
         };
-        let reading = |done: u64| HashNews::Reading {
-            generation,
-            row,
-            done,
-            total,
-        };
         // A file opened while a report is due says so at once; most small files do not.
-        if told.elapsed() >= gap {
-            told = Instant::now();
-            tell(reading(0));
-        }
-        let digest = digest_stream(&mut stream, request.algorithm, chunk, cancel, &mut |done| {
-            if told.elapsed() >= gap {
-                told = Instant::now();
-                tell(reading(done));
-            }
-        });
+        news.reading(row, 0, total);
+        let digest = digest_stream(
+            &mut stream,
+            request.algorithm,
+            &mut buffer,
+            cancel,
+            &mut |done| news.reading(row, done, total),
+        );
         match digest {
-            Ok(digest) => tell(HashNews::Hashed {
-                generation,
-                row,
-                result: Ok(digest),
-            }),
+            Ok(digest) => news.hashed(row, Ok(digest)),
             Err(Stopped::Cancelled) => return None,
             Err(Stopped::Failed(error)) => {
-                tell(failed(Error::io("read", path.clone(), error).kind()));
+                let kind = Error::io("read", path.clone(), error).kind();
+                news.hashed(row, Err(HashFailure::Unreadable(kind)));
             }
         }
     }
+    news.flush();
     Some(())
 }
 
-/// Whether `pasted`, a hash the user pasted, is `digest`, ignoring the case of its letters and
-/// the white space around it. `None` while there is nothing to compare (only white space).
+/// The news of [`hash_files`] on their way to `tell`: at most every `gap`, the checksums made
+/// since the news before together.
+struct Teller<'a> {
+    generation: u64,
+    tell: &'a mut dyn FnMut(HashNews),
+    /// When the last news went.
+    told: Instant,
+    gap: Duration,
+    /// The rows finished and not told yet, in order.
+    hashed: Vec<(usize, Result<String, HashFailure>)>,
+}
+
+impl Teller<'_> {
+    /// Whether news is due: `gap` has passed since the last; then the time starts again.
+    fn due(&mut self) -> bool {
+        if self.told.elapsed() >= self.gap {
+            self.told = Instant::now();
+            return true;
+        }
+        false
+    }
+
+    /// The file of row `row` has been read up to `done` of its `total` bytes: told when news is
+    /// due, after the checksums made before it.
+    fn reading(&mut self, row: usize, done: u64, total: u64) {
+        if self.due() {
+            self.send_hashed();
+            (self.tell)(HashNews::Reading {
+                generation: self.generation,
+                row,
+                done,
+                total,
+            });
+        }
+    }
+
+    /// Row `row` has finished: told with the others when news is due.
+    fn hashed(&mut self, row: usize, result: Result<String, HashFailure>) {
+        self.hashed.push((row, result));
+        if self.due() {
+            self.send_hashed();
+        }
+    }
+
+    /// Tells the rows finished and not told yet, if any.
+    fn send_hashed(&mut self) {
+        if !self.hashed.is_empty() {
+            (self.tell)(HashNews::Hashed {
+                generation: self.generation,
+                results: std::mem::take(&mut self.hashed),
+            });
+        }
+    }
+
+    /// Tells what is left: the end of the request.
+    fn flush(&mut self) {
+        self.send_hashed();
+    }
+}
+
+/// Whether `pasted`, a hash the user pasted, is `digest`, ignoring the case of its letters.
+/// It takes the first line of what is pasted, with the white space around it, in the forms the
+/// tools write: the hash alone; the hash first and the file's name after it (`sha256sum`,
+/// `b3sum`, `md5sum`, `xxhsum`, with `\` before a hash whose name they escaped); the BSD form
+/// with the hash after ` = ` (`SHA256 (a.txt) = …`, as `shasum --tag`, `xxhsum --tag` and
+/// macOS's `md5` write it); and `xxhsum -H3`'s `XXH3_` before the hash. The hash must then be
+/// the whole of `digest`: a part of it never matches. `None` while there is nothing to compare
+/// (only white space).
 pub fn same_digest(pasted: &str, digest: &str) -> Option<bool> {
-    let pasted = pasted.trim();
-    if pasted.is_empty() {
+    let line = pasted.trim().lines().next()?.trim();
+    if line.is_empty() {
         return None;
     }
-    Some(pasted.eq_ignore_ascii_case(digest.trim()))
+    let hash = match line.rsplit_once(" = ") {
+        // The BSD form: `TAG (name) = hash`.
+        Some((tag, hash)) if tag.ends_with(')') => hash.trim(),
+        // The hash, then two spaces (or a space and `*`) and the name.
+        _ => line.split_whitespace().next().unwrap_or(line),
+    };
+    let hash = hash.strip_prefix('\\').unwrap_or(hash);
+    let hash = match hash.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("XXH3_") => &hash[5..],
+        _ => hash,
+    };
+    Some(!hash.is_empty() && hash.eq_ignore_ascii_case(digest.trim()))
 }
 
 #[cfg(test)]
@@ -318,7 +392,7 @@ mod tests {
                 digest_stream(
                     &mut Cursor::new(data),
                     algorithm,
-                    chunk,
+                    &mut vec![0; chunk],
                     &CancelToken::new(),
                     &mut |_| {},
                 )
@@ -384,12 +458,21 @@ mod tests {
         digest_stream(
             &mut Cursor::new(&data),
             Algorithm::Sha256,
-            HASH_CHUNK,
+            &mut vec![0; HASH_CHUNK],
             &CancelToken::new(),
             &mut |done| told.push(done),
         )
         .expect("a stream in memory");
         assert_eq!(told, [1 << 20, (1 << 20) + 1]);
+        // A buffer with no room reads nothing, and says so rather than give the empty stream's.
+        let empty = digest_stream(
+            &mut Cursor::new(&data),
+            Algorithm::Sha256,
+            &mut [],
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        assert!(matches!(empty, Err(Stopped::Failed(_))));
     }
 
     /// A reader that never ends, as a file of many gigabytes would not for a long time, and
@@ -413,7 +496,7 @@ mod tests {
             let result = digest_stream(
                 &mut Endless(&given),
                 algorithm,
-                HASH_CHUNK,
+                &mut vec![0; HASH_CHUNK],
                 &cancel,
                 &mut |_| {
                     chunks += 1;
@@ -440,7 +523,7 @@ mod tests {
         let result = digest_stream(
             &mut Broken,
             Algorithm::Md5,
-            HASH_CHUNK,
+            &mut vec![0; HASH_CHUNK],
             &CancelToken::new(),
             &mut |_| {},
         );
@@ -471,6 +554,51 @@ mod tests {
         }
         assert_eq!(same_digest("", digest), None);
         assert_eq!(same_digest(" \n\t", digest), None);
+    }
+
+    #[test]
+    fn a_pasted_line_of_a_checksum_tool_is_compared_by_its_hash() {
+        let sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        for pasted in [
+            // `sha256sum`, `b3sum`: the hash, two spaces, the name; `*` for binary mode.
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  abc.txt\n",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad *abc.txt",
+            // A name with a space or a ` = ` in it changes nothing.
+            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  a = b.txt",
+            // A name the tool escaped: `\` before the hash.
+            "\\ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  a\\nb",
+            // The BSD form (`shasum --tag`, `xxhsum --tag`, macOS's `md5`).
+            "SHA256 (abc.txt) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "SHA256 (a = b.txt) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            // The first of several lines.
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  a\nffff  b\n",
+        ] {
+            assert_eq!(same_digest(pasted, sha256), Some(true), "{pasted:?}");
+        }
+        // `xxhsum -H3`: `XXH3_` before the hash, in either case, and its BSD form.
+        let xxh3 = "78af5f94892f3950";
+        for pasted in [
+            "XXH3_78af5f94892f3950  abc.txt",
+            "xxh3_78AF5F94892F3950",
+            "XXH3 (abc.txt) = 78af5f94892f3950",
+        ] {
+            assert_eq!(same_digest(pasted, xxh3), Some(true), "{pasted:?}");
+        }
+        for (pasted, digest) in [
+            // The hash of another line, a part of the hash, no hash after the tool's words.
+            (
+                "ffff  a\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  b",
+                sha256,
+            ),
+            ("ba7816bf8f01cfea  abc.txt", sha256),
+            ("SHA256 (abc.txt) = ba7816bf", sha256),
+            ("SHA256 (abc.txt) = ", sha256),
+            ("XXH3_", xxh3),
+            ("XXH3_78af5f94892f39", xxh3),
+            ("XXH64_78af5f94892f3950", xxh3),
+        ] {
+            assert_eq!(same_digest(pasted, digest), Some(false), "{pasted:?}");
+        }
     }
 
     /// A temporary folder with the file `name` holding `data`.
@@ -507,11 +635,11 @@ mod tests {
             .filter_map(|item| match item {
                 HashNews::Hashed {
                     generation: 7,
-                    row,
-                    result,
-                } => Some((*row, result.clone())),
+                    results,
+                } => Some(results.clone()),
                 _ => None,
             })
+            .flatten()
             .collect();
         assert_eq!(
             hashed,
@@ -579,6 +707,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn the_checksums_of_many_small_files_come_together() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let files: Vec<(usize, VPath)> = (0..50)
+            .map(|i| {
+                let path = dir.path().join(format!("f{i}"));
+                std::fs::write(&path, [u8::try_from(i).expect("below 50")]).expect("a file");
+                (i, VPath::local(path).expect("a local path"))
+            })
+            .collect();
+        let request = HashRequest {
+            generation: 4,
+            algorithm: Algorithm::Xxh3,
+            files,
+        };
+        let mut news = Vec::new();
+        hash_files(
+            &request,
+            &Vfs::with_local(),
+            &CancelToken::new(),
+            HASH_CHUNK,
+            Duration::from_secs(3600),
+            &mut |item| news.push(item),
+        );
+        // Within the gap, one piece of news with all fifty, in order, and no progress.
+        let [HashNews::Hashed { results, .. }] = news.as_slice() else {
+            panic!("one piece of news, not {news:?}");
+        };
+        let rows: Vec<usize> = results.iter().map(|(row, _)| *row).collect();
+        assert_eq!(rows, (0..50).collect::<Vec<_>>());
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+    }
+
     // Unix opens a folder or a FIFO and refuses it as no regular file; Windows does not open a
     // folder as a file at all, and has no FIFO in a folder.
     #[cfg(unix)]
@@ -606,16 +767,18 @@ mod tests {
             &Vfs::with_local(),
             &CancelToken::new(),
             HASH_CHUNK,
-            PROGRESS_GAP,
+            Duration::from_secs(3600),
             &mut |item| news.push(item),
         );
         assert_eq!(
             news,
-            [0, 1].map(|row| HashNews::Hashed {
+            [HashNews::Hashed {
                 generation: 1,
-                row,
-                result: Err(HashFailure::NotAFile)
-            })
+                results: vec![
+                    (0, Err(HashFailure::NotAFile)),
+                    (1, Err(HashFailure::NotAFile))
+                ],
+            }]
         );
     }
 

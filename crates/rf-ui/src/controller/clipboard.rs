@@ -461,6 +461,39 @@ mod tests {
     }
 
     #[test]
+    fn a_checksum_goes_as_text_and_answers_with_its_token() {
+        let fake = Fake::default();
+        let digest = "6cc2245eccd5e186849fbd638fe04a1ceb0fd9ee6871039a04bcd1122cc66e45";
+        let work = ClipboardWork::PutText {
+            token: 9,
+            text: digest.to_owned(),
+        };
+        assert_eq!(
+            carry_out(work, &fake, Os::CURRENT),
+            Done::Text {
+                token: 9,
+                result: Ok(())
+            }
+        );
+        assert_eq!(fake.text.lock().expect("the lock").as_deref(), Some(digest));
+        let busy = Fake {
+            busy: true,
+            ..Fake::default()
+        };
+        let work = ClipboardWork::PutText {
+            token: 10,
+            text: digest.to_owned(),
+        };
+        assert_eq!(
+            carry_out(work, &busy, Os::CURRENT),
+            Done::Text {
+                token: 10,
+                result: Err(ClipboardFailure::Unavailable)
+            }
+        );
+    }
+
+    #[test]
     fn the_worker_answers_in_the_order_asked_and_polls_once_at_a_time() {
         let fake: Arc<dyn SystemClipboard> = Arc::new(Fake::default());
         let (answers, done) = mpsc::channel();

@@ -4,7 +4,8 @@
 //! Alt+Enter (⌘I on macOS) and 속성 in the menu of a row open the window over the main window
 //! ([`Modal::Properties`]) for the items a command acts on in the active pane (the selected
 //! rows, or the row the user put the cursor on), or, with none, for the folder the pane shows
-//! ([`crate::properties`]). It only reads: nothing in it changes a file. While it shows, the
+//! ([`crate::properties`]); 속성 in the menu of the part of a list without rows opens it for that
+//! folder whatever is chosen ([`AppState::folder_properties`]). It only reads: nothing in it changes a file. While it shows, the
 //! panes take no keys or clicks, so the items it shows stay the ones chosen.
 //!
 //! Two workers add what the listing does not tell, each request under a generation of its own:
@@ -15,13 +16,15 @@
 //!
 //! - when the window closes, whichever way (Esc, 닫기, the app's end): the controller calls
 //!   [`AppState::follow_properties`] after every change, which then stops both workers;
-//! - the count, on 중지 ([`AppState::stop_count`]), which keeps what it found;
-//! - the checksums, when another algorithm is chosen: the new request replaces the old one on
-//!   the worker, which stops it, and the old one's late news has the old generation.
+//! - the count, on its 중지 ([`AppState::stop_count`]), which keeps what it found;
+//! - the checksums, on their 중지 ([`AppState::stop_hashes`]), which keeps the checksums made
+//!   (the same algorithm chosen again makes the rest), and when another algorithm is chosen:
+//!   the new request replaces the old one on the worker, which stops it, and the old one's late
+//!   news has the old generation.
 //!
 //! A new window has new generations: nothing of the items of a window before it comes into it.
 
-use rf_core::{Attributes, ErrorKind};
+use rf_core::{Attributes, EntryKind, ErrorKind};
 
 use super::{AppState, ClipboardFailure, ClipboardWork, Effect};
 use crate::dialogs::Modal;
@@ -50,14 +53,34 @@ impl AppState {
     /// Alt+Enter (⌘I): the properties window for the items of pane `side`, or for its folder
     /// when it has none, and the request for what a worker is to find out of them.
     pub(super) fn open_properties(&mut self, side: usize) -> Vec<Effect> {
+        self.properties_of(side, true)
+    }
+
+    /// 속성 in the menu of the part of a list without rows: the properties window for the
+    /// folder the active pane shows, whatever is chosen in it, as File Explorer's.
+    pub fn folder_properties(&mut self) -> Vec<Effect> {
+        if self.modal.is_some() || self.quitting {
+            return Vec::new();
+        }
+        self.properties_of(self.active, false)
+    }
+
+    /// The properties window for the items of pane `side` (`chosen`, when it has some), or else
+    /// for its folder.
+    fn properties_of(&mut self, side: usize, chosen: bool) -> Vec<Effect> {
         let folder = self.tab(side).location().clone();
-        let chosen = self.target_entries(side);
+        let chosen = if chosen {
+            self.target_entries(side)
+        } else {
+            Vec::new()
+        };
         let own_folder = chosen.is_empty();
         let items: Vec<Item> = if own_folder {
             vec![Item {
                 path: folder.clone(),
                 entry: None,
                 unreadable: None,
+                unlisted: None,
                 link: None,
             }]
         } else {
@@ -67,6 +90,7 @@ impl AppState {
                     path,
                     entry: Some(entry.clone()),
                     unreadable: None,
+                    unlisted: None,
                     link: None,
                 })
                 .collect()
@@ -88,7 +112,7 @@ impl AppState {
             && properties.items[0]
                 .entry
                 .as_ref()
-                .is_some_and(|entry| entry.kind == rf_core::EntryKind::Symlink);
+                .is_some_and(|entry| entry.kind == EntryKind::Symlink);
         let mut effects = Vec::new();
         if counts || links {
             let generation = next_generation();
@@ -135,9 +159,7 @@ impl AppState {
         if gone.measuring {
             effects.push(Effect::StopMeasure);
         }
-        let hashing = gone.hashing.algorithm.is_some()
-            && gone.hashing.rows.iter().any(|row| !row.status.finished());
-        if hashing {
+        if gone.hashing.under_way() {
             effects.push(Effect::StopHashes);
         }
         effects
@@ -174,6 +196,16 @@ impl AppState {
                 };
                 shown.link = Some(result);
             }
+            MeasureNews::Unlisted {
+                generation,
+                item,
+                kind,
+            } if generation == properties.count.generation => {
+                let Some(shown) = properties.items.get_mut(item) else {
+                    return false;
+                };
+                shown.unlisted = Some(kind);
+            }
             MeasureNews::Counted { generation, tally }
                 if generation == properties.count.generation
                     && properties.count.status == CountStatus::Counting =>
@@ -206,10 +238,19 @@ impl AppState {
                 None => properties.count.status = CountStatus::Failed,
             }
         }
-        // What the worker did not get to read.
+        // What the worker did not get to read: the folder a pane shows, and where a lone link
+        // leads (a worker that failed told neither).
+        let lone = properties.items.len() == 1;
         for item in &mut properties.items {
             if item.entry.is_none() && item.unreadable.is_none() {
                 item.unreadable = Some(ErrorKind::Other);
+            }
+            let link = item
+                .entry
+                .as_ref()
+                .is_some_and(|entry| entry.kind == EntryKind::Symlink);
+            if lone && link && item.link.is_none() {
+                item.link = Some(Err(ErrorKind::Other));
             }
         }
         properties.revision += 1;
@@ -237,7 +278,7 @@ impl AppState {
 
     /// The algorithm numbered `number` was chosen: the files are hashed with it, under a new
     /// generation (the request replaces the one before on the worker, which stops). The same
-    /// algorithm again changes nothing.
+    /// algorithm again makes the checksums 중지 stopped, and changes nothing else.
     pub fn choose_algorithm(&mut self, number: i32) -> Vec<Effect> {
         let Some(algorithm) = Algorithm::from_number(number) else {
             return Vec::new();
@@ -246,24 +287,36 @@ impl AppState {
             return Vec::new();
         };
         let hashing = &mut properties.hashing;
-        if hashing.rows.is_empty() || hashing.algorithm == Some(algorithm) {
+        let again = hashing.algorithm == Some(algorithm);
+        let stopped = hashing
+            .rows
+            .iter()
+            .any(|row| row.status == HashStatus::Stopped);
+        if hashing.rows.is_empty() || (again && !stopped) {
             return Vec::new();
         }
-        let under_way =
-            hashing.algorithm.is_some() && hashing.rows.iter().any(|row| !row.status.finished());
+        let under_way = hashing.under_way();
         hashing.algorithm = Some(algorithm);
         hashing.generation = next_generation();
         let mut files = Vec::new();
         for (index, row) in hashing.rows.iter_mut().enumerate() {
-            if row.status == HashStatus::OnlineOnly {
+            // Again, only what 중지 left; another algorithm, every file but those online only.
+            let wanted = if again {
+                row.status == HashStatus::Stopped
+            } else {
+                row.status != HashStatus::OnlineOnly
+            };
+            if !wanted {
                 continue;
             }
             row.status = HashStatus::Waiting;
             files.push((index, properties.items[row.item].path.clone()));
         }
-        properties.copied = None;
+        if !again {
+            properties.copied = None;
+            self.properties.copying = None;
+        }
         properties.copy_problem = None;
-        self.properties.copying = None;
         properties.revision += 1;
         if files.is_empty() {
             return if under_way {
@@ -279,44 +332,70 @@ impl AppState {
         })]
     }
 
+    /// 중지 of the checksums: the rows still to be made stop and say so, the ones made stay;
+    /// the same algorithm chosen again makes the rest.
+    pub fn stop_hashes(&mut self) -> Vec<Effect> {
+        let Some(properties) = self.properties.shown.as_mut() else {
+            return Vec::new();
+        };
+        if !properties.hashing.under_way() {
+            return Vec::new();
+        }
+        for row in &mut properties.hashing.rows {
+            if !row.status.finished() {
+                row.status = HashStatus::Stopped;
+            }
+        }
+        properties.revision += 1;
+        vec![Effect::StopHashes]
+    }
+
     /// What the worker of the checksums told: taken when it is for the window's request, and
-    /// for a row still to finish. `true` when the window changed.
+    /// for the rows still to finish. `true` when the window changed.
     pub fn hash_news(&mut self, news: HashNews) -> bool {
         let Some(properties) = self.properties.shown.as_mut() else {
             return false;
         };
-        let (generation, row, status) = match news {
+        let (generation, statuses) = match news {
             HashNews::Reading {
                 generation,
                 row,
                 done,
                 total,
-            } => (generation, row, HashStatus::Reading { done, total }),
+            } => (generation, vec![(row, HashStatus::Reading { done, total })]),
             HashNews::Hashed {
                 generation,
-                row,
-                result,
+                results,
             } => (
                 generation,
-                row,
-                match result {
-                    Ok(digest) => HashStatus::Done(digest),
-                    Err(failure) => HashStatus::Failed(failure),
-                },
+                results
+                    .into_iter()
+                    .map(|(row, result)| {
+                        let status = match result {
+                            Ok(digest) => HashStatus::Done(digest),
+                            Err(failure) => HashStatus::Failed(failure),
+                        };
+                        (row, status)
+                    })
+                    .collect(),
             ),
         };
         if generation != properties.hashing.generation || properties.hashing.algorithm.is_none() {
             return false;
         }
-        let Some(shown) = properties.hashing.rows.get_mut(row) else {
-            return false;
-        };
-        if shown.status.finished() {
-            return false;
+        let mut changed = false;
+        for (row, status) in statuses {
+            if let Some(shown) = properties.hashing.rows.get_mut(row)
+                && !shown.status.finished()
+            {
+                shown.status = status;
+                changed = true;
+            }
         }
-        shown.status = status;
-        properties.revision += 1;
-        true
+        if changed {
+            properties.revision += 1;
+        }
+        changed
     }
 
     /// The worker of the checksums could not make those of the request with `generation` (it

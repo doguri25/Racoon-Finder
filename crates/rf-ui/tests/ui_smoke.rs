@@ -4399,13 +4399,15 @@ fn the_pattern_window_s_choices_take_the_keys_in_turn() {
 /// `counting`, and its SHA-256 made when `algorithm` is 2.
 fn properties_view(counting: bool, algorithm: i32) -> PropertiesView {
     let facts = [
-        ("종류", "텍스트 문서"),
-        ("크기", "3 바이트"),
-        ("속성", "읽기 전용"),
+        ("종류", "텍스트 문서", ""),
+        ("위치", "/…/사진/2026", "/home/me/아주 긴 폴더/사진/2026"),
+        ("크기", "3 바이트", ""),
+        ("속성", "읽기 전용", ""),
     ]
-    .map(|(label, value)| FactRow {
+    .map(|(label, value, full)| FactRow {
         label: label.into(),
         value: value.into(),
+        full: full.into(),
     });
     let hash = HashRowView {
         name: "a.txt".into(),
@@ -4431,6 +4433,7 @@ fn properties_view(counting: bool, algorithm: i32) -> PropertiesView {
             SharedString::new()
         },
         hashable: true,
+        hashing: false,
         algorithm,
         hash_note: SharedString::new(),
         several: false,
@@ -4449,6 +4452,8 @@ fn properties_window(view: PropertiesView) -> (MainWindow, Calls) {
     window.on_properties_algorithm(move |number| record.note(format!("algorithm {number}")));
     let record = calls.clone();
     window.on_properties_stop(move || record.note("stop"));
+    let record = calls.clone();
+    window.on_properties_stop_hashes(move || record.note("stop hashes"));
     let record = calls.clone();
     window.on_properties_copy(move |row| record.note(format!("copy {row}")));
     let record = calls.clone();
@@ -4476,6 +4481,12 @@ fn the_properties_window_shows_its_facts_and_hands_the_choices_over() {
             "{text}"
         );
     }
+    // A shortened path gives screen readers the whole of it (and the pointer a tooltip).
+    let place = labelled(&window, "/…/사진/2026", AccessibleRole::Text).remove(0);
+    assert_eq!(
+        place.accessible_description().as_deref(),
+        Some("/home/me/아주 긴 폴더/사진/2026")
+    );
     // No checksum before an algorithm is chosen, and nothing to copy.
     assert!(labelled(&window, "복사", AccessibleRole::Button).is_empty());
     labelled(&window, "SHA-256", AccessibleRole::RadioButton)[0].invoke_accessible_default_action();
@@ -4531,6 +4542,34 @@ fn the_properties_window_s_stops_take_the_keys_in_turn() {
 }
 
 #[test]
+fn checksums_under_way_can_be_stopped_and_made_again_from_the_keys() {
+    let mut view = properties_view(false, 2);
+    view.hashing = true;
+    let (window, calls) = properties_window(view);
+    // Tab: the algorithms, where Space chooses the one chosen again.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["algorithm 2"]);
+    // Tab: the checksum, which Enter copies.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["copy 0"]);
+    // Tab: 계산 중지, which Space presses; a click does the same.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["stop hashes"]);
+    labelled(&window, "계산 중지", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["stop hashes"]);
+    // Still on 계산 중지, the checksums end: it is gone, the keys are nowhere, and Tab goes
+    // from the first stop that shows.
+    window.set_properties_view(properties_view(false, 2));
+    assert!(labelled(&window, "계산 중지", AccessibleRole::Button).is_empty());
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take(), ["algorithm 3"]);
+}
+
+#[test]
 fn a_hash_being_composed_holds_the_compare_field() {
     let (window, calls) = properties_window(properties_view(false, 2));
     let field = || labelled(&window, "비교", AccessibleRole::TextInput).remove(0);
@@ -4558,7 +4597,7 @@ fn a_hash_being_composed_holds_the_compare_field() {
 }
 
 #[test]
-fn the_row_menu_ends_with_the_properties_and_their_key() {
+fn the_menus_end_with_the_properties() {
     use slint::platform::PointerEventButton;
     let (window, _calls, _models, _tree) = drag_window();
     let commands = Calls::default();
@@ -4574,6 +4613,12 @@ fn the_row_menu_ends_with_the_properties_and_their_key() {
             .mock_single_click(PointerEventButton::Right);
         choose_item(&window, item);
         assert_eq!(commands.take(), ["properties"], "{os:?}");
+        // The part without rows has the folder's own, without a key.
+        labelled(&window, "항목 목록", AccessibleRole::List)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+        choose_item(&window, "속성");
+        assert_eq!(commands.take(), ["folder-properties"], "{os:?}");
     }
 }
 

@@ -196,7 +196,8 @@ export component MainWindow inherits Window {
     // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
     // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
     // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons,
-    // quick-look, properties.
+    // quick-look, properties, folder-properties (the properties of the pane's folder, whatever
+    // is chosen).
     callback command(name: string);
     // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
     callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
@@ -282,10 +283,11 @@ export component MainWindow inherits Window {
     callback pattern-mode(add: bool);
     callback pattern-accepted(text: string);
     // The properties window: an algorithm was chosen (its number, `Algorithms.names`), 중지
-    // stopped the count of what its folders hold, 복사 of the checksum of row `row`, the field
-    // 비교 changed. Esc and 닫기 are `dialog-cancelled`.
+    // stopped the count of what its folders hold, 계산 중지 the checksums under way, 복사 of the
+    // checksum of row `row`, the field 비교 changed. Esc and 닫기 are `dialog-cancelled`.
     callback properties-algorithm(number: int);
     callback properties-stop();
+    callback properties-stop-hashes();
     callback properties-copy(row: int);
     callback properties-compare(text: string);
     // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
@@ -1516,6 +1518,9 @@ export component MainWindow inherits Window {
             }
             count-stopped => {
                 root.properties-stop();
+            }
+            hashes-stopped => {
+                root.properties-stop-hashes();
             }
             copy(row) => {
                 root.properties-copy(row);

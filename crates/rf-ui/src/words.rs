@@ -1610,6 +1610,22 @@ pub fn folders_elsewhere(count: u64) -> String {
     )
 }
 
+/// The size of the properties window's folder that could not be listed: why, in place of a size
+/// of nothing.
+pub fn folder_unreadable(kind: ErrorKind) -> String {
+    format!("폴더를 읽을 수 없습니다: {}", error_kind(kind))
+}
+
+/// A file whose checksum 중지 stopped before it was made.
+pub fn hash_stopped() -> &'static str {
+    "멈춤"
+}
+
+/// 중지 stopped the checksums, and how to go on.
+pub fn hashes_stopped() -> &'static str {
+    "계산을 멈췄습니다. 같은 알고리즘을 다시 고르면 남은 파일을 계산합니다"
+}
+
 /// A file whose checksum waits for the files before it.
 pub fn hash_waiting() -> &'static str {
     "대기 중"

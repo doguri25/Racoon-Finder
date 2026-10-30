@@ -12,6 +12,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# `pure`: no C or assembly, so that the cross-target clippy of the development container
+# builds (its Windows check has no `ml64.exe` for blake3's assembly, and its aarch64 macOS check
+# no C compiler or SDK for the NEON code). It keeps the Rust SSE2/SSE4.1/AVX2 code on x86-64
+# and costs AVX-512 there and NEON on ARM. Drop it once the cross checks have target C
+# toolchains, or when native speed on ARM matters more than them: CI builds natively.
 blake3 = { version = "1.8.7", features = ["pure"] }
 chardetng = "1.0.0"
 encoding_rs = "0.8.42"

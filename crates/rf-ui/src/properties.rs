@@ -21,8 +21,15 @@
 //! mounted inside it, `/proc` under `/`) holds what is not this folder's to take room, and can
 //! be huge or never end; such folders are counted apart ([`Tally::elsewhere`]) and said so. A
 //! folder whose identity it has seen already (a bind mount of a parent) is not entered twice.
-//! It looks at its [`CancelToken`] between the listings' batches (2,000 items at most), so 중지,
-//! the window's end and a newer request stop it at once, even in a folder of a million files.
+//! A file with several names (hard links) counts once for each name, as in File Explorer and
+//! unlike `du`, which counts its blocks once. It looks at its [`CancelToken`] between the
+//! listings' batches (2,000 items at most), so 중지, the window's end and a newer request stop it
+//! at once, even in a folder of a million files.
+//!
+//! A size is whole only when the count ended and read every folder: one that stopped, failed or
+//! met a folder it could not list says `이상` (at least) after it. A folder of the items that
+//! cannot be listed itself ([`MeasureNews::Unlisted`]), or the folder a pane shows that cannot
+//! be read, says why in place of its size, rather than show an empty folder.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime};
@@ -78,6 +85,12 @@ pub enum MeasureNews {
         item: usize,
         result: Result<String, ErrorKind>,
     },
+    /// Folder `item`, one of the items, could not be listed: what it holds is not counted.
+    Unlisted {
+        generation: u64,
+        item: usize,
+        kind: ErrorKind,
+    },
     /// What the count has found so far.
     Counted { generation: u64, tally: Tally },
 }
@@ -91,7 +104,8 @@ pub struct Tally {
     pub folders: u64,
     /// The size of the files.
     pub bytes: u64,
-    /// The folders that could not be listed: what they hold is not counted.
+    /// The folders that could not be listed, the items' own among them: what they hold is not
+    /// counted.
     pub unreadable: u64,
     /// The folders on another file system, which the count does not enter.
     pub elsewhere: u64,
@@ -147,12 +161,12 @@ pub fn measure(
         entries.push(entry);
     }
     let mut count = Walk::new(gap);
-    for (item, entry) in request.items.iter().zip(&entries) {
+    for (index, (item, entry)) in request.items.iter().zip(&entries).enumerate() {
         if let Some(entry) = entry.as_ref().filter(|entry| entry.kind == EntryKind::Dir) {
-            count.start(item.path.clone(), entry);
+            count.start(index, item.path.clone(), entry);
         }
     }
-    while let Some((dir, volume)) = count.pending.pop() {
+    while let Some((dir, volume, item)) = count.pending.pop() {
         if cancel.is_cancelled() {
             return None;
         }
@@ -167,7 +181,16 @@ pub fn measure(
             Ok(()) => {}
             Err(_) if cancel.is_cancelled() => return None,
             // What it holds is not counted, and the window says so.
-            Err(_) => count.tally.unreadable += 1,
+            Err(error) => {
+                count.tally.unreadable += 1;
+                if let Some(item) = item {
+                    tell(MeasureNews::Unlisted {
+                        generation,
+                        item,
+                        kind: error.kind(),
+                    });
+                }
+            }
         }
         count.report(generation, tell);
     }
@@ -175,10 +198,11 @@ pub fn measure(
 }
 
 /// A count under way: what it found, the folders it is still to list (each with the volume of
-/// the folder it started from), and the folders it has entered.
+/// the folder it started from, and the number of the item for an item's own folder), and the
+/// folders it has entered.
 struct Walk {
     tally: Tally,
-    pending: Vec<(VPath, Option<VolumeId>)>,
+    pending: Vec<(VPath, Option<VolumeId>, Option<usize>)>,
     /// The folders entered, by identity (where the listing gives one): none twice.
     entered: HashSet<(VolumeId, FileId)>,
     /// When the count was last told, and how often it is.
@@ -197,14 +221,14 @@ impl Walk {
         }
     }
 
-    /// The folder `entry` at `path`, one of the items, is to be listed.
-    fn start(&mut self, path: VPath, entry: &Entry) {
+    /// The folder `entry` at `path`, item `item`, is to be listed.
+    fn start(&mut self, item: usize, path: VPath, entry: &Entry) {
         if let Some(identity) = entry.identity()
             && !self.entered.insert(identity)
         {
             return;
         }
-        self.pending.push((path, entry.volume_id));
+        self.pending.push((path, entry.volume_id, Some(item)));
     }
 
     /// Counts `batch`, a part of the listing of `dir`, a folder on `volume`: its files, and its
@@ -234,7 +258,7 @@ impl Walk {
             }
             self.tally.folders += 1;
             if let Ok(path) = dir.join(&entry.name) {
-                self.pending.push((path, volume));
+                self.pending.push((path, volume, None));
             }
         }
     }
@@ -285,6 +309,8 @@ pub struct Item {
     pub entry: Option<Entry>,
     /// Why the worker could not read it.
     pub unreadable: Option<ErrorKind>,
+    /// Why the worker could not list it, a folder: what it holds is not counted.
+    pub unlisted: Option<ErrorKind>,
     /// Where a link leads, once a worker read it.
     pub link: Option<Result<String, ErrorKind>>,
 }
@@ -391,15 +417,21 @@ pub enum HashStatus {
     /// A file stored online only (`Attributes::OFFLINE`), which reading would download: it is
     /// not read, as the preview does not read it.
     OnlineOnly,
+    /// 중지 stopped it before it was made: the same algorithm chosen again makes it.
+    Stopped,
 }
 
 impl HashStatus {
     /// Whether nothing more comes for it.
     pub fn finished(&self) -> bool {
-        matches!(
-            self,
-            HashStatus::Done(_) | HashStatus::Failed(_) | HashStatus::OnlineOnly
-        )
+        !matches!(self, HashStatus::Waiting | HashStatus::Reading { .. })
+    }
+}
+
+impl Hashing {
+    /// Whether the worker is making checksums of the rows: some wait or are read.
+    pub fn under_way(&self) -> bool {
+        self.algorithm.is_some() && self.rows.iter().any(|row| !row.status.finished())
     }
 }
 
@@ -479,14 +511,25 @@ impl Properties {
 pub struct Fact {
     pub label: &'static str,
     pub value: String,
+    /// The whole value, when `value` leaves part of it out (a long path): for a tooltip and
+    /// screen readers.
+    pub full: Option<String>,
 }
 
 /// The facts of the window, in their order, with the times in `tz`: for one item, its kind,
 /// place, size (and what a folder holds), where a link leads, its times and attributes; for
 /// several, how many of what, their folder, their size with what their folders hold, and the
 /// attributes they have.
+///
+/// 접근한 날짜 is what the file system keeps, which may lag: Linux mounts with `relatime` or
+/// `noatime` update it seldom or never, Windows can have its last-access updates off, and
+/// reading a file (to hash it, for one) can move it.
 pub fn facts(properties: &Properties, tz: &TimeZone) -> Vec<Fact> {
-    let fact = |label: &'static str, value: String| Fact { label, value };
+    let fact = |label: &'static str, value: String| Fact {
+        label,
+        value,
+        full: None,
+    };
     let mut facts = Vec::new();
     let Some(item) = properties.single() else {
         let chosen = &properties.chosen;
@@ -494,9 +537,9 @@ pub fn facts(properties: &Properties, tz: &TimeZone) -> Vec<Fact> {
             words::fact_kind(),
             words::chosen_kinds(chosen.files, chosen.folders),
         ));
-        facts.push(fact(
+        facts.push(place_fact(
             words::fact_place(),
-            place(&properties.folder.to_string()),
+            &properties.folder.to_string(),
         ));
         facts.push(fact(words::fact_size(), size_value(properties)));
         if chosen.folders > 0 {
@@ -526,24 +569,33 @@ pub fn facts(properties: &Properties, tz: &TimeZone) -> Vec<Fact> {
     );
     facts.push(fact(words::fact_kind(), kind_name));
     if let Some(parent) = item.path.parent() {
-        facts.push(fact(words::fact_place(), place(&parent.to_string())));
+        facts.push(place_fact(words::fact_place(), &parent.to_string()));
     }
+    // A folder that could not be read or listed says why, not that it is empty.
+    let size = match (&item.entry, item.unlisted) {
+        (None, _) => Some(unread()),
+        (Some(_), Some(kind)) => Some(words::folder_unreadable(kind)),
+        (Some(_), None) => None,
+    };
     match kind {
         EntryKind::File | EntryKind::Dir => {
-            facts.push(fact(words::fact_size(), size_value(properties)));
+            let value = size.clone().unwrap_or_else(|| size_value(properties));
+            facts.push(fact(words::fact_size(), value));
         }
         EntryKind::Symlink | EntryKind::Other => {}
     }
-    if kind == EntryKind::Dir {
+    if kind == EntryKind::Dir && size.is_none() {
         facts.extend(contents(properties).map(|value| fact(words::fact_contents(), value)));
     }
     if kind == EntryKind::Symlink {
-        let target = match &item.link {
-            Some(Ok(target)) => place(target),
-            Some(Err(kind)) => words::error_kind(*kind).to_owned(),
-            None => words::reading().to_owned(),
-        };
-        facts.push(fact(words::fact_link_target(), target));
+        facts.push(match &item.link {
+            Some(Ok(target)) => place_fact(words::fact_link_target(), target),
+            Some(Err(kind)) => fact(
+                words::fact_link_target(),
+                words::error_kind(*kind).to_owned(),
+            ),
+            None => fact(words::fact_link_target(), words::reading().to_owned()),
+        });
     }
     let time = |time: fn(&Entry) -> Option<SystemTime>| match &item.entry {
         Some(entry) => time(entry).map_or_else(
@@ -572,6 +624,13 @@ fn place(path: &str) -> String {
     short_path(path, PLACE_CHARS)
 }
 
+/// The fact `label` of `path`, shortened ([`place`]) with the whole path beside it.
+fn place_fact(label: &'static str, path: &str) -> Fact {
+    let value = place(path);
+    let full = (value != path).then(|| path.to_owned());
+    Fact { label, value, full }
+}
+
 /// The size the window shows: the files chosen and what the folders hold so far, `이상` (at
 /// least) while the count has not ended whole.
 fn size_value(properties: &Properties) -> String {
@@ -582,7 +641,7 @@ fn size_value(properties: &Properties) -> String {
     let whole = matches!(
         properties.count.status,
         CountStatus::None | CountStatus::Done
-    );
+    ) && properties.count.tally.unreadable == 0;
     words::size_fact(bytes, whole)
 }
 
@@ -604,7 +663,11 @@ pub fn count_note(properties: &Properties) -> String {
         CountStatus::Stopped => parts.push(words::count_stopped().to_owned()),
         CountStatus::Failed => parts.push(words::count_failed().to_owned()),
     }
-    if count.tally.unreadable > 0 {
+    // A lone folder that could not be listed says so in place of its size.
+    let lone_unlisted = properties
+        .single()
+        .is_some_and(|item| item.unlisted.is_some());
+    if count.tally.unreadable > 0 && !lone_unlisted {
         parts.push(words::unreadable_folders(count.tally.unreadable));
     }
     if count.tally.elsewhere > 0 {
@@ -648,6 +711,7 @@ pub fn hash_lines(properties: &Properties) -> Vec<HashLine> {
                 HashStatus::Done(digest) => (digest.clone(), None),
                 HashStatus::Failed(failure) => (words::hash_failure(*failure), None),
                 HashStatus::OnlineOnly => (words::hash_online_only().to_owned(), None),
+                HashStatus::Stopped => (words::hash_stopped().to_owned(), None),
             };
             let done = matches!(hash.status, HashStatus::Done(_));
             let matched = match &hash.status {
@@ -687,15 +751,21 @@ pub fn hash_note(properties: &Properties) -> String {
     let mut parts = Vec::new();
     if hashing.algorithm.is_none() {
         parts.push(words::choose_algorithm().to_owned());
-    } else if hashing.rows.len() > 1 {
-        let finished = hashing
-            .rows
-            .iter()
-            .filter(|row| row.status.finished())
-            .count();
-        if finished < hashing.rows.len() {
+    } else if hashing.under_way() {
+        if hashing.rows.len() > 1 {
+            let finished = hashing
+                .rows
+                .iter()
+                .filter(|row| row.status.finished())
+                .count();
             parts.push(words::hashing_files(finished, hashing.rows.len()));
         }
+    } else if hashing
+        .rows
+        .iter()
+        .any(|row| row.status == HashStatus::Stopped)
+    {
+        parts.push(words::hashes_stopped().to_owned());
     }
     if hashing.left_out > 0 {
         parts.push(words::hashed_first(MAX_HASHED_FILES));
@@ -720,19 +790,24 @@ pub enum Verdict {
     Waiting,
 }
 
-/// What the comparison with the pasted hash says now.
-pub fn verdict(properties: &Properties) -> Verdict {
+/// What the comparison with the pasted hash says now, given the rows as [`hash_lines`] made them
+/// (`lines`, made once for the window's view and for this).
+pub fn verdict(properties: &Properties, lines: &[HashLine]) -> Verdict {
     let hashing = &properties.hashing;
     if hashing.algorithm.is_none() || properties.compare.trim().is_empty() {
         return Verdict::None;
     }
-    let lines = hash_lines(properties);
     let matched: Vec<&HashLine> = lines.iter().filter(|line| line.matched).collect();
     if let Some(first) = matched.first() {
         let name = (hashing.rows.len() > 1 && matched.len() == 1).then(|| first.name.clone());
         return Verdict::Match(name, matched.len());
     }
-    if hashing.rows.iter().all(|row| row.status.finished()) {
+    // A row 중지 stopped may still be made: no mismatch is told before it is.
+    let stopped = hashing
+        .rows
+        .iter()
+        .any(|row| row.status == HashStatus::Stopped);
+    if !stopped && hashing.rows.iter().all(|row| row.status.finished()) {
         if lines.iter().any(|line| line.done) {
             Verdict::Mismatch
         } else {
@@ -1205,8 +1280,22 @@ mod tests {
             path: at(&entry.name.to_string_lossy()),
             entry: Some(entry),
             unreadable: None,
+            unlisted: None,
             link: None,
         }
+    }
+
+    /// What the comparison says, from the rows as the window makes them.
+    fn judged(properties: &Properties) -> Verdict {
+        verdict(properties, &hash_lines(properties))
+    }
+
+    /// The value of the fact `label`, if the window shows it.
+    fn fact_value(properties: &Properties, label: &str) -> Option<String> {
+        facts(properties, &TimeZone::UTC)
+            .into_iter()
+            .find(|fact| fact.label == label)
+            .map(|fact| fact.value)
     }
 
     #[test]
@@ -1270,6 +1359,46 @@ mod tests {
                 ("속성", "읽기 전용, 숨김"),
             ]
         );
+    }
+
+    #[test]
+    fn a_shortened_place_keeps_the_whole_path_beside_it() {
+        let mut deep = at("");
+        for _ in 0..8 {
+            deep = deep.join("아주 긴 폴더 이름").expect("a name");
+        }
+        let deep = deep.join("설계안.pdf").expect("a name");
+        let properties = Properties::new(
+            1,
+            at(""),
+            false,
+            vec![Item {
+                path: deep.clone(),
+                entry: Some(file_entry("설계안.pdf", 1, Attributes::empty())),
+                unreadable: None,
+                unlisted: None,
+                link: None,
+            }],
+        );
+        let place = facts(&properties, &TimeZone::UTC)
+            .into_iter()
+            .find(|fact| fact.label == "위치")
+            .expect("a place");
+        let whole = deep.parent().expect("a parent").to_string();
+        assert!(place.value.contains('…'), "{}", place.value);
+        assert_eq!(place.full, Some(whole));
+        // A short one has nothing beside it.
+        let properties = Properties::new(
+            1,
+            at(""),
+            false,
+            vec![item(file_entry("a", 1, Attributes::empty()))],
+        );
+        let place = facts(&properties, &TimeZone::UTC)
+            .into_iter()
+            .find(|fact| fact.label == "위치")
+            .expect("a place");
+        assert_eq!(place.full, None);
     }
 
     #[test]
@@ -1376,21 +1505,21 @@ mod tests {
         let mut properties = Properties::new(1, at(""), false, items);
         properties.compare = "  ABC123 \n".to_owned();
         // No algorithm, nothing to say.
-        assert_eq!(verdict(&properties), Verdict::None);
+        assert_eq!(judged(&properties), Verdict::None);
         properties.hashing.algorithm = Some(Algorithm::Md5);
         properties.hashing.rows[0].status = HashStatus::Done("abc123".to_owned());
         properties.hashing.rows[1].status = HashStatus::Reading { done: 1, total: 3 };
         assert_eq!(
-            verdict(&properties),
+            judged(&properties),
             Verdict::Match(Some("a.txt".to_owned()), 1)
         );
         assert!(hash_lines(&properties)[0].matched);
         properties.compare = "def".to_owned();
-        assert_eq!(verdict(&properties), Verdict::Waiting);
+        assert_eq!(judged(&properties), Verdict::Waiting);
         properties.hashing.rows[1].status = HashStatus::Done("fed".to_owned());
-        assert_eq!(verdict(&properties), Verdict::Mismatch);
+        assert_eq!(judged(&properties), Verdict::Mismatch);
         properties.compare = " ".to_owned();
-        assert_eq!(verdict(&properties), Verdict::None);
+        assert_eq!(judged(&properties), Verdict::None);
         assert_eq!(
             hash_lines(&properties)
                 .iter()
@@ -1398,5 +1527,104 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["abc123", "fed"]
         );
+        // A row 중지 stopped may still be made: no mismatch before it is.
+        properties.compare = "abc".to_owned();
+        properties.hashing.rows[1].status = HashStatus::Stopped;
+        assert_eq!(judged(&properties), Verdict::Waiting);
+        assert_eq!(hash_lines(&properties)[1].value, "멈춤");
+        assert!(!properties.hashing.under_way());
+        assert_eq!(
+            hash_note(&properties),
+            "계산을 멈췄습니다. 같은 알고리즘을 다시 고르면 남은 파일을 계산합니다"
+        );
+    }
+
+    #[test]
+    fn a_count_that_met_a_folder_it_could_not_list_is_not_whole() {
+        let mut properties = Properties::new(
+            1,
+            at(""),
+            false,
+            vec![item(Entry::new("docs", EntryKind::Dir))],
+        );
+        properties.count = Count {
+            generation: 2,
+            tally: Tally {
+                files: 3,
+                folders: 2,
+                bytes: 2_048,
+                unreadable: 1,
+                elsewhere: 0,
+            },
+            status: CountStatus::Done,
+        };
+        assert_eq!(
+            fact_value(&properties, "크기").as_deref(),
+            Some("2 KB (2,048 바이트) 이상")
+        );
+        assert_eq!(
+            count_note(&properties),
+            "읽을 수 없는 폴더 1개는 세지 못했습니다"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_listed_or_read_says_why_rather_than_look_empty() {
+        // A chosen folder the worker cannot list: it tells which.
+        let (vfs, _) = vfs_of(tree());
+        let mut news = Vec::new();
+        let tally = measure(
+            &request(
+                vec![MeasureItem {
+                    path: at("locked"),
+                    entry: Some(on("locked", EntryKind::Dir, 0, 1, 3)),
+                }],
+                true,
+            ),
+            &vfs,
+            &CancelToken::new(),
+            Duration::ZERO,
+            &mut |item| news.push(item),
+        );
+        assert_eq!(tally.map(|tally| tally.unreadable), Some(1));
+        assert!(
+            news.contains(&MeasureNews::Unlisted {
+                generation: 5,
+                item: 0,
+                kind: ErrorKind::PermissionDenied,
+            }),
+            "{news:?}"
+        );
+        // The window says so in place of the size, and no contents of 0 items.
+        let mut locked = item(Entry::new("locked", EntryKind::Dir));
+        locked.unlisted = Some(ErrorKind::PermissionDenied);
+        let mut properties = Properties::new(1, at(""), false, vec![locked]);
+        properties.count.status = CountStatus::Done;
+        properties.count.tally = tally.unwrap_or_default();
+        assert_eq!(
+            fact_value(&properties, "크기").as_deref(),
+            Some("폴더를 읽을 수 없습니다: 권한이 없습니다")
+        );
+        assert_eq!(fact_value(&properties, "내용"), None);
+        assert_eq!(count_note(&properties), "");
+        // The folder a pane shows, which the worker could not read at all.
+        let mut properties = Properties::new(
+            1,
+            at(""),
+            true,
+            vec![Item {
+                path: at("gone"),
+                entry: None,
+                unreadable: Some(ErrorKind::NotFound),
+                unlisted: None,
+                link: None,
+            }],
+        );
+        properties.count.status = CountStatus::Done;
+        assert_eq!(
+            fact_value(&properties, "크기").as_deref(),
+            Some("찾을 수 없습니다")
+        );
+        assert_eq!(fact_value(&properties, "내용"), None);
     }
 }

@@ -1047,12 +1047,16 @@ impl PropertiesModels {
                 .map(|fact| FactRow {
                     label: fact.label.into(),
                     value: fact.value.into(),
+                    full: fact.full.unwrap_or_default().into(),
                 })
                 .collect(),
         );
+        // Made once, for the rows and for the comparison.
+        let lines = properties::hash_lines(properties);
+        let verdict = properties::verdict(properties, &lines);
         set_rows(
             &self.hashes,
-            properties::hash_lines(properties)
+            lines
                 .into_iter()
                 .map(|line| HashRowView {
                     name: line.name.into(),
@@ -1076,7 +1080,6 @@ impl PropertiesModels {
             }
             None => (words::item_count(properties.items.len()), "file", false),
         };
-        let verdict = properties::verdict(properties);
         let verdict_text = match &verdict {
             Verdict::None => String::new(),
             Verdict::Match(name, count) => words::verdict_match(name.as_deref(), *count),
@@ -1092,6 +1095,7 @@ impl PropertiesModels {
             counting: properties.count.status == properties::CountStatus::Counting,
             count_note: properties::count_note(properties).into(),
             hashable: !hashing.rows.is_empty(),
+            hashing: hashing.under_way(),
             algorithm: hashing.algorithm.map_or(-1, Algorithm::number),
             hash_note: properties::hash_note(properties).into(),
             several: hashing.rows.len() > 1,
