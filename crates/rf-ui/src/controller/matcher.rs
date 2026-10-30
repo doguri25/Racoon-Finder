@@ -54,7 +54,7 @@ mod tests {
         MatchRequest {
             generation,
             rows: names,
-            pattern: NamePattern::new("*.txt", PatternSyntax::Wildcard, true)
+            pattern: NamePattern::new("*.txt", PatternSyntax::Wildcard, true, rf_core::Os::CURRENT)
                 .expect("a pattern")
                 .expect("something to match"),
         }

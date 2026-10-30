@@ -4333,7 +4333,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -4409,6 +4408,7 @@ dependencies = [
  "rf-core",
  "rf-platform",
  "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]

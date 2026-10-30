@@ -214,9 +214,10 @@ pub struct PatternChoice {
 }
 
 impl PatternChoice {
-    /// The pattern of the choices; `Ok(None)` for one with nothing to match.
+    /// The pattern of the choices, for the names of this system; `Ok(None)` for one with
+    /// nothing to match.
     pub fn pattern(&self) -> Result<Option<NamePattern>, PatternError> {
-        NamePattern::new(&self.text, self.syntax, !self.match_case)
+        NamePattern::new(&self.text, self.syntax, !self.match_case, Os::CURRENT)
     }
 }
 

@@ -631,6 +631,29 @@ fn the_folder_of_the_same_name_is_the_exact_one_or_the_only_one_in_another_case(
 }
 
 #[test]
+fn the_folder_of_the_same_name_ignores_the_unicode_form_on_macos() {
+    use super::super::layout::same_folder;
+    // 한글 composed (NFC) and decomposed (NFD), as APFS may hand out either.
+    let (nfc, nfd) = ("한글", "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}");
+    assert_ne!(nfc, nfd);
+    let entries = vec![dir(nfd), dir("Music")];
+    // macOS takes the two forms for one name; Windows and Linux keep them apart.
+    assert_eq!(
+        same_folder(&entries, nfc.as_ref(), Os::MacOs),
+        Some(nfd.as_ref())
+    );
+    for os in [Os::Windows, Os::Other] {
+        assert_eq!(same_folder(&entries, nfc.as_ref(), os), None, "{os:?}");
+    }
+    // Case still folds on macOS and Windows alone.
+    let decomposed_upper = vec![dir("\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}-Docs")];
+    assert_eq!(
+        same_folder(&decomposed_upper, "한글-docs".as_ref(), Os::MacOs),
+        Some("\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}-Docs".as_ref())
+    );
+}
+
+#[test]
 fn with_one_pane_the_commands_for_the_hidden_one_only_say_so() {
     let mut state = ready(vec![dir("x")], vec![file("z")]);
     press(&mut state, &special(Key::F9), SHIFT);

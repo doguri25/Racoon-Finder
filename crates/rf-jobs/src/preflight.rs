@@ -8,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 
 use rf_core::{Os, VPath};
-use unicode_normalization::UnicodeNormalization;
+use rf_vfs::NameFolding;
 
 /// The longest local path on Windows, in UTF-16 units. The system accepts 32,767; the rest is
 /// kept free for the temporary names a transfer writes next to its target.
@@ -89,6 +89,17 @@ impl FsKind {
     /// [`FsKind::Other`], which is assumed to tell them apart.
     pub const fn case_insensitive(self) -> bool {
         !matches!(self, FsKind::Other)
+    }
+
+    /// How the file system tells two names of one folder apart: by neither case nor Unicode
+    /// form on `Apfs` and `HfsPlus`, by case alone on the others but [`FsKind::Other`], which
+    /// tells every spelling apart.
+    pub const fn folding(self) -> NameFolding {
+        match self {
+            FsKind::Apfs | FsKind::HfsPlus => NameFolding::CaseAndForm,
+            FsKind::Other => NameFolding::Exact,
+            _ => NameFolding::Case,
+        }
     }
 
     /// The largest file the file system can hold, when it has a limit worth checking: 4 GiB
@@ -352,19 +363,15 @@ pub fn check_size(size: u64, fs: FsKind) -> Option<IssueKind> {
     (size > max).then_some(IssueKind::FileTooLarge { size, max })
 }
 
-/// The key under which two names of one folder on `fs` are the same name: the lossy text,
-/// composed to NFC first on `Apfs` and `HfsPlus` (which ignore the Unicode form of a name),
-/// then lower-cased. It is a simple lower-casing, not a full case folding: `ß` and `SS` stay
-/// different names.
+/// The key under which two names of one folder on `fs` are the same name: `rf_vfs::fold_name`
+/// by the file system's rule ([`FsKind::folding`]), the lossy text composed to NFC first on
+/// `Apfs` and `HfsPlus` (which ignore the Unicode form of a name), then lower-cased. It is a
+/// simple lower-casing, not a full case folding: `ß` and `SS` stay different names.
 ///
 /// [`CaseIndex`] and the transfer's path comparisons share it. It means something only on a
 /// file system with [`FsKind::case_insensitive`]; callers check that first.
 pub(crate) fn fold_name(name: &OsStr, fs: FsKind) -> String {
-    let text = name.to_string_lossy();
-    match fs {
-        FsKind::Apfs | FsKind::HfsPlus => text.nfc().collect::<String>().to_lowercase(),
-        _ => text.to_lowercase(),
-    }
+    rf_vfs::fold_name(name, fs.folding())
 }
 
 /// Finds names that collide in case on a case-insensitive target as a job plans its writes.

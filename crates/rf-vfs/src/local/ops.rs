@@ -6,7 +6,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use rf_core::{Error, ErrorKind, Result, VPath};
 
 use super::native;
-use crate::names::fold_name;
+use crate::names::{LOCAL_GUARD, fold_name};
 use crate::provider::{
     DataRanges, DeleteMode, Deleted, LinkTarget, MetadataPatch, ReadStream, RenameMode, WriteMode,
     WriteStream,
@@ -18,8 +18,8 @@ use crate::provider::{
 /// path (`lands_inside`). `RenameMode::NoReplace` goes through
 /// `rf_platform::rename_no_replace`, so an existing target is never overwritten. The one thing
 /// it cannot do is change only the case of a name on a volume that ignores case (`b.txt` to
-/// `B.TXT`), because the OS then sees the target as taken; that case is renamed plainly after
-/// checking that both names are the same item.
+/// `B.TXT`), or its Unicode form on macOS, because the OS then sees the target as taken; that
+/// case is renamed plainly after checking that both names are the same item.
 pub(super) fn rename(from: &VPath, to: &VPath, mode: RenameMode) -> Result<()> {
     if (to != from && to.starts_with(from)) || lands_inside(from, to) {
         return Err(Error::Unsupported(format!(
@@ -71,8 +71,9 @@ fn rename_plain(from: &VPath, to: &VPath) -> Result<()> {
     std::fs::rename(native(from)?, native(to)?).map_err(|e| Error::io("rename", from.clone(), e))
 }
 
-/// Whether `to` is `from` in the same folder with only the letter case changed, and both names
-/// already lead to one item. Only then is a taken target the item itself, not another one.
+/// Whether `to` is `from` in the same folder with only the letter case changed (or, on macOS,
+/// the Unicode form: NFC and NFD, which APFS takes for one name), and both names already lead
+/// to one item. Only then is a taken target the item itself, not another one.
 ///
 /// An identity that cannot be read, on a file system without usable file IDs too, counts as
 /// two different items, so the rename keeps failing with `AlreadyExists`.
@@ -80,7 +81,7 @@ fn is_case_only_rename(from: &VPath, to: &VPath) -> bool {
     let same_folder = from.parent() == to.parent();
     let same_name_ignoring_case = matches!(
         (from.file_name(), to.file_name()),
-        (Some(a), Some(b)) if fold_name(a) == fold_name(b)
+        (Some(a), Some(b)) if fold_name(a, LOCAL_GUARD) == fold_name(b, LOCAL_GUARD)
     );
     same_folder
         && same_name_ignoring_case

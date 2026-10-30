@@ -697,6 +697,42 @@ fn a_listing_of_names_keeps_the_folders_that_fit_and_counts_the_rest() {
 }
 
 #[test]
+fn a_listing_of_names_ignores_the_unicode_form_on_macos() {
+    use rf_ui::loader::name_starts_with;
+
+    // A folder named in decomposed Hangul (NFD, as HFS+ and some Mac apps write it), and the
+    // composed start the path field gets from the input method (NFC).
+    let t = tempfile::tempdir().unwrap();
+    let nfd = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af} 문서";
+    std::fs::create_dir(t.path().join(nfd)).unwrap();
+    std::fs::create_dir(t.path().join("other")).unwrap();
+    let request = |os: Os| NamesRequest {
+        generation: 7,
+        folder: local(t.path()),
+        prefix: "한글".to_owned(),
+        filter: VisibilityFilter::default(),
+        limit: 100,
+        os,
+    };
+    assert_eq!(
+        names_of(&loader(), request(Os::MacOs)),
+        (strings(&[nfd]), 0)
+    );
+    for os in [Os::Windows, Os::Other] {
+        assert_eq!(names_of(&loader(), request(os)), (Vec::new(), 0), "{os:?}");
+    }
+    // The address bar's own test of a name it has, each way round.
+    assert!(name_starts_with(OsStr::new(nfd), "한글", Os::MacOs));
+    assert!(name_starts_with(
+        OsStr::new("한글 문서"),
+        "\u{1112}\u{1161}\u{11ab}",
+        Os::MacOs
+    ));
+    assert!(!name_starts_with(OsStr::new(nfd), "한글", Os::Windows));
+    assert!(!name_starts_with(OsStr::new(nfd), "한글", Os::Other));
+}
+
+#[test]
 fn a_cancelled_listing_of_names_sends_nothing() {
     let t = tempfile::tempdir().unwrap();
     std::fs::create_dir(t.path().join("docs")).unwrap();

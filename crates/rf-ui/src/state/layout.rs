@@ -34,7 +34,7 @@
 use std::ffi::{OsStr, OsString};
 
 use rf_core::{Entry, EntryKind, Os};
-use rf_vfs::fold_name;
+use rf_vfs::{NameFolding, fold_name};
 
 use super::{AppState, Effect, LEFT, RIGHT, load};
 use crate::loader::LoadRequest;
@@ -418,8 +418,9 @@ fn one_pane_only() -> Vec<Effect> {
 
 /// The folder among `entries` that navigation sync takes for `name` on `os`: the one of that
 /// very name; or else, on Windows and macOS, whose file systems mostly ignore case, the only
-/// one whose name differs from it in case alone (folded as `rf_vfs` folds names). `None` when
-/// there is none, or several.
+/// one whose name is the same name there ([`rf_vfs::fold_name`] by the rule of `os`): it
+/// differs in case alone, or on macOS also in its Unicode form (NFC or NFD, which APFS takes
+/// for one name). `None` when there is none, or several.
 pub(super) fn same_folder<'a>(entries: &'a [Entry], name: &OsStr, os: Os) -> Option<&'a OsStr> {
     let folders = entries.iter().filter(|entry| entry.kind == EntryKind::Dir);
     if let Some(exact) = folders.clone().find(|entry| entry.name == name) {
@@ -428,8 +429,9 @@ pub(super) fn same_folder<'a>(entries: &'a [Entry], name: &OsStr, os: Os) -> Opt
     if os == Os::Other {
         return None;
     }
-    let wanted = fold_name(name);
-    let mut alike = folders.filter(|entry| fold_name(&entry.name) == wanted);
+    let folding = NameFolding::of(os);
+    let wanted = fold_name(name, folding);
+    let mut alike = folders.filter(|entry| fold_name(&entry.name, folding) == wanted);
     match (alike.next(), alike.next()) {
         (Some(only), None) => Some(&only.name),
         _ => None,

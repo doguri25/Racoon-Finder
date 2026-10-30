@@ -1,11 +1,12 @@
 //! The folder views remembered (NAV-10): at most [`MAX_FOLDER_VIEWS`], the one used longest ago
-//! first, each folder known by its `VPath::to_uri` under the system's rule of case. See the
+//! first, each folder known by its `VPath::to_uri` under the system's rule of names (case, and
+//! on macOS the Unicode form). See the
 //! module `state::view` for what a view is and how a folder finds its own.
 
 use std::ffi::OsStr;
 
 use rf_core::{Os, VPath};
-use rf_vfs::fold_name;
+use rf_vfs::{NameFolding, fold_name};
 
 use super::FolderView;
 use crate::pane::ancestors;
@@ -20,7 +21,7 @@ pub const MAX_FOLDER_URI: usize = 2048;
 pub struct ViewStore {
     /// With each the key it is found by ([`ViewStore::key`]).
     entries: Vec<(String, StoredView)>,
-    /// Whose rule of case the keys follow.
+    /// Whose rule of names the keys follow.
     os: Os,
 }
 
@@ -77,7 +78,7 @@ impl Default for ViewStore {
 }
 
 impl ViewStore {
-    /// A store of `entries`, the one used longest ago first, with the case rule of `os`. Of two
+    /// A store of `entries`, the one used longest ago first, with the rule of names of `os`. Of two
     /// entries for one folder the later one is kept, and of more than [`MAX_FOLDER_VIEWS`] the
     /// last ones.
     pub fn new(entries: Vec<StoredView>, os: Os) -> ViewStore {
@@ -167,7 +168,7 @@ impl ViewStore {
     }
 
     /// Whether `a` and `b` are one folder, as the store tells folders apart (ignoring case on
-    /// Windows and macOS).
+    /// Windows and macOS, and the Unicode form on macOS).
     pub fn same_folder(&self, a: &VPath, b: &VPath) -> bool {
         self.key(a) == self.key(b)
     }
@@ -218,17 +219,16 @@ impl ViewStore {
         true
     }
 
-    /// The key `folder` is found by: its `to_uri`, folded on a system that ignores case.
+    /// The key `folder` is found by: its `to_uri`, folded by the system's rule of names
+    /// ([`rf_vfs::fold_name`]: lower-cased on Windows and macOS, composed to NFC on macOS, as it
+    /// is elsewhere). The `to_uri` keeps every letter as it is, escaping only `%` and control
+    /// characters, so the folding sees the names.
     fn key(&self, folder: &VPath) -> String {
         self.key_of(&folder.to_uri())
     }
 
     fn key_of(&self, uri: &str) -> String {
-        if self.os == Os::Other {
-            uri.to_owned()
-        } else {
-            fold_name(OsStr::new(uri))
-        }
+        fold_name(OsStr::new(uri), NameFolding::of(self.os))
     }
 
     fn position(&self, key: &str) -> Option<usize> {
@@ -330,6 +330,33 @@ mod tests {
             let mut store = ViewStore::new(Vec::new(), os);
             store.apply_to_subfolders(&upper, icons(ViewMode::LargeIcons));
             let below = folder("photos/2026");
+            assert_eq!(
+                store.view_for(&below) == icons(ViewMode::LargeIcons),
+                alike,
+                "{os:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn folders_are_known_by_the_systems_rule_of_unicode_form() {
+        // 사진 composed (NFC) and decomposed (NFD): one folder on macOS, two elsewhere.
+        let composed = folder("사진");
+        let decomposed = folder("\u{1109}\u{1161}\u{110c}\u{1175}\u{11ab}");
+        assert_ne!(composed, decomposed);
+        for (os, alike) in [(Os::MacOs, true), (Os::Windows, false), (Os::Other, false)] {
+            let mut store = ViewStore::new(Vec::new(), os);
+            store.remember(&decomposed, icons(ViewMode::List));
+            assert_eq!(
+                store.view_for(&composed) == icons(ViewMode::List),
+                alike,
+                "{os:?}"
+            );
+            assert_eq!(store.same_folder(&composed, &decomposed), alike, "{os:?}");
+            // The folders below, too.
+            let mut store = ViewStore::new(Vec::new(), os);
+            store.apply_to_subfolders(&decomposed, icons(ViewMode::LargeIcons));
+            let below = composed.join("2026").expect("a name");
             assert_eq!(
                 store.view_for(&below) == icons(ViewMode::LargeIcons),
                 alike,

@@ -25,8 +25,8 @@ use std::time::SystemTime;
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_jobs::{CopyFound, CreatedItem};
 use rf_vfs::{
-    CancelToken, Capabilities, Change, Provider, SortSpec, Vfs, VisibilityFilter, WatchEvent,
-    WatchHandle, fold_name, sort_by_name, sort_entries,
+    CancelToken, Capabilities, Change, NameFolding, Provider, SortSpec, Vfs, VisibilityFilter,
+    WatchEvent, WatchHandle, fold_name, sort_by_name, sort_entries,
 };
 
 use crate::pane::OpenAction;
@@ -84,17 +84,16 @@ impl FolderName {
     }
 }
 
-/// Whether the folder name `name` starts with `prefix`, typed into the path field, on `os`:
-/// ignoring case on Windows and macOS, whose file systems mostly do (folded as `rf_vfs` folds
-/// names), and as spelled elsewhere.
+/// Whether the folder name `name` starts with `prefix`, typed into the path field, on `os`,
+/// both folded as the file systems of `os` mostly compare names ([`rf_vfs::fold_name`]):
+/// ignoring case on Windows and macOS, and on macOS the Unicode form too (a name in NFD, as
+/// HFS+ writes it, starts with the NFC text an input method types); as spelled elsewhere.
 pub fn name_starts_with(name: &OsStr, prefix: &str, os: Os) -> bool {
     if prefix.is_empty() {
         return true;
     }
-    if os == Os::Other {
-        return name.to_string_lossy().starts_with(prefix);
-    }
-    fold_name(name).starts_with(&fold_name(OsStr::new(prefix)))
+    let folding = NameFolding::of(os);
+    fold_name(name, folding).starts_with(&fold_name(OsStr::new(prefix), folding))
 }
 
 /// What the work of one [`LoadRequest`] reports, from a worker thread or the watch's thread.

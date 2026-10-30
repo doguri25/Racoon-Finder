@@ -9,7 +9,7 @@ use std::time::Duration;
 use rf_core::{Entry, FileId, VolumeId};
 use rf_platform::DirEvent;
 
-use crate::names::fold_name;
+use crate::names::{LOCAL_GUARD, fold_name};
 
 /// How long a provider collects raw notifications before it sends them as one
 /// `WatchEvent::Changes`.
@@ -241,7 +241,8 @@ impl Coalescer {
 /// - an 8.3 short name on Windows;
 /// - hard links.
 ///
-/// It is so when two names fold to one string (`fold_name`), whether or not both are present;
+/// It is so when two names fold to one string (`fold_name` by the local guards' rule: case
+/// everywhere, and the Unicode form on macOS), whether or not both are present;
 /// or when two names that are present have the same file ID (compared only
 /// when both are known). The IDs cost a call each on Windows, so they are asked for only when
 /// two names are present and the spellings are all different.
@@ -257,7 +258,10 @@ fn names_one_file_twice(
         return false;
     }
     let mut spellings = HashSet::with_capacity(names.len());
-    if !names.iter().all(|name| spellings.insert(fold_name(name))) {
+    if !names
+        .iter()
+        .all(|name| spellings.insert(fold_name(name, LOCAL_GUARD)))
+    {
         return true;
     }
     if now.iter().flatten().nth(1).is_none() {
@@ -545,6 +549,23 @@ mod tests {
             c.flush(&mut stat_from(&["B.TXT"]), &mut no_id_lookup()),
             [WatchEvent::Rescan]
         );
+    }
+
+    /// The two Unicode forms of one name (NFC and NFD) in one window, the old one gone: APFS
+    /// takes them for one name, so on macOS it is a rescan by the names alone; elsewhere they
+    /// are two names, one gone and one there.
+    #[test]
+    fn the_two_unicode_forms_of_a_name_are_one_name_on_macos() {
+        const NFC: &str = "한.txt";
+        const NFD: &str = "\u{1112}\u{1161}\u{11ab}.txt";
+        let mut c = Coalescer::new();
+        c.push(renamed(NFC, NFD));
+        let events = c.flush(&mut stat_from(&[NFD]), &mut no_id_lookup());
+        if cfg!(target_os = "macos") {
+            assert_eq!(events, [WatchEvent::Rescan]);
+        } else {
+            assert_ne!(events, [WatchEvent::Rescan]);
+        }
     }
 
     #[test]

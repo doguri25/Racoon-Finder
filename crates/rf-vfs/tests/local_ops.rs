@@ -201,6 +201,26 @@ fn names_differing_only_in_case_never_overwrite_each_other() {
     assert_eq!(std::fs::read(upper.as_local().unwrap()).unwrap(), b"upper");
 }
 
+/// On APFS the two Unicode forms of a name (NFC and NFD) are one name, as `a.txt` and `A.TXT`
+/// are: a rename that changes only the form is a rename of the item itself, not onto another.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_rename_that_changes_only_the_unicode_form_renames_the_item() {
+    let (_t, root) = tmp();
+    let p = LocalProvider::new();
+    let nfc = root.join("한글.txt").unwrap();
+    let nfd = root
+        .join("\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt")
+        .unwrap();
+    std::fs::write(nfc.as_local().unwrap(), b"one").unwrap();
+    if std::fs::metadata(nfd.as_local().unwrap()).is_err() {
+        eprintln!("skipped: this volume tells the two forms apart");
+        return;
+    }
+    p.rename(&nfc, &nfd, RenameMode::NoReplace).unwrap();
+    assert_eq!(std::fs::read(nfd.as_local().unwrap()).unwrap(), b"one");
+}
+
 /// Makes `link` lead to the folder `target`: a symbolic link on Unix.
 #[cfg(unix)]
 fn dir_alias(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {

@@ -11,8 +11,9 @@
 //! above it that applies its view to its subfolders (하위 폴더에 적용), or else the default one
 //! ([`FolderView::default`]). The store keeps at most [`MAX_FOLDER_VIEWS`] folders, and drops
 //! the one used longest ago first (a use is a tab showing the folder's view, or a change of it).
-//! Folders are known by their `VPath::to_uri`, compared as the system compares names: ignoring
-//! case on Windows and macOS (`rf_vfs::fold_name`), exactly elsewhere.
+//! Folders are known by their `VPath::to_uri`, compared as the system compares names
+//! (`rf_vfs::fold_name`): ignoring case on Windows and macOS, and the Unicode form (NFC or NFD)
+//! on macOS, exactly elsewhere.
 //!
 //! The keys move the cursor as the view lays the rows out ([`target`]): 자세히 one row per line,
 //! the icons left to right and then down (row-major), 목록 top to bottom and then right

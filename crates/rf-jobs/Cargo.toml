@@ -17,7 +17,6 @@ rf-platform = { version = "0.1.0", path = "../rf-platform" }
 rf-vfs = { version = "0.1.0", path = "../rf-vfs" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-unicode-normalization = "0.1.26"
 
 [dev-dependencies]
 proptest = "1.11.0"

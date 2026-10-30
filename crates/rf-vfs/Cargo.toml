@@ -15,6 +15,7 @@ workspace = true
 bitflags = "2.13.2"
 rf-core = { version = "0.1.0", path = "../rf-core" }
 rf-platform = { version = "0.1.0", path = "../rf-platform" }
+unicode-normalization = "0.1.26"
 
 [dev-dependencies]
 criterion = "0.7.0"

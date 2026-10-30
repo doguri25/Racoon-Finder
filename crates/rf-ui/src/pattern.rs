@@ -4,6 +4,9 @@
 
 use std::ffi::OsStr;
 
+use rf_core::Os;
+use rf_vfs::{NameFolding, name_text};
+
 /// How the text of a [`NamePattern`] is written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PatternSyntax {
@@ -39,31 +42,43 @@ pub const PATTERN_SIZE_LIMIT: usize = 1 << 20;
 /// A pattern the names of rows are matched against (NAV-15 패턴 선택): wildcards or a regular
 /// expression ([`PatternSyntax`]), ignoring case or not. A name that is not Unicode is matched
 /// as the screen shows it, its bytes that are no text replaced.
+///
+/// On macOS, whose volumes take the two Unicode forms of a name (NFC and NFD) for one name, the
+/// pattern and each name are matched in NFC (`rf_vfs::name_text`): a `?` stands for a whole
+/// syllable of a decomposed Korean name, and a composed name typed in matches it.
 #[derive(Clone, Debug)]
 pub struct NamePattern {
     regex: regex::Regex,
+    /// The rule of the system the names are matched by; only its Unicode form counts here, as
+    /// case is the pattern's own choice.
+    folding: NameFolding,
 }
 
 impl PartialEq for NamePattern {
     fn eq(&self, other: &NamePattern) -> bool {
         // The flags are written into the text.
-        self.regex.as_str() == other.regex.as_str()
+        self.regex.as_str() == other.regex.as_str() && self.folding == other.folding
     }
 }
 
 impl Eq for NamePattern {}
 
 impl NamePattern {
-    /// The pattern `text` writes in `syntax`, ignoring case when `ignore_case`; `Ok(None)` for
-    /// one with nothing to match (an empty text, or wildcards of nothing but `;` and spaces).
+    /// The pattern `text` writes in `syntax`, ignoring case when `ignore_case`, for the names of
+    /// `os` (composed to NFC on macOS, with the names it matches); `Ok(None)` for one with
+    /// nothing to match (an empty text, or wildcards of nothing but `;` and spaces).
     pub fn new(
         text: &str,
         syntax: PatternSyntax,
         ignore_case: bool,
+        os: Os,
     ) -> Result<Option<NamePattern>, PatternError> {
         if text.chars().count() > MAX_PATTERN_CHARS {
             return Err(PatternError::TooLong);
         }
+        let folding = NameFolding::of(os);
+        let text = name_text(OsStr::new(text), folding);
+        let text = text.as_ref();
         let body = match syntax {
             PatternSyntax::Wildcard => {
                 let parts: Vec<String> = text
@@ -90,15 +105,12 @@ impl NamePattern {
                 regex::Error::CompiledTooBig(_) => PatternError::TooComplex,
                 _ => PatternError::Invalid,
             })?;
-        Ok(Some(NamePattern { regex }))
+        Ok(Some(NamePattern { regex, folding }))
     }
 
-    /// Whether `name` matches.
+    /// Whether `name` matches, in the Unicode form of the pattern's system.
     pub fn matches(&self, name: &OsStr) -> bool {
-        match name.to_str() {
-            Some(text) => self.regex.is_match(text),
-            None => self.regex.is_match(&name.to_string_lossy()),
-        }
+        self.regex.is_match(&name_text(name, self.folding))
     }
 }
 
@@ -124,9 +136,45 @@ mod tests {
     use super::*;
 
     fn pattern(text: &str, syntax: PatternSyntax, ignore_case: bool) -> NamePattern {
-        NamePattern::new(text, syntax, ignore_case)
+        pattern_on(text, syntax, ignore_case, Os::Other)
+    }
+
+    fn pattern_on(text: &str, syntax: PatternSyntax, ignore_case: bool, os: Os) -> NamePattern {
+        NamePattern::new(text, syntax, ignore_case, os)
             .expect("a pattern")
             .expect("something to match")
+    }
+
+    #[test]
+    fn on_macos_a_pattern_and_a_name_are_matched_in_one_unicode_form() {
+        // 한글 decomposed (NFD), as HFS+ and some Mac apps write names, and composed (NFC).
+        let nfd = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt";
+        let nfc = "한글.txt";
+        for syntax in [PatternSyntax::Wildcard, PatternSyntax::Regex] {
+            let two = match syntax {
+                PatternSyntax::Wildcard => "??.txt",
+                PatternSyntax::Regex => "^..\\.txt$",
+            };
+            // `?` (or `.`) is a whole syllable on macOS, whichever form the name has.
+            let mac = pattern_on(two, syntax, true, Os::MacOs);
+            assert_eq!(matching(&mac, &[nfd, nfc]), [nfd, nfc], "{syntax:?}");
+            // Elsewhere a decomposed name is the six jamo it is written as.
+            let other = pattern_on(two, syntax, true, Os::Windows);
+            assert_eq!(matching(&other, &[nfd, nfc]), [nfc], "{syntax:?}");
+        }
+        // A composed name typed in finds the decomposed one on macOS, and a decomposed one the
+        // composed one; elsewhere each finds only its own form.
+        let typed = pattern_on("한글*", PatternSyntax::Wildcard, false, Os::MacOs);
+        assert_eq!(matching(&typed, &[nfd, nfc]), [nfd, nfc]);
+        let decomposed = pattern_on(
+            "\u{1112}\u{1161}\u{11ab}*",
+            PatternSyntax::Wildcard,
+            false,
+            Os::MacOs,
+        );
+        assert_eq!(matching(&decomposed, &[nfd, nfc]), [nfd, nfc]);
+        let typed = pattern_on("한글*", PatternSyntax::Wildcard, false, Os::Other);
+        assert_eq!(matching(&typed, &[nfd, nfc]), [nfc]);
     }
 
     fn matching(pattern: &NamePattern, names: &[&str]) -> Vec<String> {
@@ -193,37 +241,42 @@ mod tests {
     #[test]
     fn a_text_that_is_no_pattern_says_why() {
         for syntax in [PatternSyntax::Wildcard, PatternSyntax::Regex] {
-            assert_eq!(NamePattern::new("", syntax, true), Ok(None));
+            assert_eq!(NamePattern::new("", syntax, true, Os::Other), Ok(None));
             let long = "a".repeat(MAX_PATTERN_CHARS + 1);
             assert_eq!(
-                NamePattern::new(&long, syntax, true),
+                NamePattern::new(&long, syntax, true, Os::Other),
                 Err(PatternError::TooLong)
             );
             let longest = "가".repeat(MAX_PATTERN_CHARS);
             assert!(matches!(
-                NamePattern::new(&longest, syntax, true),
+                NamePattern::new(&longest, syntax, true, Os::Other),
                 Ok(Some(_))
             ));
         }
         assert_eq!(
-            NamePattern::new(" ; ", PatternSyntax::Wildcard, true),
+            NamePattern::new(" ; ", PatternSyntax::Wildcard, true, Os::Other),
             Ok(None)
         );
         for bad in ["(", "[a-", "*.jpg", "a{2,1}", r"\p{Nope}"] {
             assert_eq!(
-                NamePattern::new(bad, PatternSyntax::Regex, true),
+                NamePattern::new(bad, PatternSyntax::Regex, true, Os::Other),
                 Err(PatternError::Invalid),
                 "{bad}"
             );
         }
         // Short, but it would compile to more than the limit.
         assert_eq!(
-            NamePattern::new(r"\w{200}\w{200}\w{200}", PatternSyntax::Regex, true),
+            NamePattern::new(
+                r"\w{200}\w{200}\w{200}",
+                PatternSyntax::Regex,
+                true,
+                Os::Other
+            ),
             Err(PatternError::TooComplex)
         );
         // The same text in wildcards is a name.
         assert!(matches!(
-            NamePattern::new("(", PatternSyntax::Wildcard, true),
+            NamePattern::new("(", PatternSyntax::Wildcard, true, Os::Other),
             Ok(Some(_))
         ));
     }
