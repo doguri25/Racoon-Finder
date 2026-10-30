@@ -161,6 +161,13 @@ fn reference_path(text: &NSString) -> Option<PathBuf> {
         .map(|path| PathBuf::from(path.to_string()))
 }
 
+pub fn has_files() -> bool {
+    autoreleasepool(|_| {
+        NSPasteboard::generalPasteboard()
+            .canReadItemWithDataConformingToTypes(&NSArray::from_slice(&[file_url_type()]))
+    })
+}
+
 pub fn put_text(text: &str) -> io::Result<u64> {
     autoreleasepool(|_| {
         let board = NSPasteboard::generalPasteboard();

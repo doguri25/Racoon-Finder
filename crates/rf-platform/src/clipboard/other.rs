@@ -54,6 +54,10 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     }))
 }
 
+pub fn has_files() -> bool {
+    store().files.is_some()
+}
+
 pub fn put_text(_text: &str) -> io::Result<u64> {
     Err(no_text())
 }

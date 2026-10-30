@@ -21,6 +21,13 @@ export global ItemMenu {
     in-out property <length> at-x;
     in-out property <length> at-y;
 
+    // Whether the clipboard holds no files (text, an image, nothing): 붙여넣기 and 여기로 이동
+    // are off then, as in File Explorer. Each menu asks as it shows (a menu's items are made
+    // anew for every show), since another app may have changed the clipboard since; Rust answers
+    // with a look that reads nothing (`rf_platform::clipboard::has_files`). Unanswered, it is
+    // false and they stay on.
+    pure callback no-files-to-paste() -> bool;
+
     // An item menu shows at (`x`, `y`) of the window.
     public function showing(x: length, y: length) {
         ItemMenu.at-x = x;
@@ -33,7 +40,7 @@ export global ItemMenu {
 // selects the item first, then calls `show`. The clipboard's items are the system's: 잘라내기
 // where File Explorer has it (not on macOS), 여기로 이동 where Finder has it (macOS only);
 // 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
-// else into the pane's folder. The system's ways to open an item (OPS-04, OPS-06, OPS-11) show
+// else into the pane's folder; they are off while the clipboard holds no files. The system's ways to open an item (OPS-04, OPS-06, OPS-11) show
 // for the items they act on (`ItemMenu`): 관리자 권한으로 실행 and 연결 프로그램으로 열기… by
 // 열기 for one file, 터미널에서 열기 for one folder, OS 속성 창 열기 after 속성 for one item.
 export component RowMenu inherits ContextMenuArea {
@@ -75,12 +82,14 @@ export component RowMenu inherits ContextMenuArea {
         }
         MenuItem {
             title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-into");
             }
         }
         if Shortcuts.paste-move != "": MenuItem {
             title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-move-into");
             }
@@ -162,7 +171,8 @@ export component RowMenu inherits ContextMenuArea {
     }
 }
 
-// The menu of the part of a list without items: a new folder there, a paste into the folder,
+// The menu of the part of a list without items: a new folder there, a paste into the folder
+// (off while the clipboard holds no files),
 // the folder listed again (NAV-13), each with its key (KEY-03), a terminal in the folder
 // (OPS-11), and the folder's own 속성, as in File Explorer. It wraps that part of the list.
 export component BlankMenu inherits ContextMenuArea {
@@ -183,12 +193,14 @@ export component BlankMenu inherits ContextMenuArea {
         MenuSeparator { }
         MenuItem {
             title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste");
             }
         }
         if Shortcuts.paste-move != "": MenuItem {
             title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-move");
             }

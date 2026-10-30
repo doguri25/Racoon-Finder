@@ -69,8 +69,8 @@ use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
 };
 use crate::{
-    DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, RecentRowView, TabDrop, open,
-    words,
+    DialogKind, DropPlace, FolderMenuRow, ItemMenu, JobRowView, MainWindow, RecentRowView, TabDrop,
+    open, words,
 };
 
 pub mod clipboard;
@@ -689,6 +689,11 @@ fn connect_jobs(window: &MainWindow) {
     window.on_row_menu(|s, i| {
         with(|c| c.update_at(i, |state, i| state.row_menu(side(s), i)));
     });
+    // Each menu asks as it shows, on the UI thread: the look reads nothing and does not wait
+    // for an app that holds the clipboard.
+    window
+        .global::<ItemMenu<'_>>()
+        .on_no_files_to_paste(|| !rf_platform::clipboard::has_files());
     window.on_name_edited(|text| {
         with(|c| {
             c.update(|state| {

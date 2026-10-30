@@ -5563,6 +5563,70 @@ fn quick_look_takes_every_key_while_it_shows() {
 }
 
 #[test]
+fn paste_is_off_in_the_menus_while_the_clipboard_holds_no_files() {
+    use std::cell::Cell;
+
+    use slint::platform::PointerEventButton;
+    let (window, _calls, _models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    // What the clipboard holds now; the menus ask each time they show.
+    let files = Rc::new(Cell::new(false));
+    let asked = Rc::new(Cell::new(0));
+    let (holds, count) = (Rc::clone(&files), Rc::clone(&asked));
+    window
+        .global::<rf_ui::ItemMenu<'_>>()
+        .on_no_files_to_paste(move || {
+            count.set(count.get() + 1);
+            !holds.get()
+        });
+    let row_menu = || {
+        labelled(&window, "x.txt", AccessibleRole::ListItem)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    let blank_menu = || {
+        labelled(&window, "항목 목록", AccessibleRole::List)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    for os in [Os::Windows, Os::MacOs] {
+        ui_bridge::show_shortcuts(&window, os);
+        let (paste, paste_move) = if os == Os::MacOs {
+            ("붙여넣기  (⌘V)", Some("여기로 이동  (⌥⌘V)"))
+        } else {
+            ("붙여넣기  (Ctrl+V)", None)
+        };
+        let items = [(paste, "paste-into", "paste")]
+            .into_iter()
+            .chain(paste_move.map(|item| (item, "paste-move-into", "paste-move")));
+        for (item, into, here) in items {
+            // No files: the items show, and choosing them does nothing.
+            files.set(false);
+            row_menu();
+            choose_item(&window, item);
+            assert_eq!(commands.take(), Vec::<String>::new(), "{os:?} {item}");
+            press(&window, Key::Escape);
+            blank_menu();
+            choose_item(&window, item);
+            assert_eq!(commands.take(), Vec::<String>::new(), "{os:?} {item}");
+            press(&window, Key::Escape);
+            // Files came since (another app copied some): the next menus take them.
+            files.set(true);
+            row_menu();
+            choose_item(&window, item);
+            assert_eq!(commands.take(), [into], "{os:?} {item}");
+            blank_menu();
+            choose_item(&window, item);
+            assert_eq!(commands.take(), [here], "{os:?} {item}");
+        }
+    }
+    // Asked as the menus showed, not once for all of them.
+    assert!(asked.get() >= 12, "asked {} times", asked.get());
+}
+
+#[test]
 fn the_menus_have_the_clipboard_with_the_keys_of_the_system() {
     use slint::platform::PointerEventButton;
     let (window, _calls, _models, _tree) = drag_window();

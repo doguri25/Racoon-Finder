@@ -262,6 +262,12 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     }))
 }
 
+pub fn has_files() -> bool {
+    // SAFETY: takes a format number and only asks the window station; unlike reading the data,
+    // it needs no hold of the clipboard (`open`).
+    unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
+}
+
 pub fn put_text(text: &str) -> io::Result<u64> {
     put(vec![(CF_UNICODETEXT, unicode_text(text.encode_utf16()))])
 }

@@ -26,9 +26,9 @@
 //! clipboard open, and it is tried up to ten times, 10 ms apart, before the call fails with
 //! `io::ErrorKind::ResourceBusy` (about 100 ms at most); another app's delayed data may take
 //! longer to come. On macOS the pasteboard server answers. Call them from a worker thread, one
-//! at a time, rather than from the UI thread; [`change_count`] alone is cheap. Nothing here
-//! changes a file, though the system may look at one: reading Finder's file reference URLs
-//! finds their items.
+//! at a time, rather than from the UI thread; [`change_count`] and [`has_files`] alone are
+//! cheap. Nothing here changes a file, though the system may look at one: reading Finder's file
+//! reference URLs finds their items.
 //!
 //! The buffers of the Windows formats, and the file URLs of macOS, are made and read by pure
 //! functions of this module, which the tests check on every system.
@@ -96,6 +96,16 @@ pub fn put_files(paths: &[PathBuf], effect: DropEffect) -> io::Result<u64> {
 /// none of them can be read ([`ClipboardFiles::skipped`]).
 pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     imp::get_files()
+}
+
+/// Whether the clipboard holds files, without reading them: cheap enough for the UI thread as
+/// a menu opens (its 붙여넣기 is off without them, as in File Explorer). Windows asks whether
+/// `CF_HDROP` is there, which needs no hold of the clipboard; macOS asks the pasteboard whether
+/// an item has a file URL; elsewhere it is whether this process put files there. Files that
+/// [`get_files`] then leaves out ([`ClipboardFiles::skipped`]) count: a paste of them says why
+/// it pasted nothing.
+pub fn has_files() -> bool {
+    imp::has_files()
 }
 
 /// Puts `text` on the clipboard in the place of what it held, and gives the clipboard's

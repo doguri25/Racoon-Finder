@@ -46,6 +46,8 @@ fn files_put_on_the_clipboard_read_back_with_their_count() {
     let paths = paths();
     let change = clipboard::put_files(&paths, DropEffect::Move).expect("put");
     assert_eq!(clipboard::change_count(), Some(change));
+    // The menus' look, without reading them.
+    assert!(clipboard::has_files());
     let read = clipboard::get_files().expect("read").expect("files");
     // Byte for byte: no name changes its Unicode form on the way.
     assert_eq!(bytes(&read.paths), bytes(&paths));
@@ -91,6 +93,7 @@ fn the_clipboard_is_emptied_only_while_it_holds_what_was_read() {
     // Nothing came since the second: it goes.
     assert!(clipboard::clear_if_unchanged(second).expect("clear"));
     assert_eq!(clipboard::get_files().expect("read"), None);
+    assert!(!clipboard::has_files());
     assert_ne!(clipboard::change_count(), Some(second));
 }
 
@@ -118,6 +121,7 @@ fn text_goes_on_the_clipboard_where_the_system_has_one() {
         assert_eq!(clipboard::get_text().expect("read").as_deref(), Some(text));
         // Text is no files.
         assert_eq!(clipboard::get_files().expect("read"), None);
+        assert!(!clipboard::has_files());
     } else {
         // Linux has no text clipboard of its own here.
         let unsupported = std::io::ErrorKind::Unsupported;
