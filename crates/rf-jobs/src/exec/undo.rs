@@ -19,7 +19,8 @@ use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
 use rf_vfs::{Deleted, Provider};
 
 use super::delete::{deleted_not_trashed, trash_one};
-use super::{At, Attempt, Ctx, Failed, MAX_DEPTH, Stopped, simple, transfer};
+use super::{At, Attempt, Ctx, Failed, Stopped, simple, transfer};
+use crate::copies::{self, Compared};
 use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{
     ConflictPolicy, CreateKind, ErrorPolicy, SymlinkMode, TransferItem, TransferMode,
@@ -139,19 +140,11 @@ fn undo_copy(ctx: &mut Ctx<'_>, created: &[CreatedItem], overwritten: u64, at: O
 }
 
 /// Checks that `item`, which a copy made and `stat` now finds as `now`, is still as the copy
-/// left it. Anything else, or anything that cannot be told, fails as [`left`] with "changed
-/// after it was copied" (`ChangedSinceCopy`).
-///
-/// Its identity must be the recorded one when both are known, and its modification time must
-/// be known and the recorded one (a time before 1970 is not recorded, so such an item always
-/// stays).
-///
-/// - A file (or a link): it must be no folder, of the recorded size.
-/// - A folder: it must be a folder, the job's time `at` must be known, and nothing under it may
-///   be newer than `at` (see [`untouched_since`]). The folder's own time catches an item added
-///   to it or taken from it; an item changed, added or taken deeper down leaves a time after
-///   `at` on itself or on its folder. A file that the copy gave a time after `at`, because its
-///   source has a time in the future, makes its folder stay too.
+/// left it, the copy's time being `at` (see `copies::as_left`, which the delete of copies and
+/// a window's look at copies use too). Anything else, or anything that cannot be told, fails as
+/// [`left`] with "changed after it was copied" (`ChangedSinceCopy`). A folder under it that
+/// cannot be listed fails as `Stage::Undo` with the listing's error, and a cancel of the job
+/// stops the look.
 fn check_copied(
     ctx: &Ctx<'_>,
     provider: &dyn Provider,
@@ -159,75 +152,17 @@ fn check_copied(
     now: &Entry,
     at: Option<SystemTime>,
 ) -> Result<(), Failed> {
-    let other_item = matches!(
-        (item.identity, now.identity()),
-        (Some(was), Some((volume, file))) if was != (volume.0, file.0)
-    );
-    let same_time = matches!((item.modified, now.modified), (Some(was), Some(is)) if was == is);
-    let unchanged = !other_item
-        && same_time
-        && if item.is_dir {
-            match at {
-                Some(at) if now.kind == EntryKind::Dir => {
-                    untouched_since(ctx, provider, &item.path, now, at, 1)?
-                }
-                _ => false,
-            }
-        } else {
-            now.kind != EntryKind::Dir && now.size == item.size
-        };
-    if unchanged {
-        Ok(())
-    } else {
-        let reason = FailureReason::ChangedSinceCopy;
-        Err(left(&item.path, "changed after it was copied", reason))
+    let cancel = ctx.env.control.cancel_token();
+    // An undo looks at everything the copy made, however much that is.
+    let mut budget = usize::MAX;
+    match copies::as_left(provider, item, now, at, &cancel, &mut budget) {
+        Ok(Compared::Same) => Ok(()),
+        Ok(_) => {
+            let reason = FailureReason::ChangedSinceCopy;
+            Err(left(&item.path, "changed after it was copied", reason))
+        }
+        Err(error) => Err(Failed::new(Stage::Undo, error)),
     }
-}
-
-/// Whether nothing under the folder `dir` of `provider`, which `entry` describes, is newer than
-/// `at`: every item it lists has a known modification time, none of them after `at`, and every
-/// real folder among them (`EntryKind::Dir`, as the listing gives it: a link is never followed)
-/// holds the same. `depth` is how far below the copied folder the listed items are (its own
-/// items are at 1).
-///
-/// The copy went no deeper than [`MAX_DEPTH`], so a folder whose items would be deeper must be
-/// empty. A folder on another volume than the one it is in (both volume IDs known) is not
-/// entered and counts as a change. A folder that cannot be listed fails as `Stage::Undo` with
-/// the listing's error, and a cancel of the job stops the walk.
-fn untouched_since(
-    ctx: &Ctx<'_>,
-    provider: &dyn Provider,
-    dir: &VPath,
-    entry: &Entry,
-    at: SystemTime,
-    depth: usize,
-) -> Result<bool, Failed> {
-    let children = ctx.list(provider, dir).at(Stage::Undo)?;
-    if depth > MAX_DEPTH {
-        return Ok(children.is_empty());
-    }
-    for child in &children {
-        if child.modified.is_none_or(|modified| modified > at) {
-            return Ok(false);
-        }
-        if child.kind != EntryKind::Dir {
-            continue;
-        }
-        let elsewhere = matches!(
-            (entry.volume_id, child.volume_id),
-            (Some(here), Some(there)) if here != there
-        );
-        if elsewhere {
-            return Ok(false);
-        }
-        let path = dir
-            .join(&child.name)
-            .map_err(|error| Failed::new(Stage::Undo, error.into()))?;
-        if !untouched_since(ctx, provider, &path, child, at, depth + 1)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Sends the item at `path` to the trash, as one step under [`ERRORS`], once `check` has passed

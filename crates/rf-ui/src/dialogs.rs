@@ -12,9 +12,9 @@ use std::ffi::OsString;
 
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{
-    Conflict, ConflictAction, ConflictAnswer, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy,
-    IncompleteJob, Issue, IssueKind, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer, Severity,
-    UndoRecord, numbered_name,
+    Conflict, ConflictAction, ConflictAnswer, CreateKind, DeleteCopiesSpec, DeleteMethod,
+    DeleteSpec, ErrorPolicy, IncompleteJob, Issue, IssueKind, JobId, JobSpec, MTIME_TOLERANCE,
+    PreflightAnswer, Severity, UndoRecord, numbered_name,
 };
 
 use crate::pattern::{NamePattern, PatternError, PatternSyntax};
@@ -328,11 +328,10 @@ pub enum DeleteWhy {
 pub enum ConfirmPurpose {
     /// Delete these items for good.
     DeletePermanently(Vec<VPath>),
-    /// Delete for good the copies an undo of the copy `record` could not send to the trash,
-    /// whose originals (`originals`, one for each copy) a worker has found as they were.
+    /// Delete for good (`spec`) the copies an undo of the copy `record` could not send to the
+    /// trash, which a worker has found as they were, with their originals.
     DeleteCopies {
-        copies: Vec<VPath>,
-        originals: Vec<VPath>,
+        spec: DeleteCopiesSpec,
         record: Box<UndoRecord>,
     },
     /// End the app while jobs run.
@@ -387,22 +386,25 @@ impl Confirm {
         }
     }
 
-    /// The question before `copies` are deleted for good: the copies an undo of the copy
-    /// `record` could not send to the trash, whose originals (`originals`, one for each copy)
-    /// are as they were. It lists every copy by its whole path.
-    pub fn delete_copies(copies: Vec<VPath>, originals: Vec<VPath>, record: UndoRecord) -> Confirm {
+    /// The question before the copies of `spec` are deleted for good: the copies an undo of
+    /// the copy `record` could not send to the trash, which are as they were, with their
+    /// originals. It lists every copy by its whole path.
+    pub fn delete_copies(spec: DeleteCopiesSpec, record: UndoRecord) -> Confirm {
         Confirm {
             title: words::delete_permanently_title().to_owned(),
             message: words::copies_refused().to_owned(),
             detail: String::new(),
-            lines: copies.iter().map(ToString::to_string).collect(),
-            question: words::delete_copies(copies.len()),
+            lines: spec
+                .copies
+                .iter()
+                .map(|copy| copy.made.path.to_string())
+                .collect(),
+            question: words::delete_copies(spec.copies.len()),
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
             alt: String::new(),
             purpose: ConfirmPurpose::DeleteCopies {
-                copies,
-                originals,
+                spec,
                 record: Box::new(record),
             },
         }
@@ -444,16 +446,15 @@ impl Confirm {
         }
     }
 
-    /// The job the confirmation asks for, if it asks for one. The copies an undo could not
-    /// trash give none: they go only once a worker has found them as they were once more
-    /// ([`AppState::copies_checked`](crate::state::AppState::copies_checked)), so a yes alone
-    /// never deletes them.
+    /// The job the confirmation asks for, if it asks for one. For the copies an undo could not
+    /// trash, it is a delete of those copies that looks at each one and its original once more
+    /// before it deletes it (`JobSpec::DeleteCopies`): one that changed after the question
+    /// stays.
     pub fn job(&self) -> Option<JobSpec> {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
-            ConfirmPurpose::DeleteCopies { .. }
-            | ConfirmPurpose::Quit
-            | ConfirmPurpose::ApplyViewBelow { .. } => None,
+            ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
+            ConfirmPurpose::Quit | ConfirmPurpose::ApplyViewBelow { .. } => None,
         }
     }
 }
@@ -596,6 +597,7 @@ impl PreflightQuestion {
 #[cfg(test)]
 mod tests {
     use rf_core::Entry;
+    use rf_jobs::{CopyOf, CreatedItem};
 
     use super::*;
 
@@ -720,16 +722,30 @@ mod tests {
         assert!(refused.message.contains("휴지통이 받지 않은 항목이 4개"));
         assert!(refused.message.ends_with("되돌릴 수 없습니다."));
 
-        // The copies an undo could not trash go only after a worker has looked at them once
-        // more: their confirmation submits no job itself.
+        // The copies an undo could not trash go through a job that looks at each one and its
+        // original once more before it deletes it.
         let record = UndoRecord::Copied {
             created: Vec::new(),
             overwritten: 0,
             at: None,
         };
-        let copies = Confirm::delete_copies(vec![path("a.txt")], vec![path("b.txt")], record);
+        let spec = DeleteCopiesSpec {
+            copies: vec![CopyOf {
+                made: CreatedItem {
+                    path: path("a.txt"),
+                    is_dir: false,
+                    size: 1,
+                    modified: None,
+                    identity: None,
+                },
+                original: path("b.txt"),
+            }],
+            at: None,
+        };
+        let copies = Confirm::delete_copies(spec.clone(), record);
         assert!(copies.danger);
-        assert_eq!(copies.job(), None);
+        assert_eq!(copies.lines, [path("a.txt").to_string()]);
+        assert_eq!(copies.job(), Some(JobSpec::DeleteCopies(spec)));
 
         let quit = Confirm::quit(2, None);
         assert!(!quit.danger);

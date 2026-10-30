@@ -2,6 +2,7 @@
 
 pub mod conflict;
 pub mod control;
+pub mod copies;
 pub mod engine;
 pub mod exec;
 pub mod id;
@@ -17,6 +18,9 @@ pub mod undo;
 
 pub use conflict::{Conflict, ConflictAction, ConflictAnswer, Decision, MTIME_TOLERANCE, decide};
 pub use control::Control;
+pub use copies::{
+    COMPARE_ITEMS, Compared, CopyFound, check_copy, compare_with_made, compare_with_original,
+};
 pub use engine::{
     DefaultLanes, EngineConfig, JobEngine, JobEvent, JobSnapshot, JobState, LaneId, LanePolicy,
 };
@@ -31,7 +35,7 @@ pub use progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
 pub use report::{FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals, one_line};
 pub use resolver::{ErrorAction, ErrorAnswer, NonInteractive, PreflightAnswer, Resolver};
 pub use spec::{
-    ConflictPolicy, CreateKind, DeleteMethod, DeleteSpec, ErrorPolicy, JobKind, JobSpec,
-    SymlinkMode, TransferItem, TransferMode, TransferOptions, TransferSpec,
+    ConflictPolicy, CopyOf, CreateKind, DeleteCopiesSpec, DeleteMethod, DeleteSpec, ErrorPolicy,
+    JobKind, JobSpec, SymlinkMode, TransferItem, TransferMode, TransferOptions, TransferSpec,
 };
 pub use undo::{CreatedItem, MovedItem, TrashedItem, UNDO_LIMIT, UndoHistory, UndoRecord};

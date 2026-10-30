@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use rf_core::{EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{
-    ConflictPolicy, DeleteMethod, FailureReason, IssueKind, ItemFailure, JobKind, JobSpec,
-    JobState, Outcome, Severity, TransferMode, UndoRecord,
+    Compared, ConflictPolicy, CopyFound, DeleteMethod, FailureReason, IssueKind, ItemFailure,
+    JobKind, JobSpec, JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
 use rf_platform::KnownFolder;
 use rf_platform::shell::App;
@@ -492,6 +492,10 @@ pub fn failure_reason(reason: &FailureReason) -> String {
         FailureReason::ChangedWhileDeleted => "지우는 동안 항목이 바뀌어 그대로 두었습니다",
         FailureReason::Overwritten => "덮어쓴 파일의 예전 내용은 되살릴 수 없습니다",
         FailureReason::ChangedSinceCopy => "복사한 뒤 바뀌어 되돌리지 않았습니다",
+        // A copy as it was is never kept; the words of one that cannot be told do for it.
+        FailureReason::CopyKept(found) => {
+            copy_kept(CopyKept::of(*found).unwrap_or(CopyKept::CopyUnknown))
+        }
         FailureReason::ChangedSinceCreated => "만든 뒤 다른 종류로 바뀌어 되돌리지 않았습니다",
         FailureReason::NotEmpty => "만든 뒤 내용이 생겨 되돌리지 않았습니다",
         FailureReason::TrashLocationUnknown => {
@@ -896,6 +900,13 @@ fn detail(spec: &JobSpec, folder: impl Fn(&VPath) -> String) -> String {
             }
         }
         JobSpec::Delete(delete) => items_named(&delete.paths.iter().collect::<Vec<_>>()),
+        JobSpec::DeleteCopies(delete) => items_named(
+            &delete
+                .copies
+                .iter()
+                .map(|c| &c.made.path)
+                .collect::<Vec<_>>(),
+        ),
         JobSpec::Rename { from, to } => format!("{} → {}", name_of(from), name_of(to)),
         JobSpec::Create { parent, name, .. } => {
             format!("{} → {}", name.to_string_lossy(), folder(parent))
@@ -1245,12 +1256,6 @@ pub fn copies_deleted(count: usize) -> String {
     format!("복사본 {count}개를 영구 삭제해 복사를 되돌렸습니다")
 }
 
-/// The toast of the copies an undo could not trash, when something of them or their
-/// originals changed after the user was asked about them: nothing was deleted.
-pub fn copies_not_deleted(count: usize) -> String {
-    format!("복사본 {count}개를 지우지 않았습니다")
-}
-
 /// The notice while a worker looks at the copies an undo could not trash and their originals.
 pub fn checking_originals() -> &'static str {
     "원본을 확인하는 중…"
@@ -1280,6 +1285,29 @@ pub enum CopyKept {
     CopyChanged,
     CopyMissing,
     CopyUnknown,
+}
+
+impl CopyKept {
+    /// Why a copy found as `found` stays: by the copy while it is not as its job left it, else
+    /// by its original. `None` for a copy and an original as they were.
+    pub fn of(found: CopyFound) -> Option<CopyKept> {
+        Some(match found {
+            CopyFound::SAME => return None,
+            CopyFound {
+                copy: Compared::Same,
+                original,
+            } => match original {
+                Compared::Missing => CopyKept::OriginalMissing,
+                Compared::Changed => CopyKept::OriginalChanged,
+                Compared::Same | Compared::Unknown => CopyKept::OriginalUnknown,
+            },
+            CopyFound { copy, .. } => match copy {
+                Compared::Missing => CopyKept::CopyMissing,
+                Compared::Changed => CopyKept::CopyChanged,
+                Compared::Same | Compared::Unknown => CopyKept::CopyUnknown,
+            },
+        })
+    }
 }
 
 /// The names of the items a confirmation is about: up to three, in quotes, and how many more.
@@ -2148,6 +2176,19 @@ mod tests {
             FailureReason::TempLeftBehind,
             FailureReason::Issue(IssueKind::ReservedName),
         ]
+        .into_iter()
+        .chain(
+            [
+                (Compared::Same, Compared::Missing),
+                (Compared::Same, Compared::Changed),
+                (Compared::Same, Compared::Unknown),
+                (Compared::Changed, Compared::Unknown),
+                (Compared::Missing, Compared::Unknown),
+                (Compared::Unknown, Compared::Unknown),
+            ]
+            .map(|(copy, original)| FailureReason::CopyKept(CopyFound { copy, original })),
+        )
+        .collect()
     }
 
     #[test]
@@ -2167,6 +2208,17 @@ mod tests {
         assert_eq!(
             failure_reason(&FailureReason::ChangedSinceCopy),
             "복사한 뒤 바뀌어 되돌리지 않았습니다"
+        );
+        // A copy that a delete of copies kept, by why it stays.
+        let kept =
+            |copy, original| failure_reason(&FailureReason::CopyKept(CopyFound { copy, original }));
+        assert_eq!(
+            kept(Compared::Same, Compared::Changed),
+            "원본이 바뀌어 복사본을 지우지 않았습니다"
+        );
+        assert_eq!(
+            kept(Compared::Changed, Compared::Unknown),
+            "복사본이 바뀌어 지우지 않았습니다"
         );
 
         let mut seen = HashSet::new();

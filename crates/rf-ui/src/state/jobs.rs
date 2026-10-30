@@ -184,24 +184,18 @@ impl AppState {
     }
 
     /// The confirmation that shows was accepted: its job is submitted, or the app ends. The
-    /// copies an undo could not trash are deleted only once a worker has found them and their
-    /// originals as they were once more ([`AppState::copies_checked`]).
+    /// delete of the copies an undo could not trash looks at each copy and its original once
+    /// more itself before it deletes it.
     pub fn confirm_accepted(&mut self) -> Vec<Effect> {
         let Some(Modal::Confirm(confirm)) = &self.modal else {
             return Vec::new();
         };
         match &confirm.purpose {
             ConfirmPurpose::Quit => self.begin_quit(),
-            // No job of its own (`Confirm::job`): a worker looks at the copies first.
-            ConfirmPurpose::DeleteCopies {
-                copies,
-                originals,
-                record,
-            } => {
-                let (copies, originals) = (copies.clone(), originals.clone());
-                let record = UndoRecord::clone(record);
+            ConfirmPurpose::DeleteCopies { spec, record } => {
+                let (spec, record) = (spec.clone(), UndoRecord::clone(record));
                 self.close();
-                self.copies_confirmed(record, copies, originals)
+                self.copies_confirmed(spec, record)
             }
             ConfirmPurpose::DeletePermanently(_) => {
                 let spec = confirm.job();
@@ -761,6 +755,7 @@ pub(super) fn top_level_count(spec: &JobSpec) -> usize {
     match spec {
         JobSpec::Transfer(transfer) => transfer.items.len(),
         JobSpec::Delete(delete) => delete.paths.len(),
+        JobSpec::DeleteCopies(delete) => delete.copies.len(),
         JobSpec::Undo(record) => record.item_count(),
         _ => 1,
     }
@@ -797,6 +792,7 @@ fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
             }
         }
         JobSpec::Delete(delete) => paths.extend(&delete.paths),
+        JobSpec::DeleteCopies(delete) => paths.extend(delete.copies.iter().map(|c| &c.made.path)),
         JobSpec::Rename { from, to } => paths.extend([from, to]),
         // What an undo took away is in its record; what it put back is in its outputs.
         JobSpec::Undo(record) => paths.extend(record_paths(record)),

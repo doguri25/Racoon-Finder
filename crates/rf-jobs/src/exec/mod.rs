@@ -169,6 +169,7 @@ fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
     match spec {
         JobSpec::Transfer(transfer) => transfer::run_transfer(ctx, transfer),
         JobSpec::Delete(delete) => delete::run_delete(ctx, delete),
+        JobSpec::DeleteCopies(copies) => delete::run_delete_copies(ctx, copies),
         JobSpec::Rename { from, to } => simple::run_rename(ctx, from, to),
         JobSpec::Create { parent, name, kind } => simple::run_create(ctx, parent, name, *kind),
         JobSpec::Undo(record) => undo::run_undo(ctx, record),

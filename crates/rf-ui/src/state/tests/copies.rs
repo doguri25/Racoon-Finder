@@ -1,17 +1,17 @@
 //! The copies an undo of a copy could not send to the trash: offered for a permanent delete
-//! only once their originals are found as they were.
+//! only once their originals are found as they were, and deleted by a job that looks at each
+//! one again before it goes.
 
 use rf_core::Os;
 use rf_jobs::{
-    CreatedItem, DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent,
-    JobSpec, Outcome, TransferItem, TransferMode, TransferOptions, TransferSpec, UndoRecord,
-    numbered_name,
+    Compared, CopyFound, CopyOf, CreatedItem, DeleteCopiesSpec, FailureReason, ItemFailure,
+    JobEvent, JobSpec, Outcome, TransferItem, TransferMode, TransferOptions, TransferSpec,
+    UndoRecord, numbered_name,
 };
 
 use super::*;
 use crate::dialogs::{ConfirmPurpose, Modal};
 use crate::jobs::{History, JobEffect, Started};
-use crate::loader::{CopyFound, Original};
 use crate::state::copy_origins;
 use crate::words::JobWork;
 
@@ -119,9 +119,9 @@ fn the_check(effects: &[Effect]) -> (u64, Vec<(VPath, VPath)>, u64) {
 }
 
 /// What a worker finds of a copy whose original is as `original` says.
-fn original(original: Original) -> CopyFound {
+fn original(original: Compared) -> CopyFound {
     CopyFound {
-        copy: Original::Same,
+        copy: Compared::Same,
         original,
     }
 }
@@ -296,11 +296,21 @@ fn an_undo_the_trash_refused_offers_the_copies_once_their_originals_are_found() 
         "복사본 2개를 영구 삭제할까요? 되돌릴 수 없습니다."
     );
     assert_eq!(confirm.ok, "영구 삭제");
+    // A yes deletes exactly those copies, each as the copy left it, with its original.
+    let spec = DeleteCopiesSpec {
+        copies: created
+            .iter()
+            .cloned()
+            .zip([in_a("a.txt"), in_a("b.txt")])
+            .map(|(made, original)| CopyOf { made, original })
+            .collect(),
+        at: *copied_at,
+    };
     assert!(matches!(
         &confirm.purpose,
-        ConfirmPurpose::DeleteCopies { copies: c, originals: o, record: r }
-            if *c == copies && *o == [in_a("a.txt"), in_a("b.txt")] && **r == record
+        ConfirmPurpose::DeleteCopies { spec: s, record: r } if *s == spec && **r == record
     ));
+    assert_eq!(confirm.job(), Some(JobSpec::DeleteCopies(spec)));
 }
 
 /// The state at the offer of the copies of `names` in `b`, after the undo of their copy from
@@ -318,39 +328,37 @@ fn offered(names: &[&str]) -> (AppState, UndoRecord) {
     (state, record)
 }
 
-#[test]
-fn the_copies_go_for_good_once_found_as_they_were_again() {
-    let (mut state, record) = offered(&["a.txt", "b.txt"]);
-    let copies = [in_b("a.txt"), in_b("b.txt")];
-    // Yes: a worker looks at the copies and their originals once more, and only with all of
-    // them as they were are exactly the copies deleted, for good.
-    let (token, pairs, note) = the_check(&state.confirm_accepted());
+/// The job a yes to the offer of `state` submits, which it gives.
+fn confirmed(state: &mut AppState) -> JobSpec {
+    let effects = state.confirm_accepted();
     assert_eq!(state.modal(), None);
+    match effects.as_slice() {
+        [Effect::Job(JobEffect::Submit { spec, origin: None })] => spec.clone(),
+        other => panic!("expected the delete of the copies, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_yes_deletes_the_copies_by_a_job_that_looks_at_them_again() {
+    let (mut state, record) = offered(&["a.txt", "b.txt"]);
+    // Yes: no worker looks first. The job deletes exactly the copies, each only once it has
+    // found the copy and its original as they were, right before it goes.
+    let delete = confirmed(&mut state);
+    let JobSpec::DeleteCopies(spec) = &delete else {
+        panic!("a delete of copies: {delete:?}");
+    };
     assert_eq!(
-        pairs,
+        spec.copies
+            .iter()
+            .map(|copy| (copy.made.path.clone(), copy.original.clone()))
+            .collect::<Vec<_>>(),
         [
             (in_b("a.txt"), in_a("a.txt")),
             (in_b("b.txt"), in_a("b.txt"))
         ]
     );
-    let effects = state.copies_checked(token, &[CopyFound::SAME, CopyFound::SAME]);
-    let delete = JobSpec::Delete(DeleteSpec {
-        paths: copies.to_vec(),
-        method: DeleteMethod::Permanent,
-        errors: ErrorPolicy::Continue,
-    });
-    assert_eq!(
-        effects,
-        [
-            Effect::NotBusy(note),
-            Effect::Job(JobEffect::Submit {
-                spec: delete.clone(),
-                origin: None
-            })
-        ]
-    );
     // Once they are all gone, the copy is undone.
-    let effects = finish(&mut state, 3, &delete, JobWork::Delete, |_| {});
+    let effects = finish(&mut state, 3, &delete, JobWork::of(&delete), |_| {});
     assert!(
         effects.contains(&Effect::Job(JobEffect::ForgetUndo(record.clone()))),
         "{effects:?}"
@@ -362,76 +370,63 @@ fn the_copies_go_for_good_once_found_as_they_were_again() {
 }
 
 #[test]
-fn a_change_after_the_offer_deletes_nothing() {
-    // The state at the offer of the copies of a, b and c, and the check the user's yes starts.
-    let confirmed = || {
-        let (mut state, _) = offered(&["a.txt", "b.txt", "c.txt"]);
-        let (token, _, note) = the_check(&state.confirm_accepted());
-        (state, token, note)
-    };
-
-    // An original removed meanwhile, or changed; a copy changed or removed meanwhile: nothing
-    // is deleted, and the toast's list says why for each.
+fn a_copy_the_job_kept_keeps_the_record_and_says_why() {
+    // A copy or an original changed after the offer: the job kept that copy, deleted the
+    // others, and its failure says why.
     for (found, why) in [
         (
-            original(Original::Missing),
+            original(Compared::Missing),
             "원본이 없어 복사본을 지우지 않았습니다",
         ),
         (
-            original(Original::Changed),
+            original(Compared::Changed),
             "원본이 바뀌어 복사본을 지우지 않았습니다",
         ),
         (
+            original(Compared::Unknown),
+            "원본을 확인할 수 없어 복사본을 지우지 않았습니다",
+        ),
+        (
             CopyFound {
-                copy: Original::Changed,
-                original: Original::Unknown,
+                copy: Compared::Changed,
+                original: Compared::Unknown,
             },
             "복사본이 바뀌어 지우지 않았습니다",
         ),
         (
             CopyFound {
-                copy: Original::Missing,
-                original: Original::Unknown,
-            },
-            "복사본이 이미 없습니다",
-        ),
-        (
-            CopyFound {
-                copy: Original::Unknown,
-                original: Original::Unknown,
+                copy: Compared::Unknown,
+                original: Compared::Unknown,
             },
             "복사본을 확인할 수 없어 지우지 않았습니다",
         ),
     ] {
-        let (mut state, token, note) = confirmed();
-        let effects = state.copies_checked(token, &[CopyFound::SAME, found, CopyFound::SAME]);
-        assert_eq!(effects.first(), Some(&Effect::NotBusy(note)));
+        let (mut state, _) = offered(&["a.txt", "b.txt", "c.txt"]);
+        let delete = confirmed(&mut state);
+        let effects = finish(&mut state, 3, &delete, JobWork::of(&delete), |report| {
+            report.outcome = Outcome::CompletedWithErrors;
+            report.failures.push(ItemFailure {
+                reason: Some(FailureReason::CopyKept(found)),
+                ..refused(in_b("b.txt"))
+            });
+        });
+        // The record stays, to undo the copy again.
         assert!(
             !effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::Job(_))),
-            "nothing is deleted: {effects:?}"
+                .any(|effect| matches!(effect, Effect::Job(JobEffect::ForgetUndo(_)))),
+            "{effects:?}"
         );
-        assert_eq!(state.modal(), None);
         let (token, text, action) = the_toast(&effects);
         assert_eq!(
             (text.as_str(), action.as_str()),
-            ("복사본 3개를 지우지 않았습니다", "자세히")
+            ("항목 1개를 처리하지 못했습니다", "자세히")
         );
         assert_eq!(
             details(&mut state, token),
-            [
-                format!("{}: 휴지통으로 보낼 수 없습니다", in_b("a.txt")),
-                format!("{}: 휴지통으로 보낼 수 없습니다. {why}", in_b("b.txt")),
-                format!("{}: 휴지통으로 보낼 수 없습니다", in_b("c.txt")),
-            ]
+            [format!("{}: {why}", in_b("b.txt"))]
         );
     }
-
-    // The app ending meanwhile: nothing is deleted either.
-    let (mut state, token, _) = confirmed();
-    state.begin_quit();
-    assert_eq!(state.copies_checked(token, &[CopyFound::SAME; 3]), []);
 }
 
 #[test]
@@ -447,8 +442,8 @@ fn no_offer_while_an_original_is_gone_or_changed() {
         token,
         &[
             CopyFound::SAME,
-            original(Original::Missing),
-            original(Original::Changed),
+            original(Compared::Missing),
+            original(Compared::Changed),
         ],
     );
     assert_eq!(effects.first(), Some(&Effect::NotBusy(note)));
@@ -541,12 +536,8 @@ fn only_the_undo_of_a_copy_offers_its_copies() {
 #[test]
 fn a_delete_of_the_copies_that_fails_keeps_the_record() {
     let (mut state, _) = offered(&["a.txt", "b.txt"]);
-    let (token, _, _) = the_check(&state.confirm_accepted());
-    let effects = state.copies_checked(token, &[CopyFound::SAME; 2]);
-    let [_, Effect::Job(JobEffect::Submit { spec: delete, .. })] = effects.as_slice() else {
-        panic!("the delete: {effects:?}");
-    };
-    let effects = finish(&mut state, 3, delete, JobWork::Delete, |report| {
+    let delete = confirmed(&mut state);
+    let effects = finish(&mut state, 3, &delete, JobWork::Delete, |report| {
         report.outcome = Outcome::CompletedWithErrors;
         report.failures.push(ItemFailure {
             reason: None,

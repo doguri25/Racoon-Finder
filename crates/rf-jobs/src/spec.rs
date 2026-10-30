@@ -1,11 +1,12 @@
 //! What a job is asked to do: the data the UI hands to the engine, before any file is touched.
 
 use std::ffi::OsString;
+use std::time::SystemTime;
 
 use rf_core::{Error, Result, VPath};
 use serde::{Deserialize, Serialize};
 
-use crate::undo::UndoRecord;
+use crate::undo::{CreatedItem, UndoRecord};
 
 /// Whether a transfer keeps the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,12 +126,38 @@ pub struct DeleteSpec {
     pub errors: ErrorPolicy,
 }
 
+/// One copy a [`DeleteCopiesSpec`] deletes: the item as its copy job left it (an item of the
+/// job's `UndoRecord::Copied`), and the item it was copied from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyOf {
+    pub made: CreatedItem,
+    pub original: VPath,
+}
+
+/// A delete for good of copies that one copy job made: how the user has the copies that the
+/// undo of that copy could not send to the trash deleted (OPS-12), since an undo never deletes
+/// for good itself. Right before it deletes a copy, the job looks at it and at its original
+/// (`copies::check_copy`): a copy goes only while it is as its copy job left it and its
+/// original still holds everything it holds. Any other copy stays, and fails as `Stage::Delete`
+/// with the reason `CopyKept`; one that is gone is skipped. It runs under
+/// `ErrorPolicy::Continue` and keeps no undo record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteCopiesSpec {
+    pub copies: Vec<CopyOf>,
+    /// When the copy job ended (the `at` of its `UndoRecord::Copied`): a copied folder is as
+    /// that job left it only while nothing in it is newer. Without it, no copied folder goes.
+    pub at: Option<SystemTime>,
+}
+
 /// A request to the engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum JobSpec {
     Transfer(TransferSpec),
     Delete(DeleteSpec),
+    /// Deletes for good the copies of a copy job that are still as it left them (see
+    /// [`DeleteCopiesSpec`]). Its kind is [`JobKind::Delete`].
+    DeleteCopies(DeleteCopiesSpec),
     Rename {
         from: VPath,
         to: VPath,
@@ -179,7 +206,7 @@ impl JobSpec {
                 TransferMode::Copy => JobKind::Copy,
                 TransferMode::Move => JobKind::Move,
             },
-            Self::Delete(_) => JobKind::Delete,
+            Self::Delete(_) | Self::DeleteCopies(_) => JobKind::Delete,
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
             Self::Undo(_) => JobKind::Undo,
@@ -190,6 +217,9 @@ impl JobSpec {
     /// none; a transfer or a delete works through many items one by one and keeps one, and so
     /// does an undo, which may move, copy or trash as many.
     pub fn journaled(&self) -> bool {
-        matches!(self, Self::Transfer(_) | Self::Delete(_) | Self::Undo(_))
+        matches!(
+            self,
+            Self::Transfer(_) | Self::Delete(_) | Self::DeleteCopies(_) | Self::Undo(_)
+        )
     }
 }

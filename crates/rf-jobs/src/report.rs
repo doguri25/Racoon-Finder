@@ -8,9 +8,10 @@ use std::time::{Duration, SystemTime};
 use rf_core::{ErrorKind, VPath};
 use serde::{Deserialize, Serialize};
 
+use crate::copies::CopyFound;
 use crate::id::JobId;
 use crate::preflight::{Issue, IssueKind};
-use crate::spec::{DeleteSpec, JobKind, JobSpec, TransferItem, TransferSpec};
+use crate::spec::{DeleteCopiesSpec, DeleteSpec, JobKind, JobSpec, TransferItem, TransferSpec};
 use crate::undo::UndoRecord;
 
 /// The step of a job an item failed in, for the UI to pick the wording.
@@ -177,6 +178,10 @@ pub enum FailureReason {
     Overwritten,
     /// `Undo`, `Unsupported`: an item a copy made changed after the copy, and is left in place.
     ChangedSinceCopy,
+    /// `Delete`, `Unsupported`: a copy that a delete of copies (`JobSpec::DeleteCopies`) was to
+    /// delete for good is not as its copy job left it, its original no longer holds everything
+    /// it holds, or either cannot be told; how each was found is given. It is left in place.
+    CopyKept(CopyFound),
     /// `Undo`, `Unsupported`: an item a create job made is no longer of the kind it made, and is
     /// left in place.
     ChangedSinceCreated,
@@ -225,6 +230,7 @@ impl FailureReason {
             Self::ChangedWhileDeleted => "changed_while_deleted",
             Self::Overwritten => "overwritten",
             Self::ChangedSinceCopy => "changed_since_copy",
+            Self::CopyKept(_) => "copy_kept",
             Self::ChangedSinceCreated => "changed_since_created",
             Self::NotEmpty => "not_empty",
             Self::TrashLocationUnknown => "trash_location_unknown",
@@ -357,6 +363,8 @@ impl JobReport {
     ///   only after the user has said yes: it then sets `DeleteSpec::method` itself on the
     ///   spec this gives. A folder a permanent delete kept because of a failure below it is
     ///   not in the retry.
+    /// - A delete of copies retries each copy that failed, or that something below it failed
+    ///   in, with what its copy job left: it is looked at again before it goes.
     /// - A rename, a create or an undo is retried as it was asked, when it has any failure.
     ///
     /// Items that a cancelled or aborted job never reached are not failures and are not in the
@@ -365,6 +373,7 @@ impl JobReport {
         match &self.spec {
             JobSpec::Transfer(spec) => self.retry_transfer(spec),
             JobSpec::Delete(spec) => self.retry_delete(spec),
+            JobSpec::DeleteCopies(spec) => self.retry_delete_copies(spec),
             JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
                 (!self.failures.is_empty()).then(|| self.spec.clone())
             }
@@ -418,6 +427,26 @@ impl JobReport {
             paths,
             method: spec.method,
             errors: spec.errors,
+        }))
+    }
+
+    fn retry_delete_copies(&self, spec: &DeleteCopiesSpec) -> Option<JobSpec> {
+        let copies: Vec<_> = spec
+            .copies
+            .iter()
+            .filter(|copy| {
+                self.failures.iter().any(|failure| {
+                    failure
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.starts_with(&copy.made.path))
+                })
+            })
+            .cloned()
+            .collect();
+        (!copies.is_empty()).then_some(JobSpec::DeleteCopies(DeleteCopiesSpec {
+            copies,
+            at: spec.at,
         }))
     }
 
@@ -709,6 +738,7 @@ mod tests {
             (FailureReason::OtherVolume, "other_volume"),
             (FailureReason::TrashRefused, "trash_refused"),
             (FailureReason::TempLeftBehind, "temp_left_behind"),
+            (FailureReason::CopyKept(CopyFound::SAME), "copy_kept"),
             (
                 FailureReason::Issue(IssueKind::ReservedName),
                 "reserved_name",

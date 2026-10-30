@@ -1926,8 +1926,25 @@ fn the_copies_an_undo_could_not_trash_are_listed_by_their_whole_paths() {
         overwritten: 0,
         at: None,
     };
-    let originals = vec![in_backup("원본 a.txt"), in_backup("원본 docs")];
-    let confirm = rf_ui::dialogs::Confirm::delete_copies(copies.clone(), originals, record);
+    let originals = [in_backup("원본 a.txt"), in_backup("원본 docs")];
+    let spec = rf_jobs::DeleteCopiesSpec {
+        copies: copies
+            .iter()
+            .zip(originals)
+            .map(|(copy, original)| rf_jobs::CopyOf {
+                made: rf_jobs::CreatedItem {
+                    path: copy.clone(),
+                    is_dir: false,
+                    size: 1,
+                    modified: None,
+                    identity: None,
+                },
+                original,
+            })
+            .collect(),
+        at: None,
+    };
+    let confirm = rf_ui::dialogs::Confirm::delete_copies(spec, record);
     window.set_confirm_view(ui_bridge::confirm_view(&confirm));
     window.set_dialog(DialogKind::Confirm);
     for copy in &copies {

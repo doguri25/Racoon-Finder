@@ -676,8 +676,8 @@ mod tests {
     use crate::exec::{ExecEnv, execute};
     use crate::resolver::NonInteractive;
     use crate::spec::{
-        ConflictPolicy, CreateKind, SymlinkMode, TransferItem, TransferMode, TransferOptions,
-        TransferSpec,
+        ConflictPolicy, CopyOf, CreateKind, DeleteCopiesSpec, SymlinkMode, TransferItem,
+        TransferMode, TransferOptions, TransferSpec,
     };
     use crate::testkit::{Fault, FaultyProvider, temp_files};
     use crate::undo::{CreatedItem, MovedItem, TrashedItem, UndoRecord};
@@ -1038,6 +1038,23 @@ mod tests {
     #[cfg(windows)]
     const CREATE_LINE: &str = r#"{"v":1,"rec":{"Submitted":{"job":4,"spec":{"Create":{"parent":"remote://p/d","name":{"Windows":[110,101,119]},"kind":"Dir"}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#;
 
+    /// The delete of copies of [`golden`], with every field set.
+    fn delete_copies_golden() -> JobSpec {
+        JobSpec::DeleteCopies(DeleteCopiesSpec {
+            copies: vec![CopyOf {
+                made: CreatedItem {
+                    path: remote(&["d", "a.txt"]),
+                    is_dir: false,
+                    size: 3,
+                    modified: Some(golden_time()),
+                    identity: Some((1, 7)),
+                },
+                original: remote(&["a.txt"]),
+            }],
+            at: Some(golden_time()),
+        })
+    }
+
     /// One record of every kind, one submitted spec of every kind, and the line format 1
     /// writes for each. A file name is stored as the OS gives it (bytes on Unix, UTF-16 units
     /// on Windows), so the line of the create differs by OS.
@@ -1101,6 +1118,14 @@ mod tests {
                     at,
                 },
                 CREATE_LINE,
+            ),
+            (
+                Record::Submitted {
+                    job: JobId(5),
+                    spec: delete_copies_golden(),
+                    at,
+                },
+                r#"{"v":1,"rec":{"Submitted":{"job":5,"spec":{"DeleteCopies":{"copies":[{"made":{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]},"original":"remote://p/a.txt"}],"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
             ),
             (
                 Record::Started { job: JobId(1) },

@@ -35,8 +35,9 @@ use super::{
     At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Parent, Stopped, Walking, on_another_volume,
     other_volume, too_deep, volume_of,
 };
+use crate::copies::{self, CopyFound};
 use crate::report::{FailureReason, Stage, Totals};
-use crate::spec::{DeleteMethod, DeleteSpec, ErrorPolicy};
+use crate::spec::{DeleteCopiesSpec, DeleteMethod, DeleteSpec, ErrorPolicy};
 use crate::undo::{TrashedItem, UndoRecord};
 
 /// Plans `spec` (see [`plan`]) and deletes each planned path by its method, under its error
@@ -62,6 +63,87 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
             }
         }
     }
+}
+
+/// Deletes for good each copy of `spec` that is still as its copy job left it and whose
+/// original still holds everything it holds, as a permanent delete deletes an item (see
+/// [`delete_entry`]), under `ErrorPolicy::Continue`. The plan counts each copy that is there,
+/// with everything in it (see [`count_tree`]). A cancel stops the job between two steps.
+///
+/// Right before a copy goes, one step looks at it again: `stat`, then
+/// `copies::check_found` on what `stat` gave, which the delete then works from. A copy that is
+/// gone is skipped. One found any other way than [`CopyFound::SAME`] stays, and fails as
+/// `Stage::Delete` with `Unsupported` and the reason `CopyKept`: a copy or an original changed
+/// after the job was submitted, or before a job a crash cut off runs again, keeps the copy. What
+/// remains is the window of every permanent delete: a change between that look and the steps
+/// of the delete, each of which looks at its own item again (see [`restat`]), is not seen.
+pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
+    let mut totals = Totals::default();
+    for copy in &spec.copies {
+        let path = &copy.made.path;
+        let found = ctx
+            .provider(path)
+            .and_then(|provider| Ok((provider.stat(path)?, provider)));
+        let Ok((entry, provider)) = found else {
+            continue;
+        };
+        let counted = count_tree(ctx, &*provider, path, &entry, Level::TOP, None, &mut totals);
+        if counted.is_err() {
+            ctx.stop(Stopped::Cancelled);
+            return;
+        }
+    }
+    ctx.planned(totals);
+    for copy in &spec.copies {
+        let path = &copy.made.path;
+        let looked = ctx.attempt(ErrorPolicy::Continue, Some(path), None, |ctx| {
+            ctx.check().at(Stage::Delete)?;
+            let provider = ctx.provider(path).at(Stage::Delete)?;
+            let now = match provider.stat(path) {
+                Ok(now) => now,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(Failed::new(Stage::Delete, error)),
+            };
+            ctx.working_on(path);
+            let cancel = ctx.env.control.cancel_token();
+            let found = copies::check_found(
+                ctx.env.vfs,
+                &*provider,
+                &copy.made,
+                &now,
+                spec.at,
+                &copy.original,
+                &cancel,
+            );
+            // A look that a cancel cut short stops the job, rather than keep the copy for it.
+            ctx.check().at(Stage::Delete)?;
+            if found != CopyFound::SAME {
+                return Err(copy_kept(path, found));
+            }
+            Ok(Some(now))
+        });
+        let flow = match looked {
+            Attempt::Done(Some(now)) => {
+                delete_entry(ctx, ErrorPolicy::Continue, path, &now, Level::TOP, None)
+            }
+            Attempt::Done(None) => {
+                ctx.report.skipped += 1;
+                ControlFlow::Continue(true)
+            }
+            other => kept(&other),
+        };
+        if flow.is_break() {
+            break;
+        }
+    }
+}
+
+/// The failure of the copy `path` that a delete of copies leaves, found as `found`.
+fn copy_kept(path: &VPath, found: CopyFound) -> Failed {
+    let error = Error::Unsupported(format!(
+        "{path} is not as it was copied, or its original is not ({found:?}); left in place"
+    ));
+    Failed::refused(Stage::Delete, error, FailureReason::CopyKept(found))
 }
 
 /// What the job will delete: each path of `spec` that `stat` finds (a link itself, not what it

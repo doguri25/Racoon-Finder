@@ -964,253 +964,40 @@ fn a_volume_is_not_there_when_the_folders_that_hold_it_are_missing_too() {
     assert!(!not_there("/run/user/docs", "/run"));
 }
 
-/// Gives the file at `path` the modification time `at`.
-fn set_modified(path: &Path, at: std::time::SystemTime) {
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.set_modified(at))
-        .expect("the time is set");
-}
-
-/// Writes `text` at `path`, changed at `at`, as a copy keeps the time of its source.
-fn write_at(path: &Path, text: &str, at: std::time::SystemTime) {
-    std::fs::write(path, text).expect("a test file");
-    set_modified(path, at);
-}
-
 #[test]
-fn a_copy_is_compared_with_its_original() {
-    use rf_ui::loader::Original;
+fn a_look_at_a_copy_is_the_one_the_delete_of_copies_makes() {
+    use rf_jobs::{Compared, CopyFound};
 
     let dir = tempfile::TempDir::new().expect("a temporary folder");
     let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
     let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     for folder in [&src, &dst] {
-        std::fs::create_dir_all(folder.join("docs").join("sub")).expect("folders");
-        write_at(&folder.join("a.txt"), "AAAA", at);
-        write_at(&folder.join("docs").join("x.txt"), "X", at);
-        write_at(&folder.join("docs").join("sub").join("y.txt"), "YY", at);
+        std::fs::create_dir(folder).expect("a folder");
+        let path = folder.join("a.txt");
+        std::fs::write(&path, "AAAA").expect("a test file");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(at))
+            .expect("the time is set");
     }
-    write_at(&src.join("docs").join("only-in-source.txt"), "S", at);
-    let loader = loader();
-    let go_on = CancelToken::new();
-    let compare = |name: &str| {
-        loader.compare_with_original(&local(&dst.join(name)), &local(&src.join(name)), &go_on)
-    };
-
-    // As they were: a file of the same size and time, and a folder that holds everything the
-    // copy holds (and more).
-    assert_eq!(compare("a.txt"), Original::Same);
-    assert_eq!(compare("docs"), Original::Same);
-
-    // Something of the copy is not in the original: deleting the copy would lose it.
-    std::fs::remove_file(src.join("docs").join("sub").join("y.txt")).expect("removed");
-    assert_eq!(compare("docs"), Original::Changed);
-    write_at(&src.join("docs").join("sub").join("y.txt"), "YYY", at);
-    assert_eq!(compare("docs"), Original::Changed, "another size deep down");
-    write_at(&src.join("docs").join("sub").join("y.txt"), "YY", at);
-    assert_eq!(compare("docs"), Original::Same);
-
-    // The original edited since (same size, a later time), of another kind, or gone.
-    set_modified(&src.join("a.txt"), at + Duration::from_secs(60));
-    assert_eq!(compare("a.txt"), Original::Changed);
-    std::fs::remove_file(src.join("a.txt")).expect("removed");
-    std::fs::create_dir(src.join("a.txt")).expect("a folder in its place");
-    assert_eq!(compare("a.txt"), Original::Changed);
-    std::fs::remove_dir(src.join("a.txt")).expect("removed");
-    assert_eq!(compare("a.txt"), Original::Missing);
-
-    // A copy that is gone cannot be told about.
-    std::fs::remove_file(dst.join("docs").join("x.txt")).expect("removed");
+    let copy = local(&dst.join("a.txt"));
+    let entry = LocalProvider::new().stat(&copy).expect("the copy is there");
+    let made = rf_jobs::CreatedItem::from_entry(copy, &entry);
+    let (loader, go_on) = (loader(), CancelToken::new());
+    let original = local(&src.join("a.txt"));
+    // rf-jobs' look, which the delete of copies runs again before it deletes a copy.
     assert_eq!(
-        loader.compare_with_original(
-            &local(&dst.join("docs").join("x.txt")),
-            &local(&src.join("docs").join("x.txt")),
-            &go_on
-        ),
-        Original::Unknown
-    );
-
-    // Once the app ends, the worker stops looking: it cannot be told.
-    let stopped = CancelToken::new();
-    stopped.cancel();
-    assert_eq!(compare("docs"), Original::Same);
-    assert_eq!(
-        loader.compare_with_original(
-            &local(&dst.join("docs")),
-            &local(&src.join("docs")),
-            &stopped
-        ),
-        Original::Unknown
-    );
-}
-
-/// What a copy job records of the item at `path` it made: what `stat` finds there now.
-fn made_at(path: &Path) -> rf_jobs::CreatedItem {
-    let path = local(path);
-    let entry = LocalProvider::new().stat(&path).expect("the item is there");
-    rf_jobs::CreatedItem::from_entry(path, &entry)
-}
-
-#[test]
-fn a_copy_is_checked_against_what_the_copy_left() {
-    use rf_ui::loader::{CopyFound, Original};
-
-    let dir = tempfile::TempDir::new().expect("a temporary folder");
-    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
-    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    for folder in [&src, &dst] {
-        std::fs::create_dir_all(folder.join("docs").join("sub")).expect("folders");
-        write_at(&folder.join("a.txt"), "AAAA", old);
-        write_at(&folder.join("docs").join("sub").join("y.txt"), "YY", old);
-    }
-    // The copy job ended after it wrote everything (later than anything here).
-    let ended = std::time::SystemTime::now() + Duration::from_secs(3600);
-    let (file, folder) = (made_at(&dst.join("a.txt")), made_at(&dst.join("docs")));
-    let loader = loader();
-    let go_on = CancelToken::new();
-    let made = |item: &rf_jobs::CreatedItem| loader.compare_with_made(item, Some(ended), &go_on);
-
-    // As the copy left them.
-    assert_eq!(made(&file), Original::Same);
-    assert_eq!(made(&folder), Original::Same);
-    assert_eq!(
-        loader.check_copy(&file, Some(ended), &local(&src.join("a.txt")), &go_on),
+        loader.check_copy(&made, None, &original, &go_on),
         CopyFound::SAME
     );
-
-    // A file of the same size written since, or of another size.
-    set_modified(&dst.join("a.txt"), old + Duration::from_secs(60));
-    assert_eq!(made(&file), Original::Changed);
-    set_modified(&dst.join("a.txt"), old);
-    assert_eq!(made(&file), Original::Same);
-    write_at(&dst.join("a.txt"), "AAAAA", old);
-    assert_eq!(made(&file), Original::Changed);
-    // The copy is not compared with its original then: it is not the copy any more.
+    std::fs::write(src.join("a.txt"), "changed").expect("written");
     assert_eq!(
-        loader.check_copy(&file, Some(ended), &local(&src.join("a.txt")), &go_on),
+        loader.check_copy(&made, None, &original, &go_on),
         CopyFound {
-            copy: Original::Changed,
-            original: Original::Unknown,
+            copy: Compared::Same,
+            original: Compared::Changed,
         }
-    );
-    std::fs::remove_file(dst.join("a.txt")).expect("removed");
-    assert_eq!(made(&file), Original::Missing);
-
-    // A folder with something deep down newer than the job's end, or without the job's time.
-    let deep = dst.join("docs").join("sub").join("y.txt");
-    set_modified(&deep, ended + Duration::from_secs(60));
-    assert_eq!(made(&folder), Original::Changed);
-    set_modified(&deep, old);
-    assert_eq!(made(&folder), Original::Same);
-    assert_eq!(
-        loader.compare_with_made(&folder, None, &go_on),
-        Original::Unknown
-    );
-
-    // Once the app ends, the worker stops looking.
-    let stopped = CancelToken::new();
-    stopped.cancel();
-    assert_eq!(
-        loader.compare_with_made(&folder, Some(ended), &stopped),
-        Original::Unknown
-    );
-}
-
-/// Makes `link` a symbolic link to the file or folder `target` (which Windows lets only a user
-/// with the privilege, or in developer mode, do).
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    let made = std::os::unix::fs::symlink(target, link);
-    #[cfg(windows)]
-    let made = if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, link)
-    } else {
-        std::os::windows::fs::symlink_file(target, link)
-    };
-    made
-}
-
-#[test]
-fn an_original_that_is_the_copy_itself_cannot_be_told() {
-    use rf_ui::loader::{CopyFound, Original};
-
-    let dir = tempfile::TempDir::new().expect("a temporary folder");
-    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
-    let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    std::fs::create_dir_all(dst.join("docs")).expect("folders");
-    std::fs::create_dir(&src).expect("a folder");
-    write_at(&dst.join("a.txt"), "AAAA", at);
-    write_at(&dst.join("docs").join("x.txt"), "X", at);
-    let loader = loader();
-    let go_on = CancelToken::new();
-    let compare = |copy: &Path, original: &Path| {
-        loader.compare_with_original(&local(copy), &local(original), &go_on)
-    };
-
-    // A file of the copy's size and time elsewhere is a copy as it was.
-    write_at(&dir.path().join("real.txt"), "AAAA", at);
-    assert_eq!(
-        compare(&dst.join("a.txt"), &dir.path().join("real.txt")),
-        Original::Same
-    );
-
-    // An original that is a link to its copy: deleting the copy would lose the only data.
-    match symlink(&dst.join("a.txt"), &src.join("a.txt")) {
-        Ok(()) => {}
-        Err(e) if cfg!(windows) => {
-            eprintln!("skipped: cannot create symlinks here: {e}");
-            return;
-        }
-        Err(e) => panic!("a link: {e}"),
-    }
-    assert_eq!(
-        compare(&dst.join("a.txt"), &src.join("a.txt")),
-        Original::Unknown
-    );
-    symlink(&dst.join("docs"), &src.join("docs")).expect("a link");
-    assert_eq!(
-        compare(&dst.join("docs"), &src.join("docs")),
-        Original::Unknown
-    );
-    // Nothing is deleted then, though the copy is as its job left it.
-    assert_eq!(
-        loader.check_copy(
-            &made_at(&dst.join("a.txt")),
-            None,
-            &local(&src.join("a.txt")),
-            &go_on
-        ),
-        CopyFound {
-            copy: Original::Same,
-            original: Original::Unknown,
-        }
-    );
-
-    // Reached through a linked folder, the original is the copy itself.
-    let through = dir.path().join("through");
-    symlink(&dst, &through).expect("a link");
-    assert_eq!(
-        compare(&dst.join("a.txt"), &through.join("a.txt")),
-        Original::Unknown
-    );
-    assert_eq!(
-        compare(&dst.join("docs"), &through.join("docs")),
-        Original::Unknown
-    );
-
-    // A folder whose item leads to the copy's own item, deep down.
-    let holder = dir.path().join("holder");
-    std::fs::create_dir(&holder).expect("a folder");
-    symlink(&dst.join("docs").join("x.txt"), &holder.join("x.txt")).expect("a link");
-    assert_eq!(compare(&dst.join("docs"), &holder), Original::Unknown);
-
-    // A hard link is the copy under another name too: it cannot be told either.
-    std::fs::hard_link(dst.join("a.txt"), dir.path().join("hard.txt")).expect("a hard link");
-    assert_eq!(
-        compare(&dst.join("a.txt"), &dir.path().join("hard.txt")),
-        Original::Unknown
     );
 }
 

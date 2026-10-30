@@ -3,29 +3,29 @@
 //! of rf-jobs), so they stay, and only the user may have them deleted for good. The window
 //! offers that only once a worker has found each copy as its job left it and its original as
 //! it was ([`Loader::check_copy`](crate::loader::Loader::check_copy)), while a notice says it
-//! looks: the danger confirmation lists every copy by its whole path. The user's yes has a
-//! worker look once more, since anything may have changed while the question showed, and
-//! only with everything still as it was is the job a permanent delete of exactly those copies.
-//! Once it has deleted them all, the copy's record leaves the history: the copy is undone. A
-//! child of [`state`](super), so these methods see the fields of [`AppState`].
+//! looks: the danger confirmation lists every copy by its whole path. The user's yes submits a
+//! delete of exactly those copies (`JobSpec::DeleteCopies`), which looks at each copy and its
+//! original once more right before it deletes it, whenever it runs, and keeps any that changed
+//! meanwhile. Once it has deleted them all, the copy's record leaves the history: the copy is
+//! undone. A child of [`state`](super), so these methods see the fields of [`AppState`].
 //!
 //! The originals come from the copy jobs of this run: when one ends, the state notes which
 //! source each item it made came from ([`copy_origins`]). A copy whose original cannot be told
 //! (a copy of an earlier run, a name two items could have taken) is never offered.
 
 use std::collections::VecDeque;
+use std::time::SystemTime;
 
 use rf_core::{Os, VPath};
 use rf_jobs::{
-    CreatedItem, FailureReason, ItemFailure, JobReport, JobSpec, MAX_NUMBERED, Outcome,
-    TransferSpec, UNDO_LIMIT, UndoRecord, numbered_name,
+    CopyFound, CopyOf, CreatedItem, DeleteCopiesSpec, FailureReason, ItemFailure, JobReport,
+    JobSpec, MAX_NUMBERED, Outcome, TransferSpec, UNDO_LIMIT, UndoRecord, numbered_name,
 };
 
 use super::jobs::{deleted_for_good, submit};
 use super::{AppState, Effect, ToastAction};
-use crate::dialogs::{Confirm, Failures, Modal, permanent_delete};
+use crate::dialogs::{Confirm, Failures, Modal};
 use crate::jobs::JobEffect;
-use crate::loader::{CopyFound, Original};
 use crate::pane::ancestors;
 use crate::words::{self, CopyKept};
 
@@ -37,30 +37,25 @@ pub(super) struct CopyOrigins {
     pairs: Vec<(VPath, Option<VPath>)>,
 }
 
-/// What a worker's look at the copies an undo could not trash is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stage {
-    /// The undo has ended: whether to offer the copies for a permanent delete.
-    Offer,
-    /// The user said yes: whether to delete them now.
-    Delete,
-}
-
-/// The copies an undo could not trash, while a worker looks at them and their originals.
+/// The copies an undo could not trash, while a worker looks at them and their originals, to
+/// find out whether to offer them for a permanent delete.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CopiesCheck {
     token: u64,
     /// The token of the notice that shows while the worker looks.
     note: u64,
-    stage: Stage,
     /// The record of the copy the undo was to undo.
     record: UndoRecord,
     /// The copies, in the order the worker's answers come.
     copies: Vec<VPath>,
     /// Each copy's original, in the same order.
     originals: Vec<VPath>,
+    /// Each copy as its job left it, in the same order, and when the job ended; empty until
+    /// the look starts.
+    made: Vec<CreatedItem>,
+    at: Option<SystemTime>,
     /// The lines of the undo's other failures, and of what it deleted for good instead of
-    /// trashing it, for the toast's list; none once they have been told (at the user's yes).
+    /// trashing it, for the toast's list.
     other_lines: Vec<String>,
     /// How many of the undo's failures those are, and how many items it deleted for good.
     other_failed: usize,
@@ -76,8 +71,7 @@ pub(super) struct Copies {
     checking: Option<CopiesCheck>,
     /// The token of the last check.
     token: u64,
-    /// The permanent deletes of copies the user confirmed, each with the record of the copy
-    /// it undoes.
+    /// The deletes of copies the user confirmed, each with the record of the copy it undoes.
     deleting: Vec<(JobSpec, UndoRecord)>,
 }
 
@@ -143,10 +137,11 @@ impl AppState {
         let check = CopiesCheck {
             token: 0,
             note: 0,
-            stage: Stage::Offer,
             record: record.clone(),
             copies: refused,
             originals: originals.unwrap_or_default(),
+            made: Vec::new(),
+            at: None,
             other_lines,
             other_failed: others.len(),
             gone: gone.len(),
@@ -154,25 +149,17 @@ impl AppState {
         self.start_check(check)
     }
 
-    /// The user said yes to deleting `copies` for good, the copies of the copy `record` with
-    /// their `originals`: a worker looks at them once more first.
+    /// The user said yes to `spec`, the delete for good of the copies of the copy `record`:
+    /// it is submitted, and it looks at each copy and its original once more itself before it
+    /// deletes it.
     pub(super) fn copies_confirmed(
         &mut self,
+        spec: DeleteCopiesSpec,
         record: UndoRecord,
-        copies: Vec<VPath>,
-        originals: Vec<VPath>,
     ) -> Vec<Effect> {
-        self.start_check(CopiesCheck {
-            token: 0,
-            note: 0,
-            stage: Stage::Delete,
-            record,
-            copies,
-            originals,
-            other_lines: Vec::new(),
-            other_failed: 0,
-            gone: 0,
-        })
+        let spec = JobSpec::DeleteCopies(spec);
+        self.copies.deleting.push((spec.clone(), record));
+        vec![submit(spec, None)]
     }
 
     /// Has a worker look at the copies of `check` and their originals, under a notice that
@@ -197,16 +184,16 @@ impl AppState {
         let (note, busy) = self.busy(words::checking_originals());
         check.note = note;
         let token = check.token;
-        let copies = made.into_iter().zip(check.originals.clone()).collect();
+        let copies = made.iter().cloned().zip(check.originals.clone()).collect();
+        (check.made, check.at) = (made, at);
         self.copies.checking = Some(check);
         vec![busy, Effect::CheckCopies { token, copies, at }]
     }
 
     /// What the worker found of the copies of the check `token` and their originals, one for
     /// each copy, in order. With every one as it was, the user is asked whether the copies go
-    /// for good, or, once the user has said yes, they go; otherwise a toast lists them and why
-    /// they stay. The notice of the check goes. A check that has been replaced since, or that
-    /// ends while the app ends, gives nothing.
+    /// for good; otherwise a toast lists them and why they stay. The notice of the check goes.
+    /// A check that has been replaced since, or that ends while the app ends, gives nothing.
     pub fn copies_checked(&mut self, token: u64, found: &[CopyFound]) -> Vec<Effect> {
         let Some(check) = self.copies.checking.take_if(|check| check.token == token) else {
             return Vec::new();
@@ -221,35 +208,32 @@ impl AppState {
             effects.push(self.copies_kept(&check, found));
             return effects;
         }
-        match check.stage {
-            Stage::Offer => {
-                if !check.other_lines.is_empty() {
-                    let shown = Failures {
-                        title: words::failures_title().to_owned(),
-                        lines: check.other_lines.clone(),
-                    };
-                    let text = words::and_gone(words::items_failed(check.other_failed), check.gone);
-                    effects.push(self.toast(text, Some(ToastAction::Details(shown))));
-                }
-                self.open(Modal::Confirm(Confirm::delete_copies(
-                    check.copies,
-                    check.originals,
-                    check.record,
-                )));
-            }
-            Stage::Delete => {
-                let spec = permanent_delete(check.copies);
-                self.copies.deleting.push((spec.clone(), check.record));
-                effects.push(submit(spec, None));
-            }
+        if !check.other_lines.is_empty() {
+            let shown = Failures {
+                title: words::failures_title().to_owned(),
+                lines: check.other_lines.clone(),
+            };
+            let text = words::and_gone(words::items_failed(check.other_failed), check.gone);
+            effects.push(self.toast(text, Some(ToastAction::Details(shown))));
         }
+        let spec = DeleteCopiesSpec {
+            copies: check
+                .made
+                .into_iter()
+                .zip(check.originals)
+                .map(|(made, original)| CopyOf { made, original })
+                .collect(),
+            at: check.at,
+        };
+        self.open(Modal::Confirm(Confirm::delete_copies(spec, check.record)));
         effects
     }
 
-    /// Takes the end of the job that gave `report` when it is a permanent delete of copies
-    /// the user confirmed: with every copy gone, the copy's record leaves the history (the
-    /// window has undone it) and a toast says so. `None` for any other job; for one that did
-    /// not delete them all, the usual notice tells why, and the record stays to be undone again.
+    /// Takes the end of the job that gave `report` when it is a delete of copies the user
+    /// confirmed: with every copy gone, the copy's record leaves the history (the window has
+    /// undone it) and a toast says so. `None` for any other job; for one that did not delete
+    /// them all (a copy or an original changed after the offer: the job kept that copy), the
+    /// usual notice tells why, and the record stays to be undone again.
     pub(super) fn copies_deleted(&mut self, report: &JobReport) -> Option<Vec<Effect>> {
         let index = self
             .copies
@@ -262,7 +246,7 @@ impl AppState {
             return None;
         }
         let count = match &spec {
-            JobSpec::Delete(delete) => delete.paths.len(),
+            JobSpec::DeleteCopies(delete) => delete.copies.len(),
             _ => 0,
         };
         self.copies.origins.retain(|noted| noted.record != record);
@@ -279,24 +263,12 @@ impl AppState {
         let refused = words::failure_reason(&FailureReason::TrashRefused);
         let mut lines = check.other_lines.clone();
         for (i, copy) in check.copies.iter().enumerate() {
-            let why = match found.get(i) {
-                // Another copy, or its original, stands in the way: this one is as it was.
-                Some(&CopyFound::SAME) => None,
-                Some(CopyFound {
-                    copy: Original::Same,
-                    original,
-                }) => Some(match original {
-                    Original::Missing => CopyKept::OriginalMissing,
-                    Original::Changed => CopyKept::OriginalChanged,
-                    Original::Same | Original::Unknown => CopyKept::OriginalUnknown,
-                }),
-                Some(CopyFound { copy, .. }) => Some(match copy {
-                    Original::Missing => CopyKept::CopyMissing,
-                    Original::Changed => CopyKept::CopyChanged,
-                    Original::Same | Original::Unknown => CopyKept::CopyUnknown,
-                }),
-                None => Some(CopyKept::OriginalUnknown),
-            };
+            // `None` for a copy as it was: another copy, or its original, stands in the way.
+            let why = found
+                .get(i)
+                .map_or(Some(CopyKept::OriginalUnknown), |&found| {
+                    CopyKept::of(found)
+                });
             lines.push(match why {
                 Some(why) => format!("{copy}: {refused}. {}", words::copy_kept(why)),
                 None => format!("{copy}: {refused}"),
@@ -306,13 +278,8 @@ impl AppState {
             title: words::failures_title().to_owned(),
             lines,
         };
-        let text = match check.stage {
-            Stage::Offer => {
-                let failed = check.other_failed + check.copies.len();
-                words::and_gone(words::items_failed(failed), check.gone)
-            }
-            Stage::Delete => words::copies_not_deleted(check.copies.len()),
-        };
+        let failed = check.other_failed + check.copies.len();
+        let text = words::and_gone(words::items_failed(failed), check.gone);
         self.toast(text, Some(ToastAction::Details(shown)))
     }
 }

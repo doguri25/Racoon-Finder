@@ -146,7 +146,10 @@ impl LanePolicy for DefaultLanes {
                 | UndoRecord::Created { .. }
                 | UndoRecord::Removed { .. },
             ) => LaneId::QUICK,
-            JobSpec::Transfer(_) | JobSpec::Delete(_) | JobSpec::Undo(_) => LaneId::MAIN,
+            JobSpec::Transfer(_)
+            | JobSpec::Delete(_)
+            | JobSpec::DeleteCopies(_)
+            | JobSpec::Undo(_) => LaneId::MAIN,
         }
     }
 }

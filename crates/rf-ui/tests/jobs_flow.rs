@@ -733,8 +733,7 @@ fn a_question_during_shutdown_waits_for_the_release_and_the_job_is_recovered() {
 /// copies to the user's own trash.
 #[cfg(target_os = "linux")]
 mod without_a_trash {
-    use rf_jobs::CreatedItem;
-    use rf_ui::loader::{CopyFound, Original};
+    use rf_jobs::{Compared, CopyFound, CreatedItem};
     use rf_vfs::CancelToken;
 
     use super::*;
@@ -867,13 +866,14 @@ mod without_a_trash {
             ]
         );
 
-        // Yes: a worker looks once more, then the copies go for good, the originals stay, and the
-        // copy is undone: the next undo is the older job's.
+        // Yes: the delete of the copies looks at each one and its original once more, then
+        // the copies go for good, the originals stay, and the copy is undone: the next undo is
+        // the older job's.
         let effects = state.confirm_accepted();
-        let check = the_check(&effects);
-        assert!(right.join("a.txt").exists(), "nothing is deleted before");
-        let found = look(&harness, &check);
-        let effects = state.copies_checked(check.0, &found);
+        assert!(
+            right.join("a.txt").exists(),
+            "nothing is deleted before the job runs"
+        );
         let seen = harness.run(&mut state, effects);
         assert!(!right.join("a.txt").exists() && !right.join("docs").exists());
         assert_eq!(read(&left.join("a.txt")), "A");
@@ -909,8 +909,8 @@ mod without_a_trash {
         assert_eq!(
             found,
             [CopyFound {
-                copy: Original::Same,
-                original: Original::Missing
+                copy: Compared::Same,
+                original: Compared::Missing
             }]
         );
         let effects = state.copies_checked(check.0, &found);
@@ -939,9 +939,9 @@ mod without_a_trash {
     }
 
     /// The copies offered, and something changed before the user said yes: an original removed,
-    /// or a copy written to. Nothing is deleted.
+    /// or a copy written to. The delete of the copies keeps that copy.
     #[test]
-    fn a_change_after_the_offer_keeps_the_copies() {
+    fn a_change_after_the_offer_keeps_that_copy() {
         for change in ["original removed", "copy written"] {
             let (_dir, left, right) = folders();
             write(&left.join("a.txt"), "A");
@@ -971,24 +971,15 @@ mod without_a_trash {
                 write(&right.join("b.txt"), "written since");
             }
             let effects = state.confirm_accepted();
-            let check = the_check(&effects);
-            let found = look(&harness, &check);
-            let effects = state.copies_checked(check.0, &found);
-            assert!(
-                !effects
-                    .iter()
-                    .any(|effect| matches!(effect, Effect::Job(_))),
-                "{change}: nothing is deleted: {effects:?}"
-            );
             let seen = harness.run(&mut state, effects);
             assert!(
                 seen.iter().any(|effect| matches!(
                     effect,
-                    Effect::Toast { text, .. } if text == "복사본 2개를 지우지 않았습니다"
+                    Effect::Toast { text, .. } if text == "항목 1개를 처리하지 못했습니다"
                 )),
                 "{change}: {seen:?}"
             );
-            assert_eq!(read(&right.join("a.txt")), "A", "{change}");
+            assert!(!right.join("a.txt").exists(), "{change}");
             assert!(right.join("b.txt").exists(), "{change}");
             // The record stays: the undo can be tried again.
             assert_eq!(harness.jobs.history().top, Some(copied), "{change}");
