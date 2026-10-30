@@ -29,8 +29,8 @@ use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use rf_jobs::{
-    ConflictAnswer, EngineConfig, JobEngine, JobEvent, JobId, JobReport, JobSpec, JobState,
-    Outcome, PreflightAnswer, Progress, Totals, UndoRecord,
+    ConflictAnswer, DefaultLanes, EngineConfig, JobEngine, JobEvent, JobId, JobReport, JobSpec,
+    JobState, LaneId, LanePolicy, Outcome, PreflightAnswer, Progress, Totals, UndoRecord,
 };
 use rf_vfs::Vfs;
 
@@ -645,6 +645,31 @@ impl JobRows {
     /// The number of jobs that have not ended, queued ones included.
     pub fn active(&self) -> usize {
         self.jobs.len()
+    }
+
+    /// Whether a job will end by itself: one that is not paused, and is not queued in a lane
+    /// whose job under way is paused. A lane runs one job at a time and passes over only the
+    /// queued jobs that are paused, so a paused job a worker took up holds the jobs queued
+    /// behind it. The lanes are those the engine starts with ([`DefaultLanes`]); a job whose
+    /// lane is not known (its spec has not come) is taken to wait behind any paused one.
+    pub fn going_on(&self) -> bool {
+        let lane = |job: &Tracked| job.spec.as_deref().map(|spec| DefaultLanes.lane(spec));
+        let held: Vec<Option<LaneId>> = self
+            .jobs
+            .iter()
+            .filter(|job| job.started.is_some() && job.state == JobState::Paused)
+            .map(lane)
+            .collect();
+        self.jobs.iter().any(|job| match job.state {
+            JobState::Paused | JobState::Finished(_) => false,
+            JobState::Queued if job.started.is_none() => {
+                let own = lane(job);
+                !held
+                    .iter()
+                    .any(|paused| own.is_none() || paused.is_none() || *paused == own)
+            }
+            _ => true,
+        })
     }
 
     /// Whether an undo or a redo of the history is queued or running: then neither starts

@@ -345,3 +345,96 @@ fn a_tray_icon_that_could_not_be_made_leaves_the_window_and_the_offer_goes() {
     state.request_close();
     assert_eq!(the_confirm(&state).alt, "");
 }
+
+/// Follows the rename of `name` as job `id`, queued: renames go in the lane of their own, which
+/// a paused copy or trash does not hold.
+fn rename_queued(state: &mut AppState, id: u64, name: &str) {
+    state.track(Started {
+        id: JobId(id),
+        spec: Some(Arc::new(JobSpec::Rename {
+            from: folder("a").join(name).expect("a name"),
+            to: folder("a").join(format!("{name}2")).expect("a name"),
+        })),
+        work: JobWork::Rename,
+        origin: None,
+        via_history: false,
+    });
+    set_state(state, id, JobState::Queued);
+}
+
+/// Follows the trash of `name` as job `id`, queued: in the lane of the long jobs.
+fn trash_queued(state: &mut AppState, id: u64, name: &str) {
+    state.track(Started {
+        id: JobId(id),
+        spec: Some(Arc::new(trash(&[name]))),
+        work: JobWork::Trash,
+        origin: None,
+        via_history: false,
+    });
+    set_state(state, id, JobState::Queued);
+}
+
+#[test]
+fn a_job_queued_behind_a_paused_one_in_its_lane_does_not_go_on() {
+    // The trash under way is paused; another one waits behind it in the same lane.
+    let mut state = with_jobs(&[1]);
+    set_state(&mut state, 1, JobState::Paused);
+    trash_queued(&mut state, 2, "x2");
+    state.request_close();
+    assert_eq!(
+        the_confirm(&state).alt,
+        "",
+        "nothing behind the tray would end"
+    );
+    state.dialog_cancelled();
+    // A rename queued in its own lane goes on.
+    rename_queued(&mut state, 3, "x3");
+    state.request_close();
+    assert_ne!(the_confirm(&state).alt, "");
+    state.dialog_cancelled();
+    // A paused trash still queued holds nothing: its lane passes over it.
+    let mut state = with_jobs(&[]);
+    trash_queued(&mut state, 4, "x4");
+    set_state(&mut state, 4, JobState::Paused);
+    trash_queued(&mut state, 5, "x5");
+    state.request_close();
+    assert_ne!(the_confirm(&state).alt, "");
+}
+
+#[test]
+fn behind_the_tray_a_job_left_behind_a_paused_one_brings_the_window_back() {
+    let mut state = with_jobs(&[1]);
+    trash_queued(&mut state, 2, "x2");
+    // A rename runs alongside.
+    rename_queued(&mut state, 3, "x3");
+    set_state(&mut state, 3, JobState::Running);
+    to_tray(&mut state);
+    set_state(&mut state, 1, JobState::Paused);
+    // The rename ends; the trash queued behind the paused one would never start.
+    let rename = JobSpec::Rename {
+        from: folder("a").join("x3").expect("a name"),
+        to: folder("a").join("x32").expect("a name"),
+    };
+    let effects = finish(&mut state, 3, &rename, JobWork::Rename, |_| {});
+    assert!(effects.contains(&Effect::FromTray), "{effects:?}");
+    assert!(!state.background() && !state.quitting());
+}
+
+#[test]
+fn a_look_at_copies_under_way_offers_no_tray() {
+    use super::copies::{copy_of, in_b, undo_refused};
+    let mut state = with_jobs(&[1]);
+    // An undo of a copy could not trash the copy: a worker looks at its original, which may
+    // end in a question.
+    let (spec, record) = copy_of(&["a.txt"]);
+    finish(&mut state, 5, &spec, JobWork::Copy, |report| {
+        report.undo = Some(record.clone());
+    });
+    undo_refused(&mut state, 6, &record, &[in_b("a.txt")]);
+    assert!(state.checking_copies());
+    // Going behind the tray would bring the window straight back: the plain question.
+    state.request_close();
+    assert_eq!(the_confirm(&state).alt, "");
+    assert_eq!(state.confirm_alternative(), []);
+    assert!(!state.background());
+}

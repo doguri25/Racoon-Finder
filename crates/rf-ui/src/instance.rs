@@ -9,14 +9,15 @@
 //! behind the tray icon, XFER-15) and ends quietly: it puts a request file, [`SHOW_REQUEST`],
 //! beside the lock ([`ask_to_show`]); the running app looks for it every [`SHOW_POLL`] on a
 //! thread of its own ([`InstanceLock::watch_requests`]), takes it away and shows its window.
-//! When nothing takes the request within [`SHOW_WAIT`] (an app that hangs, or an older one),
-//! the second start takes it back and says that the app runs, as it did before. A request
-//! left over from an earlier run goes when the lock is taken.
+//! When nothing takes the request within [`SHOW_WAIT`] (an app that hangs, an older one, or one
+//! that is ending and takes no more requests, [`RequestStop`]), the second start takes it back
+//! and tries the lock once more: the app may have ended meanwhile. Only then does it say that
+//! the app runs, as it did before ([`take_or_ask`]). A request left over from an earlier run
+//! goes when the lock is taken.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -91,7 +92,8 @@ impl InstanceLock {
 
     /// Looks every [`SHOW_POLL`], on a thread of its own, for a second start's request to show
     /// the window ([`ask_to_show`]); takes each one away and calls `on_show`. The look stops
-    /// when the [`RequestWatch`] is dropped.
+    /// when the [`RequestWatch`] is dropped, and takes no request once its [`RequestStop`] has
+    /// stopped it.
     pub fn watch_requests(
         &self,
         on_show: impl Fn() + Send + 'static,
@@ -100,15 +102,22 @@ impl InstanceLock {
             .path
             .parent()
             .map_or_else(|| PathBuf::from(SHOW_REQUEST), |dir| dir.join(SHOW_REQUEST));
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
+        let stop = RequestStop(Arc::new(Mutex::new(false)));
+        let stopped = stop.clone();
         let thread = std::thread::Builder::new()
             .name("rf-ui-instance".to_owned())
             .spawn(move || {
-                while !stopped.load(Ordering::SeqCst) {
+                loop {
                     std::thread::sleep(SHOW_POLL);
+                    // Held while a request is taken: once `RequestStop::stop` has returned, none
+                    // is.
+                    let flag = stopped.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *flag {
+                        return;
+                    }
                     // Only the one that takes the file away answers it.
                     if std::fs::remove_file(&request).is_ok() {
+                        drop(flag);
                         on_show();
                     }
                 }
@@ -124,16 +133,67 @@ impl InstanceLock {
 /// stops the look, within a [`SHOW_POLL`].
 #[derive(Debug)]
 pub struct RequestWatch {
-    stop: Arc<AtomicBool>,
+    stop: RequestStop,
     thread: Option<JoinHandle<()>>,
+}
+
+impl RequestWatch {
+    /// What stops the look from another place, without waiting for its thread: the app's end.
+    pub fn stopper(&self) -> RequestStop {
+        self.stop.clone()
+    }
 }
 
 impl Drop for RequestWatch {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Stops a [`RequestWatch`] from taking requests. The app's end stops it as it begins: an app
+/// that is ending cannot show its window to a second start, which then finds out by itself
+/// ([`take_or_ask`]). Cloning is cheap.
+#[derive(Clone, Debug)]
+pub struct RequestStop(Arc<Mutex<bool>>);
+
+impl RequestStop {
+    /// No request is taken from now on. Waits only while the look takes one away.
+    pub fn stop(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+}
+
+/// How a start of the app with the lock folder `dir` goes ([`take_or_ask`]).
+#[derive(Debug)]
+pub enum Start {
+    /// This process has the lock: the app starts.
+    Lock(InstanceLock),
+    /// The app that runs took the request to show its window.
+    Shown,
+    /// The app that runs neither took the request nor ended meanwhile.
+    Running,
+}
+
+/// Takes the lock in `dir`, or, while another process holds it, asks that one to show its
+/// window with `ask` (the app's is [`ask_to_show`] with [`SHOW_WAIT`]: `true` once it was
+/// taken). A request nobody took may mean the app that holds the lock is ending, which takes no
+/// more requests: the lock is tried once more before the app is said to run.
+pub fn take_or_ask(dir: &Path, ask: impl FnOnce(&Path) -> bool) -> Result<Start, InstanceError> {
+    match InstanceLock::acquire(dir) {
+        Ok(lock) => return Ok(Start::Lock(lock)),
+        Err(InstanceError::AlreadyRunning(_)) => {}
+        Err(error) => return Err(error),
+    }
+    if ask(dir) {
+        return Ok(Start::Shown);
+    }
+    match InstanceLock::acquire(dir) {
+        Ok(lock) => Ok(Start::Lock(lock)),
+        Err(InstanceError::AlreadyRunning(_)) => Ok(Start::Running),
+        Err(error) => Err(error),
     }
 }
 
@@ -217,6 +277,55 @@ mod tests {
             asked.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Disconnected)
         );
+    }
+
+    #[test]
+    fn an_app_that_is_ending_takes_no_request_to_show() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let journal = dir.path().join("data");
+        let running = InstanceLock::acquire(&journal).expect("the running app's lock");
+        let (shown, asked) = std::sync::mpsc::channel();
+        let watch = running
+            .watch_requests(move || {
+                let _ = shown.send(());
+            })
+            .expect("the look starts");
+        // The app's end begins: the look stops taking requests, though it is not dropped yet.
+        watch.stopper().stop();
+        assert!(!ask_to_show(&journal, Duration::from_millis(800)));
+        assert!(!journal.join(SHOW_REQUEST).exists());
+        drop(watch);
+        assert_eq!(
+            asked.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_second_start_shows_the_app_that_runs_or_takes_the_lock_of_one_that_ended() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let journal = dir.path().join("data");
+        // Nobody runs: the lock.
+        let first = match take_or_ask(&journal, |_| panic!("nobody to ask")) {
+            Ok(Start::Lock(lock)) => lock,
+            other => panic!("the lock, not {other:?}"),
+        };
+        // It runs and takes the request: shown.
+        assert!(matches!(take_or_ask(&journal, |_| true), Ok(Start::Shown)));
+        // It runs and does not take it: it runs.
+        assert!(matches!(
+            take_or_ask(&journal, |_| false),
+            Ok(Start::Running)
+        ));
+        // It ended while it was asked (an app that is ending takes no request): the lock.
+        let mut held = Some(first);
+        match take_or_ask(&journal, |_| {
+            drop(held.take());
+            false
+        }) {
+            Ok(Start::Lock(lock)) => assert_eq!(lock.path(), journal.join(LOCK_FILE)),
+            other => panic!("the lock, not {other:?}"),
+        }
     }
 
     #[test]

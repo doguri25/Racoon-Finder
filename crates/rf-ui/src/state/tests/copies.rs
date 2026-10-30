@@ -19,7 +19,7 @@ fn in_a(name: &str) -> VPath {
     folder("a").join(name).expect("a plain name")
 }
 
-fn in_b(name: &str) -> VPath {
+pub(super) fn in_b(name: &str) -> VPath {
     folder("b").join(name).expect("a plain name")
 }
 
@@ -34,7 +34,7 @@ fn made(path: VPath, is_dir: bool) -> CreatedItem {
 }
 
 /// The copy of `names` from `a` into `b`, and the record of what it made there.
-fn copy_of(names: &[&str]) -> (JobSpec, UndoRecord) {
+pub(super) fn copy_of(names: &[&str]) -> (JobSpec, UndoRecord) {
     let sources: Vec<VPath> = names.iter().map(|name| in_a(name)).collect();
     let spec = TransferSpec::into_dir(
         TransferMode::Copy,
@@ -86,7 +86,7 @@ fn refused(path: VPath) -> ItemFailure {
 }
 
 /// The undo of `record`, whose trash refused each of `copies`.
-fn undo_refused(
+pub(super) fn undo_refused(
     state: &mut AppState,
     id: u64,
     record: &UndoRecord,

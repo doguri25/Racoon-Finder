@@ -11,13 +11,14 @@
 //! The window is never left hidden with nothing to show it again: it comes back
 //! ([`Effect::FromTray`]) whenever something waits for the user (a question of a job, a window
 //! a job's end opens, a look at copies that may end in one, [`AppState::follow_background`]),
-//! when every job left is paused (nothing would end them), and when the last job has ended but
-//! one that ended out of sight did not do it all, so that 최근 완료 and its 자세히 show. Only
-//! when the last job has ended with everything done does a notification say so and the app
-//! end the way it always does ([`AppState::begin_quit`]: the settings are written, the engine
-//! shuts down, then the questions are released). Nor is the tray offered while every job is
-//! paused. 끝내기 while jobs run brings the window back with the question before the app ends,
-//! without the tray this time. A second start of the app shows the window too
+//! when every job left is paused or waits behind a paused one (nothing would end them), and
+//! when the last job has ended but one that ended out of sight did not do it all, so that 최근
+//! 완료 and its 자세히 show. Only when the last job has ended with everything done does a
+//! notification say so and the app end the way it always does ([`AppState::begin_quit`]: the
+//! settings are written, the engine shuts down, then the questions are released). Nor is the
+//! tray offered while every job is paused or waits behind a paused one, or while something
+//! waits for the user. 끝내기 while jobs run brings the window back with the question before the
+//! app ends, without the tray this time. A second start of the app shows the window too
 //! ([`AppState::show_asked`], module `instance`), and so does a tray icon the window could not
 //! make ([`AppState::tray_unavailable`]), which the window then never hides behind.
 
@@ -88,7 +89,7 @@ impl AppState {
         if self.jobs.active() == 0 {
             return self.begin_quit();
         }
-        if self.modal.is_some() {
+        if self.waits_for_user() {
             return Vec::new();
         }
         self.background = true;
@@ -124,23 +125,21 @@ impl AppState {
     }
 
     /// The system the question before the app ends offers the tray on: this one, where it has a
-    /// tray, while the window shows, nothing else waits for the user, and a job goes on (not
-    /// when every job is paused, which nothing behind the tray would end).
+    /// tray, while the window shows, nothing else waits for the user (a window, or a look at
+    /// copies that may end in one, which would bring the window straight back), and a job goes
+    /// on (not when every job is paused, or waits behind a paused one, which nothing behind the
+    /// tray would end).
     pub(super) fn tray_offer(&self) -> Option<Os> {
-        (self.tray
-            && !self.background
-            && self.modal.is_none()
-            && self.later.is_empty()
-            && self.jobs_go_on())
-        .then_some(Os::CURRENT)
+        (self.tray && !self.background && !self.waits_for_user() && self.jobs_go_on())
+            .then_some(Os::CURRENT)
     }
 
-    /// Whether a job is under way that is not paused: one that will end by itself.
+    /// Whether a job is under way that will end by itself: one that is not paused, and not
+    /// queued in a lane whose job under way is paused ([`JobRows::going_on`]).
+    ///
+    /// [`JobRows::going_on`]: crate::jobs::JobRows::going_on
     fn jobs_go_on(&self) -> bool {
-        self.jobs
-            .states()
-            .iter()
-            .any(|(_, state)| *state != JobState::Paused)
+        self.jobs.going_on()
     }
 
     /// Whether something waits for the user: a window over the main window, or one waiting to

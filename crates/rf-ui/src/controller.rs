@@ -49,6 +49,7 @@ use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecMod
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
+use crate::instance::RequestStop;
 use crate::jobs::{self, Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
@@ -130,6 +131,12 @@ pub fn post_question(question: Question) -> bool {
 /// the thread that looks for such requests.
 pub fn show_requested() {
     post(|c| c.update(AppState::show_asked));
+}
+
+/// Hands the window `stop`, which the app's end uses as it begins, so that no second start's
+/// request to show the window is taken by an app that is ending (`Controller::quit`).
+pub fn stop_requests_at_quit(stop: RequestStop) {
+    with(|c| *c.request_stop.borrow_mut() = Some(stop));
 }
 
 /// Opens `file` with the system's default app, on a worker thread; a failure shows as a notice.
@@ -845,6 +852,8 @@ pub struct Controller {
     notifier: OsNotifier,
     /// The tray icon while the window is hidden.
     tray: Tray,
+    /// Stops the look for a second start's requests to show the window, as the app ends.
+    request_stop: RefCell<Option<RequestStop>>,
 }
 
 impl fmt::Debug for Controller {
@@ -947,6 +956,7 @@ impl Controller {
             tray: Tray::new(Box::new(SlintTray::new(|command| {
                 with(|c| c.update(|state| state.tray_command(command)));
             }))),
+            request_stop: RefCell::new(None),
         }
     }
 
@@ -1056,8 +1066,14 @@ impl Controller {
     /// [`FINAL_SAVE_WAIT`] at most), then the engine shuts down and the questions are released
     /// ([`Jobs::close_down`]), and then the event loop ends. The window shows the closing note
     /// meanwhile. A worker that cannot start leaves the settings and the shutdown to
-    /// [`crate::run`], after the event loop.
+    /// [`crate::run`], after the event loop. From the start, no second start's request to show
+    /// the window is taken ([`stop_requests_at_quit`]).
     fn quit(&self) {
+        // A second start's request to show the window is not taken from now on: the window is
+        // about to go, and that start then tries the lock again (`instance::take_or_ask`).
+        if let Some(stop) = self.request_stop.borrow().as_ref() {
+            stop.stop();
+        }
         // The looks at copies stop: the state takes no answer while the app ends.
         self.checks.borrow_mut().stop();
         let jobs = self.jobs.clone();

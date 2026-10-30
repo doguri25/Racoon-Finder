@@ -76,8 +76,9 @@ pub enum RunError {
 /// One instance of the app runs at a time: it takes the lock in the folder of the job
 /// journal ([`instance`]) before anything else. A second one has the running one show its
 /// window and ends quietly, with `Ok` ([`instance::ask_to_show`]); only when the running one
-/// does not answer does it say that the app runs, in a small window, and end with
-/// [`RunError::AlreadyRunning`]. The job engine keeps its journal in that folder.
+/// does not answer, and still holds the lock (it may have been ending), does it say that the
+/// app runs, in a small window, and end with [`RunError::AlreadyRunning`]
+/// ([`instance::take_or_ask`]). The job engine keeps its journal in that folder.
 ///
 /// When the window closes, the settings are written (waiting [`controller::FINAL_SAVE_WAIT`] at
 /// most), and the engine is shut down and the jobs' questions are released
@@ -87,15 +88,14 @@ pub enum RunError {
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
-    let lock = match instance::InstanceLock::acquire(paths.data_dir()) {
-        Ok(lock) => lock,
-        Err(instance::InstanceError::AlreadyRunning(_)) => {
-            // The instance that runs shows its window, which may be hidden behind the tray
-            // icon; only when it does not answer does this one say that it runs.
-            if instance::ask_to_show(paths.data_dir(), instance::SHOW_WAIT) {
-                // What the user asked for is done: the app shows. Nothing to tell.
-                return Ok(());
-            }
+    // The instance that runs shows its window, which may be hidden behind the tray icon; only
+    // when it does not answer, and has not ended meanwhile, does this one say that it runs.
+    let ask = |dir: &std::path::Path| instance::ask_to_show(dir, instance::SHOW_WAIT);
+    let lock = match instance::take_or_ask(paths.data_dir(), ask) {
+        Ok(instance::Start::Lock(lock)) => lock,
+        // What the user asked for is done: the app shows. Nothing to tell.
+        Ok(instance::Start::Shown) => return Ok(()),
+        Ok(instance::Start::Running) => {
             // The theme of the instance that runs, read only: that one writes the settings.
             let theme = settings::peek_theme(paths.config_dir());
             show_notice(words::already_running(), theme)?;
@@ -123,8 +123,11 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     // A second start of the app shows this one's window. Without the look (no thread), a second
-    // start says that the app runs, as before.
+    // start says that the app runs, as before. The app's end stops the look as it begins.
     let requests = lock.watch_requests(controller::show_requested).ok();
+    if let Some(requests) = &requests {
+        controller::stop_requests_at_quit(requests.stopper());
+    }
     // The loop runs until the controller ends it (the app's end, `controller::quit`): the
     // window hides while its jobs go on behind the tray icon, which must not end it.
     let result = window
