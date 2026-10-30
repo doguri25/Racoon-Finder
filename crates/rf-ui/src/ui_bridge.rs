@@ -851,6 +851,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_delete_permanently(key(Command::DeletePermanently));
     shown.set_rename(key(Command::Rename));
     shown.set_undo(key(Command::Undo));
+    shown.set_redo(key(Command::Redo));
     shown.set_open(key(Command::Open));
     shown.set_toggle_hidden(key(Command::ToggleHidden));
     shown.set_view_menu(key(Command::ViewMenu));
@@ -875,7 +876,6 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_view_large_icons(key(Command::ViewLargeIcons));
     shown.set_fit_columns(key(Command::FitColumns));
     shown.set_select_all(key(Command::SelectAll));
-    shown.set_clear_selection(key(Command::ClearSelection));
     shown.set_invert_selection(key(Command::InvertSelection));
     shown.set_select_pattern(key(Command::SelectPattern));
     shown.set_select_same_extension(key(Command::SelectSameExtension));

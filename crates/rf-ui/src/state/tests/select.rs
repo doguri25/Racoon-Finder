@@ -173,6 +173,20 @@ fn the_extension_of_the_cursor_s_row_selects_its_like_ignoring_case() {
 }
 
 #[test]
+fn an_extension_is_compared_as_the_user_s_search_is_on_each_system() {
+    use super::super::select::folded;
+    let fold = |text: &str, os| folded(std::ffi::OsStr::new(text), os);
+    // 한글 composed (NFC) and decomposed into its jamo (NFD), as a Mac may write a name.
+    let (nfc, nfd) = ("한글", "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}");
+    for os in [Os::Windows, Os::MacOs, Os::Other] {
+        assert_eq!(fold("JPG", os), fold("jpg", os), "{os:?}");
+        assert_ne!(fold("jpg", os), fold("jpeg", os), "{os:?}");
+    }
+    assert_eq!(fold(nfc, Os::MacOs), fold(nfd, Os::MacOs));
+    assert_ne!(fold(nfc, Os::Windows), fold(nfd, Os::Windows));
+}
+
+#[test]
 fn a_link_has_no_extension_to_select_by_as_its_row_shows_none() {
     // A link may lead to a folder (`앨범.2025`): its name shows whole, with no extension.
     let link = |name: &str| Entry::new(name, EntryKind::Symlink);

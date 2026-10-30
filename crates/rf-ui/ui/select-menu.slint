@@ -2,6 +2,8 @@
 // the rows whose names match a pattern, or those with the extension of the cursor's row. Each
 // tool chooses among the rows on screen, whatever the view mode, and each item says its key
 // (KEY-03): the keys do the same from the panes, so the menu needs no key of its own (KEY-02).
+// 선택 해제 says none: Esc does more (with nothing selected it cancels a cut, as File
+// Explorer's does), and File Explorer's 선택 안 함 shows no key either.
 
 import { Shortcuts } from "shortcuts.slint";
 
@@ -22,7 +24,7 @@ export component SelectMenu inherits ContextMenuArea {
             }
         }
         MenuItem {
-            title: Shortcuts.titled("선택 해제", Shortcuts.clear-selection);
+            title: "선택 해제";
             activated => {
                 root.command("clear-selection");
             }

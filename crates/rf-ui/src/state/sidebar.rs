@@ -1,8 +1,8 @@
 //! The sidebar's folder tree from the keyboard (KEY-02). A child of [`state`](super), so these
 //! methods see the fields of [`AppState`].
 //!
-//! F6 gives the tree the keys ([`Command::FocusTree`](crate::keys::Command::FocusTree)),
-//! showing it first if it is hidden. The tree has a cursor of its own, apart from its
+//! F6 gives the tree the keys ([`Command::FocusTree`](crate::keys::Command::FocusTree)) while
+//! it shows; a hidden one is passed by. The tree has a cursor of its own, apart from its
 //! selection (the active pane's folder): it starts on the selection's row, or the first row,
 //! and the keys of [`TreeKey`] move it, open and close its row, or show its folder in the
 //! active pane, which leaves the keys with the tree. Esc and Tab give them back to the active
@@ -20,14 +20,15 @@ impl AppState {
         self.tree.row_of(self.tree_cursor?)
     }
 
-    /// F6: the tree takes the keys, shown if it was hidden, its cursor on the row of the
-    /// active pane's folder (or the first row).
+    /// F6 from the panes: the tree takes the keys, its cursor on the row of the active pane's
+    /// folder (or the first row). A hidden tree is passed by, as File Explorer's F6 passes by
+    /// the parts that do not show: the job panel takes the keys while it shows, else the panes
+    /// keep them. The layout stays as the user chose it.
     pub(super) fn focus_tree(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
         if !self.layout.tree {
-            self.layout.tree = true;
-            effects.extend(self.follow_active());
+            return self.tree_next();
         }
+        let mut effects = Vec::new();
         let row = self.tree.selected_row().unwrap_or(0);
         self.tree_cursor = self.tree.node_at(row);
         effects.push(Effect::FocusTree);

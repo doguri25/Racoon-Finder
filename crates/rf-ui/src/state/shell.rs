@@ -112,13 +112,24 @@ pub fn menu_facts(items: &[(VPath, &Entry)], runs_as_admin: bool) -> MenuFacts {
     }
 }
 
+/// A request for the apps that can open `file`, by its `token`, and where it was asked: the
+/// pane `side`, its tab `tab` and that tab's `folder`. Its answer shows only there.
+#[derive(Debug)]
+struct AskedApps {
+    token: u64,
+    file: VPath,
+    side: usize,
+    tab: u64,
+    folder: VPath,
+}
+
 /// What the commands of this module keep between their request and its answer.
 #[derive(Debug, Default)]
 pub(super) struct ShellState {
     /// The facts of the item menu that opened last.
     menu: MenuFacts,
-    /// The last request for 연결 프로그램, by its token, and its file.
-    asked: Option<(u64, VPath)>,
+    /// The last request for 연결 프로그램.
+    asked: Option<AskedApps>,
     /// The apps of the menu that shows them last, and their file.
     apps: Option<(VPath, Vec<App>)>,
     token: u64,
@@ -186,20 +197,30 @@ impl AppState {
         };
         self.shell.token += 1;
         let token = self.shell.token;
-        self.shell.asked = Some((token, file.clone()));
+        let tab = self.tab(side);
+        self.shell.asked = Some(AskedApps {
+            token,
+            file: file.clone(),
+            side,
+            tab: tab.id(),
+            folder: tab.location().clone(),
+        });
         vec![Effect::Shell(ShellWork::OpenWith { token, file })]
     }
 
     /// The apps that can open the file of the request `token` (or why they are not known): a
-    /// menu of them, the default one first, when it is the last request and no window shows
-    /// over the main one; else nothing.
+    /// menu of them, the default one first, when it is the last request and the user is where
+    /// they asked (no window and no quick look over the main one, and the same pane, tab,
+    /// folder and file); else nothing: they have moved on.
     pub fn apps_found(&mut self, token: u64, found: Result<Vec<App>, ErrorKind>) -> Vec<Effect> {
-        let Some((_, file)) = self.shell.asked.take_if(|(asked, _)| *asked == token) else {
+        let Some(asked) = self.shell.asked.take_if(|asked| asked.token == token) else {
             return Vec::new();
         };
-        if self.modal.is_some() || self.quitting {
+        if self.modal.is_some() || self.quitting || self.quick_look_open() || !self.still_at(&asked)
+        {
             return Vec::new();
         }
+        let file = asked.file;
         match found {
             Ok(apps) if apps.is_empty() => vec![Effect::Notice(words::no_apps().to_owned())],
             Ok(apps) => {
@@ -213,6 +234,19 @@ impl AppState {
                 Os::CURRENT,
             ))],
         }
+    }
+
+    /// Whether the user is still where they asked for the apps of `asked`: its pane is the
+    /// active one, on the same tab and folder, and its file is still the one item a command acts
+    /// on there.
+    fn still_at(&self, asked: &AskedApps) -> bool {
+        let tab = self.tab(asked.side);
+        self.active == asked.side
+            && tab.id() == asked.tab
+            && *tab.location() == asked.folder
+            && self
+                .single_target(asked.side)
+                .is_some_and(|(path, _)| path == asked.file)
     }
 
     /// Item `index` of the menu of apps: the file opens with that app.

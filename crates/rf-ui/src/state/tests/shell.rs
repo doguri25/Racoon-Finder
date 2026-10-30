@@ -179,6 +179,37 @@ fn no_app_or_a_failure_says_so_and_a_window_on_top_keeps_the_apps_away() {
 }
 
 #[test]
+fn the_apps_do_not_show_once_the_user_has_moved_on() {
+    let mut state = listed();
+    choose(&mut state, &[1]);
+    // Quick look opened meanwhile.
+    let token = ask_apps(&mut state);
+    run(&mut state, Command::QuickLook);
+    assert!(state.quick_look_open());
+    assert_eq!(state.apps_found(token, Ok(apps())), []);
+    run(&mut state, Command::QuickLook);
+    // Another file chosen.
+    let token = ask_apps(&mut state);
+    choose(&mut state, &[2]);
+    assert_eq!(state.apps_found(token, Ok(apps())), []);
+    // The other pane took the keys.
+    let token = ask_apps(&mut state);
+    state.activate(RIGHT);
+    assert_eq!(state.apps_found(token, Ok(apps())), []);
+    state.activate(LEFT);
+    // Another tab.
+    let token = ask_apps(&mut state);
+    run(&mut state, Command::NewTab);
+    assert_eq!(state.apps_found(token, Ok(apps())), []);
+    run(&mut state, Command::CloseTab);
+    // Another folder.
+    let token = ask_apps(&mut state);
+    state.go_to(folder("b"));
+    assert_eq!(state.apps_found(token, Ok(apps())), []);
+    assert_eq!(state.open_with_chosen(0), []);
+}
+
+#[test]
 fn a_terminal_opens_in_the_folder_chosen_or_else_in_the_pane_s() {
     let mut state = listed();
     let terminal = |state: &mut AppState| match run(state, Command::OpenTerminal).as_slice() {

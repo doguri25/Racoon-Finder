@@ -73,8 +73,8 @@ impl AppState {
         Some((line, button))
     }
 
-    /// F6 from the tree: the job panel takes the keys while it shows, on its first button;
-    /// otherwise the panes do.
+    /// F6 from the tree (or from the panes while the tree is hidden): the job panel takes the
+    /// keys while it shows, on its first button; otherwise the panes do.
     pub(super) fn tree_next(&mut self) -> Vec<Effect> {
         if self.panel_lines().is_empty() {
             return vec![Effect::FocusPanes];

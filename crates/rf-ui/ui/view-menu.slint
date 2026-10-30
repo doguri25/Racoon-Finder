@@ -555,8 +555,10 @@ export component ViewMenu inherits ContextMenuArea {
                 root.command("toggle-tree");
             }
         }
+        // Only to a tree that shows: F6 passes a hidden one by.
         MenuItem {
             title: Shortcuts.titled("폴더 트리로 가기", Shortcuts.focus-tree);
+            enabled: root.show-tree;
             activated => {
                 root.command("focus-tree");
             }

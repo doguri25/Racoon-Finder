@@ -2,6 +2,7 @@
 //! and closes rows, Enter shows a folder in the active pane, and Esc gives the keys back.
 
 use super::nav::{drive, temp, the_tree_load};
+use super::panel::running;
 use super::*;
 use crate::keys::TreeKey;
 
@@ -112,16 +113,28 @@ fn enter_shows_the_folder_in_the_active_pane_and_the_tree_keeps_the_keys() {
 }
 
 #[test]
-fn a_hidden_tree_gives_the_keys_back_and_f6_shows_it() {
+fn a_hidden_tree_gives_the_keys_back_and_f6_passes_it_by() {
     let mut state = with_tree();
     press(&mut state, &special(Key::F6), NONE);
 
     assert_eq!(press(&mut state, "b", CTRL), Some(vec![Effect::FocusPanes]));
     assert!(!state.layout().tree);
 
+    // F6 goes round the parts that show, as File Explorer's does: without the tree and the job
+    // panel the keys stay with the panes, and the layout is left as the user chose it.
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
-    assert!(state.layout().tree);
-    assert!(effects.contains(&Effect::FocusTree));
+    assert!(!state.layout().tree);
+    assert_eq!(effects, [Effect::FocusPanes]);
+    // With a job, the panel takes them.
+    running(&mut state, 1, "x");
+    let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
+    assert!(!state.layout().tree);
+    assert_eq!(effects, [Effect::FocusPanel]);
+    assert_eq!(state.panel_cursor(), Some((0, 0)));
+    // Shown again, the tree is next after the panes.
+    assert_eq!(press(&mut state, "b", CTRL), Some(vec![]));
+    let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
+    assert!(effects.contains(&Effect::FocusTree), "{effects:?}");
     assert_eq!(state.tree_cursor_row(), Some(1));
 }
 

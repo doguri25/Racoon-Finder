@@ -747,9 +747,10 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('5', CTRL_SHIFT), C::ViewList),
     (c('6', CTRL_SHIFT), C::ViewDetails),
     // File Explorer's Size all columns to fit: Ctrl with the keypad's +, or a layout's own +
-    // key; on the US layout's main keys + is Shift+=.
-    (c('+', CTRL), C::FitColumns),
+    // key; on the US layout's main keys (the Korean keyboard's too) + is Shift+=, which the
+    // label names first.
     (c('=', CTRL_SHIFT), C::FitColumns),
+    (c('+', CTRL), C::FitColumns),
     (k(Key::F10, NONE), C::ViewMenu),
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
@@ -1502,6 +1503,7 @@ mod tests {
             (C::ToggleSelect, Some("Ctrl+Space"), None),
             (C::PasteMove, None, Some("⌥⌘V")),
             (C::Undo, Some("Ctrl+Z"), Some("⌘Z")),
+            (C::Redo, Some("Ctrl+Y"), Some("⇧⌘Z")),
             (C::ViewMenu, Some("F10"), Some("⌘J")),
             (C::FocusFilter, Some("Ctrl+F"), Some("⌘F")),
             (C::EditPath, Some("Ctrl+L"), Some("⇧⌘G")),
@@ -1517,7 +1519,7 @@ mod tests {
             (C::ViewSmallIcons, Some("Ctrl+Shift+4"), None),
             (C::ViewList, Some("Ctrl+Shift+5"), Some("⌘3")),
             (C::ViewDetails, Some("Ctrl+Shift+6"), Some("⌘2")),
-            (C::FitColumns, Some("Ctrl++"), Some("⌃⌘=")),
+            (C::FitColumns, Some("Ctrl+Shift+="), Some("⌃⌘=")),
             (C::SelectAll, Some("Ctrl+A"), Some("⌘A")),
             (C::InvertSelection, Some("Ctrl+Shift+I"), Some("⌥⇧⌘A")),
             (C::SelectPattern, Some("Ctrl+S"), Some("⌘S")),

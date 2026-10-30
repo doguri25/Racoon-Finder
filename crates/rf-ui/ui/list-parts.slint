@@ -18,6 +18,10 @@ export global ItemMenu {
     in property <bool> one-folder;
     // One item: OS 속성 창 열기.
     in property <bool> one-item;
+    // Whether Undo and Redo can start: something to undo (to do again), and no undo or redo
+    // under way. The toolbar's 되돌리기 and the folder's menu follow them.
+    in property <bool> can-undo;
+    in property <bool> can-redo;
     in-out property <length> at-x;
     in-out property <length> at-y;
 
@@ -172,12 +176,13 @@ export component RowMenu inherits ContextMenuArea {
 }
 
 // The menu of the part of a list without items: a new folder there, a paste into the folder
-// (off while the clipboard holds no files),
-// the folder listed again (NAV-13), each with its key (KEY-03), a terminal in the folder
-// (OPS-11), and the folder's own 속성, as in File Explorer. It wraps that part of the list.
+// (off while the clipboard holds no files), 되돌리기 and 다시 실행 (off while there is nothing
+// to undo or to do again), the folder listed again (NAV-13), each with its key (KEY-03), a
+// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer. It wraps
+// that part of the list.
 export component BlankMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (new-folder, paste,
-    // paste-move, refresh, folder-terminal, folder-properties).
+    // paste-move, undo, redo, refresh, folder-terminal, folder-properties).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -203,6 +208,20 @@ export component BlankMenu inherits ContextMenuArea {
             enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-move");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("되돌리기", Shortcuts.undo);
+            enabled: ItemMenu.can-undo;
+            activated => {
+                root.command("undo");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("다시 실행", Shortcuts.redo);
+            enabled: ItemMenu.can-redo;
+            activated => {
+                root.command("redo");
             }
         }
         MenuSeparator { }

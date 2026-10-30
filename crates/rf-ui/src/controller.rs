@@ -2187,7 +2187,9 @@ impl Controller {
             &self.job_rows,
             rows.iter().map(ui_bridge::job_row_view).collect(),
         );
-        window.set_can_undo(state.can_undo());
+        let menu = window.global::<ItemMenu<'_>>();
+        menu.set_can_undo(state.can_undo());
+        menu.set_can_redo(state.can_redo());
         window.set_notice_action_live(state.toast_button_live());
         ui_bridge::set_rows(
             &self.recent_rows,

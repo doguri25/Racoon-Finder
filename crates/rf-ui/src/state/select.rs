@@ -18,11 +18,13 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
+use rf_core::Os;
+
 use super::{AppState, Effect};
 use crate::dialogs::{Counting, Modal, PatternChoice, PatternDialog};
 use crate::format::file_extension;
 use crate::keys::Command;
-use crate::pane::next_generation;
+use crate::pane::{next_generation, search_key};
 use crate::pattern::{NamePattern, PatternSyntax};
 use crate::words;
 
@@ -155,9 +157,10 @@ impl AppState {
     }
 
     /// 같은 확장자 선택: the rows on screen with the extension of the cursor's row, ignoring
-    /// case, are selected in place of the selection, the extension the 확장자 column shows
-    /// ([`file_extension`]). A cursor on a row without one (a folder, a link, a file such as
-    /// `README`) selects nothing, and a notice says why.
+    /// case (and on macOS the Unicode form, [`folded`]), are selected in place of the
+    /// selection, the extension the 확장자 column shows ([`file_extension`]). A cursor on a row
+    /// without one (a folder, a link, a file such as `README`) selects nothing, and a notice
+    /// says why.
     pub(super) fn select_same_extension(&mut self, side: usize) -> Vec<Effect> {
         let tab = self.tab(side);
         let Some(entry) = tab
@@ -167,13 +170,14 @@ impl AppState {
         else {
             return Vec::new();
         };
-        let Some(wanted) = file_extension(entry).map(folded) else {
+        let Some(wanted) = file_extension(entry).map(|extension| folded(extension, Os::CURRENT))
+        else {
             let name = entry.name.to_string_lossy();
             return vec![Effect::Notice(words::no_extension(&name))];
         };
         let (selection, rows) = self.tab_mut(side).selection_mut();
         selection.select_where(rows, false, |_, row| {
-            file_extension(row).is_some_and(|extension| folded(extension) == wanted)
+            file_extension(row).is_some_and(|extension| folded(extension, Os::CURRENT) == wanted)
         });
         Vec::new()
     }
@@ -452,7 +456,8 @@ impl AppState {
     }
 }
 
-/// An extension as it is compared: in lowercase.
-fn folded(extension: &OsStr) -> String {
-    extension.to_string_lossy().to_lowercase()
+/// An extension as it is compared on `os`: as the user's search is ([`search_key`]), case
+/// never counting, and on macOS its Unicode form (NFC or NFD) not counting either.
+pub(super) fn folded(extension: &OsStr, os: Os) -> String {
+    search_key(extension, os)
 }

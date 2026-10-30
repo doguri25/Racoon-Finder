@@ -8,7 +8,7 @@ use crate::words::JobWork;
 use rf_jobs::{DeleteMethod, DeleteSpec, ErrorPolicy, JobEvent, JobSpec, JobState};
 
 /// Follows the trash of `name` as job `id`, which a worker runs now.
-fn running(state: &mut AppState, id: u64, name: &str) {
+pub(super) fn running(state: &mut AppState, id: u64, name: &str) {
     let spec = JobSpec::Delete(DeleteSpec {
         paths: vec![folder("a").join(name).expect("a name")],
         method: DeleteMethod::Trash,

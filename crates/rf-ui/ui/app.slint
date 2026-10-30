@@ -93,8 +93,6 @@ export component MainWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <bool> can-up;
-    // Whether Undo can start: something to undo, and no undo or redo under way.
-    in property <bool> can-undo;
     // The rows of the job panel; the panel shows while there is one.
     in property <[JobRowView]> job-rows;
     // The line and the button of the job panel's keyboard cursor, which shows while the panel
@@ -387,6 +385,28 @@ export component MainWindow inherits Window {
         }
     }
 
+    // The part of the window that had the keys last: 0 the panes (their list, the path field
+    // or the filter box), 1 the tree, 2 the job panel. A window, a menu or quick look over the
+    // main window takes the keys for a while and leaves this as it was.
+    private property <int> keys-region;
+    private property <bool> in-pane-fields: left.editing || right.editing || filter-box.has-focus;
+    changed in-pane-fields => {
+        if (root.in-pane-fields) {
+            root.keys-region = 0;
+        }
+    }
+    // The keys go back to the part that had them, as a window or a sub-menu of the 보기 menu
+    // closes: the tree or the job panel while it still shows, otherwise the panes.
+    function give-keys-back() {
+        if (root.keys-region == 1 && root.show-tree) {
+            tree-keys.focus();
+        } else if (root.keys-region == 2 && root.panel-shows) {
+            panel-keys.focus();
+        } else {
+            keys.focus();
+        }
+    }
+
     // The 보기 menu's 분할선을 왼쪽으로/오른쪽으로 (위로/아래로): the divider moves by `step` of
     // the room, as far as a drag could take it.
     function move-divider(step: float) {
@@ -423,11 +443,9 @@ export component MainWindow inherits Window {
         open-with-menu.show({ x: ItemMenu.at-x, y: ItemMenu.at-y });
     }
 
-    // Where the keys were as the 보기 menu opened: the tree, or the panes. A sub-menu's choice
-    // gives them back there.
-    private property <bool> view-menu-from-tree;
+    // A sub-menu's choice gives the keys back where they were as the menu opened
+    // (`give-keys-back`).
     function open-view-menu() {
-        root.view-menu-from-tree = tree-keys.has-focus;
         view-menu.open(0, view-button.height + 4px);
     }
 
@@ -556,13 +574,14 @@ export component MainWindow inherits Window {
     private property <string> notice-action-text;
     private property <int> notice-token;
     private property <bool> notice-lasting;
-    // The keyboard goes back to the panes when a dialog closes (to quick look, if it shows).
+    // The keyboard goes back where it was when a dialog closes: to quick look, if it shows,
+    // else to the tree, the job panel or the panes (`give-keys-back`).
     changed dialog => {
         if (root.dialog == DialogKind.none) {
             if (root.quick-look) {
                 quick-look.take-keys();
             } else {
-                keys.focus();
+                root.give-keys-back();
             }
         }
     }
@@ -580,7 +599,7 @@ export component MainWindow inherits Window {
         if (root.quick-look) {
             quick-look.take-keys();
         } else if (!left.editing && !right.editing && !filter-box.has-focus) {
-            keys.focus();
+            root.give-keys-back();
         }
     }
     // The theme. 밝게 and 어둡게 set the scheme of the standard widgets (scroll bars, menus) and
@@ -648,6 +667,9 @@ export component MainWindow inherits Window {
     }
 
     keys := FocusScope {
+        focus-gained => {
+            root.keys-region = 0;
+        }
         // The keys leave the panes (a text field, the tree, a menu or a dialog takes them): the
         // list of subfolders, whose keys came here, closes.
         focus-lost => {
@@ -657,8 +679,17 @@ export component MainWindow inherits Window {
         }
         key-pressed(event) => {
             // A text field that has focus passes up the keys it does not use; they are not
-            // shortcuts while it is open, nor while a dialog or quick look is.
-            if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none || root.quick-look) {
+            // shortcuts while it is open, nor while a dialog or quick look is. F6 alone leaves
+            // the path field and the filter box for the next part of the window, as in File
+            // Explorer (the fields keep it while an input method composes).
+            if (root.dialog != DialogKind.none || root.quick-look) {
+                return reject;
+            }
+            if (left.editing || right.editing || filter-box.has-focus) {
+                let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                if (event.text == Key.F6 && plain && root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
+                    return accept;
+                }
                 return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
@@ -794,7 +825,7 @@ export component MainWindow inherits Window {
                             icon: "undo";
                             keys: Shortcuts.undo;
                             text: "되돌리기";
-                            enabled: root.can-undo;
+                            enabled: ItemMenu.can-undo;
                             clicked => {
                                 root.command("undo");
                             }
@@ -912,6 +943,11 @@ export component MainWindow inherits Window {
                                 keys.focus();
                                 return accept;
                             }
+                            // F6 leaves the field (the window's keys), but not while an input
+                            // method composes: the syllable would be lost with the focus.
+                            if (event.text == Key.F6 && self.composing) {
+                                return accept;
+                            }
                             reject
                         }
                     }
@@ -938,6 +974,9 @@ export component MainWindow inherits Window {
                     horizontal-stretch: root.show-tree ? 0.1 : 0;
                     focus-on-click: false;
                     focus-on-tab-navigation: false;
+                    focus-gained => {
+                        root.keys-region = 1;
+                    }
                     key-pressed(event) => {
                         if (root.dialog != DialogKind.none) {
                             return reject;
@@ -1277,6 +1316,9 @@ export component MainWindow inherits Window {
                 visible: root.panel-shows;
                 focus-on-click: false;
                 focus-on-tab-navigation: false;
+                focus-gained => {
+                    root.keys-region = 2;
+                }
                 // The panel goes once its last job has ended, and the window takes its keys
                 // away: the panes take them, once the window has done so.
                 focus-lost(reason) => {
@@ -1443,18 +1485,14 @@ export component MainWindow inherits Window {
 
     // A sub-menu of the 보기 menu gives the keys back, as it closes, to the menu it opened from,
     // which has closed too: they go back where they were as the menu opened once both have (the
-    // tree, while it shows, or the panes).
+    // tree or the job panel, while it shows, or the panes).
     panes-focus-later := Timer {
         interval: 1ms;
         running: false;
         triggered => {
             self.running = false;
             if (root.dialog == DialogKind.none && !left.editing && !right.editing && !filter-box.has-focus) {
-                if (root.view-menu-from-tree && root.show-tree) {
-                    tree-keys.focus();
-                } else {
-                    keys.focus();
-                }
+                root.give-keys-back();
             }
         }
     }

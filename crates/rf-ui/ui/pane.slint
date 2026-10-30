@@ -1100,6 +1100,11 @@ export component Pane inherits Rectangle {
                                 return accept;
                             }
                             let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                            // F6 leaves the field (the window's keys), but not while an input
+                            // method composes: the syllable would be lost with the focus.
+                            if (event.text == Key.F6 && self.composing) {
+                                return accept;
+                            }
                             if (!(listing || waiting) || !plain) {
                                 return reject;
                             }

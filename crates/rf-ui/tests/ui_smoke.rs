@@ -17,9 +17,9 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DropPlace, FactRow, FolderMenuRow, FolderMenuView,
-    HashRowView, JobRowView, JobTray, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
-    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecentRowView, RecoveryView, Theme,
+    HashRowView, ItemMenu, JobRowView, JobTray, MainWindow, MessageView, NameView, NoticeWindow,
+    PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView,
+    PropertiesView, RecentRowView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -4554,6 +4554,111 @@ fn the_view_menu_gives_the_tree_the_keys() {
     assert_eq!(calls.take(), ["key"]);
 }
 
+/// Lets the timers that give the keys back a moment later run.
+fn settle() {
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    slint::platform::update_timers_and_animations();
+}
+
+/// Gives a part of the window the keys.
+type GiveKeys = fn(&MainWindow);
+
+#[test]
+fn a_window_or_a_sub_menu_gives_the_keys_back_to_the_part_that_had_them() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_tree_key(move |_, _, _, _, _| {
+        record.note("tree");
+        true
+    });
+    let record = calls.clone();
+    window.on_panel_key(move |_, _, _, _, _| {
+        record.note("panel");
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    let parts: [(GiveKeys, &str); 3] = [
+        (MainWindow::invoke_focus_tree, "tree"),
+        (MainWindow::invoke_focus_panel, "panel"),
+        (MainWindow::invoke_focus_panes, "key"),
+    ];
+    for (give, owner) in parts {
+        // A window over the main window closes.
+        give(&window);
+        window.set_dialog(DialogKind::Message);
+        settle();
+        window.set_dialog(DialogKind::None);
+        settle();
+        press(&window, Key::DownArrow);
+        assert_eq!(calls.take(), [owner], "after a window");
+        // A choice in a sub-menu of the 보기 menu (테마 ▸ 밝게).
+        give(&window);
+        window.invoke_show_view_menu();
+        for _ in 0..4 {
+            press(&window, Key::DownArrow);
+        }
+        press(&window, Key::RightArrow);
+        press(&window, Key::DownArrow);
+        press(&window, Key::Return);
+        settle();
+        press(&window, Key::DownArrow);
+        assert_eq!(calls.take(), [owner], "after a sub-menu");
+    }
+    // A part that has gone meanwhile leaves the keys to the panes.
+    window.invoke_focus_tree();
+    window.set_dialog(DialogKind::Message);
+    settle();
+    window.set_show_tree(false);
+    window.set_dialog(DialogKind::None);
+    settle();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+}
+
+#[test]
+fn f6_leaves_the_path_field_and_the_filter_box_unless_a_syllable_is_composed() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    let f6 = special(Key::F6);
+    window.on_key(move |text, _, _, _, _, _| {
+        record.note(if text == f6.as_str() { "F6" } else { "key" });
+        true
+    });
+    let mut view = window.get_left_pane();
+    view.path_text = "/start".into();
+    window.set_left_pane(view);
+
+    // F6 goes to the window's keys, which take it on to the next part.
+    window.invoke_edit_path(0);
+    press(&window, Key::F6);
+    assert_eq!(calls.take(), ["F6"]);
+    window.invoke_focus_filter();
+    press(&window, Key::F6);
+    assert_eq!(calls.take(), ["F6"]);
+    // Other keys stay with the field, and F6 with a modifier.
+    chord(&window, &["x"]);
+    chord(&window, &[&special(Key::Shift), &special(Key::F6)]);
+    assert_eq!(calls.take(), Vec::<String>::new());
+
+    // Not while a syllable is composed: the field keeps it.
+    window.invoke_edit_path(0);
+    compose(&window, "ㅅ");
+    press(&window, Key::F6);
+    window.invoke_focus_filter();
+    compose(&window, "ㅅ");
+    press(&window, Key::F6);
+    assert_eq!(calls.take(), Vec::<String>::new());
+}
+
 #[test]
 fn the_view_menu_s_order_items_show_the_key_and_the_direction() {
     let window = window();
@@ -5131,7 +5236,7 @@ fn the_keys_open_the_item_menu_by_its_row_and_the_folder_s_menu() {
     ui_bridge::show_shortcuts(&window, Os::Windows);
     offer(&window, ONE_FILE);
     let at = || {
-        let menu = window.global::<rf_ui::ItemMenu<'_>>();
+        let menu = window.global::<ItemMenu<'_>>();
         (menu.get_at_x(), menu.get_at_y())
     };
     for mode in [ViewMode::Details, ViewMode::MediumIcons, ViewMode::List] {
@@ -5188,7 +5293,7 @@ fn the_select_menu_says_its_keys_and_runs_the_commands() {
             Os::Windows,
             [
                 "모두 선택  (Ctrl+A)",
-                "선택 해제  (Esc)",
+                "선택 해제",
                 "선택 반전  (Ctrl+Shift+I)",
                 "패턴으로 선택…  (Ctrl+S)",
                 "같은 확장자 선택  (Ctrl+Shift+S)",
@@ -5198,7 +5303,7 @@ fn the_select_menu_says_its_keys_and_runs_the_commands() {
             Os::MacOs,
             [
                 "모두 선택  (⌘A)",
-                "선택 해제  (⎋)",
+                "선택 해제",
                 "선택 반전  (⌥⇧⌘A)",
                 "패턴으로 선택…  (⌘S)",
                 "같은 확장자 선택  (⇧⌘S)",
@@ -5355,6 +5460,35 @@ fn the_menu_of_a_list_s_empty_part_lists_the_folder_again_in_every_view() {
             .dispatch_event(WindowEvent::PointerReleased { position, button });
         choose_item(&window, "새로 고침  (F5)");
         assert_eq!(calls.take(), ["pane 0", "command refresh"], "{mode:?}");
+    }
+}
+
+#[test]
+fn the_menu_of_a_list_s_empty_part_undoes_and_does_again_while_it_can() {
+    let window = window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let menu = window.global::<ItemMenu<'_>>();
+    for (undo, redo, called) in [
+        (false, false, vec![]),
+        (true, false, vec!["undo"]),
+        (false, true, vec!["redo"]),
+        (true, true, vec!["undo", "redo"]),
+    ] {
+        menu.set_can_undo(undo);
+        menu.set_can_redo(redo);
+        for item in ["되돌리기  (Ctrl+Z)", "다시 실행  (Ctrl+Y)"] {
+            window.invoke_show_blank_menu(0);
+            choose_item(&window, item);
+            // A disabled item leaves the menu open.
+            press(&window, Key::Escape);
+        }
+        assert_eq!(calls.take(), called, "undo {undo}, redo {redo}");
     }
 }
 
@@ -5576,7 +5710,7 @@ fn paste_is_off_in_the_menus_while_the_clipboard_holds_no_files() {
     let asked = Rc::new(Cell::new(0));
     let (holds, count) = (Rc::clone(&files), Rc::clone(&asked));
     window
-        .global::<rf_ui::ItemMenu<'_>>()
+        .global::<ItemMenu<'_>>()
         .on_no_files_to_paste(move || {
             count.set(count.get() + 1);
             !holds.get()
