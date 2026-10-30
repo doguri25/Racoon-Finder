@@ -203,6 +203,12 @@ struct Walk {
 /// for a file, size. Each item below it must be no newer than the copy job's end `at`, the rule
 /// of the look (`copies::as_left`): the copy gave every item the time of its source, and
 /// anything changed since has a later one.
+///
+/// Below the copy only that time is checked, not the size, the content or the identity. So an
+/// edit that also sets an item's modification time back to no later than `at` (a tool that
+/// keeps times, `touch -d`) is not seen, and the item is deleted: the same limit as the look's
+/// rule (`untouched_since`). The folder that holds an item added or taken away still shows it,
+/// unless its own time was set back too.
 #[derive(Clone, Copy, Debug)]
 struct Guard {
     modified: Option<SystemTime>,
