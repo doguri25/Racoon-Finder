@@ -17,7 +17,8 @@
 //!
 //! The panel needs a window at least [`PREVIEW_MIN_WINDOW`] wide: in a narrower one it hides
 //! ([`AppState::set_preview_cramped`]) and asks for nothing, and the setting stays, so it comes
-//! back when the window is wide enough; the first time, a notice says so.
+//! back when the window is wide enough; the first time, a notice says so. Turned on by the user
+//! (Alt+P, the menu) while the window is too narrow, it says so every time.
 //!
 //! Quick look opens on Space (and ⌘Y on macOS; while a name is being typed Space types, see
 //! `keys::pane_command`) over the item, and takes every key while it shows
@@ -61,7 +62,8 @@ pub(super) struct PreviewWork {
     quick_look: Option<QuickLookAt>,
     /// The window is too narrow for the panel ([`PREVIEW_MIN_WINDOW`]).
     cramped: bool,
-    /// The notice that the panel hid for the window's width has shown (once is enough).
+    /// The notice that the panel hid for the window's width has shown (once is enough while the
+    /// window hides it by itself).
     cramped_told: bool,
 }
 
@@ -136,12 +138,13 @@ impl AppState {
     /// why.
     pub fn set_preview_cramped(&mut self, cramped: bool) -> Vec<Effect> {
         self.preview.cramped = cramped;
-        self.tell_cramped()
+        self.tell_cramped(false)
     }
 
-    /// The notice that the panel is on but hidden for the window's width, once.
-    pub(super) fn tell_cramped(&mut self) -> Vec<Effect> {
-        if self.layout.preview && self.preview.cramped && !self.preview.cramped_told {
+    /// The notice that the panel is on but hidden for the window's width: once for the
+    /// window's own hiding, and every time the user turns it on (`asked`).
+    pub(super) fn tell_cramped(&mut self, asked: bool) -> Vec<Effect> {
+        if self.layout.preview && self.preview.cramped && (asked || !self.preview.cramped_told) {
             self.preview.cramped_told = true;
             return vec![Effect::Notice(words::preview_no_room().to_owned())];
         }

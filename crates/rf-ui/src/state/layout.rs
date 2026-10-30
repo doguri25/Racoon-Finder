@@ -161,11 +161,12 @@ impl AppState {
         }
     }
 
-    /// Shows or hides the preview panel (in a window too narrow for it, the first time it is
-    /// turned on a notice says why it does not show).
+    /// Shows or hides the preview panel. Turned on in a window too narrow for it, a notice says
+    /// why it does not show, each time: the user asked for it (the window hiding it by itself
+    /// says so once, [`AppState::set_preview_cramped`]).
     pub(super) fn toggle_preview(&mut self) -> Vec<Effect> {
         self.layout.preview = !self.layout.preview;
-        self.tell_cramped()
+        self.tell_cramped(true)
     }
 
     /// The two panes trade their tab sets, each tab with its folder, rows, history and

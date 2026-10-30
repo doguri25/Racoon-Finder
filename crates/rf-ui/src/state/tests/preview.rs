@@ -385,10 +385,17 @@ fn a_window_too_narrow_hides_the_panel_and_keeps_its_setting() {
     assert_eq!(state.set_preview_cramped(false), []);
     the_preview(&state.follow_preview());
     assert_eq!(state.set_preview_cramped(true), []);
-    // Turned on in a narrow window, it says so the first time.
+    // Turned on by the user in a narrow window, it says so each time: the user asked for it.
     let mut state = ready(mixed(), vec![]);
     assert_eq!(state.set_preview_cramped(true), []);
-    assert_eq!(press(&mut state, "p", ALT), Some(vec![notice]));
+    assert_eq!(press(&mut state, "p", ALT), Some(vec![notice.clone()]));
     assert!(state.layout().preview);
     assert_eq!(state.follow_preview(), []);
+    // Off: nothing to say. On again (the key, or the menu, which runs the same command): told
+    // again.
+    assert_eq!(press(&mut state, "p", ALT), Some(vec![]));
+    assert_eq!(press(&mut state, "p", ALT), Some(vec![notice]));
+    // The window hiding it again by itself has said it once already.
+    assert_eq!(state.set_preview_cramped(false), []);
+    assert_eq!(state.set_preview_cramped(true), []);
 }

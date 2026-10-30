@@ -29,6 +29,9 @@ pub mod tree;
 pub mod ui_bridge;
 pub mod words;
 
+#[cfg(test)]
+mod test_provider;
+
 #[allow(
     missing_debug_implementations,
     unused_qualifications,

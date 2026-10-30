@@ -34,7 +34,7 @@ use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::Encoding;
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, Limits};
-use rf_core::{EntryKind, ErrorKind, VPath};
+use rf_core::{Attributes, EntryKind, ErrorKind, VPath};
 use rf_vfs::{CancelToken, Provider, Vfs, VisibilityFilter};
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 
@@ -205,7 +205,9 @@ pub fn make_preview(
 
 /// The preview of the file at `path`: an image by its extension, else its first part as text.
 /// `None` when `cancel` stopped it, which it looks at before it opens the file, after it read
-/// it, and between the steps of an image's decoding ([`decode_image`]).
+/// it, and between the steps of an image's decoding ([`decode_image`]). A file stored online
+/// only is not opened: the listing the state went by may be older than a cloud drive taking its
+/// content away, so it asks again first.
 fn file_preview(
     provider: &dyn Provider,
     path: &VPath,
@@ -213,6 +215,12 @@ fn file_preview(
 ) -> Option<PreviewContent> {
     if cancel.is_cancelled() {
         return None;
+    }
+    if provider
+        .stat(path)
+        .is_ok_and(|entry| entry.attributes.contains(Attributes::OFFLINE))
+    {
+        return Some(PreviewContent::OnlineOnly);
     }
     let Ok(mut stream) = provider.open_read(path) else {
         return Some(PreviewContent::Unavailable);
@@ -499,7 +507,6 @@ mod tests {
     use std::path::PathBuf;
 
     use image::{ImageBuffer, Rgba, RgbaImage};
-    use rf_core::Attributes;
 
     use super::*;
 
@@ -1058,5 +1065,36 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_file_stored_online_only_since_it_was_listed_is_not_opened() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = scratch();
+        let notes = write(dir.path(), "notes.txt", b"hello\n");
+        let png = write(dir.path(), "a.png", &picture(30, 20, ImageFormat::Png));
+        // A cloud drive took their content away after the listing: the files are online only
+        // now, and reading them would download them.
+        let opened = Arc::new(AtomicBool::new(false));
+        let heard = Arc::clone(&opened);
+        let vfs = crate::test_provider::Hooked::vfs(
+            |_, entry| entry.attributes |= Attributes::OFFLINE,
+            move |_| heard.store(true, Ordering::SeqCst),
+        );
+        for path in [&notes, &png] {
+            assert_eq!(
+                make_preview(&request(path, EntryKind::File), &vfs, &CancelToken::new()),
+                Some(PreviewContent::OnlineOnly),
+                "{path:?}"
+            );
+        }
+        assert!(!opened.load(Ordering::SeqCst), "nothing was opened");
+        // As they are on the disk, they are read.
+        let vfs = crate::test_provider::Hooked::vfs(|_, _| {}, |_| {});
+        assert!(matches!(
+            make_preview(&request(&notes, EntryKind::File), &vfs, &CancelToken::new()),
+            Some(PreviewContent::Text(_))
+        ));
     }
 }
