@@ -702,6 +702,82 @@ fn a_selection_the_user_makes_before_the_new_item_shows_stays() {
 }
 
 #[test]
+fn a_job_that_ends_after_the_user_chose_rows_leaves_them_chosen() {
+    // The new folder is listed (the watch told of it) before its job ends, and the user picks
+    // another row meanwhile: the job's end selects nothing, so a Delete acts on that row.
+    let spec = JobSpec::Create {
+        parent: folder("a"),
+        name: "새 폴더".into(),
+        kind: rf_jobs::CreateKind::Dir,
+    };
+    for user_picks in [false, true] {
+        let mut state = ready(vec![file("x"), file("y")], vec![]);
+        state.track(Started {
+            id: JobId(1),
+            spec: Some(Arc::new(spec.clone())),
+            work: JobWork::Create,
+            origin: Some(LEFT),
+            via_history: false,
+        });
+        let generation = state.panes()[LEFT].active_tab().generation();
+        state.loaded(LoadEvent::Changes {
+            generation,
+            changes: vec![rf_vfs::Change::Upsert(dir("새 폴더"))],
+        });
+        if user_picks {
+            state.click_row(LEFT, 2, false, false);
+        }
+        let mut report = JobReport::new(JobId(1), &spec);
+        report.outputs.push(in_a("새 폴더"));
+        let effects = state.job_event(JobEvent::Finished {
+            id: JobId(1),
+            report: Arc::new(report),
+        });
+        if user_picks {
+            assert_eq!(selected(&state, LEFT), [2], "{effects:?}");
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::ScrollTo { .. })),
+                "{effects:?}"
+            );
+        } else {
+            assert_eq!(selected(&state, LEFT), [0]);
+        }
+    }
+}
+
+#[test]
+fn the_pattern_window_keeps_the_name_waiting_to_be_selected() {
+    let mut state = ready(vec![file("x")], vec![]);
+    let spec = JobSpec::Create {
+        parent: folder("a"),
+        name: "새 폴더".into(),
+        kind: rf_jobs::CreateKind::Dir,
+    };
+    finish(&mut state, 1, &spec, JobWork::Create, |report| {
+        report.outputs.push(in_a("새 폴더"));
+    });
+    // The pattern window opens and closes, and a cursor without an extension selects nothing:
+    // no row was chosen, so the new folder is still selected when it shows.
+    state.key(
+        Command::SelectPattern,
+        NONE,
+        Paging::rows(10),
+        Instant::now(),
+    );
+    assert!(matches!(state.modal(), Some(Modal::Pattern(_))));
+    state.dialog_cancelled();
+    let generation = state.panes()[LEFT].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Upsert(dir("새 폴더"))],
+    });
+    assert_eq!(rows(&state, LEFT), ["새 폴더", "x"]);
+    assert_eq!(selected(&state, LEFT), [0]);
+}
+
+#[test]
 fn a_failed_rename_says_why_and_a_failed_copy_lists_its_items() {
     let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
     let spec = JobSpec::Rename {

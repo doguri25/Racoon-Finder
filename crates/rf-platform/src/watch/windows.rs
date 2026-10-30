@@ -104,12 +104,14 @@ impl Drop for Watcher {
             return;
         };
         let handle = HANDLE(self.folder.as_raw_handle());
-        // One cancel is not enough: if the thread has looked at `stop` but not yet entered
-        // `ReadDirectoryChangesW`, nothing is pending to cancel, and the call then blocks for
-        // good. So cancel until the thread is gone.
+        // One cancel is not enough: if the thread has looked at `stop` but not yet put its next
+        // `ReadDirectoryChangesW` in place, nothing is pending to cancel, and the thread then
+        // waits in `GetOverlappedResult` for good. So cancel until the thread is gone: a cancel
+        // completes the pending call, which ends that wait.
         while !thread.is_finished() {
             // SAFETY: `handle` belongs to `self.folder`, which is open until `self` is gone.
-            // `CancelIoEx` without an `OVERLAPPED` cancels every pending call on the handle. It
+            // `CancelIoEx` without an `OVERLAPPED` cancels every pending call on the handle (the
+            // thread's own `OVERLAPPED` stays alive until its wait has seen the call end). It
             // fails when none is pending, which is fine, so the result is ignored.
             let _ = unsafe { CancelIoEx(handle, None) };
             std::thread::sleep(Duration::from_millis(10));

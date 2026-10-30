@@ -201,6 +201,8 @@ pub struct Tab {
     requested_sort: SortSpec,
     /// The name [`Tab::select_name`] waits for: it is selected when it shows.
     pending_select: Option<OsString>,
+    /// How many times the user has changed the selection ([`Tab::selection_epoch`]).
+    selection_epoch: u64,
     /// The row a waiting [`Tab::select_name`] selected, until [`Tab::take_revealed`].
     revealed: Option<usize>,
     /// The folder of the last run that the tab shows home in place of, until it goes
@@ -266,6 +268,7 @@ impl Tab {
             pending: Vec::new(),
             requested_sort: sort,
             pending_select: None,
+            selection_epoch: 0,
             revealed: None,
             stands_in_for: None,
         }
@@ -461,8 +464,22 @@ impl Tab {
     /// [`Tab::go_up`] waits to select ([`Tab::select_name`]) is forgotten, so that it does not
     /// take the selection the user chose when it shows later.
     pub fn selection_mut(&mut self) -> (&mut Selection, &[Entry]) {
-        self.pending_select = None;
+        self.user_selects();
         (&mut self.selection, &self.visible)
+    }
+
+    /// How many times the user has changed the selection of the tab ([`Tab::selection_mut`],
+    /// [`Tab::type_to_select`]): a job that ends selects its item only where this is as it was
+    /// when the job was submitted.
+    pub fn selection_epoch(&self) -> u64 {
+        self.selection_epoch
+    }
+
+    /// The user changes the selection: a name waiting to be selected is forgotten, and the
+    /// selection epoch moves on.
+    fn user_selects(&mut self) {
+        self.pending_select = None;
+        self.selection_epoch += 1;
     }
 
     /// The generation of the tab's last request; events of any other are dropped.
@@ -668,7 +685,7 @@ impl Tab {
     /// name that a job or [`Tab::go_up`] waits to select is forgotten, as for
     /// [`Tab::selection_mut`].
     pub fn type_to_select(&mut self, text: &str, now: Instant) -> Option<usize> {
-        self.pending_select = None;
+        self.user_selects();
         let (prefix, last) = &mut self.type_buffer;
         if now.saturating_duration_since(*last) > TYPE_TO_SELECT_WINDOW {
             prefix.clear();

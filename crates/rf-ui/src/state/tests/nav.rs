@@ -130,6 +130,29 @@ fn keys_move_the_cursor_and_select() {
 }
 
 #[test]
+fn a_key_before_the_parent_is_listed_keeps_the_folder_it_came_from_unselected() {
+    // Going up selects the folder it came from once the parent is listed, unless the user has
+    // pressed a key meanwhile: that key, not the folder, says where the selection goes.
+    for user_keys in [false, true] {
+        let mut state = ready(vec![], vec![]);
+        let effects = state
+            .key(Command::Up, NONE, Paging::rows(10), Instant::now())
+            .expect("the window takes it");
+        let request = the_load(&effects);
+        if user_keys {
+            state.key(Command::CursorDown, NONE, Paging::rows(10), Instant::now());
+        }
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: vec![dir("a"), dir("b")],
+        });
+        assert_eq!(rows(&state, LEFT), ["a", "b"]);
+        let came_from: &[usize] = if user_keys { &[] } else { &[0] };
+        assert_eq!(selected(&state, LEFT), came_from, "a key: {user_keys}");
+    }
+}
+
+#[test]
 fn typing_jumps_to_a_name() {
     let mut state = ready(vec![file("apple"), file("banana"), file("berry")], vec![]);
     let now = Instant::now();

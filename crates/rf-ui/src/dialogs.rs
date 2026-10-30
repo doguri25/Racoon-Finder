@@ -742,6 +742,7 @@ mod tests {
                 original: path("b.txt"),
             }],
             at: None,
+            resumed: false,
         };
         let copies = Confirm::delete_copies(spec.clone(), record);
         assert!(copies.danger);

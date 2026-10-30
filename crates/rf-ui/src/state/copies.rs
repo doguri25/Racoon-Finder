@@ -224,6 +224,7 @@ impl AppState {
                 .map(|(made, original)| CopyOf { made, original })
                 .collect(),
             at: check.at,
+            resumed: false,
         };
         self.open(Modal::Confirm(Confirm::delete_copies(spec, check.record)));
         effects
@@ -231,7 +232,8 @@ impl AppState {
 
     /// Takes the end of the job that gave `report` when it is a delete of copies the user
     /// confirmed: with every copy gone, the copy's record leaves the history (the window has
-    /// undone it) and a toast says so. `None` for any other job; for one that did not delete
+    /// undone it) and a toast says so, counting the copies it deleted (not those that were gone
+    /// already). `None` for any other job; for one that did not delete
     /// them all (a copy or an original changed after the offer: the job kept that copy), the
     /// usual notice tells why, and the record stays to be undone again.
     pub(super) fn copies_deleted(&mut self, report: &JobReport) -> Option<Vec<Effect>> {
@@ -245,14 +247,23 @@ impl AppState {
         if !all || self.quitting {
             return None;
         }
-        let count = match &spec {
-            JobSpec::DeleteCopies(delete) => delete.copies.len(),
+        // A copy that was gone already is skipped, not deleted.
+        let deleted = match &spec {
+            JobSpec::DeleteCopies(delete) => {
+                let skipped = usize::try_from(report.skipped).unwrap_or(usize::MAX);
+                delete.copies.len().saturating_sub(skipped)
+            }
             _ => 0,
+        };
+        let text = if deleted == 0 {
+            words::copies_were_gone().to_owned()
+        } else {
+            words::copies_deleted(deleted)
         };
         self.copies.origins.retain(|noted| noted.record != record);
         Some(vec![
             Effect::Job(JobEffect::ForgetUndo(record)),
-            self.toast(words::copies_deleted(count), None),
+            self.toast(text, None),
         ])
     }
 

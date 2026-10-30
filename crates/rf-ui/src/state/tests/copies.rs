@@ -305,6 +305,7 @@ fn an_undo_the_trash_refused_offers_the_copies_once_their_originals_are_found() 
             .map(|(made, original)| CopyOf { made, original })
             .collect(),
         at: *copied_at,
+        resumed: false,
     };
     assert!(matches!(
         &confirm.purpose,
@@ -367,6 +368,22 @@ fn a_yes_deletes_the_copies_by_a_job_that_looks_at_them_again() {
         the_toast(&effects).1,
         "복사본 2개를 영구 삭제해 복사를 되돌렸습니다"
     );
+}
+
+#[test]
+fn the_toast_counts_the_copies_deleted_not_those_gone_already() {
+    for (skipped, toast) in [
+        (1, "복사본 1개를 영구 삭제해 복사를 되돌렸습니다"),
+        (2, "복사본이 이미 없어 복사를 되돌렸습니다"),
+    ] {
+        let (mut state, record) = offered(&["a.txt", "b.txt"]);
+        let delete = confirmed(&mut state);
+        let effects = finish(&mut state, 3, &delete, JobWork::of(&delete), |report| {
+            report.skipped = skipped;
+        });
+        assert!(effects.contains(&Effect::Job(JobEffect::ForgetUndo(record))));
+        assert_eq!(the_toast(&effects).1, toast);
+    }
 }
 
 #[test]

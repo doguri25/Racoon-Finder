@@ -286,25 +286,12 @@ fn crash_mid_file(f: &Fx, journal: &Path) -> JobId {
     id
 }
 
-fn restart(journal: &Path) -> (JobEngine, Receiver<JobEvent>, Vec<IncompleteJob>, usize) {
-    let (e, rx) = JobEngine::start(
-        EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive)).with_journal(journal),
-    );
-    match wait_for(&rx, WAIT, |ev| matches!(ev, JobEvent::Recovered { .. })) {
-        JobEvent::Recovered {
-            jobs,
-            temp_files_removed,
-        } => (e, rx, jobs, temp_files_removed),
-        _ => unreachable!(),
-    }
-}
-
 #[test]
 fn a_crash_mid_file_is_recovered_on_the_next_start() {
     let f = fx();
     let journal = f.root.join("state");
     let id = crash_mid_file(&f, &journal);
-    let (e, rx, jobs, removed) = restart(&journal);
+    let (e, rx, jobs, removed) = restart(&journal, WAIT);
     assert_eq!(
         jobs.iter().map(|j| (j.id, j.started)).collect::<Vec<_>>(),
         [(id, true)]
@@ -324,7 +311,7 @@ fn a_crash_mid_file_is_recovered_on_the_next_start() {
     );
     assert_eq!(e.recovered(), Vec::<IncompleteJob>::new());
     assert!(e.shutdown(WAIT));
-    let (e3, _, jobs3, _) = restart(&journal);
+    let (e3, _, jobs3, _) = restart(&journal, WAIT);
     assert_eq!(jobs3, Vec::<IncompleteJob>::new());
     assert!(e3.shutdown(WAIT));
 }
@@ -334,11 +321,11 @@ fn a_dismissed_recovery_is_forgotten() {
     let f = fx();
     let journal = f.root.join("state");
     let id = crash_mid_file(&f, &journal);
-    let (e, _, _, _) = restart(&journal);
+    let (e, _, _, _) = restart(&journal, WAIT);
     assert!(e.dismiss_recovered(id));
     assert!(!e.dismiss_recovered(id));
     assert!(e.shutdown(WAIT));
-    let (e2, _, jobs, _) = restart(&journal);
+    let (e2, _, jobs, _) = restart(&journal, WAIT);
     assert_eq!(jobs, Vec::<IncompleteJob>::new());
     assert!(e2.shutdown(WAIT));
 }

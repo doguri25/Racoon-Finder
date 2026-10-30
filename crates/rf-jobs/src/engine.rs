@@ -573,10 +573,16 @@ impl JobEngine {
     /// `ConflictPolicy::AutoRename` it makes numbered copies of them), and a move fails with
     /// `NotFound` for each item it had moved already. A recovered [`JobSpec::Undo`] runs as a
     /// job the user ran, as [`submit`](Self::submit) says: it does not wait for an undo or a
-    /// redo under way, and its record goes on the undo list.
+    /// redo under way, and its record goes on the undo list. A recovered delete of copies that
+    /// had started runs [`JobSpec::resumed`]: it may have deleted part of a copied folder.
     pub fn resubmit_recovered(&self, id: JobId) -> Option<JobId> {
         let job = self.shared.lock().dismiss(id)?;
-        Some(self.submit(job.spec))
+        let spec = if job.started {
+            job.spec.resumed()
+        } else {
+            job.spec
+        };
+        Some(self.submit(spec))
     }
 
     /// Ends the engine, when the app ends: every queued job ends as [`Outcome::Cancelled`],

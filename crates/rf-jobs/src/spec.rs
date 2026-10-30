@@ -147,6 +147,13 @@ pub struct DeleteCopiesSpec {
     /// When the copy job ended (the `at` of its `UndoRecord::Copied`): a copied folder is as
     /// that job left it only while nothing in it is newer. Without it, no copied folder goes.
     pub at: Option<SystemTime>,
+    /// Whether a run of this delete may have gone before and deleted part of the copies: a retry
+    /// of one (`JobReport::retry_spec`), or a recovered one that a crash cut off after it had
+    /// started (`JobEngine::resubmit_recovered`). A copied folder it finds changed is then said
+    /// to be partly deleted already (the reason `CopyPartlyDeleted`) rather than changed by
+    /// someone else; it stays either way. `false` in a spec written before this was kept.
+    #[serde(default)]
+    pub resumed: bool,
 }
 
 /// A request to the engine.
@@ -210,6 +217,19 @@ impl JobSpec {
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
             Self::Undo(_) => JobKind::Undo,
+        }
+    }
+
+    /// This spec for a run after one that a crash cut off once it had started: a delete of
+    /// copies is [`DeleteCopiesSpec::resumed`]; any other spec is as it is.
+    #[must_use]
+    pub fn resumed(self) -> JobSpec {
+        match self {
+            Self::DeleteCopies(spec) => Self::DeleteCopies(DeleteCopiesSpec {
+                resumed: true,
+                ..spec
+            }),
+            other => other,
         }
     }
 

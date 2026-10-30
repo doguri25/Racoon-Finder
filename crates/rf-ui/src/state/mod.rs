@@ -325,6 +325,10 @@ pub struct AppState {
     quitting: bool,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
+    /// For each job under way, how far the user had changed the selection of each tab when it
+    /// was submitted (the tab's id and [`Tab::selection_epoch`]): the item the job makes is
+    /// selected when it ends only in a tab whose selection the user has not changed since.
+    selections_at_submit: HashMap<rf_jobs::JobId, Vec<(u64, u64)>>,
     /// The copies an undo of a copy could not trash, and where they came from.
     copies: copies::Copies,
     /// The items the last press on a row readied a drag of, under the id its payload carries.
@@ -445,6 +449,7 @@ impl AppState {
             toast_token: 0,
             quitting: false,
             journal_error_told: false,
+            selections_at_submit: HashMap::new(),
             copies: copies::Copies::default(),
             drag: None,
             pending_click: None,

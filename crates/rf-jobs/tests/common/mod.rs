@@ -1,13 +1,16 @@
 #![allow(dead_code, reason = "each test file uses a different part")]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
 use rf_core::VPath;
 use rf_core::identity::TEMP_PREFIX;
+use rf_jobs::testkit::wait_for;
 use rf_jobs::{
-    ExecEnv, JobId, JobReport, JobSpec, NonInteractive, Resolver, TransferMode, TransferOptions,
-    TransferSpec, execute,
+    EngineConfig, ExecEnv, IncompleteJob, JobEngine, JobEvent, JobId, JobReport, JobSpec,
+    NonInteractive, Resolver, TransferMode, TransferOptions, TransferSpec, execute,
 };
 use rf_vfs::Vfs;
 
@@ -61,6 +64,25 @@ pub fn run(job: &JobSpec) -> JobReport {
 
 pub fn run_on(job: &JobSpec, vfs: &Vfs, resolver: &dyn Resolver) -> JobReport {
     execute(JobId::generate(), job, &ExecEnv::new(vfs, resolver))
+}
+
+/// Starts an engine on the local disk with the journal in `journal`, as the next start of the
+/// app does, and waits up to `timeout` for what it recovers: the engine, its events, the jobs
+/// recovered and how many temporary files recovery removed.
+pub fn restart(
+    journal: &Path,
+    timeout: Duration,
+) -> (JobEngine, Receiver<JobEvent>, Vec<IncompleteJob>, usize) {
+    let (e, rx) = JobEngine::start(
+        EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive)).with_journal(journal),
+    );
+    match wait_for(&rx, timeout, |ev| matches!(ev, JobEvent::Recovered { .. })) {
+        JobEvent::Recovered {
+            jobs,
+            temp_files_removed,
+        } => (e, rx, jobs, temp_files_removed),
+        _ => unreachable!(),
+    }
 }
 
 pub fn pattern(len: u64) -> Vec<u8> {

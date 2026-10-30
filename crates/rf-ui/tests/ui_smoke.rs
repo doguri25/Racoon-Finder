@@ -1943,6 +1943,7 @@ fn the_copies_an_undo_could_not_trash_are_listed_by_their_whole_paths() {
             })
             .collect(),
         at: None,
+        resumed: false,
     };
     let confirm = rf_ui::dialogs::Confirm::delete_copies(spec, record);
     window.set_confirm_view(ui_bridge::confirm_view(&confirm));

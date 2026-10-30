@@ -1052,6 +1052,7 @@ mod tests {
                 original: remote(&["a.txt"]),
             }],
             at: Some(golden_time()),
+            resumed: true,
         })
     }
 
@@ -1125,7 +1126,7 @@ mod tests {
                     spec: delete_copies_golden(),
                     at,
                 },
-                r#"{"v":1,"rec":{"Submitted":{"job":5,"spec":{"DeleteCopies":{"copies":[{"made":{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]},"original":"remote://p/a.txt"}],"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
+                r#"{"v":1,"rec":{"Submitted":{"job":5,"spec":{"DeleteCopies":{"copies":[{"made":{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]},"original":"remote://p/a.txt"}],"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"resumed":true}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
             ),
             (
                 Record::Started { job: JobId(1) },
@@ -1201,6 +1202,14 @@ mod tests {
             copied_dirs: Vec::new(),
         };
         assert_eq!(serde_json::from_str::<UndoRecord>(older).unwrap(), without);
+        // A delete of copies from before `resumed` was kept: not resumed.
+        let older = r#"{"DeleteCopies":{"copies":[],"at":null}}"#;
+        let without = JobSpec::DeleteCopies(DeleteCopiesSpec {
+            copies: Vec::new(),
+            at: None,
+            resumed: false,
+        });
+        assert_eq!(serde_json::from_str::<JobSpec>(older).unwrap(), without);
     }
 
     /// `value` is written as `want`, and `want` reads back as `value`.

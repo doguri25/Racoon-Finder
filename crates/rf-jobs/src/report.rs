@@ -182,6 +182,10 @@ pub enum FailureReason {
     /// delete for good is not as its copy job left it, its original no longer holds everything
     /// it holds, or either cannot be told; how each was found is given. It is left in place.
     CopyKept(CopyFound),
+    /// `Delete`, `Unsupported`: a copied folder that a resumed delete of copies (a retry, or a
+    /// job a crash cut off) finds no longer as its copy job left it, as it is after that job
+    /// deleted part of it: the rest cannot be compared safely, so it is left in place.
+    CopyPartlyDeleted,
     /// `Undo`, `Unsupported`: an item a create job made is no longer of the kind it made, and is
     /// left in place.
     ChangedSinceCreated,
@@ -231,6 +235,7 @@ impl FailureReason {
             Self::Overwritten => "overwritten",
             Self::ChangedSinceCopy => "changed_since_copy",
             Self::CopyKept(_) => "copy_kept",
+            Self::CopyPartlyDeleted => "copy_partly_deleted",
             Self::ChangedSinceCreated => "changed_since_created",
             Self::NotEmpty => "not_empty",
             Self::TrashLocationUnknown => "trash_location_unknown",
@@ -364,7 +369,8 @@ impl JobReport {
     ///   spec this gives. A folder a permanent delete kept because of a failure below it is
     ///   not in the retry.
     /// - A delete of copies retries each copy that failed, or that something below it failed
-    ///   in, with what its copy job left: it is looked at again before it goes.
+    ///   in, with what its copy job left: it is looked at again before it goes. The retry is
+    ///   `DeleteCopiesSpec::resumed`, since this run may have deleted part of a copied folder.
     /// - A rename, a create or an undo is retried as it was asked, when it has any failure.
     ///
     /// Items that a cancelled or aborted job never reached are not failures and are not in the
@@ -444,9 +450,11 @@ impl JobReport {
             })
             .cloned()
             .collect();
+        // This run deleted what it could of them.
         (!copies.is_empty()).then_some(JobSpec::DeleteCopies(DeleteCopiesSpec {
             copies,
             at: spec.at,
+            resumed: true,
         }))
     }
 
@@ -739,6 +747,7 @@ mod tests {
             (FailureReason::TrashRefused, "trash_refused"),
             (FailureReason::TempLeftBehind, "temp_left_behind"),
             (FailureReason::CopyKept(CopyFound::SAME), "copy_kept"),
+            (FailureReason::CopyPartlyDeleted, "copy_partly_deleted"),
             (
                 FailureReason::Issue(IssueKind::ReservedName),
                 "reserved_name",

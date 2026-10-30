@@ -111,9 +111,11 @@ pub(crate) fn check_found(
     }
 }
 
-/// Whether `made`, an item a copy job made that ended at `at`, is still as the job left it:
-/// see [`as_left`]. Gone, it is `Missing`; past [`COMPARE_ITEMS`] items, after `cancel`, or
-/// for anything that cannot be looked at, it cannot be told.
+/// Whether `made`, an item a copy job made that ended at `at`, is still as the job left it, by
+/// the rule the undo of a copy checks it by: its recorded identity and modification time, the
+/// recorded size for a file, and nothing newer than `at` under a folder. Gone, it is `Missing`;
+/// without a recorded time (or `at`, for a folder), past [`COMPARE_ITEMS`] items, after
+/// `cancel`, or for anything that cannot be looked at, it cannot be told.
 ///
 /// Blocks (a large folder, a slow drive): call it on a worker thread.
 pub fn compare_with_made(

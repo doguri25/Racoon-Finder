@@ -496,6 +496,9 @@ pub fn failure_reason(reason: &FailureReason) -> String {
         FailureReason::CopyKept(found) => {
             copy_kept(CopyKept::of(*found).unwrap_or(CopyKept::CopyUnknown))
         }
+        FailureReason::CopyPartlyDeleted => {
+            "복사본의 일부를 이미 지워 나머지는 안전하게 비교할 수 없어 남겨 두었습니다"
+        }
         FailureReason::ChangedSinceCreated => "만든 뒤 다른 종류로 바뀌어 되돌리지 않았습니다",
         FailureReason::NotEmpty => "만든 뒤 내용이 생겨 되돌리지 않았습니다",
         FailureReason::TrashLocationUnknown => {
@@ -1254,6 +1257,12 @@ pub fn delete_copies(count: usize) -> String {
 /// The toast once the copies an undo could not trash are deleted for good: the copy is undone.
 pub fn copies_deleted(count: usize) -> String {
     format!("복사본 {count}개를 영구 삭제해 복사를 되돌렸습니다")
+}
+
+/// The toast when the copies an undo could not trash were all gone by the time their delete
+/// ran: nothing was deleted, and the copy is undone all the same.
+pub fn copies_were_gone() -> &'static str {
+    "복사본이 이미 없어 복사를 되돌렸습니다"
 }
 
 /// The notice while a worker looks at the copies an undo could not trash and their originals.
@@ -2188,6 +2197,7 @@ mod tests {
             ]
             .map(|(copy, original)| FailureReason::CopyKept(CopyFound { copy, original })),
         )
+        .chain([FailureReason::CopyPartlyDeleted])
         .collect()
     }
 

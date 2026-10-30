@@ -129,8 +129,15 @@ impl AppState {
 
     /// The selection tool `command` on the rows of pane `side`: Ctrl+Space flips the cursor's
     /// row; 모두 선택, 선택 해제 (Esc) and 선택 반전 select all, none or the others; 패턴으로
-    /// 선택… opens its window; 같은 확장자 선택 selects the rows like the cursor's.
+    /// 선택… opens its window; 같은 확장자 선택 selects the rows like the cursor's. The pattern
+    /// window and a cursor row without an extension select nothing, so they leave the selection,
+    /// and a name waiting to be selected (`Tab::selection_mut`), as they are.
     pub(super) fn select(&mut self, side: usize, command: &Command) -> Vec<Effect> {
+        match command {
+            Command::SelectPattern => return self.open_pattern(side),
+            Command::SelectSameExtension => return self.select_same_extension(side),
+            _ => {}
+        }
         let (selection, rows) = self.tab_mut(side).selection_mut();
         match command {
             Command::ToggleSelect => {
@@ -141,8 +148,6 @@ impl AppState {
             Command::SelectAll => selection.select_all(rows),
             Command::ClearSelection => selection.clear(),
             Command::InvertSelection => selection.invert(rows),
-            Command::SelectPattern => return self.open_pattern(side),
-            Command::SelectSameExtension => return self.select_same_extension(side),
             _ => {}
         }
         Vec::new()
@@ -152,14 +157,19 @@ impl AppState {
     /// case, are selected in place of the selection. A cursor on a row without one (a folder, a
     /// file such as `README`) selects nothing, and a notice says why.
     pub(super) fn select_same_extension(&mut self, side: usize) -> Vec<Effect> {
-        let (selection, rows) = self.tab_mut(side).selection_mut();
-        let Some(entry) = selection.cursor().and_then(|cursor| rows.get(cursor)) else {
+        let tab = self.tab(side);
+        let Some(entry) = tab
+            .selection()
+            .cursor()
+            .and_then(|cursor| tab.visible().get(cursor))
+        else {
             return Vec::new();
         };
         let Some(wanted) = entry.extension().map(folded) else {
             let name = entry.name.to_string_lossy();
             return vec![Effect::Notice(words::no_extension(&name))];
         };
+        let (selection, rows) = self.tab_mut(side).selection_mut();
         selection.select_where(rows, false, |_, row| {
             row.extension()
                 .is_some_and(|extension| folded(extension) == wanted)

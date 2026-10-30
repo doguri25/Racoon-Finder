@@ -74,6 +74,13 @@ impl AppState {
 
     /// Follows the job the engine started for an [`Effect::Job`].
     pub fn track(&mut self, started: Started) {
+        let marks = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .map(|tab| (tab.id(), tab.selection_epoch()))
+            .collect();
+        self.selections_at_submit.insert(started.id, marks);
         self.jobs.track(started);
     }
 
@@ -433,6 +440,8 @@ impl AppState {
         if !self.quitting {
             effects.push(self.space_to_read(&touched));
         }
+        // What the selection was when the job was submitted.
+        let marks = self.selections_at_submit.remove(&report.id);
         // Before the end of a cancelled copy, which may have made some of its items.
         self.note_copies(&report);
         if let Some(done) = self.copies_deleted(&report) {
@@ -446,7 +455,7 @@ impl AppState {
             && matches!(work, JobWork::Create | JobWork::Rename)
             && let (Some(side), Some(output)) = (origin, report.outputs.first())
         {
-            effects.extend(self.select_output(side, output));
+            effects.extend(self.select_output(side, output, marks.as_deref()));
         }
         // What an undo or a redo brought back (a name, a folder, an item from the trash) is
         // selected where a pane shows its folder, the active one first.
@@ -457,7 +466,7 @@ impl AppState {
                 .into_iter()
                 .find(|&side| Some(self.tab(side).location().clone()) == output.parent());
             if let Some(side) = side {
-                effects.extend(self.select_output(side, output));
+                effects.extend(self.select_output(side, output, marks.as_deref()));
             }
         }
 
@@ -582,13 +591,26 @@ impl AppState {
     }
 
     /// Selects `output`, the item a create or a rename made, in pane `side` if it still shows
-    /// the item's folder: now if the row is there, else once it comes.
-    fn select_output(&mut self, side: usize, output: &VPath) -> Vec<Effect> {
+    /// the item's folder: now if the row is there, else once it comes. Not when the user has
+    /// changed the selection of that tab since the job was submitted, as `marks` (the tabs'
+    /// selection epochs then, if they were noted) tell, or when the tab was not there then: what
+    /// the user chose stays, so that a key pressed right then (Delete) acts on it.
+    fn select_output(
+        &mut self,
+        side: usize,
+        output: &VPath,
+        marks: Option<&[(u64, u64)]>,
+    ) -> Vec<Effect> {
         let (Some(folder), Some(name)) = (output.parent(), output.file_name()) else {
             return Vec::new();
         };
         let tab = self.tab_mut(side);
         if *tab.location() != folder {
+            return Vec::new();
+        }
+        let untouched =
+            marks.is_none_or(|marks| marks.contains(&(tab.id(), tab.selection_epoch())));
+        if !untouched {
             return Vec::new();
         }
         tab.select_name(name.to_os_string())

@@ -7,15 +7,14 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 
 use common::*;
-use rf_jobs::testkit::{Fault, FaultyProvider, wait_finished, wait_for};
+use rf_jobs::testkit::{Fault, FaultyProvider, wait_finished};
 use rf_jobs::{
     Compared, CopyFound, CopyOf, CreatedItem, DeleteCopiesSpec, EngineConfig, FailureReason,
-    IncompleteJob, JobEngine, JobEvent, JobKind, JobReport, JobSpec, NonInteractive, Outcome,
-    Stage, UndoRecord, check_copy, compare_with_made, compare_with_original,
+    JobEngine, JobKind, JobReport, JobSpec, NonInteractive, Outcome, Stage, UndoRecord, check_copy,
+    compare_with_made, compare_with_original,
 };
 use rf_vfs::{CancelToken, LocalProvider, Provider, Vfs};
 
@@ -278,7 +277,11 @@ fn copied(f: &Fx, names: &[&str]) -> DeleteCopiesSpec {
             CopyOf { made, original }
         })
         .collect();
-    DeleteCopiesSpec { copies, at }
+    DeleteCopiesSpec {
+        copies,
+        at,
+        resumed: false,
+    }
 }
 
 /// Two files and a folder in `src`, and the delete of their copies in `dst`.
@@ -448,16 +451,6 @@ fn a_copy_that_is_gone_is_skipped() {
     assert!(!f.dst.join("b.txt").exists() && !f.dst.join("docs").exists());
 }
 
-fn restart(journal: &Path) -> (JobEngine, Receiver<JobEvent>, Vec<IncompleteJob>) {
-    let (e, rx) = JobEngine::start(
-        EngineConfig::new(Vfs::with_local(), Arc::new(NonInteractive)).with_journal(journal),
-    );
-    match wait_for(&rx, WAIT, |ev| matches!(ev, JobEvent::Recovered { .. })) {
-        JobEvent::Recovered { jobs, .. } => (e, rx, jobs),
-        _ => unreachable!(),
-    }
-}
-
 #[test]
 fn a_recovered_delete_of_copies_looks_at_them_again() {
     let f = fx();
@@ -487,7 +480,7 @@ fn a_recovered_delete_of_copies_looks_at_them_again() {
 
     // Before the next start, a copy is written to.
     std::fs::write(f.dst.join("a.txt"), "written since").unwrap();
-    let (e, rx, jobs) = restart(&journal);
+    let (e, rx, jobs, _) = restart(&journal, WAIT);
     let job = jobs
         .iter()
         .find(|job| job.id == id)
@@ -513,4 +506,196 @@ fn a_recovered_delete_of_copies_looks_at_them_again() {
     );
     assert!(!f.dst.join("b.txt").exists() && !f.dst.join("docs").exists());
     assert!(e.shutdown(WAIT));
+}
+
+/// The copy as changed while the job deleted it: kept, the copy changed.
+const CHANGED: CopyFound = CopyFound {
+    copy: Compared::Changed,
+    original: Compared::Unknown,
+};
+
+/// An engine on `p`, without a journal.
+fn engine_on(p: &Arc<FaultyProvider>) -> (JobEngine, std::sync::mpsc::Receiver<rf_jobs::JobEvent>) {
+    JobEngine::start(EngineConfig::new(p.vfs(), Arc::new(NonInteractive)))
+}
+
+/// Lets the clock of the file system pass the copy job's end, so that a change made from now on
+/// has a later time even where file times run on a coarse clock.
+fn after_the_copy() {
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[test]
+fn a_copy_written_while_the_job_is_paused_after_its_look_is_kept() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    let spec = copied(&f, &["a.txt"]);
+    // The look holds on the original, after it has found the copy as it was.
+    let p = FaultyProvider::local(vec![Fault::HoldAt {
+        path: v(f.src.join("a.txt")),
+    }]);
+    let (e, rx) = engine_on(&p);
+    let id = e.submit(JobSpec::DeleteCopies(spec));
+    assert!(p.wait_held(WAIT));
+    // The user pauses the job; it stops at the checkpoint after its look. Meanwhile the copy
+    // is written to, and then the job goes on.
+    assert!(e.pause(id));
+    p.release();
+    std::fs::write(f.dst.join("a.txt"), "written while paused").unwrap();
+    assert!(e.resume(id));
+    let report = wait_finished(&rx, id, WAIT);
+    assert_eq!(kept(&report), [(f.dst.join("a.txt"), CHANGED)]);
+    assert_eq!(
+        std::fs::read_to_string(f.dst.join("a.txt")).unwrap(),
+        "written while paused"
+    );
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn what_is_put_in_a_copied_folder_while_the_job_is_paused_stays() {
+    let f = fx();
+    for sub in ["a", "b"] {
+        std::fs::create_dir_all(f.src.join("docs").join(sub)).unwrap();
+        std::fs::write(f.src.join("docs").join(sub).join("old.txt"), sub).unwrap();
+    }
+    let spec = copied(&f, &["docs"]);
+    after_the_copy();
+    // The walk holds at the first file it deletes, whichever subfolder that is in.
+    let docs = f.dst.join("docs");
+    let p = FaultyProvider::local(
+        ["a", "b"]
+            .map(|sub| Fault::HoldAt {
+                path: v(docs.join(sub).join("old.txt")),
+            })
+            .to_vec(),
+    );
+    let (e, rx) = engine_on(&p);
+    let id = e.submit(JobSpec::DeleteCopies(spec));
+    assert!(p.wait_held(WAIT));
+    assert!(e.pause(id));
+    p.release();
+    // While it is paused, a file goes into each subfolder: one the walk has listed already,
+    // and one it has not reached yet.
+    for sub in ["a", "b"] {
+        std::fs::write(docs.join(sub).join("new.txt"), "N").unwrap();
+    }
+    assert!(e.resume(id));
+    let report = wait_finished(&rx, id, WAIT);
+    // Both new files stay, with their folders and the copied folder; each subfolder is kept
+    // as a changed copy.
+    for sub in ["a", "b"] {
+        assert!(docs.join(sub).join("new.txt").is_file(), "{sub}");
+    }
+    let mut kept = kept(&report);
+    kept.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(kept, [(docs.join("a"), CHANGED), (docs.join("b"), CHANGED)]);
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn a_cancel_during_the_look_stops_the_job_and_keeps_nothing_as_changed() {
+    let f = fx();
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    let spec = copied(&f, &["a.txt"]);
+    let p = FaultyProvider::local(vec![Fault::HoldAt {
+        path: v(f.src.join("a.txt")),
+    }]);
+    let (e, rx) = engine_on(&p);
+    let id = e.submit(JobSpec::DeleteCopies(spec));
+    assert!(p.wait_held(WAIT));
+    assert!(e.cancel(id));
+    p.release();
+    let report = wait_finished(&rx, id, WAIT);
+    assert_eq!(report.outcome, Outcome::Cancelled);
+    assert_eq!(report.failures, []);
+    assert_eq!(std::fs::read_to_string(f.dst.join("a.txt")).unwrap(), "A");
+    assert!(e.shutdown(WAIT));
+}
+
+/// A copied folder of two subfolders, `x` and `y`, with the files `x.txt` and `y.txt`, and a
+/// copied file.
+fn folder_and_file(f: &Fx) -> DeleteCopiesSpec {
+    for sub in ["x", "y"] {
+        std::fs::create_dir_all(f.src.join("docs").join(sub)).unwrap();
+        std::fs::write(f.src.join("docs").join(sub).join(format!("{sub}.txt")), sub).unwrap();
+    }
+    std::fs::write(f.src.join("a.txt"), "A").unwrap();
+    let spec = copied(f, &["docs", "a.txt"]);
+    after_the_copy();
+    spec
+}
+
+#[test]
+fn a_copied_folder_a_crash_left_partly_deleted_is_kept_and_said_to_be() {
+    let f = fx();
+    let journal = f.root.join("state");
+    let spec = folder_and_file(&f);
+    let docs = f.dst.join("docs");
+    // The app dies as it removes `x`, which it has emptied: like a killed process.
+    let p = FaultyProvider::local(vec![Fault::CrashAt {
+        path: v(docs.join("x")),
+    }]);
+    let (e, _rx) = JobEngine::start(
+        EngineConfig::new(p.vfs(), Arc::new(NonInteractive)).with_journal(&journal),
+    );
+    let id = e.submit(JobSpec::DeleteCopies(spec.clone()));
+    assert!(p.wait_crashed(WAIT));
+    assert!(!docs.join("x").join("x.txt").exists());
+    drop(e);
+
+    // The next start recovers it, and the user runs it again.
+    let (e, rx, jobs, _) = restart(&journal, WAIT);
+    let job = jobs
+        .iter()
+        .find(|job| job.id == id)
+        .expect("it is recovered");
+    assert!(job.started);
+    let again = e.resubmit_recovered(id).expect("resubmitted");
+    let report = wait_finished(&rx, again, WAIT);
+    // The folder is no longer as the copy left it, since this job emptied part of it: it stays,
+    // and the report says so rather than blame another program. The copied file goes.
+    let reasons: Vec<_> = report
+        .failures
+        .iter()
+        .map(|failure| (failure.source.clone(), failure.reason.clone()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [(Some(v(&docs)), Some(FailureReason::CopyPartlyDeleted))]
+    );
+    assert!(docs.join("x").is_dir());
+    assert!(!f.dst.join("a.txt").exists());
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn a_retry_finds_a_copied_folder_its_run_partly_deleted() {
+    let f = fx();
+    let spec = folder_and_file(&f);
+    let docs = f.dst.join("docs");
+    // One file of the folder cannot be deleted: the other subfolder goes, the folder stays.
+    let p = FaultyProvider::local(vec![Fault::FailDelete {
+        name: "y.txt".into(),
+    }]);
+    let report = run_on(&JobSpec::DeleteCopies(spec), &p.vfs(), &NonInteractive);
+    assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+    assert!(!docs.join("x").exists() && docs.join("y").join("y.txt").is_file());
+    let Some(JobSpec::DeleteCopies(retry)) = report.retry_spec() else {
+        panic!("a retry: {:?}", report.retry_spec());
+    };
+    assert!(retry.resumed);
+    assert_eq!(retry.copies.len(), 1);
+    // The retry finds the folder changed by its own run: it stays, and the report says why.
+    let report = run(&JobSpec::DeleteCopies(retry));
+    let reasons: Vec<_> = report
+        .failures
+        .iter()
+        .map(|failure| (failure.source.clone(), failure.reason.clone()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [(Some(v(&docs)), Some(FailureReason::CopyPartlyDeleted))]
+    );
+    assert!(docs.join("y").join("y.txt").is_file());
 }

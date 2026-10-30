@@ -27,6 +27,7 @@
 //! (`openat`, `unlinkat`), the follow-up for this.
 
 use std::ops::ControlFlow;
+use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath, VolumeId};
 use rf_vfs::{DeleteMode, Deleted, Provider};
@@ -35,7 +36,7 @@ use super::{
     At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Parent, Stopped, Walking, on_another_volume,
     other_volume, too_deep, volume_of,
 };
-use crate::copies::{self, CopyFound};
+use crate::copies::{self, Compared, CopyFound};
 use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{DeleteCopiesSpec, DeleteMethod, DeleteSpec, ErrorPolicy};
 use crate::undo::{TrashedItem, UndoRecord};
@@ -56,7 +57,11 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
         DeleteMethod::Trash => trash(ctx, spec.errors, &items),
         DeleteMethod::Permanent => {
             for (path, entry) in &items {
-                let deleted = delete_entry(ctx, spec.errors, path, entry, Level::TOP, None);
+                let walk = Walk {
+                    errors: spec.errors,
+                    guard: None,
+                };
+                let deleted = delete_entry(ctx, walk, path, entry, Level::TOP, None);
                 if deleted.is_break() {
                     break;
                 }
@@ -74,9 +79,16 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
 /// `copies::check_found` on what `stat` gave, which the delete then works from. A copy that is
 /// gone is skipped. One found any other way than [`CopyFound::SAME`] stays, and fails as
 /// `Stage::Delete` with `Unsupported` and the reason `CopyKept`: a copy or an original changed
-/// after the job was submitted, or before a job a crash cut off runs again, keeps the copy. What
-/// remains is the window of every permanent delete: a change between that look and the steps
-/// of the delete, each of which looks at its own item again (see [`restat`]), is not seen.
+/// after the job was submitted, or before a job a crash cut off runs again, keeps the copy. In
+/// a job that may have run before ([`DeleteCopiesSpec::resumed`]: a retry, or a job a crash cut
+/// off), a copied folder found changed may be one it already partly deleted, so its reason is
+/// `CopyPartlyDeleted` then.
+///
+/// The delete itself holds every item of the copy to the look (see [`Guard`]) at the step that
+/// deletes or lists it, after that step's checkpoint: a change made while the job was paused
+/// after the look, or between two steps of its walk, keeps the item and the folders above it,
+/// each kept item failing with `CopyKept` (the copy changed). A folder that another program put
+/// an item in after its listing fails to be removed and counts as changed in the same way.
 pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
     let mut totals = Totals::default();
     for copy in &spec.copies {
@@ -117,14 +129,25 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
             );
             // A look that a cancel cut short stops the job, rather than keep the copy for it.
             ctx.check().at(Stage::Delete)?;
-            if found != CopyFound::SAME {
-                return Err(copy_kept(path, found));
+            if found == CopyFound::SAME {
+                Ok(Some(now))
+            } else if spec.resumed && copy.made.is_dir && found.copy != Compared::Same {
+                Err(partly_deleted(path))
+            } else {
+                Err(copy_kept(path, found))
             }
-            Ok(Some(now))
         });
         let flow = match looked {
             Attempt::Done(Some(now)) => {
-                delete_entry(ctx, ErrorPolicy::Continue, path, &now, Level::TOP, None)
+                let walk = Walk {
+                    errors: ErrorPolicy::Continue,
+                    guard: Some(Guard {
+                        modified: now.modified,
+                        size: now.size,
+                        at: spec.at,
+                    }),
+                };
+                delete_entry(ctx, walk, path, &now, Level::TOP, None)
             }
             Attempt::Done(None) => {
                 ctx.report.skipped += 1;
@@ -144,6 +167,61 @@ fn copy_kept(path: &VPath, found: CopyFound) -> Failed {
         "{path} is not as it was copied, or its original is not ({found:?}); left in place"
     ));
     Failed::refused(Stage::Delete, error, FailureReason::CopyKept(found))
+}
+
+/// The failure of the item `path` of a copy that changed while a delete of copies deleted the
+/// copy (see [`Guard`]): `CopyKept`, the copy changed.
+fn changed_copy(path: &VPath) -> Failed {
+    let found = CopyFound {
+        copy: Compared::Changed,
+        original: Compared::Unknown,
+    };
+    copy_kept(path, found)
+}
+
+/// The failure of the copied folder `path` that a resumed delete of copies finds changed, as it
+/// would be after that job had deleted part of it: `CopyPartlyDeleted`.
+fn partly_deleted(path: &VPath) -> Failed {
+    let error = Error::Unsupported(format!(
+        "{path} may have been partly deleted already; the rest cannot be compared safely and is \
+         left in place"
+    ));
+    Failed::refused(Stage::Delete, error, FailureReason::CopyPartlyDeleted)
+}
+
+/// How a permanent delete walks: its error policy, and for a delete of copies what it holds
+/// each item to before the item goes.
+#[derive(Clone, Copy, Debug)]
+struct Walk {
+    errors: ErrorPolicy,
+    guard: Option<Guard>,
+}
+
+/// What a delete of copies holds each item of a copy to, at the step that deletes or lists it,
+/// after that step's checkpoint (where a pause waits) and on what that step's own `stat` finds.
+/// The copy itself must still be as the job's look found it: of the same modification time and,
+/// for a file, size. Each item below it must be no newer than the copy job's end `at`, the rule
+/// of the look (`copies::as_left`): the copy gave every item the time of its source, and
+/// anything changed since has a later one.
+#[derive(Clone, Copy, Debug)]
+struct Guard {
+    modified: Option<SystemTime>,
+    size: u64,
+    at: Option<SystemTime>,
+}
+
+impl Guard {
+    /// Whether the item at `level` of the walk (`Level::TOP` for the copy itself), which a
+    /// step's `stat` finds as `now`, may go.
+    fn allows(self, level: Level<'_>, now: &Entry) -> bool {
+        if level.depth() == 0 {
+            now.modified.is_some()
+                && now.modified == self.modified
+                && (now.kind == EntryKind::Dir || now.size == self.size)
+        } else {
+            matches!((now.modified, self.at), (Some(modified), Some(at)) if modified <= at)
+        }
+    }
 }
 
 /// What the job will delete: each path of `spec` that `stat` finds (a link itself, not what it
@@ -357,9 +435,10 @@ fn checked<T>(
 
 /// Deletes `path`, which `entry` describes, for good; `level` says how far below a path of the
 /// job it is, and `parent` is the folder it is in (`None` for a path of the job). Every step is
-/// an attempt under `errors` that checks for a pause or a cancel first, so a failure, a retry
-/// and the progress go item by item. Each step looks at its item, then checks its folder (see
-/// [`checked`]), and only then acts. An item below a path of the job that is gone by the time a
+/// an attempt under the walk's error policy that checks for a pause or a cancel first, so a
+/// failure, a retry and the progress go item by item. Each step looks at its item, then checks
+/// its folder (see [`checked`]), then holds the item to the walk's [`Guard`] if it has one, and
+/// only then acts. An item below a path of the job that is gone by the time a
 /// step reaches it counts as gone, with no failure, and is not counted as done. No undo record
 /// is kept.
 ///
@@ -370,19 +449,19 @@ fn checked<T>(
 ///   [`delete_leaf`].
 fn delete_entry(
     ctx: &mut Ctx<'_>,
-    errors: ErrorPolicy,
+    walk: Walk,
     path: &VPath,
     entry: &Entry,
     level: Level<'_>,
     parent: Option<Parent<'_>>,
 ) -> Flow {
-    if let Some(failed) = too_deep(ctx, level, errors, path, None) {
+    if let Some(failed) = too_deep(ctx, level, walk.errors, path, None) {
         return kept(&failed);
     }
     if entry.kind == EntryKind::Dir {
-        delete_dir(ctx, errors, path, entry, level, parent)
+        delete_dir(ctx, walk, path, entry, level, parent)
     } else {
-        delete_leaf(ctx, errors, path, entry, parent)
+        delete_leaf(ctx, walk, path, entry, level, parent)
     }
 }
 
@@ -409,18 +488,24 @@ fn restat(provider: &dyn Provider, path: &VPath, entry: &Entry) -> Result<Entry,
 /// one other file, which then goes in its place.
 fn delete_leaf(
     ctx: &mut Ctx<'_>,
-    errors: ErrorPolicy,
+    walk: Walk,
     path: &VPath,
     entry: &Entry,
+    level: Level<'_>,
     parent: Option<Parent<'_>>,
 ) -> Flow {
-    let deleted = ctx.attempt(errors, Some(path), None, |ctx| {
+    let deleted = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
         ctx.working_on(path);
         let own = restat(&*provider, path, entry);
-        if checked(&*provider, parent, own)?.is_none() {
+        let Some(now) = checked(&*provider, parent, own)? else {
             return Ok(None);
+        };
+        if let Some(guard) = walk.guard
+            && !guard.allows(level, &now)
+        {
+            return Err(changed_copy(path));
         }
         unless_gone(
             provider.delete_leaf(path).at(Stage::Delete),
@@ -445,13 +530,17 @@ fn delete_leaf(
 /// unknown: a folder on another volume (a mount point) fails as `Stage::Delete` with
 /// `Unsupported`. After the listing it is checked once more against what `stat` found before
 /// it: if it, or a folder above it, was swapped for a link while it was listed, the listing
-/// came from somewhere else, and the step fails before any child is touched.
+/// came from somewhere else, and the step fails before any child is touched. Under a `guard`
+/// (a delete of copies, at `level` of its walk), what `stat` finds before the listing must pass
+/// it, or the folder is kept as a changed copy.
 fn open_dir(
     ctx: &mut Ctx<'_>,
     provider: &dyn Provider,
     path: &VPath,
     entry: &Entry,
+    level: Level<'_>,
     parent: Option<Parent<'_>>,
+    guard: Option<Guard>,
 ) -> Result<Option<(Entry, Vec<Entry>)>, Failed> {
     let own = restat(provider, path, entry);
     let Some(before) = checked(provider, parent, own)? else {
@@ -460,6 +549,11 @@ fn open_dir(
     let above = parent.and_then(|parent| parent.entry.volume_id);
     if on_another_volume(above, before.volume_id) {
         return Err(other_volume(Stage::Delete, path));
+    }
+    if let Some(guard) = guard
+        && !guard.allows(level, &before)
+    {
+        return Err(changed_copy(path));
     }
     ctx.working_on(path);
     let child = parent.is_some();
@@ -482,19 +576,20 @@ fn open_dir(
 /// once more, as for a leaf, and it is removed with `Provider::remove_dir`, which removes only
 /// an empty folder. A folder with a child that failed or stayed is kept without a failure of
 /// its own; one that another program put a file in meanwhile fails to be removed
-/// (`DirectoryNotEmpty`) and keeps that file.
+/// (`DirectoryNotEmpty`) and keeps that file, and under a [`Guard`] it is kept as a changed
+/// copy.
 fn delete_dir(
     ctx: &mut Ctx<'_>,
-    errors: ErrorPolicy,
+    walk: Walk,
     path: &VPath,
     entry: &Entry,
     level: Level<'_>,
     parent: Option<Parent<'_>>,
 ) -> Flow {
-    let opened = ctx.attempt(errors, Some(path), None, |ctx| {
+    let opened = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
-        open_dir(ctx, &*provider, path, entry, parent)
+        open_dir(ctx, &*provider, path, entry, level, parent, walk.guard)
     });
     let (before, children) = match opened {
         Attempt::Done(Some(opened)) => opened,
@@ -512,7 +607,7 @@ fn delete_dir(
             Ok(child_path) => child_path,
             Err(error) => {
                 // No path names the child; the error names it.
-                let failed = ctx.attempt(errors, Some(path), None, |_| {
+                let failed = ctx.attempt(walk.errors, Some(path), None, |_| {
                     Err::<(), _>(Failed::new(Stage::Delete, error.clone().into()))
                 });
                 kept(&failed)?;
@@ -520,22 +615,26 @@ fn delete_dir(
                 continue;
             }
         };
-        all_gone &= delete_entry(ctx, errors, &child_path, child, here.below(), Some(this))?;
+        all_gone &= delete_entry(ctx, walk, &child_path, child, here.below(), Some(this))?;
     }
     if !all_gone {
         return ControlFlow::Continue(false);
     }
-    let removed = ctx.attempt(errors, Some(path), None, |ctx| {
+    let removed = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
         let own = restat(&*provider, path, &before);
         if checked(&*provider, parent, own)?.is_none() {
             return Ok(None);
         }
-        unless_gone(
-            provider.remove_dir(path).at(Stage::Delete),
-            parent.is_some(),
-        )
+        // Its own time changed as its items went; only an item put in since can stop it now.
+        let removed = match provider.remove_dir(path) {
+            Err(error) if walk.guard.is_some() && error.kind() == ErrorKind::DirectoryNotEmpty => {
+                return Err(changed_copy(path));
+            }
+            removed => removed,
+        };
+        unless_gone(removed.at(Stage::Delete), parent.is_some())
     });
     match removed {
         Attempt::Done(Some(())) => {

@@ -322,6 +322,14 @@ pub enum Fault {
     CrossDevice,
     /// Deleting an item called `name` (`delete` or `delete_leaf`) fails with `PermissionDenied`.
     FailDelete { name: OsString },
+    /// A `stat` or `delete_leaf` of `path` waits until [`FaultyProvider::release`], as a slow
+    /// disk holds a job there; once released, every later call passes. It wakes
+    /// [`FaultyProvider::wait_held`] before it waits.
+    HoldAt { path: VPath },
+    /// Like a killed process: a `delete_leaf` or `remove_dir` of `path` deletes nothing, wakes
+    /// [`FaultyProvider::wait_crashed`], and stops the deleting thread for good. No later code,
+    /// no `Drop`, runs on it.
+    CrashAt { path: VPath },
     /// Just before the first permanent delete (`delete` with `DeleteMode::Permanent`, or
     /// `delete_leaf`) is passed on, a file `name` with the content `late` appears next to the
     /// item, as if another app wrote it during a move. Once only. If that file cannot be made,
@@ -533,6 +541,32 @@ impl FaultyProvider {
         entry
     }
 
+    /// Waits at a [`Fault::HoldAt`] of `path` until [`FaultyProvider::release`].
+    fn hold_at(&self, path: &VPath) {
+        let held = self
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::HoldAt { path: at } if at == path));
+        if held {
+            self.shared.set(|signals| signals.held = true);
+            self.shared.wait_until(|signals| signals.released);
+        }
+    }
+
+    /// Stops this thread for good at a [`Fault::CrashAt`] of `path`, once it has said so.
+    fn crash_at(&self, path: &VPath) {
+        let crash = self
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::CrashAt { path: at } if at == path));
+        if crash {
+            self.shared.set(|signals| signals.crashed = true);
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
     /// Fails with `PermissionDenied` when a [`Fault::FailDelete`] names the item at `path`.
     fn refuse_delete(&self, path: &VPath) -> Result<()> {
         let refused = self.faults.iter().any(|fault| {
@@ -608,6 +642,7 @@ impl Provider for FaultyProvider {
     }
 
     fn stat(&self, path: &VPath) -> Result<Entry> {
+        self.hold_at(path);
         let refused = self.faults.iter().any(|fault| {
             matches!(fault, Fault::FailStat { name } if path.file_name() == Some(name.as_os_str()))
         });
@@ -665,6 +700,8 @@ impl Provider for FaultyProvider {
     }
 
     fn delete_leaf(&self, path: &VPath) -> Result<()> {
+        self.hold_at(path);
+        self.crash_at(path);
         self.refuse_delete(path)?;
         self.make_late_file(path)?;
         self.inner.delete_leaf(path)
@@ -759,6 +796,7 @@ impl Provider for FaultyProvider {
     }
 
     fn remove_dir(&self, path: &VPath) -> Result<()> {
+        self.crash_at(path);
         if self.faults.contains(&Fault::FailRemoveDir) {
             let error = io::Error::other("injected remove_dir failure");
             return Err(Error::io("remove_dir", path.clone(), error));
