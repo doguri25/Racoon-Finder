@@ -81,6 +81,27 @@ fn watch_channel(dir: &std::path::Path) -> (rf_platform::DirWatch, mpsc::Receive
     (watch, rx)
 }
 
+/// A change made the moment `watch_dir` returns is reported: the watch is in place by then
+/// (on Windows the first `ReadDirectoryChangesW` is, and an inotify watch is at once). Not
+/// pinned for `FSEvents`, which only says that it reports changes after its stream started.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_change_right_after_the_start_is_reported() {
+    let t = tempfile::tempdir().unwrap();
+    // Many rounds: a watch that returned before it was in place would miss some of them.
+    for round in 0..20 {
+        let dir = t.path().join(format!("w{round}"));
+        std::fs::create_dir(&dir).unwrap();
+        let (_watch, rx) = watch_channel(&dir);
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let seen = recv_until(
+            &rx,
+            |event| matches!(event, DirEvent::Changed(n) | DirEvent::Renamed { to: n, .. } if n == "a.txt"),
+        );
+        assert!(seen, "round {round}: no event for a file made at once");
+    }
+}
+
 #[test]
 fn a_file_is_not_a_directory() {
     let t = tempfile::tempdir().unwrap();

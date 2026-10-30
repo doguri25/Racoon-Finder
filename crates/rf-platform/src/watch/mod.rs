@@ -82,6 +82,11 @@ type Backend = notify::RecommendedWatcher;
 /// Watches the folder `dir` for changes to its direct children; nothing inside a subfolder is
 /// reported. `handler` is called on a thread of the backend, so it needs to be quick.
 ///
+/// On Windows and Linux it returns once the OS watches the folder, so a change made after it
+/// returns is reported: a caller that lists the folder after this misses nothing in between.
+/// On Windows a folder whose file system gives no change notifications fails here then, with
+/// the system's error, rather than with a watch that ends at once.
+///
 /// A folder that does not exist gives `ErrorKind::NotFound` and something that is not a folder
 /// gives `ErrorKind::NotADirectory`, both with the operation `"watch"`. A non-local path gives
 /// `Error::Unsupported`.
