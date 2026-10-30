@@ -202,11 +202,14 @@ pub struct Tab {
     pending: Vec<Change>,
     /// The order the listing in progress was asked for in.
     requested_sort: SortSpec,
-    /// The name [`Tab::select_name`] waits for: it is selected when it shows.
-    pending_select: Option<OsString>,
+    /// The names [`Tab::select_names`] waits for: each is selected when it shows.
+    pending_select: Vec<OsString>,
+    /// Whether a name of the same call shows selected already, so that the waiting names join
+    /// the selection rather than take its place.
+    pending_joins: bool,
     /// How many times the user has changed the selection ([`Tab::selection_epoch`]).
     selection_epoch: u64,
-    /// The row a waiting [`Tab::select_name`] selected, until [`Tab::take_revealed`].
+    /// The row a waiting [`Tab::select_names`] selected, until [`Tab::take_revealed`].
     revealed: Option<usize>,
     /// The folder of the last run that the tab shows home in place of, until it goes
     /// somewhere ([`Tab::stand_in_for`]).
@@ -270,7 +273,8 @@ impl Tab {
             incoming: Vec::new(),
             pending: Vec::new(),
             requested_sort: sort,
-            pending_select: None,
+            pending_select: Vec::new(),
+            pending_joins: false,
             selection_epoch: 0,
             revealed: None,
             stands_in_for: None,
@@ -464,7 +468,7 @@ impl Tab {
     /// The selection to change, with the rows it refers to: a click is
     /// `let (selection, rows) = tab.selection_mut(); selection.click(i, rows);`. It is for a
     /// change the user makes (a click, a key, a selection tool): the name a job or
-    /// [`Tab::go_up`] waits to select ([`Tab::select_name`]) is forgotten, so that it does not
+    /// [`Tab::go_up`] waits to select ([`Tab::select_names`]) is forgotten, so that it does not
     /// take the selection the user chose when it shows later.
     pub fn selection_mut(&mut self) -> (&mut Selection, &[Entry]) {
         self.user_selects();
@@ -478,10 +482,10 @@ impl Tab {
         self.selection_epoch
     }
 
-    /// The user changes the selection: a name waiting to be selected is forgotten, and the
+    /// The user changes the selection: the names waiting to be selected are forgotten, and the
     /// selection epoch moves on.
     fn user_selects(&mut self) {
-        self.pending_select = None;
+        self.pending_select.clear();
         self.selection_epoch += 1;
     }
 
@@ -534,12 +538,13 @@ impl Tab {
     }
 
     /// Goes to the parent folder, like [`Tab::navigate`]; `None` at a root. The folder it
-    /// came from is selected, with the cursor, once it shows ([`Tab::select_name`]).
+    /// came from is selected, with the cursor, once it shows ([`Tab::select_names`]).
     pub fn go_up(&mut self) -> Option<LoadRequest> {
         let parent = self.location.parent()?;
         let came_from = self.location.file_name().map(OsStr::to_os_string);
         let request = self.navigate(parent);
-        self.pending_select = came_from;
+        self.pending_select = came_from.into_iter().collect();
+        self.pending_joins = false;
         Some(request)
     }
 
@@ -723,22 +728,41 @@ impl Tab {
         self.type_buffer.0.clear();
     }
 
-    /// Selects the row called `name` alone and puts the cursor on it: the item a job has just
-    /// made or renamed. A name that does not show yet is selected when it comes (by the
-    /// listing or the watch), unless the tab moves to another folder first or the user changes
-    /// the selection meanwhile ([`Tab::selection_mut`], [`Tab::type_to_select`]). Gives the row
-    /// when it shows already.
-    pub fn select_name(&mut self, name: OsString) -> Option<usize> {
-        let Some(row) = self.visible.iter().position(|entry| entry.name == name) else {
-            self.pending_select = Some(name);
-            return None;
-        };
-        self.selection.click(row, &self.visible);
-        self.pending_select = None;
-        Some(row)
+    /// Selects the rows called `names` and no others, and puts the cursor on the first of them
+    /// in the list: the items a job has just made, renamed or pasted. A name that does not show
+    /// yet is selected when it comes (by the listing or the watch): the first to come takes the
+    /// selection's place and the cursor when none of `names` showed, and the others join it,
+    /// unless the tab moves to another folder first or the user changes the selection meanwhile
+    /// ([`Tab::selection_mut`], [`Tab::type_to_select`]). Gives the cursor's row when one of
+    /// them shows already.
+    pub fn select_names(&mut self, names: &[OsString]) -> Option<usize> {
+        let wanted: HashSet<&OsStr> = names.iter().map(OsString::as_os_str).collect();
+        let first = self
+            .visible
+            .iter()
+            .position(|entry| wanted.contains(entry.name.as_os_str()));
+        if let Some(first) = first {
+            self.selection.click(first, &self.visible);
+            self.selection
+                .select_where(&self.visible, true, |_, entry| {
+                    wanted.contains(entry.name.as_os_str())
+                });
+        }
+        let shown: HashSet<&OsStr> = self
+            .visible
+            .iter()
+            .map(|entry| entry.name.as_os_str())
+            .collect();
+        self.pending_select = names
+            .iter()
+            .filter(|name| !shown.contains(name.as_os_str()))
+            .cloned()
+            .collect();
+        self.pending_joins = first.is_some();
+        first
     }
 
-    /// The row a waiting [`Tab::select_name`] has selected since the last call, to scroll to.
+    /// The row a waiting [`Tab::select_names`] has selected since the last call, to scroll to.
     pub fn take_revealed(&mut self) -> Option<usize> {
         self.revealed.take()
     }
@@ -777,7 +801,7 @@ impl Tab {
         self.name_filter.clear();
         self.selection = Selection::default();
         self.free = None;
-        self.pending_select = None;
+        self.pending_select.clear();
         self.revealed = None;
         self.start_request()
     }
@@ -811,7 +835,7 @@ impl Tab {
         }
         self.status = LoadStatus::Ready;
         self.refresh_visible();
-        if self.selection.cursor().is_none() && self.pending_select.is_none() {
+        if self.selection.cursor().is_none() && self.pending_select.is_empty() {
             self.selection.place_cursor(0, &self.visible);
         }
     }
@@ -834,15 +858,44 @@ impl Tab {
             .collect();
         self.unfiltered = unfiltered;
         self.selection.reconcile(&old, &self.visible);
-        let waited = self
-            .pending_select
-            .as_ref()
-            .and_then(|name| self.visible.iter().position(|entry| entry.name == *name));
-        if let Some(row) = waited {
-            self.selection.click(row, &self.visible);
-            self.pending_select = None;
-            self.revealed = Some(row);
+        self.select_arrived();
+    }
+
+    /// Selects the names [`Tab::select_names`] waits for that show now: the first of them takes
+    /// the selection's place and the cursor (to scroll to, [`Tab::take_revealed`]) when none of
+    /// the same call was selected before, and the others join the selection.
+    fn select_arrived(&mut self) {
+        if self.pending_select.is_empty() {
+            return;
         }
+        let waiting: HashSet<&OsStr> = self
+            .pending_select
+            .iter()
+            .map(OsString::as_os_str)
+            .collect();
+        let arrived: HashSet<OsString> = self
+            .visible
+            .iter()
+            .filter(|entry| waiting.contains(entry.name.as_os_str()))
+            .map(|entry| entry.name.clone())
+            .collect();
+        let Some(first) = self
+            .visible
+            .iter()
+            .position(|entry| arrived.contains(&entry.name))
+        else {
+            return;
+        };
+        if !self.pending_joins {
+            self.selection.click(first, &self.visible);
+            self.revealed = Some(first);
+            self.pending_joins = true;
+        }
+        self.selection
+            .select_where(&self.visible, true, |_, entry| {
+                arrived.contains(&entry.name)
+            });
+        self.pending_select.retain(|name| !arrived.contains(name));
     }
 }
 

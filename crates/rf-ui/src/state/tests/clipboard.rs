@@ -6,13 +6,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use rf_jobs::{
-    ConflictPolicy, JobSpec, Outcome, TransferItem, TransferMode, TransferOptions, TransferSpec,
+    ConflictPolicy, JobEvent, JobSpec, Outcome, TransferItem, TransferMode, TransferOptions,
+    TransferSpec,
 };
 use rf_platform::clipboard::{ClipboardFiles, DropEffect};
 
 use super::jobs::finish;
 use super::*;
-use crate::jobs::JobEffect;
+use crate::jobs::{JobEffect, Started};
 use crate::keys::Command;
 use crate::words::{self, JobWork};
 
@@ -1030,4 +1031,145 @@ fn file_urls_read_back_as_their_paths() {
             Some(FileUrl::Path("/a\\b".to_owned()))
         );
     }
+}
+
+/// The watch of pane `side` tells that `names` came, as files.
+fn files_came(state: &mut AppState, side: usize, names: &[&str]) {
+    let generation = state.panes()[side].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation,
+        changes: names
+            .iter()
+            .map(|name| rf_vfs::Change::Upsert(file(name)))
+            .collect(),
+    });
+}
+
+#[test]
+fn what_a_paste_made_is_selected_as_it_shows() {
+    // File Explorer selects the items a paste made. Here a copy of `z.txt` and `x.txt` into `a`,
+    // which has an `x.txt` of its own: the job made `z.txt` and `x (2).txt`.
+    let mut state = two_panes();
+    let token = paste(&mut state, LEFT);
+    let effects = state.clipboard_read(
+        token,
+        Ok(Some(files(
+            &[in_b("z.txt"), in_b("x.txt")],
+            Some(DropEffect::Copy),
+            12,
+        ))),
+    );
+    let (spec, _) = the_submit(&effects);
+    // The watch told of one of them before the job ended: it is selected, with the cursor.
+    files_came(&mut state, LEFT, &["z.txt"]);
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outputs = vec![in_a("z.txt"), in_a("x (2).txt")];
+    });
+    assert_eq!(rows(&state, LEFT), ["docs", "x.txt", "y.txt", "z.txt"]);
+    assert!(
+        effects.contains(&Effect::ScrollTo { side: LEFT, row: 3 }),
+        "{effects:?}"
+    );
+    assert_eq!(selected(&state, LEFT), [3]);
+    assert_eq!(cursor(&state, LEFT), Some(3));
+    // The other joins the selection when it shows; the cursor stays on its item.
+    files_came(&mut state, LEFT, &["x (2).txt"]);
+    assert_eq!(
+        rows(&state, LEFT),
+        ["docs", "x (2).txt", "x.txt", "y.txt", "z.txt"]
+    );
+    assert_eq!(selected(&state, LEFT), [1, 4]);
+    assert_eq!(cursor(&state, LEFT), Some(4));
+
+    // A move pasted in the other pane, none of whose items shows yet: the first to show is
+    // selected with the cursor, the next joins it.
+    let token = put(&mut state, 2, true);
+    state.clipboard_put(token, Ok(20));
+    let token = paste(&mut state, RIGHT);
+    let effects = state.clipboard_read(
+        token,
+        Ok(Some(files(
+            &[in_a("y.txt"), in_a("x.txt")],
+            Some(DropEffect::Move),
+            20,
+        ))),
+    );
+    let (spec, _) = the_submit(&effects);
+    let effects = finish(&mut state, 2, &spec, JobWork::Move, |report| {
+        report.outputs = vec![in_b("y.txt"), in_b("x.txt")];
+    });
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScrollTo { .. })),
+        "{effects:?}"
+    );
+    files_came(&mut state, RIGHT, &["y.txt"]);
+    assert_eq!(rows(&state, RIGHT), ["y.txt", "z.txt"]);
+    assert_eq!(selected(&state, RIGHT), [0]);
+    assert_eq!(cursor(&state, RIGHT), Some(0));
+    files_came(&mut state, RIGHT, &["x.txt"]);
+    assert_eq!(rows(&state, RIGHT), ["x.txt", "y.txt", "z.txt"]);
+    assert_eq!(selected(&state, RIGHT), [0, 1]);
+    assert_eq!(cursor(&state, RIGHT), Some(1));
+}
+
+#[test]
+fn a_paste_selects_nothing_the_user_did_not_leave_to_it() {
+    // The user picks a row while the paste runs: what the user chose stays, so that a key
+    // pressed right then (Delete) acts on it.
+    let mut state = two_panes();
+    let token = paste(&mut state, LEFT);
+    let effects = state.clipboard_read(
+        token,
+        Ok(Some(files(&[in_b("z.txt")], Some(DropEffect::Copy), 30))),
+    );
+    let (spec, _) = the_submit(&effects);
+    state.track(Started {
+        id: JobId(1),
+        spec: Some(Arc::new(spec.clone())),
+        work: JobWork::Copy,
+        origin: Some(LEFT),
+        via_history: false,
+    });
+    state.click_row(LEFT, 2, false, false);
+    let mut report = JobReport::new(JobId(1), &spec);
+    report.outputs = vec![in_a("z.txt")];
+    state.job_event(JobEvent::Finished {
+        id: JobId(1),
+        report: Arc::new(report),
+    });
+    files_came(&mut state, LEFT, &["z.txt"]);
+    assert_eq!(rows(&state, LEFT), ["docs", "x.txt", "y.txt", "z.txt"]);
+    assert_eq!(selected(&state, LEFT), [2]);
+
+    // Pasted into a folder row: the pane does not show where the items went, and its
+    // selection stays.
+    let mut state = two_panes();
+    state.click_row(LEFT, 0, false, false);
+    let effects = state.paste_from_menu(false);
+    let ClipboardWork::ReadFiles { token } = the_work(&effects) else {
+        panic!("expected a read, got {effects:?}");
+    };
+    let effects = state.clipboard_read(
+        token,
+        Ok(Some(files(&[in_b("z.txt")], Some(DropEffect::Copy), 31))),
+    );
+    let docs = in_a("docs");
+    let into_docs = docs.join("z.txt").expect("a plain name");
+    let (spec, _) = the_submit(&effects);
+    assert_eq!(
+        spec,
+        transfer(TransferMode::Copy, &[(in_b("z.txt"), into_docs.clone())])
+    );
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outputs = vec![into_docs];
+    });
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScrollTo { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(selected(&state, LEFT), [0]);
 }

@@ -3,6 +3,9 @@
 //! the app's end. A child of [`state`](super), so these methods see the fields of
 //! [`AppState`].
 
+use std::ffi::{OsStr, OsString};
+use std::slice;
+
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
@@ -435,6 +438,7 @@ impl AppState {
         let mut effects = self.folders_changed(&touched);
         // A move a paste submitted empties the clipboard once it has moved everything.
         effects.extend(self.paste_ended(&report));
+        let pasted_in = self.pasted_in(&report);
         effects.extend(self.pick_made(&report));
         // Whatever it did, a cancelled job too, it may have changed the room left.
         if !self.quitting {
@@ -455,7 +459,16 @@ impl AppState {
             && matches!(work, JobWork::Create | JobWork::Rename)
             && let (Some(side), Some(output)) = (origin, report.outputs.first())
         {
-            effects.extend(self.select_output(side, output, marks.as_deref()));
+            effects.extend(self.select_outputs(side, slice::from_ref(output), marks.as_deref()));
+        }
+        // What a paste made is selected in the pane it was asked in, as File Explorer does;
+        // what it could not make (a failure) is not among its outputs.
+        if matches!(
+            report.outcome,
+            Outcome::Completed | Outcome::CompletedWithErrors
+        ) && let Some(side) = pasted_in
+        {
+            effects.extend(self.select_outputs(side, &report.outputs, marks.as_deref()));
         }
         // What an undo or a redo brought back (a name, a folder, an item from the trash) is
         // selected where a pane shows its folder, the active one first.
@@ -466,7 +479,11 @@ impl AppState {
                 .into_iter()
                 .find(|&side| Some(self.tab(side).location().clone()) == output.parent());
             if let Some(side) = side {
-                effects.extend(self.select_output(side, output, marks.as_deref()));
+                effects.extend(self.select_outputs(
+                    side,
+                    slice::from_ref(output),
+                    marks.as_deref(),
+                ));
             }
         }
 
@@ -590,22 +607,25 @@ impl AppState {
         Some(self.toast(words::and_gone(text, gone), action))
     }
 
-    /// Selects `output`, the item a create or a rename made, in pane `side` if it still shows
-    /// the item's folder: now if the row is there, else once it comes. Not when the user has
-    /// changed the selection of that tab since the job was submitted, as `marks` (the tabs'
-    /// selection epochs then, if they were noted) tell, or when the tab was not there then: what
-    /// the user chose stays, so that a key pressed right then (Delete) acts on it.
-    fn select_output(
+    /// Selects `outputs`, the items a create, a rename, an undo or a paste made, in pane `side`:
+    /// those in the folder it still shows, now if their rows are there, else as they come. Not
+    /// when the user has changed the selection of that tab since the job was submitted, as
+    /// `marks` (the tabs' selection epochs then, if they were noted) tell, or when the tab was
+    /// not there then: what the user chose stays, so that a key pressed right then (Delete) acts
+    /// on it.
+    fn select_outputs(
         &mut self,
         side: usize,
-        output: &VPath,
+        outputs: &[VPath],
         marks: Option<&[(u64, u64)]>,
     ) -> Vec<Effect> {
-        let (Some(folder), Some(name)) = (output.parent(), output.file_name()) else {
-            return Vec::new();
-        };
         let tab = self.tab_mut(side);
-        if *tab.location() != folder {
+        let names: Vec<OsString> = outputs
+            .iter()
+            .filter(|output| output.parent().as_ref() == Some(tab.location()))
+            .filter_map(|output| output.file_name().map(OsStr::to_os_string))
+            .collect();
+        if names.is_empty() {
             return Vec::new();
         }
         let untouched =
@@ -613,7 +633,7 @@ impl AppState {
         if !untouched {
             return Vec::new();
         }
-        tab.select_name(name.to_os_string())
+        tab.select_names(&names)
             .map(|row| Effect::ScrollTo { side, row })
             .into_iter()
             .collect()

@@ -24,7 +24,8 @@
 //! taken get a number (`파일 (2).txt`, [`ConflictPolicy::AutoRename`]), and so does a copy into
 //! the folder the items are in. A cut never deletes anything itself: only the move job does,
 //! item by item, and once it has moved everything the clipboard is emptied (as File Explorer
-//! does), if it still holds what the paste read.
+//! does), if it still holds what the paste read. What a paste made is selected in the pane it
+//! was asked in, as it shows there.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -294,6 +295,9 @@ pub(super) struct ClipWork {
     /// The moves pastes submitted that have not ended, with the change count of what the
     /// clipboard held when they read it.
     moves: Vec<(JobSpec, u64)>,
+    /// The pastes submitted that have not ended, with the pane each was asked in: what one
+    /// makes is selected there ([`AppState::pasted_in`]).
+    pasted: Vec<(JobSpec, usize)>,
 }
 
 impl ClipWork {
@@ -647,6 +651,7 @@ impl AppState {
                 if mode == TransferMode::Move {
                     self.clipboard.moves.push((spec.clone(), change));
                 }
+                self.clipboard.pasted.push((spec.clone(), to.side));
                 vec![submit(spec, Some(to.side))]
             }
             Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
@@ -682,6 +687,18 @@ impl AppState {
             self.clipboard.own = None;
         }
         vec![Effect::Clipboard(ClipboardWork::ClearIf(change))]
+    }
+
+    /// The pane a paste that ended with `report` was asked in, where what it made is selected
+    /// (as File Explorer selects what it pastes); `None` for a job that is no paste. Each paste
+    /// is told of once.
+    pub(super) fn pasted_in(&mut self, report: &JobReport) -> Option<usize> {
+        let at = self
+            .clipboard
+            .pasted
+            .iter()
+            .position(|(spec, _)| *spec == report.spec)?;
+        Some(self.clipboard.pasted.remove(at).1)
     }
 
     /// 경로 복사 in `form`: the paths of the items of pane `side` (the selected rows, or the row
