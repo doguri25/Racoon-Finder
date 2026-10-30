@@ -122,7 +122,7 @@ pub enum Command {
     Properties,
     /// Show or hide hidden items.
     ToggleHidden,
-    /// Show or hide the extensions of the files' names (파일 확장명 보기).
+    /// Show or hide the extensions of the files' names (파일 확장자 보기).
     ToggleExtensions,
     /// The view modes (NAV-06): one row per item with columns (자세히), names in columns (목록),
     /// and icons of three sizes.

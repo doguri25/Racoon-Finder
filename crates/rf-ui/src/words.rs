@@ -321,6 +321,12 @@ pub fn sync_cannot_follow() -> &'static str {
     "반대편 패널이 따라갈 수 없어 탐색 동기화를 껐습니다"
 }
 
+/// The notice when the panes were swapped while sync waited for the other pane's listing to
+/// follow a move: what it would follow now is the pane with the keys, so sync is off.
+pub fn sync_off_by_swap() -> &'static str {
+    "패널을 맞바꿔 탐색 동기화를 껐습니다"
+}
+
 /// The notice when a command for the other pane (the same folder there, navigation sync) is
 /// asked for while one pane shows.
 pub fn one_pane_only() -> &'static str {
@@ -333,9 +339,9 @@ pub fn last_tab_stays() -> &'static str {
 }
 
 /// The notice when a tab went to the other pane while one pane shows: it is in the hidden
-/// pane, which the 보기 menu's 듀얼 패널 shows.
+/// pane, which the 보기 menu's 배치 ▸ 듀얼 패널 (F12) shows.
 pub fn tab_moved_to_hidden() -> &'static str {
-    "탭을 숨은 반대편 패널로 옮겼습니다. 보기 메뉴의 ‘듀얼 패널’로 볼 수 있습니다"
+    "탭을 숨은 반대편 패널로 옮겼습니다. 보기 ▸ 배치 ▸ 듀얼 패널(F12)로 볼 수 있습니다"
 }
 
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
@@ -348,10 +354,10 @@ pub fn start_folder_gone(folder: &VPath) -> String {
 }
 
 /// The notice when the system could not start the work behind part of the window (it is out
-/// of threads or memory): the sidebar, the first folders, or where to go from a vanished
-/// folder.
+/// of threads or memory): a listing, a preview, a look at the clipboard, a worker of the app's
+/// start. Each of them can be asked for again.
 pub fn background_failed() -> &'static str {
-    "시스템 자원이 부족해 일부 내용을 불러오지 못했습니다"
+    "시스템 자원이 부족해 작업을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
 }
 
 /// The notice when the settings (tabs, theme, window size) could not be written: the next
@@ -839,7 +845,7 @@ pub fn all_jobs_done_with_failures() -> &'static str {
 
 /// The notice of a window that stays shown because it could not make the tray icon.
 pub fn tray_unavailable() -> &'static str {
-    "트레이 아이콘을 만들지 못해 창을 닫지 않았습니다."
+    "트레이 아이콘을 만들지 못해 창을 닫지 않았습니다"
 }
 
 /// The button of the question before the window closes while jobs run that keeps them going
@@ -948,6 +954,18 @@ pub fn clipboard_failed(failure: ClipboardFailure) -> &'static str {
 /// A paste with no files or folders on the clipboard (text, an image, nothing).
 pub fn nothing_to_paste() -> &'static str {
     "클립보드에 붙여넣을 파일이나 폴더가 없습니다"
+}
+
+/// A paste of a cut the user cancelled with Esc, which the clipboard still holds: nothing
+/// moves.
+pub fn cut_cancelled() -> &'static str {
+    "잘라내기를 취소해 붙여넣을 항목이 없습니다"
+}
+
+/// A paste whose `count` paths of the clipboard all name no folder or file it can take (a
+/// device or a volume of Windows, a file URL of another computer on macOS): nothing is pasted.
+pub fn clipboard_skipped(count: usize) -> String {
+    format!("클립보드의 항목 {count}개가 모두 붙여넣을 수 없는 경로라 붙여넣지 않았습니다")
 }
 
 /// A paste of a folder into itself or into a folder inside it.
@@ -2043,7 +2061,7 @@ mod tests {
         );
         assert_eq!(
             background_failed(),
-            "시스템 자원이 부족해 일부 내용을 불러오지 못했습니다"
+            "시스템 자원이 부족해 작업을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
         );
     }
 

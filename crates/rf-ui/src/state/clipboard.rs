@@ -582,7 +582,7 @@ impl AppState {
         // A cut cancelled with Esc that the clipboard still holds (its emptying is on its way,
         // or failed) pastes nothing; Finder's ⌥⌘V, a move asked for by name, still moves.
         if self.clipboard.cancelled_change == Some(files.change) && !to.force_move {
-            let mut effects = vec![Effect::Notice(words::nothing_to_paste().to_owned())];
+            let mut effects = vec![Effect::Notice(words::cut_cancelled().to_owned())];
             effects.extend(self.drop_cancelled(files.change));
             return effects;
         }
@@ -608,7 +608,12 @@ impl AppState {
         let (sources, left_out) = local_paths(&files.paths);
         let left_out = left_out + files.skipped;
         if sources.is_empty() {
-            return vec![Effect::Notice(words::nothing_to_paste().to_owned())];
+            let notice = if left_out > 0 {
+                words::clipboard_skipped(left_out)
+            } else {
+                words::nothing_to_paste().to_owned()
+            };
+            return vec![Effect::Notice(notice)];
         }
         let mode = if moves {
             TransferMode::Move

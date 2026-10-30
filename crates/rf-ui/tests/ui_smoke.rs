@@ -5338,14 +5338,14 @@ fn the_view_menu_shows_and_hides_the_extensions() {
     let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
     button.invoke_accessible_default_action();
     // On by default, as the names show them.
-    assert!(marked(&window, "파일 확장명 보기"));
-    choose_item(&window, "파일 확장명 보기");
+    assert!(marked(&window, "파일 확장자 보기"));
+    choose_item(&window, "파일 확장자 보기");
     assert_eq!(calls.take(), ["toggle-extensions"]);
     window.set_show_extensions(false);
     button.invoke_accessible_default_action();
-    assert!(!marked(&window, "파일 확장명 보기"));
+    assert!(!marked(&window, "파일 확장자 보기"));
     assert_eq!(
-        labelled(&window, "파일 확장명 보기", AccessibleRole::Text).len(),
+        labelled(&window, "파일 확장자 보기", AccessibleRole::Text).len(),
         1
     );
     press(&window, Key::Escape);

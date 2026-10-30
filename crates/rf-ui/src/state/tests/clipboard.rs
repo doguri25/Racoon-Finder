@@ -485,7 +485,7 @@ fn nothing_to_paste_and_a_clipboard_that_cannot_be_read_say_so() {
             words::clipboard_failed(ClipboardFailure::Unavailable).to_owned()
         )]
     );
-    // Paths that are not local ones are no files to paste.
+    // Paths that are not local ones are not pasted, and the notice says why.
     let token = paste(&mut state, LEFT);
     let relative = ClipboardFiles {
         paths: vec![PathBuf::from("relative.txt")],
@@ -495,7 +495,7 @@ fn nothing_to_paste_and_a_clipboard_that_cannot_be_read_say_so() {
     };
     assert_eq!(
         state.clipboard_read(token, Ok(Some(relative))),
-        [Effect::Notice(words::nothing_to_paste().to_owned())]
+        [Effect::Notice(words::clipboard_skipped(1))]
     );
     // An answer nobody asked for, or asked for twice, does nothing.
     assert_eq!(state.clipboard_read(token, Ok(None)), []);
@@ -603,7 +603,7 @@ fn a_cut_cancelled_before_its_put_was_told_is_never_pasted() {
     assert_eq!(
         state.clipboard_read(read, cut()),
         [
-            Effect::Notice(words::nothing_to_paste().to_owned()),
+            Effect::Notice(words::cut_cancelled().to_owned()),
             Effect::Clipboard(ClipboardWork::ClearIf(60)),
         ]
     );
@@ -676,7 +676,7 @@ fn a_cancelled_cut_the_clipboard_will_not_drop_is_tried_again_and_then_told() {
     let cut = Ok(Some(files(&[in_a("x.txt")], Some(DropEffect::Move), 70)));
     assert_eq!(
         state.clipboard_read(read, cut)[0],
-        Effect::Notice(words::nothing_to_paste().to_owned())
+        Effect::Notice(words::cut_cancelled().to_owned())
     );
 
     // Once something else is on the clipboard, nothing is left to empty.
@@ -785,7 +785,7 @@ fn a_device_path_on_the_clipboard_is_left_out_and_told() {
         transfer(TransferMode::Copy, &[(in_b("z.txt"), in_a("z.txt"))])
     );
     assert!(effects.contains(&Effect::Notice(words::paste_left_out(1))));
-    // Nothing but such paths: nothing to paste.
+    // Nothing but such paths: nothing is pasted, and the notice says why.
     let read = paste(&mut state, LEFT);
     let only = ClipboardFiles {
         paths: vec![shadow.clone()],
@@ -795,7 +795,7 @@ fn a_device_path_on_the_clipboard_is_left_out_and_told() {
     };
     assert_eq!(
         state.clipboard_read(read, Ok(Some(only))),
-        [Effect::Notice(words::nothing_to_paste().to_owned())]
+        [Effect::Notice(words::clipboard_skipped(1))]
     );
 }
 
@@ -818,7 +818,7 @@ fn file_urls_the_system_left_out_are_told_with_the_paths_left_out() {
         transfer(TransferMode::Copy, &[(in_b("z.txt"), in_a("z.txt"))])
     );
     assert!(effects.contains(&Effect::Notice(words::paste_left_out(3))));
-    // The left-out URLs alone, with no path: nothing to paste.
+    // The left-out URLs alone, with no path: nothing is pasted, and the notice says why.
     let read = paste(&mut state, LEFT);
     let none = ClipboardFiles {
         paths: Vec::new(),
@@ -828,7 +828,7 @@ fn file_urls_the_system_left_out_are_told_with_the_paths_left_out() {
     };
     assert_eq!(
         state.clipboard_read(read, Ok(Some(none))),
-        [Effect::Notice(words::nothing_to_paste().to_owned())]
+        [Effect::Notice(words::clipboard_skipped(2))]
     );
 }
 

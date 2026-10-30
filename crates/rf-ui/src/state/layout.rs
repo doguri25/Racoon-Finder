@@ -185,7 +185,7 @@ impl AppState {
             .into_iter()
             .any(|side| self.tab(side).generation() == wait.generation);
         if live {
-            return self.stop_sync(words::sync_cannot_follow().to_owned());
+            return self.stop_sync(words::sync_off_by_swap().to_owned());
         }
         Vec::new()
     }

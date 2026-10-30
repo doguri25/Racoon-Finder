@@ -817,9 +817,10 @@ fn swapping_the_panes_while_sync_waits_turns_it_off() {
 
     let effects = press(&mut state, "u", CTRL).expect("a shortcut");
 
+    // The swap is what turned it off, not the other pane.
     assert_eq!(
         effects,
-        [Effect::Notice(words::sync_cannot_follow().to_owned())]
+        [Effect::Notice(words::sync_off_by_swap().to_owned())]
     );
     assert!(!state.syncing());
     // The tab that waited now shows on the left, the side with the keyboard: nothing enters it.
