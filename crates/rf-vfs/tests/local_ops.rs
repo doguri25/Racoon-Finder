@@ -201,22 +201,46 @@ fn names_differing_only_in_case_never_overwrite_each_other() {
     assert_eq!(std::fs::read(upper.as_local().unwrap()).unwrap(), b"upper");
 }
 
+/// Whether the volume of the folder `root` is APFS that ignores both letter case and the
+/// Unicode form of a name (NFC or NFD): macOS's usual system volume. Each is tried on a file
+/// made for it.
+#[cfg(target_os = "macos")]
+fn case_and_form_blind_apfs(root: &VPath) -> bool {
+    let apfs = rf_platform::volume::volume_info(root)
+        .ok()
+        .and_then(|info| info.fs_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case("apfs"));
+    let dir = root.as_local().unwrap();
+    // Made under one spelling, looked for under the other.
+    let finds = |made: &str, other: &str| {
+        std::fs::write(dir.join(made), b"").unwrap();
+        let found = std::fs::metadata(dir.join(other)).is_ok();
+        std::fs::remove_file(dir.join(made)).unwrap();
+        found
+    };
+    apfs && finds("probe.txt", "PROBE.TXT")
+        && finds("\u{D55C}.probe", "\u{1112}\u{1161}\u{11ab}.probe")
+}
+
 /// On APFS the two Unicode forms of a name (NFC and NFD) are one name, as `a.txt` and `A.TXT`
-/// are: a rename that changes only the form is a rename of the item itself, not onto another.
+/// are on its usual case-insensitive volumes: a rename that changes only the form is a rename
+/// of the item itself, not onto another, and the folder lists the new spelling. Only there: on
+/// case-sensitive APFS such a rename finds one item under both names and leaves its name as it
+/// was, and HFS+ stores every name decomposed (NFD), so a folder never lists the composed one.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_rename_that_changes_only_the_unicode_form_renames_the_item() {
     let (_t, root) = tmp();
+    if !case_and_form_blind_apfs(&root) {
+        eprintln!("skipped: not APFS that ignores both letter case and the Unicode form");
+        return;
+    }
     let p = LocalProvider::new();
     let nfc = root.join("한글.txt").unwrap();
     let nfd = root
         .join("\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.txt")
         .unwrap();
     std::fs::write(nfc.as_local().unwrap(), b"one").unwrap();
-    if std::fs::metadata(nfd.as_local().unwrap()).is_err() {
-        eprintln!("skipped: this volume tells the two forms apart");
-        return;
-    }
     // The folder lists the item under the spelling it was renamed to, each way round.
     let listed = || -> Vec<std::ffi::OsString> {
         std::fs::read_dir(root.as_local().unwrap())
