@@ -11,11 +11,13 @@
 // dragged, it makes the column wider or narrower and the columns after it stay where they are,
 // the name taking what the column gives up or gives (or, while the name has no more to give, the
 // list scrolling); double-clicked, it fits the column to the rows on screen. A click on a head
-// sorts by its column, with Shift by a second key.
+// sorts by its column, with Shift by a second key. A head held near an end of a header wider
+// than the list scrolls it that way, as a tab held near an end of the tab strip does.
 
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
+import { ScrollCue } from "widgets.slint";
 
 // A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
 // 5 extension, 6 attributes), what its head says, how wide it is, whether its text lines up on
@@ -162,6 +164,30 @@ export component FileHead inherits Rectangle {
     // header's row of heads.
     private property <int> head-drag: -1;
     private property <length> head-pointer;
+
+    // While a dragged head is held within `edge` of an end of the header that has heads out of
+    // view beyond it, the header and the list scroll that way (1 to the right, -1 to the left),
+    // a step at a time, so that every place can be reached; it stops when the drag ends or the
+    // header reaches that end.
+    private property <length> edge: 24px;
+    // Where the pointer is in the header as it shows.
+    private property <length> head-pointer-shown: root.head-pointer + root.scroll-x;
+    private property <int> head-way: root.head-drag < 0 ? 0
+        : root.head-pointer-shown < root.edge && root.scroll-x < 0 ? 1
+        : root.head-pointer-shown > root.width - root.edge && root.scroll-x > root.width - root.content-width ? -1
+        : 0;
+
+    // The steps of `head-way`. The heads move under the still pointer, which is over another
+    // place of them after each.
+    Timer {
+        interval: 30ms;
+        running: root.head-way != 0;
+        triggered => {
+            let before = root.scroll-x;
+            root.scroll-x = clamp(root.scroll-x + root.head-way * 12px, root.width - root.content-width, 0px);
+            root.head-pointer -= root.scroll-x - before;
+        }
+    }
 
     // How wide column `i` after the name is now, a border drag counted in.
     public pure function w(i: int) -> length {
@@ -497,6 +523,14 @@ export component FileHead inherits Rectangle {
             height: parent.height - 8px;
             background: Theme.accent;
         }
+    }
+
+    // The end the header scrolls toward under a held head (`head-way`).
+    scroll-cue := ScrollCue {
+        x: root.head-way > 0 ? 0px : root.width - self.width;
+        width: root.edge;
+        height: parent.height;
+        way: root.head-way;
     }
 
     Rectangle {

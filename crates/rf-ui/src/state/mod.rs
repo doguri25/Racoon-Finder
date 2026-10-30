@@ -86,7 +86,7 @@ pub use select::{MATCH_STRETCH, MatchRequest, Matched};
 pub use shell::{MenuFacts, MenuShown, ShellWork, menu_facts};
 pub use tray::TrayCommand;
 pub use view::{
-    Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
+    Chosen, Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
     MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
 };
 

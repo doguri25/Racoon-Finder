@@ -42,7 +42,9 @@ pub struct StoredView {
 /// The parts of a folder's view that a newer version wrote and this one does not know (a view
 /// mode, a sort key, columns): the view shows its default in their place, and the settings
 /// write them back as they were, so that the newer version finds them again. A part the user
-/// changes here is this version's choice from then on, and the unknown value goes.
+/// chooses here is this version's choice from then on, and the unknown value goes, even when
+/// the choice is the value the part shows as (자세히 for an unknown mode, 없음 for an unknown
+/// second key).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnknownParts {
     /// The view mode (`thumbnails`), in the place of 자세히.
@@ -55,17 +57,30 @@ pub struct UnknownParts {
     pub columns: Vec<(String, u32)>,
 }
 
+/// The parts of a view that a change chose ([`ViewStore::remember_choice`]): their unknown
+/// values go, whatever the change made of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Chosen {
+    /// The view mode.
+    pub mode: bool,
+    /// The key that sorts first, or its direction.
+    pub sort: bool,
+    /// The second key, or none.
+    pub then: bool,
+}
+
 impl UnknownParts {
-    /// The view changed from `old` to `new`: the parts the change chose lose their unknown
-    /// values. The unknown columns stay, whatever the known ones do.
-    fn changed(&mut self, old: &FolderView, new: &FolderView) {
-        if new.mode != old.mode {
+    /// The view changed from `old` to `new`, choosing the parts `chosen` says: those and the
+    /// parts that changed lose their unknown values. The unknown columns stay, whatever the
+    /// known ones do.
+    fn changed(&mut self, old: &FolderView, new: &FolderView, chosen: Chosen) {
+        if chosen.mode || new.mode != old.mode {
             self.mode = None;
         }
-        if new.sort.primary != old.sort.primary {
+        if chosen.sort || new.sort.primary != old.sort.primary {
             self.sort = None;
         }
-        if new.sort.secondary != old.sort.secondary {
+        if chosen.then || new.sort.secondary != old.sort.secondary {
             self.then = None;
         }
     }
@@ -137,6 +152,13 @@ impl ViewStore {
     /// subfolders; it is the one used last. Past [`MAX_FOLDER_VIEWS`] the one used longest ago
     /// goes. Nothing for a folder whose `to_uri` is longer than [`MAX_FOLDER_URI`].
     pub fn remember(&mut self, folder: &VPath, view: FolderView) {
+        self.remember_choice(folder, view, Chosen::default());
+    }
+
+    /// Remembers `view` for `folder` as [`ViewStore::remember`] does, after a change that chose
+    /// the parts `chosen` says: they lose their unknown values even where the choice changed
+    /// nothing.
+    pub fn remember_choice(&mut self, folder: &VPath, view: FolderView, chosen: Chosen) {
         let uri = folder.to_uri();
         if uri.len() > MAX_FOLDER_URI {
             return;
@@ -144,7 +166,7 @@ impl ViewStore {
         let key = self.key_of(&uri);
         if let Some(at) = self.position(&key) {
             let entry = self.touch(at);
-            entry.unknown.changed(&entry.view, &view);
+            entry.unknown.changed(&entry.view, &view, chosen);
             entry.view = view;
         } else {
             self.entries.push((
@@ -449,5 +471,58 @@ mod tests {
         assert_eq!(unknown(&store).sort, None);
         assert_eq!(unknown(&store).then, Some(("tags".to_owned(), true)));
         assert_eq!(unknown(&store).columns.len(), 1, "the unknown columns stay");
+    }
+
+    #[test]
+    fn choosing_the_value_an_unknown_part_shows_as_makes_it_this_version_s() {
+        let unknown_parts = || UnknownParts {
+            mode: Some("thumbnails".to_owned()),
+            sort: Some("rating".to_owned()),
+            then: Some(("tags".to_owned(), true)),
+            columns: vec![("tags".to_owned(), 80)],
+        };
+        let mut store = ViewStore::new(
+            vec![StoredView {
+                folder: folder("new").to_uri(),
+                view: FolderView::default(),
+                subfolders: false,
+                unknown: unknown_parts(),
+                extra: toml::Table::new(),
+            }],
+            Os::Other,
+        );
+        let unknown = |store: &ViewStore| store.own(&folder("new")).expect("kept").unknown.clone();
+        // 자세히 chosen where an unknown mode shows as 자세히: the view is the same, but the mode
+        // is this version's now.
+        let view = FolderView::default();
+        let mode = Chosen {
+            mode: true,
+            ..Chosen::default()
+        };
+        store.remember_choice(&folder("new"), view.clone(), mode);
+        assert_eq!(unknown(&store).mode, None);
+        assert_eq!(unknown(&store).sort.as_deref(), Some("rating"));
+        // So is 없음 chosen as the second key where an unknown one shows as none.
+        let then = Chosen {
+            then: true,
+            ..Chosen::default()
+        };
+        store.remember_choice(&folder("new"), view.clone(), then);
+        assert_eq!(unknown(&store).then, None);
+        assert_eq!(unknown(&store).sort.as_deref(), Some("rating"));
+        assert_eq!(unknown(&store).columns, [("tags".to_owned(), 80)]);
+        // A change that chose nothing of them keeps them.
+        let mut kept = ViewStore::new(
+            vec![StoredView {
+                folder: folder("new").to_uri(),
+                view: FolderView::default(),
+                subfolders: false,
+                unknown: unknown_parts(),
+                extra: toml::Table::new(),
+            }],
+            Os::Other,
+        );
+        kept.remember(&folder("new"), view);
+        assert_eq!(unknown(&kept), unknown_parts());
     }
 }

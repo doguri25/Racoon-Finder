@@ -1149,6 +1149,51 @@ fn a_border_dragged_resizes_its_own_column_and_a_double_click_fits_it() {
 }
 
 #[test]
+fn a_head_held_at_an_end_of_a_wide_header_scrolls_it_that_way() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let mut pane = listed_pane(vec![entry("a.txt", EntryKind::File, 10)]);
+    pane.active_tab_mut().set_view(FolderView {
+        columns: Column::OPTIONAL.into_iter().map(ShownColumn::new).collect(),
+        ..FolderView::default()
+    });
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let moves = Calls::default();
+    let record = moves.clone();
+    window
+        .on_column_moved(move |side, from, slot| record.note(format!("move {side} {from} {slot}")));
+    let tick = || {
+        for _ in 0..60 {
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+            slint::platform::update_timers_and_animations();
+        }
+    };
+    // The heads are wider than the list: 속성, the last one, is out of view on the right.
+    let list = labelled(&window, "항목 목록", AccessibleRole::List).remove(0);
+    let (list_at, list_size) = (list.absolute_position(), list.size());
+    let attributes = || labelled(&window, "속성", AccessibleRole::Button).len();
+    assert_eq!(attributes(), 0);
+    let (size_at, size_size) = head_box(&window, "크기");
+    let from = LogicalPosition::new(
+        size_at.x + size_size.width / 2.0,
+        size_at.y + size_size.height / 2.0,
+    );
+    // 크기 dragged to just inside the list's right end, and held there.
+    let right_end = LogicalPosition::new(list_at.x + list_size.width - 6.0, from.y);
+    assert!(!scroll_cue_shows(&window));
+    drag_to(&window, from, right_end);
+    assert!(scroll_cue_shows(&window));
+    tick();
+    // The header scrolled under the still pointer as far as its end: 속성 came into view, and
+    // the head goes after it.
+    assert_eq!(attributes(), 1);
+    pointer(&window, "release", right_end);
+    assert_eq!(moves.take(), ["move 0 0 6"]);
+    assert!(!scroll_cue_shows(&window));
+}
+
+#[test]
 fn every_column_chosen_shows_and_the_list_scrolls_sideways_when_they_overflow() {
     let window = window();
     window.window().set_size(LogicalSize::new(900.0, 560.0));

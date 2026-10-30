@@ -845,8 +845,10 @@ static MACOS: &[(Chord, Command)] = &[
     (c('2', CMD), C::ViewDetails),
     (c('3', CMD), C::ViewList),
     // Finder has no key to fit the columns. ⌘= and ⌘- zoom in many apps, ⌥⌘= is Accessibility
-    // Zoom's; ⌃⌘= neither Finder nor macOS takes.
+    // Zoom's; ⌃⌘= neither Finder nor macOS takes. A layout whose = needs Shift has + on a key of
+    // its own (German): ⌃⌘+ there.
     (c('=', CTL_CMD), C::FitColumns),
+    (c('+', CTL_CMD), C::FitColumns),
     (c('j', CMD), C::ViewMenu),
     // Finder's Quick Look: Space (which types while a name is being typed, `pane_command`), and
     // ⌘Y.
@@ -1093,6 +1095,8 @@ mod tests {
             (text("2"), CMD, C::ViewDetails),
             (text("3"), CMD, C::ViewList),
             (text("="), CTL_CMD, C::FitColumns),
+            // A layout whose = needs Shift, with + a key of its own.
+            (text("+"), CTL_CMD, C::FitColumns),
             (key(Key::Space), NONE, C::QuickLook),
             (text("y"), CMD, C::QuickLook),
             (text("P"), CMD_SHIFT, C::TogglePreview),

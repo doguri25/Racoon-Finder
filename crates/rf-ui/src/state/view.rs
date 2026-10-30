@@ -30,7 +30,7 @@ use crate::words;
 
 mod store;
 
-pub use store::{MAX_FOLDER_URI, MAX_FOLDER_VIEWS, StoredView, UnknownParts, ViewStore};
+pub use store::{Chosen, MAX_FOLDER_URI, MAX_FOLDER_VIEWS, StoredView, UnknownParts, ViewStore};
 
 /// The narrowest and the widest a column of 자세히 can be made, in logical pixels.
 pub const MIN_COLUMN_WIDTH: u32 = 40;
@@ -519,13 +519,15 @@ impl AppState {
         }
     }
 
-    /// Changes the view of the folder the tab of pane `side` shows with `change`, remembers it
-    /// for the folder, and shows it in every tab at that folder; the pane gets the keyboard.
+    /// Changes the view of the folder the tab of pane `side` shows with `change`, which says
+    /// which parts it chose ([`Chosen`]: they lose the values of a newer version, even where the
+    /// choice is the value shown), remembers it for the folder, and shows it in every tab at
+    /// that folder; the pane gets the keyboard.
     /// The change goes on top of the view the folder has now, not of what the tab shows: another
     /// tab at the folder may have changed it since (its sort, while this tab's columns change),
     /// which a whole view of this tab's would undo. A folder whose view cannot be kept
     /// ([`ViewStore::keeps`]) changes as its tab shows it.
-    fn change_view(&mut self, side: usize, change: impl FnOnce(&mut FolderView)) {
+    fn change_view(&mut self, side: usize, change: impl FnOnce(&mut FolderView) -> Chosen) {
         self.activate(side);
         let folder = self.tab(side).location().clone();
         let mut view = if self.views.keeps(&folder) {
@@ -533,8 +535,8 @@ impl AppState {
         } else {
             self.tab(side).view().clone()
         };
-        change(&mut view);
-        self.views.remember(&folder, view.clone());
+        let chosen = change(&mut view);
+        self.views.remember_choice(&folder, view.clone(), chosen);
         let views = &self.views;
         for tab in self.panes.iter_mut().flat_map(Pane::tabs_mut) {
             if views.same_folder(tab.location(), &folder) {
@@ -545,14 +547,23 @@ impl AppState {
 
     /// Shows pane `side` in `mode`, and scrolls to its cursor there.
     pub fn set_view_mode(&mut self, side: usize, mode: ViewMode) -> Vec<Effect> {
-        self.change_view(side, |view| view.mode = mode);
+        self.change_view(side, |view| {
+            view.mode = mode;
+            Chosen {
+                mode: true,
+                ..Chosen::default()
+            }
+        });
         let row = self.tab(side).selection().cursor().unwrap_or(0);
         vec![Effect::ScrollTo { side, row }]
     }
 
     /// Shows or hides `column` in pane `side` (the head's menu, the 보기 menu's 열).
     pub fn toggle_column(&mut self, side: usize, column: Column) -> Vec<Effect> {
-        self.change_view(side, |view| view.toggle_column(column));
+        self.change_view(side, |view| {
+            view.toggle_column(column);
+            Chosen::default()
+        });
         Vec::new()
     }
 
@@ -561,6 +572,7 @@ impl AppState {
     pub fn move_column(&mut self, side: usize, from: usize, slot: usize) -> Vec<Effect> {
         self.change_view(side, |view| {
             view.move_column(from, slot);
+            Chosen::default()
         });
         Vec::new()
     }
@@ -568,7 +580,10 @@ impl AppState {
     /// Makes `column` of pane `side` `width` logical pixels wide (its border dragged, or a
     /// double click on it).
     pub fn set_column_width(&mut self, side: usize, column: Column, width: u32) -> Vec<Effect> {
-        self.change_view(side, |view| view.set_width(column, width));
+        self.change_view(side, |view| {
+            view.set_width(column, width);
+            Chosen::default()
+        });
         Vec::new()
     }
 
@@ -586,13 +601,29 @@ impl AppState {
     /// A click on a head of pane `side` that sorts by `key` (`then` with Shift: the second
     /// key), as [`FolderView::sort_by`] says.
     pub fn sort_by(&mut self, side: usize, key: SortKey, then: bool) -> Vec<Effect> {
-        self.change_view(side, |view| view.sort_by(key, then));
+        self.change_view(side, |view| {
+            // The first key's head flips the first key; a plain click on another one sorts by
+            // that key alone; with Shift, it is the second key.
+            let first = view.sort.primary.key == key;
+            view.sort_by(key, then);
+            Chosen {
+                sort: first || !then,
+                then: !first,
+                ..Chosen::default()
+            }
+        });
         Vec::new()
     }
 
     /// The 보기 menu's 2차 정렬 for pane `side`: `key`, or none.
     pub fn sort_then(&mut self, side: usize, key: Option<SortKey>) -> Vec<Effect> {
-        self.change_view(side, |view| view.set_then(key));
+        self.change_view(side, |view| {
+            view.set_then(key);
+            Chosen {
+                then: true,
+                ..Chosen::default()
+            }
+        });
         Vec::new()
     }
 
@@ -600,6 +631,7 @@ impl AppState {
     pub fn toggle_folders_first(&mut self, side: usize) -> Vec<Effect> {
         self.change_view(side, |view| {
             view.sort.folders_first = !view.sort.folders_first;
+            Chosen::default()
         });
         Vec::new()
     }

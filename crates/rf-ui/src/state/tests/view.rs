@@ -387,3 +387,58 @@ fn applying_a_view_below_asks_first_when_folders_below_have_their_own() {
         ViewMode::LargeIcons
     );
 }
+
+#[test]
+fn a_choice_in_a_menu_or_on_a_head_makes_an_unknown_part_this_version_s() {
+    use crate::state::{StoredView, UnknownParts};
+    // Folder a's view came from a newer version: its mode, its second key and a column this
+    // version does not know, which show as 자세히, none and nothing.
+    let newer = |state: &mut AppState| {
+        state.set_views(ViewStore::new(
+            vec![StoredView {
+                folder: folder("a").to_uri(),
+                view: FolderView::default(),
+                subfolders: false,
+                unknown: UnknownParts {
+                    mode: Some("thumbnails".to_owned()),
+                    sort: Some("rating".to_owned()),
+                    then: Some(("tags".to_owned(), true)),
+                    columns: vec![("tags".to_owned(), 80)],
+                },
+                extra: toml::Table::new(),
+            }],
+            Os::CURRENT,
+        ));
+    };
+    let unknown = |state: &AppState| {
+        state
+            .views()
+            .own(&folder("a"))
+            .expect("a's own view")
+            .unknown
+            .clone()
+    };
+    let mut state = ready_settled(files(3), vec![]);
+    newer(&mut state);
+    // A column shown chose none of them.
+    state.toggle_column(LEFT, Column::Created);
+    assert_eq!(unknown(&state).mode.as_deref(), Some("thumbnails"));
+    assert_eq!(unknown(&state).then, Some(("tags".to_owned(), true)));
+    // 자세히 chosen, which it showed as: the mode is this version's.
+    state.set_view_mode(LEFT, ViewMode::Details);
+    assert_eq!(unknown(&state).mode, None);
+    assert_eq!(unknown(&state).sort.as_deref(), Some("rating"));
+    // 2차 정렬 없음 chosen, which it showed as: so is the second key.
+    state.sort_then(LEFT, None);
+    assert_eq!(unknown(&state).then, None);
+    assert_eq!(unknown(&state).columns, [("tags".to_owned(), 80)]);
+    // A plain click on another head sorts by that key alone: both keys are this version's.
+    newer(&mut state);
+    state.sort_by(LEFT, SortKey::Size, false);
+    assert_eq!((unknown(&state).sort, unknown(&state).then), (None, None));
+    // A Shift click on another head chooses the second key alone.
+    newer(&mut state);
+    state.sort_by(LEFT, SortKey::Size, true);
+    assert_eq!(unknown(&state).sort.as_deref(), Some("rating"));
+    assert_eq!(unknown(&state).then, None);
+}

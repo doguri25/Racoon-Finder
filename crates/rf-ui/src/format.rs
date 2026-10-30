@@ -149,16 +149,20 @@ pub fn folder_label(path: &VPath) -> String {
     }
 }
 
+/// The extension of `entry` as the rows show it, in the 확장자 column and for 같은 확장자 선택:
+/// a file's alone. A folder has none, and neither has a link, which may lead to a folder
+/// (`앨범.2025`): the listing does not tell.
+pub fn file_extension(entry: &Entry) -> Option<&OsStr> {
+    entry.extension().filter(|_| entry.kind == EntryKind::File)
+}
+
 /// The name the rows show for `entry`: the whole name, or, with the extensions hidden
 /// (`show_extensions` off, NAV-11), a file's name without the dot and the extension the 확장자
-/// column shows. A folder, a link (which may lead to a folder), a name without an extension and
-/// a dot file (`.bashrc`) show whole.
+/// column shows ([`file_extension`]). A folder, a link, a name without an extension and a dot
+/// file (`.bashrc`) show whole.
 pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
     let name = entry.name.to_string_lossy();
-    // A link may lead to a folder, whose name has no extension: the listing does not tell.
-    let extension = entry
-        .extension()
-        .filter(|_| !show_extensions && entry.kind == EntryKind::File);
+    let extension = file_extension(entry).filter(|_| !show_extensions);
     let stem = extension.and_then(|extension| {
         name.strip_suffix(&*extension.to_string_lossy())?
             .strip_suffix('.')

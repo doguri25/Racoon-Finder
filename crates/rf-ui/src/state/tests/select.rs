@@ -173,6 +173,32 @@ fn the_extension_of_the_cursor_s_row_selects_its_like_ignoring_case() {
 }
 
 #[test]
+fn a_link_has_no_extension_to_select_by_as_its_row_shows_none() {
+    // A link may lead to a folder (`앨범.2025`): its name shows whole, with no extension.
+    let link = |name: &str| Entry::new(name, EntryKind::Symlink);
+    let mut state = ready(
+        vec![file("a.2025"), link("앨범.2025"), file("b.2025")],
+        vec![],
+    );
+    let row = |state: &AppState, name: &str| {
+        state.panes()[LEFT]
+            .active_tab()
+            .visible()
+            .iter()
+            .position(|entry| entry.name == name)
+            .expect("listed")
+    };
+    // On the link: nothing to select by.
+    state.click_row(LEFT, row(&state, "앨범.2025"), false, false);
+    let effects = press(&mut state, "S", CTRL_SHIFT).expect("used");
+    assert_eq!(effects, [Effect::Notice(words::no_extension("앨범.2025"))]);
+    // On a file of the same ending: the files alone.
+    state.click_row(LEFT, row(&state, "a.2025"), false, false);
+    assert_eq!(press(&mut state, "S", CTRL_SHIFT), Some(vec![]));
+    assert_eq!(selected_names(&state, LEFT), ["a.2025", "b.2025"]);
+}
+
+#[test]
 fn extensions_beyond_ascii_are_alike_ignoring_case() {
     let mut state = ready(
         vec![

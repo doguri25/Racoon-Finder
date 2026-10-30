@@ -28,8 +28,8 @@ use crate::dialogs::{
     PreflightQuestion, Recovery,
 };
 use crate::format::{
-    attribute_letters, file_icon, folder_label, format_size, format_time_in, kind_label,
-    short_path, shown_name,
+    attribute_letters, file_extension, file_icon, folder_label, format_size, format_time_in,
+    kind_label, short_path, shown_name,
 };
 use crate::hashing::Algorithm;
 use crate::jobs::{JobRow, RecentRow};
@@ -729,8 +729,7 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         modified: time(entry.modified),
         created: time(entry.created),
         kind: kind_label(entry).into(),
-        extension: entry
-            .extension()
+        extension: file_extension(entry)
             .map(|ext| ext.to_string_lossy().to_lowercase())
             .unwrap_or_default()
             .into(),
@@ -1728,6 +1727,17 @@ mod tests {
         );
         assert!(link.is_link && !link.is_dir);
         assert_eq!(link.size, "");
+        // A link may lead to a folder: its 확장자 column is empty, as its name shows whole.
+        let album = file_row(
+            &entry("앨범.2025", EntryKind::Symlink, 9),
+            false,
+            &TimeZone::UTC,
+            false,
+        );
+        assert_eq!(
+            (album.name.as_str(), album.extension.as_str()),
+            ("앨범.2025", "")
+        );
     }
 
     #[test]

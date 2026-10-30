@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use super::{AppState, Effect};
 use crate::dialogs::{Counting, Modal, PatternChoice, PatternDialog};
+use crate::format::file_extension;
 use crate::keys::Command;
 use crate::pane::next_generation;
 use crate::pattern::{NamePattern, PatternSyntax};
@@ -154,8 +155,9 @@ impl AppState {
     }
 
     /// 같은 확장자 선택: the rows on screen with the extension of the cursor's row, ignoring
-    /// case, are selected in place of the selection. A cursor on a row without one (a folder, a
-    /// file such as `README`) selects nothing, and a notice says why.
+    /// case, are selected in place of the selection, the extension the 확장자 column shows
+    /// ([`file_extension`]). A cursor on a row without one (a folder, a link, a file such as
+    /// `README`) selects nothing, and a notice says why.
     pub(super) fn select_same_extension(&mut self, side: usize) -> Vec<Effect> {
         let tab = self.tab(side);
         let Some(entry) = tab
@@ -165,14 +167,13 @@ impl AppState {
         else {
             return Vec::new();
         };
-        let Some(wanted) = entry.extension().map(folded) else {
+        let Some(wanted) = file_extension(entry).map(folded) else {
             let name = entry.name.to_string_lossy();
             return vec![Effect::Notice(words::no_extension(&name))];
         };
         let (selection, rows) = self.tab_mut(side).selection_mut();
         selection.select_where(rows, false, |_, row| {
-            row.extension()
-                .is_some_and(|extension| folded(extension) == wanted)
+            file_extension(row).is_some_and(|extension| folded(extension) == wanted)
         });
         Vec::new()
     }
