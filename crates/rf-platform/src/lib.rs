@@ -1,6 +1,7 @@
-//! OS integration used by the VFS layer; every FFI call in the workspace lives here.
+//! OS integration used by the VFS layer and the app; every FFI call in the workspace lives here.
 
 pub mod attrs;
+pub mod clipboard;
 pub mod fileid;
 pub mod fsops;
 pub mod known;
