@@ -168,13 +168,11 @@ fn file_urls_name_local_paths_on_each_system() {
         assert_eq!(unix("file:///home/50%"), Some(path("/home/50%")));
         assert_eq!(unix("file:///home/%zz"), Some(path("/home/%zz")));
         assert_eq!(unix("file:///home/%FF"), Some(FileUrl::Invalid));
-        for url in [
-            "file:///home/a%2Fb",
-            "file:///home/a%5cb",
-            "file://local%2Fhost/x",
-        ] {
+        for url in ["file:///home/a%2Fb", "file://local%2Fhost/x"] {
             assert_eq!(unix(url), Some(FileUrl::Invalid), "{url}");
         }
+        // A backslash is a character of a name there, not a separator.
+        assert_eq!(unix("file:///home/a%5cb"), Some(path("/home/a\\b")));
         // Another computer is remote.
         assert_eq!(unix("file://server/share"), Some(FileUrl::Remote));
         assert_eq!(unix("file:x"), Some(FileUrl::Invalid));

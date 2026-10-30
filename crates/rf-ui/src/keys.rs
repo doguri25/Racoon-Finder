@@ -352,6 +352,15 @@ pub fn pane_command(text: &str, mods: Mods, os: Os, typing: bool) -> Option<Comm
     Some(command)
 }
 
+/// Whether `text` held with `mods` is Esc alone: in the panes it clears the selection and, with
+/// nothing selected, cancels a cut as File Explorer's Esc does
+/// ([`AppState::escape`](crate::state::AppState::escape)). The table's other key to clear the
+/// selection (macOS ⌥⌘A) and the 선택 menu's item clear it alone.
+pub fn cancels_cut(text: &str, mods: Mods) -> bool {
+    let mut chars = text.chars();
+    mods == Mods::NONE && chars.next() == Some(char::from(Key::Escape)) && chars.next().is_none()
+}
+
 /// What a key does while quick look shows ([`quick_look_key`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QuickLookKey {
@@ -1541,6 +1550,27 @@ mod tests {
         ] {
             assert!(!command.acts_on_rows(), "{command:?}");
         }
+    }
+
+    #[test]
+    fn only_esc_alone_cancels_a_cut() {
+        assert!(cancels_cut(&key(Key::Escape), NONE));
+        for (text, mods) in [
+            (key(Key::Escape), SHIFT),
+            (key(Key::Escape), CTRL),
+            // ⌥⌘A clears the selection on macOS, and cancels no cut.
+            (text("a"), CMD_OPT),
+            (key(Key::Delete), NONE),
+            (format!("{}{}", key(Key::Escape), key(Key::Escape)), NONE),
+            (String::new(), NONE),
+        ] {
+            assert!(!cancels_cut(&text, mods), "{text:?} {mods:?}");
+        }
+        // Both are the table's command to clear the selection.
+        assert_eq!(
+            command_for(&key(Key::Escape), NONE, Os::MacOs),
+            command_for("a", CMD_OPT, Os::MacOs)
+        );
     }
 
     #[test]

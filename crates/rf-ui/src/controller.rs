@@ -1016,9 +1016,15 @@ impl Controller {
                 line: usize::try_from(window.get_line_items()).unwrap_or(1),
                 page: usize::try_from(window.get_page_rows()).unwrap_or(1),
             });
+        // Esc alone may cancel a cut too; the other keys to clear the selection do not.
+        let escape = keys::cancels_cut(text, mods);
         let mut used = false;
         self.update(|state| {
-            let effects = state.key(command, mods, paging, now);
+            let effects = if escape {
+                state.escape(paging, now)
+            } else {
+                state.key(command, mods, paging, now)
+            };
             used = effects.is_some();
             effects.unwrap_or_default()
         });
@@ -1428,16 +1434,19 @@ impl Controller {
             Done::Text { token, result } => {
                 self.update(|state| state.checksum_copied(token, result));
             }
+            Done::Cleared { change, result } => {
+                self.update(|state| state.clipboard_cleared(change, result));
+            }
             // Most polls find the clipboard as it was: the window is drawn again only for one
-            // that ends the dimming.
+            // that ends the dimming or tries again to empty it.
             Done::Polled(change) => {
-                let changed = self
+                let effects = self
                     .state
                     .borrow_mut()
                     .as_mut()
-                    .is_some_and(|state| state.clipboard_polled(change));
-                if changed {
-                    self.apply(Vec::new());
+                    .and_then(|state| state.clipboard_polled(change));
+                if let Some(effects) = effects {
+                    self.apply(effects);
                 }
             }
         }

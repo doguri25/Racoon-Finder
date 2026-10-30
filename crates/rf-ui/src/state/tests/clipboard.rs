@@ -146,11 +146,11 @@ fn a_cut_dims_its_items_until_the_clipboard_holds_something_else() {
     assert_eq!(state.clipboard_put(token + 1, Ok(7)), []);
     assert!(state.clipboard_watched());
     // The same count: still dimmed. A count the system does not tell changes nothing.
-    assert!(!state.clipboard_polled(Some(7)));
-    assert!(!state.clipboard_polled(None));
+    assert_eq!(state.clipboard_polled(Some(7)), None);
+    assert_eq!(state.clipboard_polled(None), None);
     assert_eq!(state.cut_names(&folder("a")), names(&["x.txt"]));
     // Another app put something there: the dimming goes, and the watch with it.
-    assert!(state.clipboard_polled(Some(8)));
+    assert_eq!(state.clipboard_polled(Some(8)), Some(vec![]));
     assert_eq!(state.cut_names(&folder("a")), names(&[]));
     assert!(!state.clipboard_watched());
 }
@@ -499,54 +499,225 @@ fn nothing_to_paste_and_a_clipboard_that_cannot_be_read_say_so() {
     assert_eq!(state.clipboard_read(999, Ok(None)), []);
 }
 
+/// Esc alone in the panes (`keys::cancels_cut`).
+fn esc(state: &mut AppState) -> Option<Vec<Effect>> {
+    state.escape(Paging::rows(10), Instant::now())
+}
+
 #[test]
 fn esc_clears_the_selection_first_and_then_cancels_the_cut() {
     let mut state = two_panes();
     let token = put(&mut state, 1, true);
     state.clipboard_put(token, Ok(40));
-    let esc = special(Key::Escape);
     // The selection goes first; the items stay cut.
-    assert_eq!(press(&mut state, &esc, NONE), Some(vec![]));
+    assert_eq!(esc(&mut state), Some(vec![]));
     assert_eq!(selected(&state, LEFT), Vec::<usize>::new());
     assert_eq!(state.cut_names(&folder("a")), names(&["x.txt"]));
     // Then the cut: no longer dimmed, and the clipboard emptied if it still holds them, so
     // that no later paste moves them.
     assert_eq!(
-        press(&mut state, &esc, NONE),
+        esc(&mut state),
         Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(40))])
     );
     assert_eq!(state.cut_names(&folder("a")), names(&[]));
+    // Until the emptying is seen to work, the window watches the clipboard.
+    assert!(state.clipboard_watched());
+    assert_eq!(state.clipboard_cleared(40, Ok(true)), []);
     assert!(!state.clipboard_watched());
     // Then nothing.
-    assert_eq!(press(&mut state, &esc, NONE), Some(vec![]));
+    assert_eq!(esc(&mut state), Some(vec![]));
     // A copy is no cut to cancel.
     let token = put(&mut state, 2, false);
     state.clipboard_put(token, Ok(41));
-    press(&mut state, &esc, NONE);
-    assert_eq!(press(&mut state, &esc, NONE), Some(vec![]));
+    esc(&mut state);
+    assert_eq!(esc(&mut state), Some(vec![]));
+}
+
+#[test]
+fn only_esc_cancels_a_cut_not_the_menu_or_the_other_key() {
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(42));
+    esc(&mut state);
+    // The 선택 menu's 선택 해제, and macOS's ⌥⌘A, are the command alone: the cut stays.
+    let clear = |state: &mut AppState| {
+        state.key(
+            Command::ClearSelection,
+            Mods::NONE,
+            Paging::rows(10),
+            Instant::now(),
+        )
+    };
+    assert_eq!(clear(&mut state), Some(vec![]));
+    assert_eq!(state.cut_names(&folder("a")), names(&["x.txt"]));
+    assert!(state.clipboard_watched());
+    // A dialog over the window takes Esc itself; one that comes here does nothing.
+    press(&mut state, "N", CTRL_SHIFT);
+    assert_eq!(esc(&mut state), Some(vec![]));
+    assert_eq!(state.cut_names(&folder("a")), names(&["x.txt"]));
 }
 
 #[test]
 fn esc_before_the_cut_is_on_the_clipboard_empties_it_once_it_is() {
     let mut state = two_panes();
     let token = put(&mut state, 1, true);
-    let esc = special(Key::Escape);
-    press(&mut state, &esc, NONE);
-    assert_eq!(press(&mut state, &esc, NONE), Some(vec![]));
+    esc(&mut state);
+    assert_eq!(esc(&mut state), Some(vec![]));
     assert_eq!(state.cut_names(&folder("a")), names(&[]));
     // The put tells its count: the clipboard is emptied if nothing came since.
     assert_eq!(
         state.clipboard_put(token, Ok(50)),
         [Effect::Clipboard(ClipboardWork::ClearIf(50))]
     );
+    assert_eq!(state.clipboard_cleared(50, Ok(true)), []);
     assert!(!state.clipboard_watched());
     // A put that failed has nothing to empty.
     let token = put(&mut state, 1, true);
-    press(&mut state, &esc, NONE);
-    press(&mut state, &esc, NONE);
+    esc(&mut state);
+    esc(&mut state);
     assert_eq!(
         state.clipboard_put(token, Err(ClipboardFailure::Unavailable)),
         []
+    );
+    assert!(!state.clipboard_watched());
+}
+
+#[test]
+fn a_cut_cancelled_before_its_put_was_told_is_never_pasted() {
+    // Ctrl+X, Esc, Esc, Ctrl+V, quicker than the put: the read is queued before the emptying.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    esc(&mut state);
+    esc(&mut state);
+    let read = paste(&mut state, RIGHT);
+    assert_eq!(
+        state.clipboard_put(token, Ok(60)),
+        [Effect::Clipboard(ClipboardWork::ClearIf(60))]
+    );
+    // The read finds the cut, still a move on the clipboard: nothing is pasted, and it is
+    // asked to go again.
+    let cut = || Ok(Some(files(&[in_a("x.txt")], Some(DropEffect::Move), 60)));
+    assert_eq!(
+        state.clipboard_read(read, cut()),
+        [
+            Effect::Notice(words::nothing_to_paste().to_owned()),
+            Effect::Clipboard(ClipboardWork::ClearIf(60)),
+        ]
+    );
+    // Nor later, while the clipboard still holds it (its emptying failed).
+    assert_eq!(
+        state.clipboard_cleared(60, Err(ClipboardFailure::Unavailable)),
+        []
+    );
+    let read = paste(&mut state, RIGHT);
+    assert!(
+        !state
+            .clipboard_read(read, cut())
+            .iter()
+            .any(|e| matches!(e, Effect::Job(_)))
+    );
+    // Finder's ⌥⌘V asks for a move by name: it moves.
+    state.activate(RIGHT);
+    let effects = state
+        .key(Command::PasteMove, NONE, Paging::rows(10), Instant::now())
+        .expect("a command of the window");
+    let ClipboardWork::ReadFiles { token } = the_work(&effects) else {
+        panic!("expected a read");
+    };
+    let effects = state.clipboard_read(token, Ok(Some(files(&[in_a("x.txt")], None, 60))));
+    assert_eq!(transfer_mode(&the_submit(&effects).0), TransferMode::Move);
+    // Another app's content, or the window's next put, is pasted as ever.
+    let read = paste(&mut state, RIGHT);
+    let other = Ok(Some(files(&[in_a("x.txt")], Some(DropEffect::Move), 61)));
+    the_submit(&state.clipboard_read(read, other));
+    let token = put(&mut state, 2, true);
+    state.clipboard_put(token, Ok(62));
+    let read = paste(&mut state, RIGHT);
+    let cut = Ok(Some(files(&[in_a("y.txt")], Some(DropEffect::Move), 62)));
+    assert_eq!(
+        transfer_mode(&the_submit(&state.clipboard_read(read, cut)).0),
+        TransferMode::Move
+    );
+}
+
+#[test]
+fn a_cancelled_cut_the_clipboard_will_not_drop_is_tried_again_and_then_told() {
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(70));
+    esc(&mut state);
+    assert_eq!(
+        esc(&mut state),
+        Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(70))])
+    );
+    let busy = || Err(ClipboardFailure::Unavailable);
+    // Each failure waits for the next look at the change count, which tries again while the
+    // clipboard still holds the cut.
+    for _ in 1..CLEAR_TRIES {
+        assert_eq!(state.clipboard_cleared(70, busy()), []);
+        assert!(state.clipboard_watched());
+        assert_eq!(
+            state.clipboard_polled(Some(70)),
+            Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(70))])
+        );
+    }
+    // The last failure tells the user that a paste elsewhere could still move the items.
+    assert_eq!(
+        state.clipboard_cleared(70, busy()),
+        [Effect::Notice(words::clipboard_not_emptied().to_owned())]
+    );
+    assert!(!state.clipboard_watched());
+    assert_eq!(state.clipboard_polled(Some(70)), None);
+    // The window's own paste still pastes nothing of it.
+    let read = paste(&mut state, RIGHT);
+    let cut = Ok(Some(files(&[in_a("x.txt")], Some(DropEffect::Move), 70)));
+    assert_eq!(
+        state.clipboard_read(read, cut)[0],
+        Effect::Notice(words::nothing_to_paste().to_owned())
+    );
+
+    // Once something else is on the clipboard, nothing is left to empty.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(80));
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(state.clipboard_cleared(80, busy()), []);
+    assert_eq!(state.clipboard_polled(Some(81)), None);
+    assert!(!state.clipboard_watched());
+    // An answer for another emptying (after a move) changes nothing.
+    assert_eq!(state.clipboard_cleared(80, busy()), []);
+    assert_eq!(state.clipboard_cleared(99, busy()), []);
+}
+
+#[test]
+fn a_device_path_on_the_clipboard_is_left_out_and_told() {
+    // On Windows a volume shadow copy's path stays a verbatim one; elsewhere it is not even an
+    // absolute path. Either way it is no place to paste from.
+    let mut state = two_panes();
+    let read = paste(&mut state, LEFT);
+    let shadow = PathBuf::from(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\a.txt");
+    let found = ClipboardFiles {
+        paths: vec![shadow.clone(), local(&in_b("z.txt"))],
+        effect: Some(DropEffect::Copy),
+        change: 90,
+    };
+    let effects = state.clipboard_read(read, Ok(Some(found)));
+    assert_eq!(
+        the_submit(&effects).0,
+        transfer(TransferMode::Copy, &[(in_b("z.txt"), in_a("z.txt"))])
+    );
+    assert!(effects.contains(&Effect::Notice(words::paste_left_out(1))));
+    // Nothing but such paths: nothing to paste.
+    let read = paste(&mut state, LEFT);
+    let only = ClipboardFiles {
+        paths: vec![shadow],
+        effect: Some(DropEffect::Copy),
+        change: 91,
+    };
+    assert_eq!(
+        state.clipboard_read(read, Ok(Some(only))),
+        [Effect::Notice(words::nothing_to_paste().to_owned())]
     );
 }
 
@@ -650,11 +821,9 @@ fn each_form_of_a_path_follows_its_system() {
             &[
                 (PathForm::Full, "/Users/me/보고서 \"$HOME\" `x`.txt"),
                 (PathForm::Name, "보고서 \"$HOME\" `x`.txt"),
-                // A word a shell reads back as the path.
-                (
-                    PathForm::Quoted,
-                    "\"/Users/me/보고서 \\\"\\$HOME\\\" \\`x\\`.txt\"",
-                ),
+                // A word a POSIX shell reads back as the path: nothing in single quotes is read
+                // specially.
+                (PathForm::Quoted, "'/Users/me/보고서 \"$HOME\" `x`.txt'"),
                 (PathForm::Unc, "/Users/me/보고서 \"$HOME\" `x`.txt"),
                 (PathForm::Slashes, "/Users/me/보고서 \"$HOME\" `x`.txt"),
                 (
@@ -662,6 +831,22 @@ fn each_form_of_a_path_follows_its_system() {
                     "file:///Users/me/%EB%B3%B4%EA%B3%A0%EC%84%9C%20%22$HOME%22%20%60x%60.txt",
                 ),
             ],
+        );
+    }
+    // A quote of the name closes the quotes, goes escaped, and opens them again; a line break
+    // stays inside them.
+    for os in [Os::MacOs, Os::Other] {
+        assert_eq!(
+            path_text(&["/x/it's \\ 'q'.txt".to_owned()], PathForm::Quoted, os),
+            "'/x/it'\\''s \\ '\\''q'\\''.txt'"
+        );
+        assert_eq!(
+            path_text(&["/x/a\nb".to_owned()], PathForm::Quoted, os),
+            "'/x/a\nb'"
+        );
+        assert_eq!(
+            path_text(&["/x/a\nb".to_owned()], PathForm::FileUrl, os),
+            "file:///x/a%0Ab"
         );
     }
     // A root has no name: it is its own.
@@ -725,7 +910,14 @@ fn file_urls_read_back_as_their_paths() {
             );
         }
     }
-    // A backslash in a Unix name is encoded, as a URL must; that reader refuses it rather
-    // than take it for a separator.
-    assert_eq!(file_url("/a\\b", Os::MacOs), "file:///a%5Cb");
+    // A backslash in a Unix name is encoded, as a URL must, and reads back as a character of
+    // the name; on Windows it is a separator, which no name holds.
+    for os in [Os::MacOs, Os::Other] {
+        let url = file_url("/a\\b", os);
+        assert_eq!(url, "file:///a%5Cb");
+        assert_eq!(
+            read_file_url(&url, os),
+            Some(FileUrl::Path("/a\\b".to_owned()))
+        );
+    }
 }

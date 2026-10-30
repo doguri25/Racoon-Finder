@@ -382,7 +382,7 @@ pub fn read_file_url(text: &str, os: Os) -> Option<FileUrl> {
         None => return Some(FileUrl::Invalid),
     };
     let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
-    let (Some(host), Some(path)) = (percent_decode(host), percent_decode(path)) else {
+    let (Some(host), Some(path)) = (percent_decode(host, os), percent_decode(path, os)) else {
         return Some(FileUrl::Invalid);
     };
     let here = host.is_empty() || host.eq_ignore_ascii_case("localhost");
@@ -439,9 +439,11 @@ pub(super) fn encode_url_name(name: &str) -> String {
 }
 
 /// `text` with each `%XX` turned into its byte; `None` when the bytes are not UTF-8, or one of
-/// them is a path separator (`%2F`, `%5C`): an encoded separator would make a name two, so it is
-/// no path, as browsers have it. A `%` that two hexadecimal digits do not follow stays as it is.
-fn percent_decode(text: &str) -> Option<String> {
+/// them is a path separator of `os` (`%2F`, and `%5C` on Windows): an encoded separator would
+/// make a name two, so it is no path, as browsers have it. On Linux and macOS a backslash is a
+/// character of a name like any other. A `%` that two hexadecimal digits do not follow stays as
+/// it is.
+fn percent_decode(text: &str, os: Os) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -454,7 +456,7 @@ fn percent_decode(text: &str) -> Option<String> {
         match (bytes[at], hex(1), hex(2)) {
             (b'%', Some(high), Some(low)) => {
                 let byte = u8::try_from(high * 16 + low).ok()?;
-                if matches!(byte, b'/' | b'\\') {
+                if byte == b'/' || (byte == b'\\' && os == Os::Windows) {
                     return None;
                 }
                 decoded.push(byte);
@@ -510,7 +512,7 @@ fn completion_base<'t>(
         return None;
     };
     let prefix = if read_file_url(head.trim_start(), os).is_some() {
-        Cow::Owned(percent_decode(prefix)?)
+        Cow::Owned(percent_decode(prefix, os)?)
     } else {
         Cow::Borrowed(prefix)
     };

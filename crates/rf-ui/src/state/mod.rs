@@ -63,7 +63,7 @@ pub use address::{
     Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
     is_remote_url, read_file_url, read_typed, split_last,
 };
-pub use clipboard::{ClipboardFailure, ClipboardWork, PathForm, file_url, path_text};
+pub use clipboard::{CLEAR_TRIES, ClipboardFailure, ClipboardWork, PathForm, file_url, path_text};
 pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
@@ -552,13 +552,6 @@ impl AppState {
             Command::CursorEnd => self.step_cursor(side, KeyMove::End, pick, paging),
             Command::PageUp => self.step_cursor(side, KeyMove::PageUp, pick, paging),
             Command::PageDown => self.step_cursor(side, KeyMove::PageDown, pick, paging),
-            // Esc with nothing selected cancels a cut, as File Explorer's does (and leaves the
-            // cursor's row unchosen, as any Esc).
-            Command::ClearSelection if self.tab(side).selection().is_empty() => {
-                let effects = self.cancel_cut().unwrap_or_default();
-                self.select(side, &command);
-                effects
-            }
             Command::ToggleSelect
             | Command::SelectAll
             | Command::ClearSelection

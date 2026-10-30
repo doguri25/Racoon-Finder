@@ -777,6 +777,18 @@ pub fn paste_moving() -> &'static str {
     "잘라낸 항목을 옮기는 중입니다"
 }
 
+/// A cut cancelled with Esc that the clipboard could not drop (another app held it): a paste
+/// in another app could still move the items.
+pub fn clipboard_not_emptied() -> &'static str {
+    "클립보드를 비우지 못했습니다. 다른 앱에서 붙여넣으면 잘라낸 항목이 이동될 수 있습니다"
+}
+
+/// A paste that left out `count` paths of the clipboard, which name no folder or file it can
+/// take (a device or a volume of Windows).
+pub fn paste_left_out(count: usize) -> String {
+    format!("클립보드의 항목 {count}개는 붙여넣을 수 없는 경로라 건너뛰었습니다")
+}
+
 /// `항목 3개`.
 pub fn item_count(count: usize) -> String {
     format!("항목 {count}개")

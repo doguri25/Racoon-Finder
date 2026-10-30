@@ -81,14 +81,21 @@ pub enum Done {
         token: u64,
         result: Result<(), ClipboardFailure>,
     },
+    /// The clipboard was to be emptied if its change count was still `change`: `Ok(true)` it
+    /// was, `Ok(false)` something else is there now, or why it could not be
+    /// ([`AppState::clipboard_cleared`](crate::state::AppState::clipboard_cleared)).
+    Cleared {
+        change: u64,
+        result: Result<bool, ClipboardFailure>,
+    },
     /// The clipboard's change count now
     /// ([`AppState::clipboard_polled`](crate::state::AppState::clipboard_polled)).
     Polled(Option<u64>),
 }
 
-/// Carries out `work` with `clipboard`, the paths written as the system `os` writes them;
-/// `None` for a request that has no answer (emptying the clipboard).
-pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -> Option<Done> {
+/// Carries out `work` with `clipboard`, the paths written as the system `os` writes them, and
+/// gives what came of it.
+pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -> Done {
     let failure = |error: io::Error| ClipboardFailure::from(&error);
     match work {
         ClipboardWork::PutFiles { token, paths, cut } => {
@@ -102,11 +109,11 @@ pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -
                 DropEffect::Copy
             };
             let result = clipboard.put_files(&paths, effect).map_err(failure);
-            Some(Done::Put { token, result })
+            Done::Put { token, result }
         }
         ClipboardWork::ReadFiles { token } => {
             let result = clipboard.get_files().map_err(failure);
-            Some(Done::Read { token, result })
+            Done::Read { token, result }
         }
         ClipboardWork::PutPaths { paths, form } => {
             let shown: Vec<String> = paths
@@ -124,17 +131,15 @@ pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -
                 .collect();
             let text = path_text(&shown, form, os);
             let result = clipboard.put_text(&text).map(drop).map_err(failure);
-            Some(Done::Paths(result))
+            Done::Paths(result)
         }
         ClipboardWork::PutText { token, text } => {
             let result = clipboard.put_text(&text).map(drop).map_err(failure);
-            Some(Done::Text { token, result })
+            Done::Text { token, result }
         }
         ClipboardWork::ClearIf(change) => {
-            // A clipboard that cannot be emptied now keeps what it holds, which the next paste
-            // reads afresh anyway.
-            let _ = clipboard.clear_if_unchanged(change);
-            None
+            let result = clipboard.clear_if_unchanged(change).map_err(failure);
+            Done::Cleared { change, result }
         }
     }
 }
@@ -182,12 +187,10 @@ impl Clipper {
                         Job::Work(work) => carry_out(work, &*clipboard, os),
                         Job::Poll => {
                             waiting.store(false, Ordering::Relaxed);
-                            Some(Done::Polled(clipboard.change_count()))
+                            Done::Polled(clipboard.change_count())
                         }
                     };
-                    if let Some(answer) = answer {
-                        done(answer);
-                    }
+                    done(answer);
                 }
             });
         Clipper { jobs, polling }
@@ -313,10 +316,10 @@ mod tests {
         );
         assert_eq!(
             put,
-            Some(Done::Put {
+            Done::Put {
                 token: 3,
                 result: Ok(1)
-            })
+            }
         );
         let read = carry_out(ClipboardWork::ReadFiles { token: 4 }, &fake, Os::CURRENT);
         let files = ClipboardFiles {
@@ -326,10 +329,10 @@ mod tests {
         };
         assert_eq!(
             read,
-            Some(Done::Read {
+            Done::Read {
                 token: 4,
                 result: Ok(Some(files))
-            })
+            }
         );
         // A copy in their place.
         carry_out(
@@ -363,17 +366,17 @@ mod tests {
         };
         assert_eq!(
             carry_out(put, &fake, Os::CURRENT),
-            Some(Done::Put {
+            Done::Put {
                 token: 1,
                 result: Err(ClipboardFailure::Unavailable)
-            })
+            }
         );
         assert_eq!(
             carry_out(ClipboardWork::ReadFiles { token: 2 }, &fake, Os::CURRENT),
-            Some(Done::Read {
+            Done::Read {
                 token: 2,
                 result: Err(ClipboardFailure::Unavailable)
-            })
+            }
         );
         let paths = ClipboardWork::PutPaths {
             paths: vec![temp("a")],
@@ -381,7 +384,7 @@ mod tests {
         };
         assert_eq!(
             carry_out(paths, &fake, Os::CURRENT),
-            Some(Done::Paths(Err(ClipboardFailure::Unavailable)))
+            Done::Paths(Err(ClipboardFailure::Unavailable))
         );
     }
 
@@ -398,14 +401,32 @@ mod tests {
         // The first put's count is not the clipboard's any more: it keeps what came since.
         assert_eq!(
             carry_out(ClipboardWork::ClearIf(1), &fake, Os::CURRENT),
-            None
+            Done::Cleared {
+                change: 1,
+                result: Ok(false)
+            }
         );
         assert!(fake.files.lock().expect("the lock").is_some());
         assert_eq!(
             carry_out(ClipboardWork::ClearIf(2), &fake, Os::CURRENT),
-            None
+            Done::Cleared {
+                change: 2,
+                result: Ok(true)
+            }
         );
         assert!(fake.files.lock().expect("the lock").is_none());
+        // One that cannot be emptied says why, for the window to try again.
+        let busy = Fake {
+            busy: true,
+            ..Fake::default()
+        };
+        assert_eq!(
+            carry_out(ClipboardWork::ClearIf(0), &busy, Os::CURRENT),
+            Done::Cleared {
+                change: 0,
+                result: Err(ClipboardFailure::Unavailable)
+            }
+        );
     }
 
     #[test]
@@ -424,11 +445,7 @@ mod tests {
                 paths: vec![mapped.clone(), other.clone()],
                 form,
             };
-            assert_eq!(
-                carry_out(work, &fake, os),
-                Some(Done::Paths(Ok(()))),
-                "{form:?}"
-            );
+            assert_eq!(carry_out(work, &fake, os), Done::Paths(Ok(())), "{form:?}");
             let first = if form == PathForm::Unc {
                 share.to_string_lossy().into_owned()
             } else {

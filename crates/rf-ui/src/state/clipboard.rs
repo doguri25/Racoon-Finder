@@ -8,8 +8,14 @@
 //! ([`Own`]): which items, whether they were cut, and the clipboard's change count after the
 //! put. While that count is the clipboard's, the cut items show dimmed in the panes; once
 //! another app (or this one) has put something else there, the clipboard's content is the
-//! truth and the dimming goes, as it does on Esc (with nothing selected), on a new copy or cut,
-//! and after the paste that moved them.
+//! truth and the dimming goes, as it does on a new copy or cut and after the paste that moved
+//! them.
+//!
+//! Esc with nothing selected cancels a cut ([`AppState::escape`]), and then nothing may move
+//! the items any more: the clipboard is emptied if it still holds them, a paste of what has
+//! that change count pastes nothing (another emptying goes with it), and an emptying that fails
+//! (another app holds the clipboard) is tried again at the next looks at the change count. When
+//! it fails every time, a notice says that a paste in another app could still move them.
 //!
 //! A paste reads the clipboard afresh ([`ClipboardWork::ReadFiles`]) and submits a transfer of
 //! what it holds into the folder: a move when the clipboard says so (File Explorer's cut, this
@@ -24,15 +30,17 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{
     ConflictPolicy, JobReport, JobSpec, Outcome, TransferMode, TransferOptions, TransferSpec,
 };
-use rf_platform::clipboard::{ClipboardFiles, DropEffect};
+use rf_platform::clipboard::{ClipboardFiles, DropEffect, is_device_path};
 
 use super::jobs::submit;
-use super::{AppState, Effect};
+use super::{AppState, Effect, Paging};
+use crate::keys::{Command, Mods};
 use crate::words;
 
 /// How the paths of items go to the clipboard as text (경로 복사, OPS-07).
@@ -98,6 +106,11 @@ impl PathForm {
 /// `form`: one a line, with `\r\n` between them on Windows and `\n` elsewhere. For
 /// [`PathForm::Unc`] the caller has put each mapped drive's share in its place (the worker asks
 /// the system), so the paths are taken as they are.
+///
+/// A name with a line break in it (Linux and macOS allow one) spans two lines in the forms that
+/// take the path as it is (full, name, UNC, slashes): such text is no list of one path a line.
+/// The quoted form keeps it inside its quotes, where a shell still reads one word, and the file
+/// URL encodes it (`%0A`).
 pub fn path_text(paths: &[String], form: PathForm, os: Os) -> String {
     let newline = if os == Os::Windows { "\r\n" } else { "\n" };
     paths
@@ -114,20 +127,11 @@ fn path_line(path: &str, form: PathForm, os: Os) -> String {
         PathForm::Slashes if windows => path.replace('\\', "/"),
         PathForm::Full | PathForm::Unc | PathForm::Slashes => path.to_owned(),
         PathForm::Name => name_of(path, windows).to_owned(),
+        // Windows names hold no `"`.
         PathForm::Quoted if windows => format!("\"{path}\""),
-        PathForm::Quoted => {
-            // The characters a shell reads specially between double quotes.
-            let mut quoted = String::with_capacity(path.len() + 2);
-            quoted.push('"');
-            for c in path.chars() {
-                if matches!(c, '"' | '\\' | '$' | '`') {
-                    quoted.push('\\');
-                }
-                quoted.push(c);
-            }
-            quoted.push('"');
-            quoted
-        }
+        // A POSIX shell reads everything between single quotes as it is; a quote of the name
+        // closes them, goes escaped, and opens them again.
+        PathForm::Quoted => format!("'{}'", path.replace('\'', "'\\''")),
         PathForm::FileUrl => file_url(path, os),
     }
 }
@@ -146,8 +150,7 @@ fn name_of(path: &str, windows: bool) -> &str {
 /// `file:///a%20b`. Every byte of a name that a URL's path does not take as it is (spaces,
 /// `%`, `#`, `?`, letters outside ASCII, …) is percent-encoded, so that other apps read it and
 /// [`read_file_url`](super::read_file_url) reads back the path. A backslash in a name, which
-/// only Linux and macOS allow, is `%5C`, which that reader refuses rather than take for a
-/// separator.
+/// only Linux and macOS allow, is `%5C`.
 pub fn file_url(path: &str, os: Os) -> String {
     let mut url = String::from("file://");
     if os != Os::Windows {
@@ -210,7 +213,8 @@ pub enum ClipboardWork {
     /// Put `text` on the clipboard (a checksum of the properties window); tell
     /// [`AppState::checksum_copied`] with `token` how it went.
     PutText { token: u64, text: String },
-    /// Empty the clipboard if its change count is still this one (nothing came since).
+    /// Empty the clipboard if its change count is still this one (nothing came since); tell
+    /// [`AppState::clipboard_cleared`] how it went.
     ClearIf(u64),
 }
 
@@ -255,6 +259,19 @@ struct PasteTo {
     force_move: bool,
 }
 
+/// How many times the clipboard is asked to drop a cut cancelled with Esc before a notice says
+/// that it still holds the cut.
+pub const CLEAR_TRIES: u32 = 4;
+
+/// The emptying of the clipboard after a cut was cancelled, until it is seen to work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Clearing {
+    /// The change count of the cut.
+    change: u64,
+    /// The tries that failed so far.
+    failed: u32,
+}
+
 /// What the window keeps of the clipboard.
 #[derive(Debug, Default)]
 pub(super) struct ClipWork {
@@ -264,6 +281,11 @@ pub(super) struct ClipWork {
     /// A cut cancelled (Esc) while its put was on its way: the clipboard is emptied once the
     /// put has told its count, if nothing came since.
     cancelled: Option<u64>,
+    /// The change count of the last cut cancelled with Esc: what the clipboard holds with it is
+    /// never pasted (unless ⌥⌘V asks for a move), until the window puts something else there.
+    cancelled_change: Option<u64>,
+    /// The emptying of that cut, until it worked.
+    clearing: Option<Clearing>,
     /// The pastes whose read is on its way, by token.
     pastes: HashMap<u64, PasteTo>,
     /// The moves pastes submitted that have not ended, with the change count of what the
@@ -295,11 +317,14 @@ impl AppState {
     /// Whether the window waits to see the clipboard change: items it cut are on it. The
     /// controller then asks the clipboard's change count now and then
     /// ([`AppState::clipboard_polled`]).
+    /// It also waits while a cancelled cut is still to be emptied: each look tries again.
     pub fn clipboard_watched(&self) -> bool {
-        self.clipboard
-            .own
-            .as_ref()
-            .is_some_and(|own| own.cut && own.change.is_some())
+        self.clipboard.clearing.is_some()
+            || self
+                .clipboard
+                .own
+                .as_ref()
+                .is_some_and(|own| own.cut && own.change.is_some())
     }
 
     /// Ctrl+C, Ctrl+X (and their menu items): the items of pane `side` (the selected rows, or
@@ -316,7 +341,10 @@ impl AppState {
             return Vec::new();
         }
         let token = self.clipboard.next_token();
+        // What the clipboard held is replaced, a cancelled cut too.
         self.clipboard.cancelled = None;
+        self.clipboard.cancelled_change = None;
+        self.clipboard.clearing = None;
         self.clipboard.own = Some(Own {
             token,
             paths: paths.clone(),
@@ -341,10 +369,10 @@ impl AppState {
         if self.clipboard.cancelled == Some(token) {
             self.clipboard.cancelled = None;
             // Esc came while it was on its way: the cut goes from the clipboard too.
-            return result
-                .map(|change| Effect::Clipboard(ClipboardWork::ClearIf(change)))
-                .into_iter()
-                .collect();
+            return match result {
+                Ok(change) => self.drop_cancelled(change),
+                Err(_) => Vec::new(),
+            };
         }
         let Some(own) = self.clipboard.own.as_mut().filter(|own| own.token == token) else {
             return Vec::new();
@@ -363,31 +391,102 @@ impl AppState {
 
     /// The clipboard's change count is now `change`: when it is no longer the count of what
     /// the window put there, another app has put something else, and the items cut no longer
-    /// show dimmed. `true` when that changed what the window shows. A count the system does
-    /// not tell changes nothing.
-    pub fn clipboard_polled(&mut self, change: Option<u64>) -> bool {
-        let stale = self.clipboard.own.as_ref().is_some_and(
-            |own| matches!((own.change, change), (Some(own), Some(now)) if own != now),
-        );
-        if stale {
-            let was_cut = self.clipboard.own.take().is_some_and(|own| own.cut);
-            return was_cut;
+    /// show dimmed. A cancelled cut the clipboard still holds is asked to go again, and one it
+    /// no longer holds needs nothing more. `None` when nothing changed; else what to carry out,
+    /// and the window shows the change. A count the system does not tell changes nothing.
+    pub fn clipboard_polled(&mut self, change: Option<u64>) -> Option<Vec<Effect>> {
+        let now = change?;
+        let mut changed = false;
+        if self
+            .clipboard
+            .own
+            .as_ref()
+            .is_some_and(|own| own.change.is_some_and(|own| own != now))
+        {
+            changed = self.clipboard.own.take().is_some_and(|own| own.cut);
         }
-        false
+        let mut effects = Vec::new();
+        match self.clipboard.clearing {
+            Some(clearing) if clearing.change == now => {
+                effects.push(Effect::Clipboard(ClipboardWork::ClearIf(now)));
+            }
+            Some(_) => self.clipboard.clearing = None,
+            None => {}
+        }
+        (changed || !effects.is_empty()).then_some(effects)
     }
 
-    /// Esc with nothing selected, while items the window cut are on the clipboard: the cut is
-    /// cancelled (as in File Explorer). They no longer show dimmed, and the clipboard is
-    /// emptied if it still holds them, so that a later paste cannot move them. `None` when
-    /// nothing is cut.
-    pub(super) fn cancel_cut(&mut self) -> Option<Vec<Effect>> {
+    /// The worker tried to empty the clipboard if its change count was still `change`:
+    /// `Ok(true)` it did, `Ok(false)` something else is there now, or it could not. For a cut
+    /// cancelled with Esc, a failure is tried again at the next look at the change count
+    /// ([`AppState::clipboard_polled`]), [`CLEAR_TRIES`] times in all; then a notice says the
+    /// clipboard still holds the cut. Any other emptying (after a move) needs no answer.
+    pub fn clipboard_cleared(
+        &mut self,
+        change: u64,
+        result: Result<bool, ClipboardFailure>,
+    ) -> Vec<Effect> {
+        let Some(clearing) = self
+            .clipboard
+            .clearing
+            .as_mut()
+            .filter(|clearing| clearing.change == change)
+        else {
+            return Vec::new();
+        };
+        if result.is_ok() {
+            self.clipboard.clearing = None;
+            return Vec::new();
+        }
+        clearing.failed += 1;
+        if clearing.failed < CLEAR_TRIES {
+            return Vec::new();
+        }
+        self.clipboard.clearing = None;
+        vec![Effect::Notice(words::clipboard_not_emptied().to_owned())]
+    }
+
+    /// Esc in the panes (the key alone: `keys::cancels_cut`). With items selected it clears the
+    /// selection; with nothing selected, while items the window cut are on the clipboard, it
+    /// cancels the cut as File Explorer's Esc does: they no longer show dimmed, and the
+    /// clipboard is emptied if it still holds them, so that no paste moves them (see the
+    /// module). The other ways to clear the selection (the 선택 menu, ⌥⌘A) cancel no cut.
+    /// `None` as [`AppState::key`] gives it.
+    pub fn escape(&mut self, paging: Paging, now: Instant) -> Option<Vec<Effect>> {
+        let cancels =
+            self.modal.is_none() && !self.quitting && self.tab(self.active).selection().is_empty();
+        let mut effects = if cancels {
+            self.cancel_cut().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        effects.extend(self.key(Command::ClearSelection, Mods::NONE, paging, now)?);
+        Some(effects)
+    }
+
+    /// The cut the window put on the clipboard is cancelled; `None` when nothing is cut.
+    fn cancel_cut(&mut self) -> Option<Vec<Effect>> {
         let own = self.clipboard.own.take_if(|own| own.cut)?;
         if let Some(change) = own.change {
-            return Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(change))]);
+            return Some(self.drop_cancelled(change));
         }
         // The put tells its count later: the clipboard is emptied then.
         self.clipboard.cancelled = Some(own.token);
         Some(Vec::new())
+    }
+
+    /// The cancelled cut with the change count `change` goes from the clipboard, and nothing
+    /// pastes it any more.
+    fn drop_cancelled(&mut self, change: u64) -> Vec<Effect> {
+        self.clipboard.cancelled_change = Some(change);
+        if self
+            .clipboard
+            .clearing
+            .is_none_or(|clearing| clearing.change != change)
+        {
+            self.clipboard.clearing = Some(Clearing { change, failed: 0 });
+        }
+        vec![Effect::Clipboard(ClipboardWork::ClearIf(change))]
     }
 
     /// Ctrl+V (⌘V; ⌥⌘V with `force_move`): pastes what the clipboard holds into the folder of
@@ -457,6 +556,13 @@ impl AppState {
                 return vec![Effect::Notice(words::clipboard_failed(failure).to_owned())];
             }
         };
+        // A cut cancelled with Esc that the clipboard still holds (its emptying is on its way,
+        // or failed) pastes nothing; Finder's ⌥⌘V, a move asked for by name, still moves.
+        if self.clipboard.cancelled_change == Some(files.change) && !to.force_move {
+            let mut effects = vec![Effect::Notice(words::nothing_to_paste().to_owned())];
+            effects.extend(self.drop_cancelled(files.change));
+            return effects;
+        }
         // What the window put is the truth only while the clipboard holds it; a put still on
         // its way tells its count later.
         let ours = self
@@ -474,7 +580,7 @@ impl AppState {
                 Some(effect) => effect == DropEffect::Move,
                 None => our_cut,
             };
-        let sources = local_paths(&files.paths);
+        let (sources, left_out) = local_paths(&files.paths);
         if sources.is_empty() {
             return vec![Effect::Notice(words::nothing_to_paste().to_owned())];
         }
@@ -483,7 +589,15 @@ impl AppState {
         } else {
             TransferMode::Copy
         };
-        self.paste_spec(&to, sources, mode, files.change)
+        let mut effects = self.paste_spec(&to, sources, mode, files.change);
+        // The others go; the user is told that some did not.
+        let submitted = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Job(_)));
+        if left_out > 0 && submitted {
+            effects.push(Effect::Notice(words::paste_left_out(left_out)));
+        }
+        effects
     }
 
     /// The paste of `sources` into `to`, to `mode` them, of the clipboard content with the
@@ -596,12 +710,17 @@ impl AppState {
     }
 }
 
-/// `paths` as local addresses; a path that is not one (relative, or with a name the system
-/// cannot have) is left out.
-fn local_paths(paths: &[PathBuf]) -> Vec<VPath> {
-    paths
+/// `paths` as local addresses, and how many were left out: a path that is not one (relative,
+/// or with a name the system cannot have), and a Windows device or volume path that stays one
+/// once normalized (`\\?\GLOBALROOT\…`, `\\?\Volume{…}\…`), which names no folder of a drive
+/// or a share.
+fn local_paths(paths: &[PathBuf]) -> (Vec<VPath>, usize) {
+    let local: Vec<VPath> = paths
         .iter()
         .filter(|path| path.is_absolute())
         .filter_map(|path| VPath::local(path).ok())
-        .collect()
+        .filter(|path| !path.as_local().is_some_and(is_device_path))
+        .collect();
+    let left_out = paths.len() - local.len();
+    (local, left_out)
 }
