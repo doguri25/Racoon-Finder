@@ -18,9 +18,11 @@
 //! settings are written, the engine shuts down, then the questions are released). Nor is the
 //! tray offered while every job is paused or waits behind a paused one, or while something
 //! waits for the user. 끝내기 while jobs run brings the window back with the question before the
-//! app ends, without the tray this time. A second start of the app shows the window too
-//! ([`AppState::show_asked`], module `instance`), and so does a tray icon the window could not
-//! make ([`AppState::tray_unavailable`]), which the window then never hides behind.
+//! app ends, without the tray this time. macOS's ⌘Q and the Dock's 종료 do not come here: the
+//! system ends the app, which runs its end without the question (`controller::end_at_exit`),
+//! so the jobs stop and the next start offers them again. A second start of the app shows the
+//! window too ([`AppState::show_asked`], module `instance`), and so does a tray icon the window
+//! could not make ([`AppState::tray_unavailable`]), which the window then never hides behind.
 
 use rf_core::Os;
 use rf_jobs::{JobId, JobReport, JobState};

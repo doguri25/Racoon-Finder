@@ -82,10 +82,18 @@ pub enum RunError {
 ///
 /// When the window closes, the settings are written (waiting [`controller::FINAL_SAVE_WAIT`] at
 /// most), and the engine is shut down and the jobs' questions are released
-/// ([`jobs::close_down`]), before this returns. Where the system has a tray, the window may
-/// instead hide while its jobs go on behind the tray icon; the app ends the same way once they
-/// have ended ([`notify`]).
+/// ([`jobs::close_down`]), before this returns. The same end runs, without the question about
+/// running jobs, when the system ends the event loop under the app (macOS ⌘Q and the Dock's
+/// 종료, after which the system ends the process; [`controller::end_at_exit`]). Where the system
+/// has a tray, the window may instead hide while its jobs go on behind the tray icon; the app
+/// ends the same way once they have ended ([`notify`]).
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
+    // The app's own end runs also when the system ends the event loop under the app (macOS ⌘Q,
+    // the Dock's 종료), from the loop's `exiting`. A backend that cannot start this way is left
+    // to the window, which then tells why it cannot open.
+    let _ = slint::BackendSelector::new()
+        .with_winit_custom_application_handler(EndAtExit)
+        .select();
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
     // The instance that runs shows its window, which may be hidden behind the tray icon; only
@@ -158,6 +166,20 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     drop(lock);
     result?;
     Ok(())
+}
+
+/// Runs the app's end when the event loop ends ([`controller::end_at_exit`]): on macOS the
+/// system may end the process right after the loop's `exiting`, before [`run`] goes on.
+struct EndAtExit;
+
+impl slint::winit_030::CustomApplicationHandler for EndAtExit {
+    fn exiting(
+        &mut self,
+        _event_loop: &slint::winit_030::winit::event_loop::ActiveEventLoop,
+    ) -> slint::winit_030::EventResult {
+        controller::end_at_exit();
+        slint::winit_030::EventResult::Propagate
+    }
 }
 
 /// The end of the app after the event loop, when the close button did not end it: `last`, the

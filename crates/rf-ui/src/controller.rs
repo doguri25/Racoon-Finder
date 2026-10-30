@@ -35,6 +35,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
@@ -245,6 +246,36 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         post(move |c| c.set_places(&found));
     });
     controller
+}
+
+/// The app's end when the event loop ends under the app, called from the loop's `exiting`
+/// ([`crate::run`]). On macOS, ⌘Q, the app menu's 종료 and the Dock's 종료 make the system end
+/// the process right after that (`terminate:`; winit 0.30 has no `applicationShouldTerminate:`
+/// to stop it), so nothing after the loop runs. Waits for the end of the window's close button
+/// when it is under way; else does that end without its question (the settings written, the
+/// engine shut down, the questions released) and waits for it. The jobs under way are stopped
+/// as at any other end, and the next start offers them again. Nothing when there is no
+/// controller or the end is done. Blocks, for [`FINAL_SAVE_WAIT`], [`QUIT_TIMEOUT`] and
+/// [`NOTICE_WAIT`] at most.
+pub fn end_at_exit() {
+    if let Some(Some(pending)) = with(Controller::end_for_exit) {
+        let _ = pending.join();
+    }
+}
+
+/// The work of the app's end, after the window's part: `last`, the text of the settings, is
+/// written (waiting [`FINAL_SAVE_WAIT`] at most), then the engine shuts down and the jobs'
+/// questions are released ([`Jobs::close_down`]), and the last notification, of the jobs that
+/// ended behind the tray icon, is waited for ([`NOTICE_WAIT`] at most). Blocks: a worker's.
+fn end_work(jobs: &Jobs, saver: &Saver, notifier: &OsNotifier, last: Option<String>) {
+    // First: they do not wait for the engine, and an end forced while it shuts down does not
+    // lose them.
+    if let Some(text) = last {
+        let _ = saver.save_within(text, FINAL_SAVE_WAIT);
+    }
+    jobs.close_down(QUIT_TIMEOUT);
+    // The last notification is not cut off by the end of the app.
+    notifier.wait_idle(NOTICE_WAIT);
 }
 
 /// Drops the controller of this thread, which stops every listing and watch.
@@ -859,6 +890,8 @@ pub struct Controller {
     tray: Tray,
     /// Stops the look for a second start's requests to show the window, as the app ends.
     request_stop: RefCell<Option<RequestStop>>,
+    /// The worker of the app's end, once [`Controller::quit`] started it.
+    quitting: RefCell<Option<JoinHandle<()>>>,
 }
 
 impl fmt::Debug for Controller {
@@ -962,6 +995,7 @@ impl Controller {
                 with(|c| c.update(|state| state.tray_command(command)));
             }))),
             request_stop: RefCell::new(None),
+            quitting: RefCell::new(None),
         }
     }
 
@@ -1075,40 +1109,67 @@ impl Controller {
     /// [`crate::run`], after the event loop. From the start, no second start's request to show
     /// the window is taken ([`stop_requests_at_quit`]).
     fn quit(&self) {
-        // A second start's request to show the window is not taken from now on: the window is
-        // about to go, and that start then tries the lock again (`instance::take_or_ask`).
-        if let Some(stop) = self.request_stop.borrow().as_ref() {
-            stop.stop();
-        }
-        // The looks at copies stop: the state takes no answer while the app ends.
-        self.checks.borrow_mut().stop();
-        let jobs = self.jobs.clone();
-        let saver = self.saver.clone();
-        let notifier = self.notifier.clone();
-        let last = self.final_settings();
+        let (jobs, saver, notifier, last) = self.end_parts();
         let taken = last.is_some();
         let started = std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
             .spawn(move || {
-                // First: they do not wait for the engine, and an end forced while it shuts
-                // down does not lose them.
-                if let Some(text) = last {
-                    let _ = saver.save_within(text, FINAL_SAVE_WAIT);
-                }
-                jobs.close_down(QUIT_TIMEOUT);
-                // The last notification, of the jobs that ended behind the tray icon, is not
-                // cut off by the end of the app.
-                notifier.wait_idle(NOTICE_WAIT);
+                end_work(&jobs, &saver, &notifier, last);
                 let _ = slint::invoke_from_event_loop(|| {
                     let _ = slint::quit_event_loop();
                 });
             });
-        if started.is_err() {
-            if taken {
-                self.reopen_settings();
-            }
-            let _ = slint::quit_event_loop();
+        if let Ok(worker) = started {
+            *self.quitting.borrow_mut() = Some(worker);
+            return;
         }
+        if taken {
+            self.reopen_settings();
+        }
+        let _ = slint::quit_event_loop();
+    }
+
+    /// What the work of an end takes along ([`end_work`]): the engine, the saver, the notifier
+    /// and the last text of the settings ([`Controller::final_settings`]). From now on no second
+    /// start's request to show the window is taken (the window is about to go, and that start
+    /// then tries the lock again, `instance::take_or_ask`), and the looks at copies stop (the
+    /// state takes no answer while the app ends).
+    fn end_parts(&self) -> (Jobs, Saver, OsNotifier, Option<String>) {
+        if let Some(stop) = self.request_stop.borrow().as_ref() {
+            stop.stop();
+        }
+        self.checks.borrow_mut().stop();
+        let last = self.final_settings();
+        (
+            self.jobs.clone(),
+            self.saver.clone(),
+            self.notifier.clone(),
+            last,
+        )
+    }
+
+    /// The end of the app when the event loop ends under it ([`end_at_exit`]): the worker of
+    /// the end under way, to wait for; else a worker that does the end of [`Controller::quit`]
+    /// without its question. `None` when the end is done, or when no worker could start and
+    /// the end was done here.
+    fn end_for_exit(&self) -> Option<JoinHandle<()>> {
+        if let Some(pending) = self.quitting.borrow_mut().take() {
+            return Some(pending);
+        }
+        if self.jobs.is_closed() {
+            return None;
+        }
+        let (jobs, saver, notifier, last) = self.end_parts();
+        let here = (jobs.clone(), saver.clone(), notifier.clone(), last.clone());
+        let started = std::thread::Builder::new()
+            .name("rf-ui-exit".to_owned())
+            .spawn(move || end_work(&jobs, &saver, &notifier, last));
+        if let Ok(worker) = started {
+            return Some(worker);
+        }
+        let (jobs, saver, notifier, last) = here;
+        end_work(&jobs, &saver, &notifier, last);
+        None
     }
 
     /// Makes `found` the places of the sidebar: the roots of the tree, now or once the panes'
@@ -2327,4 +2388,50 @@ fn show_layout(window: &MainWindow, layout: Layout, sync: bool) {
 /// The number Slint uses for pane `side`.
 fn side_number(side: usize) -> i32 {
     i32::from(side == RIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::settings;
+
+    #[test]
+    fn an_end_writes_the_settings_then_shuts_the_engine_down_and_waits_for_the_notice() {
+        // The end of the window's close button and the end when the system ends the event
+        // loop under the app (macOS ⌘Q, the Dock's 종료) do the same work.
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
+        let config = dir.path().join("config");
+        let saver = Saver::new(config.clone(), true);
+        // A notification on its way, which the system takes a while to show.
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let noted = Arc::clone(&sent);
+        let notifier = OsNotifier::new(move |title, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            noted.lock().expect("the list").push(title.to_owned());
+            Ok(())
+        });
+        notifier.notify(crate::notify::Notice {
+            title: "복사를 마쳤습니다".to_owned(),
+            body: String::new(),
+        });
+        assert!(!jobs.is_closed());
+        end_work(
+            &jobs,
+            &saver,
+            &notifier,
+            Some("theme = \"dark\"\n".to_owned()),
+        );
+        assert!(jobs.is_closed());
+        assert_eq!(*sent.lock().expect("the list"), ["복사를 마쳤습니다"]);
+        assert_eq!(
+            std::fs::read_to_string(config.join(settings::FILE_NAME)).expect("the settings"),
+            "theme = \"dark\"\n"
+        );
+        // Without a text to write (taken by an end before), it only ends the engine.
+        end_work(&jobs, &saver, &notifier, None);
+        assert!(jobs.is_closed());
+    }
 }
