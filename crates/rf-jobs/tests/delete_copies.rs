@@ -661,6 +661,78 @@ fn a_copy_whose_original_goes_while_the_job_is_paused_is_kept() {
     assert!(f.dst.join("docs").is_dir());
 }
 
+/// A job deleting the copy of `a.txt`, paused while its look `stat`s the copy (the copy's
+/// second `stat`: the first one plans), before the look at the original. Held again once it has
+/// looked at the original, which is as it was then; `meanwhile` runs there, with the original's
+/// path, and the job goes on paused (to the checkpoint of its delete) until it is resumed. Gives
+/// its report, the copy, and the folders, which go once dropped.
+fn paused_in_the_look(meanwhile: impl FnOnce(&Path)) -> (Arc<JobReport>, PathBuf, Fx) {
+    let f = fx();
+    let original = f.src.join("a.txt");
+    std::fs::write(&original, "A").unwrap();
+    let spec = copied(&f, &["a.txt"]);
+    after_the_copy();
+    let copy = f.dst.join("a.txt");
+    let p = FaultyProvider::local(vec![
+        Fault::HoldAtStat {
+            path: v(&copy),
+            call: 1,
+        },
+        Fault::SecondHoldAt { path: v(&original) },
+    ]);
+    let (e, rx) = engine_on(&p);
+    let id = e.submit(JobSpec::DeleteCopies(spec));
+    // The pause is asked for while the look `stat`s the copy, after the look's checkpoint.
+    assert!(p.wait_held(WAIT));
+    assert!(e.pause(id));
+    p.release();
+    // The look has found the original as it was.
+    assert!(p.wait_held_again(WAIT));
+    meanwhile(&original);
+    p.release_again();
+    assert!(e.resume(id));
+    let report = wait_finished(&rx, id, WAIT);
+    assert!(e.shutdown(WAIT));
+    (report, copy, f)
+}
+
+#[test]
+fn a_copy_whose_original_goes_after_a_pause_asked_for_during_its_look_is_kept() {
+    let (report, copy, _f) = paused_in_the_look(|original| std::fs::remove_file(original).unwrap());
+    // The pause came after the look began: the delete looks at the original again, finds it
+    // gone, and keeps the copy, the only one left.
+    assert_eq!(report.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(
+        kept(&report),
+        [(
+            copy.clone(),
+            CopyFound {
+                copy: Compared::Same,
+                original: Compared::Missing,
+            }
+        )]
+    );
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "A");
+}
+
+#[test]
+fn a_copy_whose_original_is_written_after_a_pause_asked_for_during_its_look_is_kept() {
+    let (report, copy, _f) = paused_in_the_look(|original| {
+        std::fs::write(original, "written while paused").unwrap();
+    });
+    assert_eq!(
+        kept(&report),
+        [(
+            copy.clone(),
+            CopyFound {
+                copy: Compared::Same,
+                original: Compared::Changed,
+            }
+        )]
+    );
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "A");
+}
+
 /// A job deleting the copied folder `docs` of `a.txt` and `b.txt`, held inside the look at the
 /// original of the second file it deletes: it was paused and resumed as it held at the first
 /// one, so the second one's step looks at its original again, and holds there

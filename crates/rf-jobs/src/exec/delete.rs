@@ -92,13 +92,15 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
 /// each kept item failing with `CopyKept` (the copy changed). A folder that another program put
 /// an item in after its listing fails to be removed and counts as changed in the same way.
 ///
-/// Once the job has been paused after the look of a copy, the original may have changed too:
-/// each step that then deletes an item of that copy first compares the item with its original
-/// again (see [`Recheck`]), then looks at the item itself once more. The first item whose
-/// original is gone or changed stays and fails with `CopyKept` (the original changed or went);
-/// the rest of that copy stays with it. Between two steps of a walk the job was not paused in,
-/// only the copy is held to the look. No step waits for a pause between its last look and its
-/// delete: a pause takes hold at the next step's checkpoint, before that step's looks.
+/// Once the job has been paused since the look of a copy began (a pause asked for while the
+/// look ran counts, as the job stops only at its next checkpoint), the original may have changed
+/// too: each step that then deletes an item of that copy first compares the item with its
+/// original again (see [`Recheck`]), then looks at the item itself once more. The first item
+/// whose original is gone or changed stays and fails with `CopyKept` (the original changed or
+/// went); the rest of that copy stays with it. Between two steps of a walk the job was not
+/// paused in, only the copy is held to the look. No step waits for a pause between its last
+/// look and its delete: a pause takes hold at the next step's checkpoint, before that step's
+/// looks.
 pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
     let mut totals = Totals::default();
     for copy in &spec.copies {
@@ -119,6 +121,12 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
     for copy in &spec.copies {
         let path = &copy.made.path;
         let looked = ctx.attempt(ErrorPolicy::Continue, Some(path), None, |ctx| {
+            // The pauses so far, read before anything of the look: a pause asked for from here
+            // on invites a change of the original, even one asked for while the copy is looked
+            // at (the count goes up as it is asked for, and the job waits only at the next
+            // checkpoint). One asked for before the checkpoint below makes the job wait there and
+            // costs one more look at the original, no more.
+            let pauses = ctx.env.control.pauses();
             ctx.check().at(Stage::Delete)?;
             let provider = ctx.provider(path).at(Stage::Delete)?;
             let now = match provider.stat(path) {
@@ -127,8 +135,6 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
                 Err(error) => return Err(Failed::new(Stage::Delete, error)),
             };
             ctx.working_on(path);
-            // The pauses so far: one after this look invites a change of the original.
-            let pauses = ctx.env.control.pauses();
             let cancel = ctx.env.control.cancel_token();
             let found = copies::check_found(
                 ctx.env.vfs,
@@ -227,7 +233,8 @@ struct Walk<'a> {
 /// pause since the look, the original is not looked at again.
 #[derive(Debug)]
 struct Recheck {
-    /// How many times the job had been paused when the look compared the original.
+    /// How many times the job had been paused when the look began, read before its checkpoint:
+    /// any pause asked for after that may have let the original change.
     pauses: u64,
     /// Set once an item's original was found gone or changed: the rest of the copy stays.
     lost: Cell<bool>,

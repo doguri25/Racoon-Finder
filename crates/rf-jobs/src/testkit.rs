@@ -1,7 +1,7 @@
 //! Test doubles for code that uses this crate. The module is always compiled (no feature
 //! flag) so that the tests of the crates built on top of this one can use it too.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs::ReadDir;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -329,10 +329,15 @@ pub enum Fault {
     /// Like [`Fault::HoldAt`], for a `delete_leaf` of `path` alone: a job holds there once it
     /// has looked at the item and decided to delete it.
     HoldAtDelete { path: VPath },
-    /// A `stat` of `path` waits, as at a [`Fault::HoldAt`], but at a second hold with signals
-    /// of its own: [`FaultyProvider::wait_held_again`] wakes as it waits, and
+    /// Like [`Fault::HoldAt`], for the `stat` number `call` of `path` alone (counted from 0 for
+    /// each path): a job that `stat`s an item more than once (to plan, then to look at it) holds
+    /// at the look it means.
+    HoldAtStat { path: VPath, call: usize },
+    /// A `stat` of `path` is passed on and then waits with its answer, at a second hold with
+    /// signals of its own: [`FaultyProvider::wait_held_again`] wakes as it waits, and
     /// [`FaultyProvider::release_again`] lets it go (and every later call). A job can so be held
-    /// twice: first at a `HoldAt` or `HoldAtDelete`, then here.
+    /// twice: first at a `HoldAt`, `HoldAtStat` or `HoldAtDelete`, then here, where what the
+    /// item was is already taken, whatever is done to it before the hold is let go.
     SecondHoldAt { path: VPath },
     /// Like a killed process: a `delete_leaf` or `remove_dir` of `path` deletes nothing, wakes
     /// [`FaultyProvider::wait_crashed`], and stops the deleting thread for good. No later code,
@@ -421,6 +426,8 @@ struct Counters {
     renames: usize,
     created_dirs: usize,
     late_file_made: bool,
+    /// The `stat`s of each path so far.
+    stats: HashMap<VPath, usize>,
 }
 
 /// What the held and crashed writers have signalled, shared with them.
@@ -689,15 +696,26 @@ impl Provider for FaultyProvider {
 
     fn stat(&self, path: &VPath) -> Result<Entry> {
         self.hold_at(path);
-        self.hold_again_at(path);
+        let call = {
+            let mut counters = self.counters();
+            let seen = counters.stats.entry(path.clone()).or_default();
+            *seen += 1;
+            *seen - 1
+        };
+        self.hold_if(
+            |fault| matches!(fault, Fault::HoldAtStat { path: at, call: nth } if at == path && *nth == call),
+        );
         let refused = self.faults.iter().any(|fault| {
             matches!(fault, Fault::FailStat { name } if path.file_name() == Some(name.as_os_str()))
         });
-        if refused {
+        let found = if refused {
             let error = io::Error::from(io::ErrorKind::PermissionDenied);
-            return Err(Error::io("stat", path.clone(), error));
-        }
-        self.inner.stat(path).map(|e| self.identity_of(path, e))
+            Err(Error::io("stat", path.clone(), error))
+        } else {
+            self.inner.stat(path).map(|e| self.identity_of(path, e))
+        };
+        self.hold_again_at(path);
+        found
     }
 
     fn create_dir(&self, path: &VPath) -> Result<()> {
