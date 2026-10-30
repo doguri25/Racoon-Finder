@@ -139,7 +139,10 @@ pub struct CopyOf {
 /// for good itself. Right before it deletes a copy, the job looks at it and at its original
 /// (`copies::check_copy`): a copy goes only while it is as its copy job left it and its
 /// original still holds everything it holds. Any other copy stays, and fails as `Stage::Delete`
-/// with the reason `CopyKept`; one that is gone is skipped. It runs under
+/// with the reason `CopyKept`; one that is gone is skipped. While the copy is deleted, each
+/// item is held to that look again as its step comes: the copy's items by their times, and,
+/// once the job has been paused since the look, each item's original by comparing them anew.
+/// An item found changed stays with the folders above it. It runs under
 /// `ErrorPolicy::Continue` and keeps no undo record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteCopiesSpec {

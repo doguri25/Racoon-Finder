@@ -1143,6 +1143,28 @@ fn a_paste_selects_nothing_the_user_did_not_leave_to_it() {
     assert_eq!(rows(&state, LEFT), ["docs", "x.txt", "y.txt", "z.txt"]);
     assert_eq!(selected(&state, LEFT), [2]);
 
+    // The user picks a row while the clipboard is read, before the paste's job is submitted:
+    // what the user chose stays too.
+    let mut state = two_panes();
+    let token = paste(&mut state, LEFT);
+    state.click_row(LEFT, 1, false, false);
+    let effects = state.clipboard_read(
+        token,
+        Ok(Some(files(&[in_b("z.txt")], Some(DropEffect::Copy), 32))),
+    );
+    let (spec, _) = the_submit(&effects);
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outputs = vec![in_a("z.txt")];
+    });
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ScrollTo { .. })),
+        "{effects:?}"
+    );
+    files_came(&mut state, LEFT, &["z.txt"]);
+    assert_eq!(selected(&state, LEFT), [1]);
+
     // Pasted into a folder row: the pane does not show where the items went, and its
     // selection stays.
     let mut state = two_panes();
@@ -1172,4 +1194,52 @@ fn a_paste_selects_nothing_the_user_did_not_leave_to_it() {
         "{effects:?}"
     );
     assert_eq!(selected(&state, LEFT), [0]);
+}
+
+#[test]
+fn a_cancelled_cut_still_on_the_clipboard_is_left_for_the_end_to_empty() {
+    let busy = || Err(ClipboardFailure::Unavailable);
+    let mut state = two_panes();
+    assert_eq!(state.cut_left_on_clipboard(), None);
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(70));
+    // A cut alone is no cancelled one.
+    assert_eq!(state.cut_left_on_clipboard(), None);
+    esc(&mut state);
+    assert_eq!(
+        esc(&mut state),
+        Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(70))])
+    );
+    // Its emptying is on its way, then failed once (another app held the clipboard): the app's
+    // end is to try once more if it comes now, within the next look at the clipboard.
+    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+    assert_eq!(state.clipboard_cleared(70, busy()), []);
+    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+    // The end asks the state no more once it has begun.
+    assert_eq!(state.begin_quit(), [Effect::Quit]);
+    assert_eq!(state.cut_left_on_clipboard(), Some(70));
+
+    // Emptied: nothing left.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(71));
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(state.clipboard_cleared(71, Ok(true)), []);
+    assert_eq!(state.cut_left_on_clipboard(), None);
+
+    // Failed every time: the user has been told, and the end does not try again.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(72));
+    esc(&mut state);
+    esc(&mut state);
+    for _ in 1..CLEAR_TRIES {
+        assert_eq!(state.clipboard_cleared(72, busy()), []);
+    }
+    assert_eq!(
+        state.clipboard_cleared(72, busy()),
+        [Effect::Notice(words::clipboard_not_emptied().to_owned())]
+    );
+    assert_eq!(state.cut_left_on_clipboard(), None);
 }

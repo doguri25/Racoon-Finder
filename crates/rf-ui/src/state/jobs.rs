@@ -473,9 +473,10 @@ impl AppState {
         if matches!(
             report.outcome,
             Outcome::Completed | Outcome::CompletedWithErrors
-        ) && let Some(side) = pasted_in
+        ) && let Some((side, mark)) = pasted_in
         {
-            effects.extend(self.select_outputs(side, &report.outputs, marks.as_deref()));
+            // Only while the selection is as it was when the paste was asked, before its read.
+            effects.extend(self.select_outputs(side, &report.outputs, Some(&[mark])));
         }
         // What an undo or a redo brought back (a name, a folder, an item from the trash) is
         // selected where a pane shows its folder, the active one first.

@@ -1,5 +1,6 @@
 //! Pause, resume and cancel for one running job.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use rf_core::{Error, Result};
@@ -20,6 +21,8 @@ struct Inner {
     /// Signalled when the state leaves `Paused`.
     cv: Condvar,
     token: CancelToken,
+    /// How many times the job has been paused.
+    pauses: AtomicU64,
 }
 
 /// The remote control of one job. The engine keeps a handle to pause, resume and cancel; the
@@ -46,6 +49,7 @@ impl Control {
         let mut state = self.lock();
         if *state == RunState::Running {
             *state = RunState::Paused;
+            self.inner.pauses.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -100,6 +104,14 @@ impl Control {
         } else {
             Ok(())
         }
+    }
+
+    /// How many times the job has been paused ([`pause`](Self::pause) of a running job). A
+    /// worker that reads one count before a step and another after it knows that the user
+    /// paused the job in between, which invites a change of what the job works on, whether or
+    /// not the worker reached a [`checkpoint`](Self::checkpoint) before the job was resumed.
+    pub(crate) fn pauses(&self) -> u64 {
+        self.inner.pauses.load(Ordering::SeqCst)
     }
 
     /// The state lock. A holder that panicked cannot leave the state half-written (every

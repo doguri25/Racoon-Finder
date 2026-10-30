@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use rf_core::Os;
 use rf_platform::clipboard::{self, ClipboardFiles, DropEffect};
@@ -149,6 +149,9 @@ enum Job {
     Work(ClipboardWork),
     /// Ask the change count ([`Done::Polled`]).
     Poll,
+    /// Empty the clipboard if its change count is still the one given, and answer on the
+    /// channel rather than to the window ([`Clipper::clear_now`]).
+    ClearNow(u64, Sender<Result<bool, ClipboardFailure>>),
 }
 
 /// The worker. Dropping it ends its thread once the requests sent before are done.
@@ -189,6 +192,13 @@ impl Clipper {
                             waiting.store(false, Ordering::Relaxed);
                             Done::Polled(clipboard.change_count())
                         }
+                        Job::ClearNow(change, answer) => {
+                            let result = clipboard
+                                .clear_if_unchanged(change)
+                                .map_err(|error| ClipboardFailure::from(&error));
+                            let _ = answer.send(result);
+                            continue;
+                        }
                     };
                     done(answer);
                 }
@@ -199,6 +209,17 @@ impl Clipper {
     /// Hands `work` to the worker; `false` when it has no thread.
     pub fn submit(&self, work: ClipboardWork) -> bool {
         self.jobs.send(Job::Work(work)).is_ok()
+    }
+
+    /// Asks the worker to empty the clipboard if its change count is still `change`, after the
+    /// requests sent before, and gives the channel its answer comes on (`Ok(true)` it did,
+    /// `Ok(false)` something else is there now, or why it could not): for the app's end, which
+    /// waits for it a moment rather than for the window ([`Done::Cleared`] is not sent). `None`
+    /// when the worker has no thread.
+    pub fn clear_now(&self, change: u64) -> Option<Receiver<Result<bool, ClipboardFailure>>> {
+        let (answer, answered) = mpsc::channel();
+        self.jobs.send(Job::ClearNow(change, answer)).ok()?;
+        Some(answered)
     }
 
     /// Asks the worker for the clipboard's change count, unless it has been asked already
@@ -528,5 +549,28 @@ mod tests {
         drop(clipper);
         // Once the worker is gone nothing more comes.
         assert!(done.recv().is_err());
+    }
+
+    #[test]
+    fn an_emptying_for_the_end_answers_on_its_own_channel_after_what_came_before() {
+        let fake: Arc<dyn SystemClipboard> = Arc::new(Fake::default());
+        let (answers, done) = mpsc::channel();
+        let clipper = Clipper::start(Arc::clone(&fake), Os::CURRENT, move |answer| {
+            let _ = answers.send(answer);
+        });
+        assert!(clipper.submit(ClipboardWork::PutFiles {
+            token: 1,
+            paths: vec![temp("a")],
+            cut: true,
+        }));
+        // Not the put's count: what came since stays.
+        let other = clipper.clear_now(9).expect("a worker");
+        assert_eq!(other.recv(), Ok(Ok(false)));
+        let ours = clipper.clear_now(1).expect("a worker");
+        assert_eq!(ours.recv(), Ok(Ok(true)));
+        assert_eq!(fake.get_files().expect("a read"), None);
+        // The window hears of the put alone.
+        assert!(matches!(done.recv(), Ok(Done::Put { token: 1, .. })));
+        assert!(done.try_recv().is_err());
     }
 }

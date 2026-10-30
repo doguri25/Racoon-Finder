@@ -26,6 +26,7 @@
 //! other file or one empty folder. Closing that needs a walk relative to open folder handles
 //! (`openat`, `unlinkat`), the follow-up for this.
 
+use std::cell::Cell;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
 
@@ -60,8 +61,9 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
                 let walk = Walk {
                     errors: spec.errors,
                     guard: None,
+                    recheck: None,
                 };
-                let deleted = delete_entry(ctx, walk, path, entry, Level::TOP, None);
+                let deleted = delete_entry(ctx, walk, path, entry, Level::TOP, None, None);
                 if deleted.is_break() {
                     break;
                 }
@@ -89,6 +91,12 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, spec: &DeleteSpec) {
 /// after the look, or between two steps of its walk, keeps the item and the folders above it,
 /// each kept item failing with `CopyKept` (the copy changed). A folder that another program put
 /// an item in after its listing fails to be removed and counts as changed in the same way.
+///
+/// Once the job has been paused after the look of a copy, the original may have changed too:
+/// each step that then deletes an item of that copy first compares the item with its original
+/// again (see [`Recheck`]). The first item whose original is gone or changed stays and fails
+/// with `CopyKept` (the original changed or went); the rest of that copy stays with it. Between
+/// two steps of a walk the job was not paused in, only the copy is held to the look.
 pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
     let mut totals = Totals::default();
     for copy in &spec.copies {
@@ -117,6 +125,8 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
                 Err(error) => return Err(Failed::new(Stage::Delete, error)),
             };
             ctx.working_on(path);
+            // The pauses so far: one after this look invites a change of the original.
+            let pauses = ctx.env.control.pauses();
             let cancel = ctx.env.control.cancel_token();
             let found = copies::check_found(
                 ctx.env.vfs,
@@ -130,7 +140,7 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
             // A look that a cancel cut short stops the job, rather than keep the copy for it.
             ctx.check().at(Stage::Delete)?;
             if found == CopyFound::SAME {
-                Ok(Some(now))
+                Ok(Some((now, pauses)))
             } else if spec.resumed && copy.made.is_dir && found.copy != Compared::Same {
                 Err(partly_deleted(path))
             } else {
@@ -138,7 +148,11 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
             }
         });
         let flow = match looked {
-            Attempt::Done(Some(now)) => {
+            Attempt::Done(Some((now, pauses))) => {
+                let recheck = Recheck {
+                    pauses,
+                    lost: Cell::new(false),
+                };
                 let walk = Walk {
                     errors: ErrorPolicy::Continue,
                     guard: Some(Guard {
@@ -146,8 +160,10 @@ pub(crate) fn run_delete_copies(ctx: &mut Ctx<'_>, spec: &DeleteCopiesSpec) {
                         size: now.size,
                         at: spec.at,
                     }),
+                    recheck: Some(&recheck),
                 };
-                delete_entry(ctx, walk, path, &now, Level::TOP, None)
+                let original = Some(&copy.original);
+                delete_entry(ctx, walk, path, &now, Level::TOP, None, original)
             }
             Attempt::Done(None) => {
                 ctx.report.skipped += 1;
@@ -192,9 +208,88 @@ fn partly_deleted(path: &VPath) -> Failed {
 /// How a permanent delete walks: its error policy, and for a delete of copies what it holds
 /// each item to before the item goes.
 #[derive(Clone, Copy, Debug)]
-struct Walk {
+struct Walk<'a> {
     errors: ErrorPolicy,
     guard: Option<Guard>,
+    recheck: Option<&'a Recheck>,
+}
+
+/// What a delete of copies holds each item of one copy to besides the [`Guard`], once the job
+/// has been paused since the copy's look ([`Control::pauses`](crate::Control)): the
+/// item's original must still hold it. While the job is paused anyone may delete or change the
+/// original, and deleting the copy then would lose what only the copy holds. A file or a link
+/// is compared with its original as the look compares them (`copies::original_beside`); a
+/// copied folder, which goes only once it is empty, needs only its original to be a folder
+/// still (anything put in the copy keeps it as a changed copy, see [`delete_dir`]). Without a
+/// pause since the look, the original is not looked at again.
+#[derive(Debug)]
+struct Recheck {
+    /// How many times the job had been paused when the look compared the original.
+    pauses: u64,
+    /// Set once an item's original was found gone or changed: the rest of the copy stays.
+    lost: Cell<bool>,
+}
+
+impl Recheck {
+    /// Whether the item `path` of the copy, which its step's `stat` found as `now`, may go: its
+    /// original `twin` (the original of the copy, or the item of the same names below it) still
+    /// holds it, unless the job has not paused since the look. Fails with `CopyKept` (the
+    /// original gone or changed, or a `twin` that cannot be named) and keeps the rest of the
+    /// copy.
+    fn allows(
+        &self,
+        ctx: &Ctx<'_>,
+        provider: &dyn Provider,
+        path: &VPath,
+        now: &Entry,
+        twin: Option<&VPath>,
+    ) -> Result<(), Failed> {
+        if ctx.env.control.pauses() == self.pauses {
+            return Ok(());
+        }
+        let original = match twin {
+            Some(twin) if now.kind == EntryKind::Dir => still_a_folder(ctx, twin),
+            Some(twin) => {
+                let cancel = ctx.env.control.cancel_token();
+                let vfs = ctx.env.vfs;
+                let original = copies::original_beside(vfs, provider, path, now, twin, &cancel);
+                // A look that a cancel cut short stops the job, rather than keep the item for it.
+                ctx.check().at(Stage::Delete)?;
+                original
+            }
+            None => Compared::Unknown,
+        };
+        if original == Compared::Same {
+            return Ok(());
+        }
+        self.lost.set(true);
+        let found = CopyFound {
+            copy: Compared::Same,
+            original,
+        };
+        Err(copy_kept(path, found))
+    }
+}
+
+/// How the original folder `twin` of an emptied copied folder is: `Same` while it is a folder,
+/// `Missing` when it is gone, `Changed` when it is something else, and `Unknown` when it cannot
+/// be looked at.
+fn still_a_folder(ctx: &Ctx<'_>, twin: &VPath) -> Compared {
+    let Ok(provider) = ctx.provider(twin) else {
+        return Compared::Unknown;
+    };
+    match provider.stat(twin) {
+        Ok(entry) if entry.kind == EntryKind::Dir => Compared::Same,
+        Ok(_) => Compared::Changed,
+        Err(error) if error.kind() == ErrorKind::NotFound => Compared::Missing,
+        Err(_) => Compared::Unknown,
+    }
+}
+
+/// Whether the walk keeps the rest of its copy: an item's original was found gone or changed
+/// ([`Recheck`]). Its items then stay without a failure of their own.
+fn original_lost(walk: Walk<'_>) -> bool {
+    walk.recheck.is_some_and(|recheck| recheck.lost.get())
 }
 
 /// What a delete of copies holds each item of a copy to, at the step that deletes or lists it,
@@ -455,19 +550,20 @@ fn checked<T>(
 ///   [`delete_leaf`].
 fn delete_entry(
     ctx: &mut Ctx<'_>,
-    walk: Walk,
+    walk: Walk<'_>,
     path: &VPath,
     entry: &Entry,
     level: Level<'_>,
     parent: Option<Parent<'_>>,
+    twin: Option<&VPath>,
 ) -> Flow {
     if let Some(failed) = too_deep(ctx, level, walk.errors, path, None) {
         return kept(&failed);
     }
     if entry.kind == EntryKind::Dir {
-        delete_dir(ctx, walk, path, entry, level, parent)
+        delete_dir(ctx, walk, path, entry, level, parent, twin)
     } else {
-        delete_leaf(ctx, walk, path, entry, level, parent)
+        delete_leaf(ctx, walk, path, entry, level, parent, twin)
     }
 }
 
@@ -494,12 +590,16 @@ fn restat(provider: &dyn Provider, path: &VPath, entry: &Entry) -> Result<Entry,
 /// one other file, which then goes in its place.
 fn delete_leaf(
     ctx: &mut Ctx<'_>,
-    walk: Walk,
+    walk: Walk<'_>,
     path: &VPath,
     entry: &Entry,
     level: Level<'_>,
     parent: Option<Parent<'_>>,
+    twin: Option<&VPath>,
 ) -> Flow {
+    if original_lost(walk) {
+        return ControlFlow::Continue(false);
+    }
     let deleted = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
@@ -512,6 +612,9 @@ fn delete_leaf(
             && !guard.allows(level, &now)
         {
             return Err(changed_copy(path));
+        }
+        if let Some(recheck) = walk.recheck {
+            recheck.allows(ctx, &*provider, path, &now, twin)?;
         }
         unless_gone(
             provider.delete_leaf(path).at(Stage::Delete),
@@ -586,12 +689,16 @@ fn open_dir(
 /// copy.
 fn delete_dir(
     ctx: &mut Ctx<'_>,
-    walk: Walk,
+    walk: Walk<'_>,
     path: &VPath,
     entry: &Entry,
     level: Level<'_>,
     parent: Option<Parent<'_>>,
+    twin: Option<&VPath>,
 ) -> Flow {
+    if original_lost(walk) {
+        return ControlFlow::Continue(false);
+    }
     let opened = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
@@ -621,17 +728,34 @@ fn delete_dir(
                 continue;
             }
         };
-        all_gone &= delete_entry(ctx, walk, &child_path, child, here.below(), Some(this))?;
+        // The original of the child: the item of the same name in this folder's original.
+        let child_twin = twin.and_then(|twin| twin.join(&child.name).ok());
+        all_gone &= delete_entry(
+            ctx,
+            walk,
+            &child_path,
+            child,
+            here.below(),
+            Some(this),
+            child_twin.as_ref(),
+        )?;
     }
     if !all_gone {
+        return ControlFlow::Continue(false);
+    }
+    if original_lost(walk) {
         return ControlFlow::Continue(false);
     }
     let removed = ctx.attempt(walk.errors, Some(path), None, |ctx| {
         ctx.check().at(Stage::Delete)?;
         let provider = ctx.provider(path).at(Stage::Delete)?;
         let own = restat(&*provider, path, &before);
-        if checked(&*provider, parent, own)?.is_none() {
+        let Some(now) = checked(&*provider, parent, own)? else {
             return Ok(None);
+        };
+        // Emptied by now: its original must still be a folder, if the job paused since the look.
+        if let Some(recheck) = walk.recheck {
+            recheck.allows(ctx, &*provider, path, &now, twin)?;
         }
         // Its own time changed as its items went; only an item put in since can stop it now.
         let removed = match provider.remove_dir(path) {

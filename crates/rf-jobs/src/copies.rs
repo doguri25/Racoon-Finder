@@ -176,7 +176,7 @@ fn look_at(vfs: &Vfs, path: &VPath) -> Result<(Arc<dyn Provider>, Entry), Compar
 }
 
 /// [`compare_with_original`] of the copy `copy` of `at_copy`, which `stat` found as `copied`.
-fn original_beside(
+pub(crate) fn original_beside(
     vfs: &Vfs,
     at_copy: &dyn Provider,
     copy: &VPath,

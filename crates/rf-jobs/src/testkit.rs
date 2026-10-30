@@ -326,6 +326,9 @@ pub enum Fault {
     /// disk holds a job there; once released, every later call passes. It wakes
     /// [`FaultyProvider::wait_held`] before it waits.
     HoldAt { path: VPath },
+    /// Like [`Fault::HoldAt`], for a `delete_leaf` of `path` alone: a job holds there once it
+    /// has looked at the item and decided to delete it.
+    HoldAtDelete { path: VPath },
     /// Like a killed process: a `delete_leaf` or `remove_dir` of `path` deletes nothing, wakes
     /// [`FaultyProvider::wait_crashed`], and stops the deleting thread for good. No later code,
     /// no `Drop`, runs on it.
@@ -543,10 +546,17 @@ impl FaultyProvider {
 
     /// Waits at a [`Fault::HoldAt`] of `path` until [`FaultyProvider::release`].
     fn hold_at(&self, path: &VPath) {
-        let held = self
-            .faults
-            .iter()
-            .any(|fault| matches!(fault, Fault::HoldAt { path: at } if at == path));
+        self.hold_if(|fault| matches!(fault, Fault::HoldAt { path: at } if at == path));
+    }
+
+    /// Waits at a [`Fault::HoldAtDelete`] of `path` until [`FaultyProvider::release`].
+    fn hold_at_delete(&self, path: &VPath) {
+        self.hold_if(|fault| matches!(fault, Fault::HoldAtDelete { path: at } if at == path));
+    }
+
+    /// Waits until [`FaultyProvider::release`] when a fault is one `holds`.
+    fn hold_if(&self, holds: impl Fn(&Fault) -> bool) {
+        let held = self.faults.iter().any(holds);
         if held {
             self.shared.set(|signals| signals.held = true);
             self.shared.wait_until(|signals| signals.released);
@@ -701,6 +711,7 @@ impl Provider for FaultyProvider {
 
     fn delete_leaf(&self, path: &VPath) -> Result<()> {
         self.hold_at(path);
+        self.hold_at_delete(path);
         self.crash_at(path);
         self.refuse_delete(path)?;
         self.make_late_file(path)?;

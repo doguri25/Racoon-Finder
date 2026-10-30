@@ -258,6 +258,9 @@ struct PasteTo {
     folder: VPath,
     /// ⌥⌘V: the items are moved whatever the clipboard says.
     force_move: bool,
+    /// The tab of that pane and its selection epoch when the paste was asked: what the paste
+    /// makes is selected only while both are still so ([`AppState::pasted_in`]).
+    mark: (u64, u64),
 }
 
 /// How many times the clipboard is asked to drop a cut cancelled with Esc before a notice says
@@ -295,9 +298,10 @@ pub(super) struct ClipWork {
     /// The moves pastes submitted that have not ended, with the change count of what the
     /// clipboard held when they read it.
     moves: Vec<(JobSpec, u64)>,
-    /// The pastes submitted that have not ended, with the pane each was asked in: what one
-    /// makes is selected there ([`AppState::pasted_in`]).
-    pasted: Vec<(JobSpec, usize)>,
+    /// The pastes submitted that have not ended, with the pane each was asked in and that
+    /// pane's tab and selection epoch then: what one makes is selected there
+    /// ([`AppState::pasted_in`]).
+    pasted: Vec<(JobSpec, usize, (u64, u64))>,
 }
 
 impl ClipWork {
@@ -423,6 +427,15 @@ impl AppState {
         (changed || !effects.is_empty()).then_some(effects)
     }
 
+    /// The change count of a cut cancelled with Esc that the clipboard may still hold as the
+    /// app ends: its emptying is on its way, or failed fewer than [`CLEAR_TRIES`] times (after
+    /// that, a notice has told the user). The app's end tries once more to empty it, for a
+    /// moment ([`crate::controller::CLEAR_AT_END`]), so that no paste in another app moves the
+    /// items after all. `None` when nothing waits to be emptied.
+    pub fn cut_left_on_clipboard(&self) -> Option<u64> {
+        self.clipboard.clearing.map(|clearing| clearing.change)
+    }
+
     /// The worker tried to empty the clipboard if its change count was still `change`:
     /// `Ok(true)` it did, `Ok(false)` something else is there now, or it could not. For a cut
     /// cancelled with Esc, a failure is tried again at the next look at the change count
@@ -531,12 +544,15 @@ impl AppState {
             return Vec::new();
         }
         let token = self.clipboard.next_token();
+        let tab = self.tab(side);
+        let mark = (tab.id(), tab.selection_epoch());
         self.clipboard.pastes.insert(
             token,
             PasteTo {
                 side,
                 folder,
                 force_move,
+                mark,
             },
         );
         vec![Effect::Clipboard(ClipboardWork::ReadFiles { token })]
@@ -651,7 +667,7 @@ impl AppState {
                 if mode == TransferMode::Move {
                     self.clipboard.moves.push((spec.clone(), change));
                 }
-                self.clipboard.pasted.push((spec.clone(), to.side));
+                self.clipboard.pasted.push((spec.clone(), to.side, to.mark));
                 vec![submit(spec, Some(to.side))]
             }
             Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
@@ -690,15 +706,17 @@ impl AppState {
     }
 
     /// The pane a paste that ended with `report` was asked in, where what it made is selected
-    /// (as File Explorer selects what it pastes); `None` for a job that is no paste. Each paste
-    /// is told of once.
-    pub(super) fn pasted_in(&mut self, report: &JobReport) -> Option<usize> {
+    /// (as File Explorer selects what it pastes), with the tab and the selection epoch it had
+    /// when the paste was asked: a selection the user changed since, even while the clipboard
+    /// was read, stays. `None` for a job that is no paste. Each paste is told of once.
+    pub(super) fn pasted_in(&mut self, report: &JobReport) -> Option<(usize, (u64, u64))> {
         let at = self
             .clipboard
             .pasted
             .iter()
-            .position(|(spec, _)| *spec == report.spec)?;
-        Some(self.clipboard.pasted.remove(at).1)
+            .position(|(spec, ..)| *spec == report.spec)?;
+        let (_, side, mark) = self.clipboard.pasted.remove(at);
+        Some((side, mark))
     }
 
     /// 경로 복사 in `form`: the paths of the items of pane `side` (the selected rows, or the row

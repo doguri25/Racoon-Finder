@@ -34,7 +34,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -63,8 +64,8 @@ use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
-    AppState, Column, DropSpot, Effect, LEFT, Layout, MenuShown, Paging, PathForm, RIGHT,
-    ShellWork, Subfolders, preview_width, start_folders,
+    AppState, ClipboardFailure, Column, DropSpot, Effect, LEFT, Layout, MenuShown, Paging,
+    PathForm, RIGHT, ShellWork, Subfolders, preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
@@ -263,11 +264,31 @@ pub fn end_at_exit() {
     }
 }
 
-/// The work of the app's end, after the window's part: `last`, the text of the settings, is
-/// written (waiting [`FINAL_SAVE_WAIT`] at most), then the engine shuts down and the jobs'
-/// questions are released ([`Jobs::close_down`]), and the last notification, of the jobs that
-/// ended behind the tray icon, is waited for ([`NOTICE_WAIT`] at most). Blocks: a worker's.
-fn end_work(jobs: &Jobs, saver: &Saver, notifier: &OsNotifier, last: Option<String>) {
+/// How long the app's end waits for the clipboard to be emptied of a cut cancelled with Esc
+/// that it may still hold ([`AppState::cut_left_on_clipboard`]).
+pub const CLEAR_AT_END: Duration = Duration::from_millis(500);
+
+/// What the app's end does on a worker, after the window's part ([`End`]): the cancelled cut
+/// the clipboard may still hold is emptied (waiting [`CLEAR_AT_END`] at most; one that stays is
+/// noted in the log), `last`, the text of the settings, is written (waiting
+/// [`FINAL_SAVE_WAIT`] at most), then the engine shuts down and the jobs' questions are released
+/// ([`Jobs::close_down`]), and the last notification, of the jobs that ended behind the tray
+/// icon, is waited for ([`NOTICE_WAIT`] at most). Blocks: a worker's.
+fn end_work(end: End) {
+    let End {
+        jobs,
+        saver,
+        notifier,
+        last,
+        cleared,
+    } = end;
+    if let Some(cleared) = cleared {
+        match cleared.recv_timeout(CLEAR_AT_END) {
+            Ok(Ok(_)) => {}
+            Ok(Err(failure)) => log_cut_left(&format!("{failure:?}")),
+            Err(_) => log_cut_left("the clipboard did not answer in time"),
+        }
+    }
     // First: they do not wait for the engine, and an end forced while it shuts down does not
     // lose them.
     if let Some(text) = last {
@@ -276,6 +297,28 @@ fn end_work(jobs: &Jobs, saver: &Saver, notifier: &OsNotifier, last: Option<Stri
     jobs.close_down(QUIT_TIMEOUT);
     // The last notification is not cut off by the end of the app.
     notifier.wait_idle(NOTICE_WAIT);
+}
+
+/// What the work of the app's end takes along to its worker ([`end_work`]).
+struct End {
+    jobs: Jobs,
+    saver: Saver,
+    notifier: OsNotifier,
+    /// The last text of the settings, unless an end took it before.
+    last: Option<String>,
+    /// The answer of the clipboard's worker to the emptying of a cancelled cut, if one was due.
+    cleared: Option<Receiver<Result<bool, ClipboardFailure>>>,
+}
+
+/// Notes that a cut cancelled with Esc may still be on the clipboard as the app ends, and why:
+/// a paste in another app could still move the items. The window is going, so nothing else can
+/// tell the user.
+#[expect(
+    clippy::print_stderr,
+    reason = "the app has no log of its own yet; Slint's own messages go to the same place"
+)]
+fn log_cut_left(why: &str) {
+    eprintln!("a cut cancelled with Esc may still be on the clipboard: {why}");
 }
 
 /// Drops the controller of this thread, which stops every listing and watch.
@@ -1109,12 +1152,12 @@ impl Controller {
     /// [`crate::run`], after the event loop. From the start, no second start's request to show
     /// the window is taken ([`stop_requests_at_quit`]).
     fn quit(&self) {
-        let (jobs, saver, notifier, last) = self.end_parts();
-        let taken = last.is_some();
+        let end = self.end_parts();
+        let taken = end.last.is_some();
         let started = std::thread::Builder::new()
             .name("rf-ui-quit".to_owned())
             .spawn(move || {
-                end_work(&jobs, &saver, &notifier, last);
+                end_work(end);
                 let _ = slint::invoke_from_event_loop(|| {
                     let _ = slint::quit_event_loop();
                 });
@@ -1129,23 +1172,29 @@ impl Controller {
         let _ = slint::quit_event_loop();
     }
 
-    /// What the work of an end takes along ([`end_work`]): the engine, the saver, the notifier
-    /// and the last text of the settings ([`Controller::final_settings`]). From now on no second
-    /// start's request to show the window is taken (the window is about to go, and that start
-    /// then tries the lock again, `instance::take_or_ask`), and the looks at copies stop (the
-    /// state takes no answer while the app ends).
-    fn end_parts(&self) -> (Jobs, Saver, OsNotifier, Option<String>) {
+    /// What the work of an end takes along ([`end_work`]): the engine, the saver, the notifier,
+    /// the last text of the settings ([`Controller::final_settings`]), and the emptying of a
+    /// cancelled cut the clipboard may still hold, asked of the clipboard's worker now. From now
+    /// on no second start's request to show the window is taken (the window is about to go, and
+    /// that start then tries the lock again, `instance::take_or_ask`), and the looks at copies
+    /// stop (the state takes no answer while the app ends).
+    fn end_parts(&self) -> End {
         if let Some(stop) = self.request_stop.borrow().as_ref() {
             stop.stop();
         }
         self.checks.borrow_mut().stop();
-        let last = self.final_settings();
-        (
-            self.jobs.clone(),
-            self.saver.clone(),
-            self.notifier.clone(),
-            last,
-        )
+        let left = self
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(AppState::cut_left_on_clipboard);
+        End {
+            jobs: self.jobs.clone(),
+            saver: self.saver.clone(),
+            notifier: self.notifier.clone(),
+            last: self.final_settings(),
+            cleared: left.and_then(|change| self.clipper.clear_now(change)),
+        }
     }
 
     /// The end of the app when the event loop ends under it ([`end_at_exit`]): the worker of
@@ -1159,16 +1208,22 @@ impl Controller {
         if self.jobs.is_closed() {
             return None;
         }
-        let (jobs, saver, notifier, last) = self.end_parts();
-        let here = (jobs.clone(), saver.clone(), notifier.clone(), last.clone());
+        let end = Arc::new(Mutex::new(Some(self.end_parts())));
+        let taken = Arc::clone(&end);
         let started = std::thread::Builder::new()
             .name("rf-ui-exit".to_owned())
-            .spawn(move || end_work(&jobs, &saver, &notifier, last));
+            .spawn(move || {
+                if let Some(end) = taken.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    end_work(end);
+                }
+            });
         if let Ok(worker) = started {
             return Some(worker);
         }
-        let (jobs, saver, notifier, last) = here;
-        end_work(&jobs, &saver, &notifier, last);
+        // No worker: the end is done here, the loop being over anyway.
+        if let Some(end) = end.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            end_work(end);
+        }
         None
     }
 
@@ -2418,20 +2473,39 @@ mod tests {
             body: String::new(),
         });
         assert!(!jobs.is_closed());
-        end_work(
-            &jobs,
-            &saver,
-            &notifier,
-            Some("theme = \"dark\"\n".to_owned()),
-        );
+        // The clipboard's worker answers the emptying of a cancelled cut late, but within the
+        // wait.
+        let (answer, cleared) = std::sync::mpsc::channel();
+        let answering = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = answer.send(Ok(true));
+        });
+        end_work(End {
+            jobs: jobs.clone(),
+            saver: saver.clone(),
+            notifier: notifier.clone(),
+            last: Some("theme = \"dark\"\n".to_owned()),
+            cleared: Some(cleared),
+        });
+        answering.join().expect("the answer");
         assert!(jobs.is_closed());
         assert_eq!(*sent.lock().expect("the list"), ["복사를 마쳤습니다"]);
         assert_eq!(
             std::fs::read_to_string(config.join(settings::FILE_NAME)).expect("the settings"),
             "theme = \"dark\"\n"
         );
-        // Without a text to write (taken by an end before), it only ends the engine.
-        end_work(&jobs, &saver, &notifier, None);
+        // Without a text to write (taken by an end before), and with a clipboard that never
+        // answers, it waits a moment for the clipboard and ends the engine.
+        let (_never, unanswered) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        end_work(End {
+            jobs: jobs.clone(),
+            saver,
+            notifier,
+            last: None,
+            cleared: Some(unanswered),
+        });
+        assert!(started.elapsed() >= CLEAR_AT_END);
         assert!(jobs.is_closed());
     }
 }
