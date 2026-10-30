@@ -664,6 +664,44 @@ fn the_new_folder_is_selected_when_it_shows() {
 }
 
 #[test]
+fn a_selection_the_user_makes_before_the_new_item_shows_stays() {
+    // The user clicks a row, or types a name, while the new folder is not listed yet: when it
+    // shows, the selection the user chose stays, and nothing scrolls to the folder.
+    for by_typing in [false, true] {
+        let mut state = ready(vec![file("x"), file("y")], vec![]);
+        let spec = JobSpec::Create {
+            parent: folder("a"),
+            name: "새 폴더".into(),
+            kind: rf_jobs::CreateKind::Dir,
+        };
+        finish(&mut state, 1, &spec, JobWork::Create, |report| {
+            report.outputs.push(in_a("새 폴더"));
+        });
+        if by_typing {
+            let typed = Command::TypeToSelect("y".into());
+            state.key(typed, NONE, Paging::rows(10), Instant::now());
+        } else {
+            state.click_row(LEFT, 1, false, false);
+        }
+        assert_eq!(selected(&state, LEFT), [1]);
+        let generation = state.panes()[LEFT].active_tab().generation();
+        let effects = state.loaded(LoadEvent::Changes {
+            generation,
+            changes: vec![rf_vfs::Change::Upsert(dir("새 폴더"))],
+        });
+        assert_eq!(rows(&state, LEFT), ["새 폴더", "x", "y"]);
+        assert_eq!(selected(&state, LEFT), [2], "typing: {by_typing}");
+        assert_eq!(cursor(&state, LEFT), Some(2), "typing: {by_typing}");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ScrollTo { .. })),
+            "{effects:?}"
+        );
+    }
+}
+
+#[test]
 fn a_failed_rename_says_why_and_a_failed_copy_lists_its_items() {
     let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
     let spec = JobSpec::Rename {

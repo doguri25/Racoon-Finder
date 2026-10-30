@@ -456,8 +456,12 @@ impl Tab {
     }
 
     /// The selection to change, with the rows it refers to: a click is
-    /// `let (selection, rows) = tab.selection_mut(); selection.click(i, rows);`.
+    /// `let (selection, rows) = tab.selection_mut(); selection.click(i, rows);`. It is for a
+    /// change the user makes (a click, a key, a selection tool): the name a job or
+    /// [`Tab::go_up`] waits to select ([`Tab::select_name`]) is forgotten, so that it does not
+    /// take the selection the user chose when it shows later.
     pub fn selection_mut(&mut self) -> (&mut Selection, &[Entry]) {
+        self.pending_select = None;
         (&mut self.selection, &self.visible)
     }
 
@@ -660,8 +664,11 @@ impl Tab {
     /// case, and selects that row alone (NAV-14). Keys typed within
     /// [`TYPE_TO_SELECT_WINDOW`] of the last one add to the prefix; after a pause `text`
     /// starts a new one, and a prefix of spaces alone does nothing. Returns the row moved
-    /// to, or `None` (and no change) when no name matches.
+    /// to, or `None` (and the selection stays) when no name matches. The user chooses here: a
+    /// name that a job or [`Tab::go_up`] waits to select is forgotten, as for
+    /// [`Tab::selection_mut`].
     pub fn type_to_select(&mut self, text: &str, now: Instant) -> Option<usize> {
+        self.pending_select = None;
         let (prefix, last) = &mut self.type_buffer;
         if now.saturating_duration_since(*last) > TYPE_TO_SELECT_WINDOW {
             prefix.clear();
@@ -700,8 +707,9 @@ impl Tab {
 
     /// Selects the row called `name` alone and puts the cursor on it: the item a job has just
     /// made or renamed. A name that does not show yet is selected when it comes (by the
-    /// listing or the watch), unless the tab moves to another folder first. Gives the row when
-    /// it shows already.
+    /// listing or the watch), unless the tab moves to another folder first or the user changes
+    /// the selection meanwhile ([`Tab::selection_mut`], [`Tab::type_to_select`]). Gives the row
+    /// when it shows already.
     pub fn select_name(&mut self, name: OsString) -> Option<usize> {
         let Some(row) = self.visible.iter().position(|entry| entry.name == name) else {
             self.pending_select = Some(name);
