@@ -17,6 +17,11 @@
 //! The properties window has two workers (module `properties`): the measure and the checksums.
 //! Their news changes only the window, so it redraws the window alone, as the progress of a job
 //! redraws the job panel alone.
+//!
+//! What the window asks of the system itself (연결 프로그램, a program run as administrator, a
+//! terminal, the system's properties window) goes to a worker thread of its own each time
+//! ([`open::shell`]): none of those calls needs the main thread, and some block until the user
+//! closes a dialog.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -39,6 +44,7 @@ use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
+use crate::open::ShellNews;
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::preview::{self, PREVIEW_DELAY};
@@ -46,8 +52,8 @@ use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
-    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, PathForm, RIGHT, Subfolders,
-    preview_width, start_folders,
+    AppState, Column, DropSpot, Effect, LEFT, Layout, MenuShown, Paging, PathForm, RIGHT,
+    ShellWork, Subfolders, preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
@@ -106,6 +112,21 @@ pub fn post_question(question: Question) -> bool {
         with(|c| c.question(question));
     })
     .is_ok()
+}
+
+/// Opens `file` with the system's default app, on a worker thread; a failure shows as a notice.
+fn open_file(file: VPath) {
+    open::open_file(file, |kind| {
+        post(move |c| c.notice(&words::cannot_open(kind)));
+    });
+}
+
+/// Asks the system for `work` on a worker thread ([`open::shell`]); what it has for the window
+/// comes back to [`Controller::shell_news`].
+fn ask_system(work: ShellWork) {
+    open::shell(work, |news| {
+        post(move |c| c.shell_news(news));
+    });
 }
 
 /// What the window starts with, besides the job engine.
@@ -314,7 +335,8 @@ fn connect(window: &MainWindow) {
 }
 
 /// The callbacks of the properties window: an algorithm chosen, the 중지 of the count and of
-/// the checksums, 복사 of a row's checksum, and the field 비교.
+/// the checksums, 복사 of a row's checksum, the field 비교 and OS 속성 창 열기; and the menu of
+/// the apps that can open a file.
 fn connect_properties(window: &MainWindow) {
     window.on_properties_algorithm(|number| {
         with(|c| c.update(|state| state.choose_algorithm(number)));
@@ -335,6 +357,12 @@ fn connect_properties(window: &MainWindow) {
                 Vec::new()
             });
         });
+    });
+    window.on_properties_system(|| {
+        with(|c| c.update(AppState::system_properties_of_window));
+    });
+    window.on_open_with_chosen(|index| {
+        with(|c| c.update_at(index, AppState::open_with_chosen));
     });
 }
 
@@ -739,6 +767,8 @@ pub struct Controller {
     clipper: Clipper,
     /// Asks the clipboard's change count while items the window cut are on it.
     clipboard_timer: slint::Timer,
+    /// The titles of the menu of the apps that can open a file (macOS).
+    open_with_apps: Rc<VecModel<slint::SharedString>>,
 }
 
 impl fmt::Debug for Controller {
@@ -763,6 +793,8 @@ impl Controller {
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
         let job_rows = Rc::new(VecModel::default());
         window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
+        let open_with_apps = Rc::new(VecModel::default());
+        window.set_open_with_apps(ModelRc::from(Rc::clone(&open_with_apps)));
         // A payload from the start: a drag only begins on a press whose area has one, and the
         // press readies the drag's own.
         window.set_drag_data(ui_bridge::drag_payload(0));
@@ -830,6 +862,7 @@ impl Controller {
                 post(move |c| c.clipboard_done(done));
             }),
             clipboard_timer: slint::Timer::default(),
+            open_with_apps,
         }
     }
 
@@ -1230,6 +1263,7 @@ impl Controller {
         match name {
             "paste-into" => return self.update(|state| state.paste_from_menu(false)),
             "folder-properties" => return self.update(AppState::folder_properties),
+            "folder-terminal" => return self.update(AppState::folder_terminal),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
             _ => {}
         }
@@ -1281,6 +1315,10 @@ impl Controller {
             "paste" => Command::Paste,
             "paste-move" => Command::PasteMove,
             "properties" => Command::Properties,
+            "open-with" => Command::OpenWith,
+            "run-as-admin" => Command::RunAsAdmin,
+            "open-terminal" => Command::OpenTerminal,
+            "system-properties" => Command::SystemProperties,
             _ => return,
         };
         self.update(|state| {
@@ -1380,9 +1418,8 @@ impl Controller {
                         post(move |c| c.update(|state| state.followed(followed)));
                     });
                 }
-                Effect::OpenFile(file) => open::open_file(file, |kind| {
-                    post(move |c| c.notice(&words::cannot_open(kind)));
-                }),
+                Effect::OpenFile(file) => open_file(file),
+                Effect::Shell(work) => ask_system(work),
                 Effect::ReloadLater {
                     generation,
                     path,
@@ -1402,6 +1439,7 @@ impl Controller {
                 | Effect::FitColumns(_)
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
+                | Effect::ShowMenu(_)
                 | Effect::Toast { .. }
                 | Effect::Busy { .. }
                 | Effect::NotBusy(_) => {
@@ -1426,6 +1464,19 @@ impl Controller {
         }
         // Any change may be one the settings keep (a tab, the hidden items, a recent target).
         self.plan_save();
+    }
+
+    /// What a worker that asked the system something has for the window: the apps for the menu
+    /// of 연결 프로그램, or a notice of what was not done.
+    fn shell_news(&self, news: ShellNews) {
+        match news {
+            ShellNews::Apps { token, found } => {
+                self.update(|state| state.apps_found(token, found));
+            }
+            ShellNews::Failed(action, kind) => {
+                self.notice(&words::shell_failed(action, kind, Os::CURRENT));
+            }
+        }
     }
 
     /// What the clipboard's worker did, for the state.
@@ -1566,6 +1617,8 @@ impl Controller {
             | Effect::ListNames(_)
             | Effect::Follow { .. }
             | Effect::OpenFile(_)
+            | Effect::Shell(_)
+            | Effect::ShowMenu(_)
             | Effect::ReloadLater { .. }
             | Effect::Notice(_)
             | Effect::EditPath(_)
@@ -1663,6 +1716,7 @@ impl Controller {
                     window.invoke_end_busy(i32::try_from(token).unwrap_or(0));
                 }
             }
+            Effect::ShowMenu(menu) => self.show_menu(menu),
             // Carried out by `apply`.
             Effect::Load(_)
             | Effect::Sort(_)
@@ -1680,12 +1734,33 @@ impl Controller {
             | Effect::Follow { .. }
             | Effect::ReloadLater { .. }
             | Effect::OpenFile(_)
+            | Effect::Shell(_)
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
             | Effect::CheckCopies { .. }
             | Effect::InspectTarget { .. }
             | Effect::ReadSpace { .. }
             | Effect::Quit => {}
+        }
+    }
+
+    /// Shows a menu that no click opened: the item menu or the folder's from the keys, or the
+    /// menu of the apps that can open a file.
+    fn show_menu(&self, menu: MenuShown) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        match menu {
+            MenuShown::Item { side, row } => window
+                .invoke_show_item_menu(side_number(side), i32::try_from(row).unwrap_or(i32::MAX)),
+            MenuShown::Folder(side) => window.invoke_show_blank_menu(side_number(side)),
+            MenuShown::Apps(titles) => {
+                ui_bridge::set_rows(
+                    &self.open_with_apps,
+                    titles.into_iter().map(Into::into).collect(),
+                );
+                window.invoke_show_open_with();
+            }
         }
     }
 
@@ -1787,6 +1862,7 @@ impl Controller {
                 &self.tz.borrow(),
             ));
             window.set_quick_look(state.quick_look_open());
+            ui_bridge::show_item_menu(&window, state.item_menu());
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);
         }

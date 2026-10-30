@@ -65,16 +65,21 @@ fn the_filter_box_and_the_view_menu_take_the_keys() {
 }
 
 #[test]
-fn keys_of_commands_still_to_come_go_on_to_the_system() {
-    let mut state = ready(vec![file("x")], vec![file("z")]);
-    // The item menu's key (Task 10); the clipboard's keys are the window's
-    // (`tests::clipboard`), and so is the properties' (`tests::properties`).
-    for (text, mods) in [(special(Key::F10), SHIFT), (special(Key::Menu), NONE)] {
-        assert_eq!(press(&mut state, &text, mods), None, "{text:?} {mods:?}");
+fn every_key_of_the_tables_is_the_window_s() {
+    // Since the item menu's keys (Shift+F10, the menu key, macOS ⌃↩; `tests::shell`), the window
+    // does every command of both tables: no key of theirs goes on to the system.
+    for os in [Os::Windows, Os::MacOs] {
+        for (chord, command) in keys::bindings(os) {
+            let mut state = ready(vec![file("x")], vec![file("z")]);
+            let done = state.key(
+                command.clone(),
+                chord.mods,
+                Paging::rows(10),
+                Instant::now(),
+            );
+            assert!(done.is_some(), "{os:?} {command:?}");
+        }
     }
-    // Nothing changed meanwhile.
-    assert_eq!(state.active(), LEFT);
-    assert_eq!(state.modal(), None);
 }
 
 #[test]

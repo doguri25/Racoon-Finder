@@ -2,7 +2,8 @@
 //! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]), and the layout
 //! and the commands between the panes ([`layout`]), the tree from the keyboard ([`sidebar`]),
 //! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), the system clipboard
-//! ([`clipboard`]), the properties window ([`properties`]), with the helpers they share.
+//! ([`clipboard`]), the properties window ([`properties`]), the item menu and the system's ways
+//! to open an item ([`shell`]), with the helpers they share.
 
 use super::*;
 use crate::keys;
@@ -25,6 +26,7 @@ mod preview;
 mod properties;
 mod select;
 mod session;
+mod shell;
 mod sidebar;
 mod tabs;
 mod view;

@@ -35,12 +35,13 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
+import { ItemMenu, OpenWithMenu } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView
+    PropertiesView, FactRow, HashRowView, ItemMenu
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -106,6 +107,8 @@ export component MainWindow inherits Window {
     in property <PickView> pick-view;
     in property <PatternView> pattern-view;
     in property <PropertiesView> properties-view;
+    // The titles of the menu of the apps that can open a file (연결 프로그램, macOS).
+    in property <[string]> open-with-apps;
     // The picker shows under the dialog on top of it (the name of its new folder): it stays in
     // view, and takes no click or key until it is on top again.
     in property <bool> pick-behind;
@@ -290,6 +293,10 @@ export component MainWindow inherits Window {
     callback properties-stop-hashes();
     callback properties-copy(row: int);
     callback properties-compare(text: string);
+    // OS 속성 창 열기 in the properties window: the system's own window of its item.
+    callback properties-system();
+    // App `index` of the menu of the apps that can open a file was chosen.
+    callback open-with-chosen(index: int);
     // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
     // button, the move/copy toggle, a conflict policy (0 ask, 1 overwrite, 2 skip, 3 rename),
     // the filter changed, a path was typed or entered, a row of its tree or its chevron was
@@ -349,6 +356,29 @@ export component MainWindow inherits Window {
     // Opens the 보기 menu under its button, for the keys to choose in.
     public function show-view-menu() {
         root.open-view-menu();
+    }
+
+    // The item menu of pane `side` by row `row` (Shift+F10, the menu key, macOS ⌃↩).
+    public function show-item-menu(side: int, row: int) {
+        if (side == 0) {
+            left.show-item-menu(row);
+        } else {
+            right.show-item-menu(row);
+        }
+    }
+
+    // The menu of pane `side`'s folder, by the top of its list (the same keys, nothing chosen).
+    public function show-blank-menu(side: int) {
+        if (side == 0) {
+            left.show-blank-menu();
+        } else {
+            right.show-blank-menu();
+        }
+    }
+
+    // The menu of the apps that can open a file (`open-with-apps`), where the item menu showed.
+    public function show-open-with() {
+        open-with-menu.show({ x: ItemMenu.at-x, y: ItemMenu.at-y });
     }
 
     // Where the keys were as the 보기 menu opened: the tree, or the panes. A sub-menu's choice
@@ -1528,6 +1558,9 @@ export component MainWindow inherits Window {
             compare-edited(text) => {
                 root.properties-compare(text);
             }
+            system-properties => {
+                root.properties-system();
+            }
             cancelled => {
                 root.dialog-cancelled();
             }
@@ -1536,6 +1569,22 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             text: root.closing-text;
+        }
+    }
+
+    // At the window's top left corner and without room, so that it shows at the window's
+    // coordinates of the item menu that showed last, and takes no click itself.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+
+        open-with-menu := OpenWithMenu {
+            apps: root.open-with-apps;
+            chosen(index) => {
+                root.open-with-chosen(index);
+            }
         }
     }
 }

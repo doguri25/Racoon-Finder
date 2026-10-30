@@ -39,12 +39,12 @@ use crate::places::{Place, PlaceKind};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
-use crate::state::{Column, Completion, Names, PathForm, PreviewShown};
+use crate::state::{Column, Completion, MenuFacts, Names, PathForm, PreviewShown};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FactRow, FileRow, FolderMenuRow,
-    FolderMenuView, HashRowView, JobRowView, MainWindow, MessageView, NameView, PaneView,
+    FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow, MessageView, NameView, PaneView,
     PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
     RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
@@ -883,6 +883,16 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_copy_path(key(Command::CopyPath));
     shown.set_copy_path_form(PathForm::of_key(os).number());
     shown.set_properties(key(Command::Properties));
+    shown.set_open_terminal(key(Command::OpenTerminal));
+}
+
+/// Gives the item menu what it offers for the items it opens for ([`MenuFacts`]).
+pub fn show_item_menu(window: &MainWindow, facts: MenuFacts) {
+    let menu = window.global::<ItemMenu<'_>>();
+    menu.set_one_file(facts.one_file);
+    menu.set_runnable(facts.runnable);
+    menu.set_one_folder(facts.one_folder);
+    menu.set_one_item(facts.one_item);
 }
 
 /// The models the view of the preview panel and quick look keeps between redraws: the lines of
@@ -1099,6 +1109,7 @@ impl PropertiesModels {
             algorithm: hashing.algorithm.map_or(-1, Algorithm::number),
             hash_note: properties::hash_note(properties).into(),
             several: hashing.rows.len() > 1,
+            system: properties.single().is_some(),
             hashes: ModelRc::from(Rc::clone(&self.hashes)),
             verdict: verdict_text.into(),
             matched: matches!(verdict, Verdict::Match(..)),

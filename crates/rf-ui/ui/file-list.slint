@@ -15,7 +15,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
-import { RowMenu, BlankMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
 
 export { ColumnView }
 
@@ -153,6 +153,20 @@ export component FileList inherits Rectangle {
         head.fit-all();
     }
 
+    // The item menu by row `index`, from the keyboard (Shift+F10, the menu key, macOS ⌃↩);
+    // Rust has scrolled the row into view.
+    public function show-item-menu(index: int) {
+        let x = head.pad + root.icon-room;
+        let y = head.height + list.content-y + (index + 0.75) * Theme.row-height;
+        ItemMenu.showing(root.absolute-position.x + x, root.absolute-position.y + y);
+        key-menus.item(x, y);
+    }
+
+    // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
+    public function show-blank-menu() {
+        key-menus.blank(head.pad + root.icon-room, head.height + Theme.row-height / 2);
+    }
+
     settle := ListSettle { }
 
     // How far the columns reach past the list's right edge; 0 while they fit.
@@ -274,6 +288,7 @@ export component FileList inherits Rectangle {
                                             }
                                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                                                 root.row-menu(i);
+                                                ItemMenu.showing(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                                                 row-menu.show({ x: self.mouse-x, y: self.mouse-y });
                                             }
                                         }
@@ -391,6 +406,14 @@ export component FileList inherits Rectangle {
                 border-radius: 2px;
                 background: bar.has-hover || bar.pressed ? Theme.muted : Theme.border;
             }
+        }
+    }
+
+    key-menus := KeyMenus {
+        x: 0px;
+        y: 0px;
+        command(name) => {
+            root.menu-command(name);
         }
     }
 }

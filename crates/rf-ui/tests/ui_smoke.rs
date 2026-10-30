@@ -12,7 +12,7 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::state::{Column, FolderView, ShownColumn, ViewMode};
+use rf_ui::state::{Column, FolderView, MenuFacts, ShownColumn, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
@@ -4437,6 +4437,8 @@ fn properties_view(counting: bool, algorithm: i32) -> PropertiesView {
         algorithm,
         hash_note: SharedString::new(),
         several: false,
+        // OS 속성 창 열기 has a test of its own.
+        system: false,
         hashes: ModelRc::new(slint::VecModel::from(vec![hash])),
         verdict: SharedString::new(),
         matched: false,
@@ -4458,6 +4460,8 @@ fn properties_window(view: PropertiesView) -> (MainWindow, Calls) {
     window.on_properties_copy(move |row| record.note(format!("copy {row}")));
     let record = calls.clone();
     window.on_properties_compare(move |text| record.note(format!("compare {text}")));
+    let record = calls.clone();
+    window.on_properties_system(move || record.note("system"));
     let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("cancelled"));
     let record = calls.clone();
@@ -4620,6 +4624,183 @@ fn the_menus_end_with_the_properties() {
         choose_item(&window, "속성");
         assert_eq!(commands.take(), ["folder-properties"], "{os:?}");
     }
+}
+
+#[test]
+fn the_properties_window_of_one_item_opens_the_system_s_own() {
+    let mut view = properties_view(false, 2);
+    view.system = true;
+    let (window, calls) = properties_window(view);
+    labelled(&window, "OS 속성 창 열기", AccessibleRole::Button)
+        .remove(0)
+        .invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["system"]);
+    // From the keys: after 비교, before 닫기.
+    let field = || labelled(&window, "비교", AccessibleRole::TextInput).remove(0);
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["system"]);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["system"]);
+    // A window of several items has none.
+    let mut several = properties_view(false, 2);
+    several.system = false;
+    window.set_properties_view(several);
+    slint::platform::update_timers_and_animations();
+    assert!(labelled(&window, "OS 속성 창 열기", AccessibleRole::Button).is_empty());
+}
+
+/// What the item menu offers for one file, one program, one folder, and several items.
+const ONE_FILE: MenuFacts = MenuFacts {
+    one_file: true,
+    runnable: false,
+    one_folder: false,
+    one_item: true,
+};
+const ONE_PROGRAM: MenuFacts = MenuFacts {
+    runnable: true,
+    ..ONE_FILE
+};
+const ONE_FOLDER: MenuFacts = MenuFacts {
+    one_file: false,
+    runnable: false,
+    one_folder: true,
+    one_item: true,
+};
+const SEVERAL: MenuFacts = MenuFacts {
+    one_file: false,
+    runnable: false,
+    one_folder: false,
+    one_item: false,
+};
+
+/// Sets what the item menu offers, as `AppState::item_menu` says it.
+fn offer(window: &MainWindow, facts: MenuFacts) {
+    ui_bridge::show_item_menu(window, facts);
+}
+
+#[test]
+fn the_item_menu_offers_the_system_s_ways_to_open_an_item() {
+    use slint::platform::PointerEventButton;
+    let (window, _calls, _models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let shows = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .is_some()
+    };
+    let row_menu = |name: &str| {
+        labelled(&window, name, AccessibleRole::ListItem)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+
+    // One program, on Windows.
+    offer(&window, ONE_PROGRAM);
+    for (item, command) in [
+        ("관리자 권한으로 실행", "run-as-admin"),
+        ("연결 프로그램으로 열기…", "open-with"),
+        ("OS 속성 창 열기", "system-properties"),
+    ] {
+        row_menu("x.txt");
+        assert!(!shows("터미널에서 열기  (Shift+F4)"), "not for a file");
+        choose_item(&window, item);
+        assert_eq!(commands.take(), [command], "{item}");
+    }
+    // One folder: a terminal there, and no app to open it with.
+    offer(&window, ONE_FOLDER);
+    row_menu("docs");
+    assert!(!shows("연결 프로그램으로 열기…"));
+    assert!(!shows("관리자 권한으로 실행"));
+    choose_item(&window, "터미널에서 열기  (Shift+F4)");
+    assert_eq!(commands.take(), ["open-terminal"]);
+    // Several items: none of them.
+    offer(&window, SEVERAL);
+    row_menu("x.txt");
+    for item in [
+        "관리자 권한으로 실행",
+        "연결 프로그램으로 열기…",
+        "터미널에서 열기  (Shift+F4)",
+        "OS 속성 창 열기",
+    ] {
+        assert!(!shows(item), "{item}");
+    }
+    choose_item(&window, "열기  (Enter)");
+    assert_eq!(commands.take(), ["open"]);
+    // macOS writes the key its way.
+    ui_bridge::show_shortcuts(&window, Os::MacOs);
+    offer(&window, ONE_FOLDER);
+    row_menu("docs");
+    choose_item(&window, "터미널에서 열기  (⇧F4)");
+    assert_eq!(commands.take(), ["open-terminal"]);
+    // The part without rows: a terminal in the pane's folder, without a key.
+    labelled(&window, "항목 목록", AccessibleRole::List)
+        .remove(0)
+        .mock_single_click(PointerEventButton::Right);
+    choose_item(&window, "터미널에서 열기");
+    assert_eq!(commands.take(), ["folder-terminal"]);
+}
+
+#[test]
+fn the_keys_open_the_item_menu_by_its_row_and_the_folder_s_menu() {
+    let (window, _calls, models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    offer(&window, ONE_FILE);
+    let at = || {
+        let menu = window.global::<rf_ui::ItemMenu<'_>>();
+        (menu.get_at_x(), menu.get_at_y())
+    };
+    for mode in [ViewMode::Details, ViewMode::MediumIcons, ViewMode::List] {
+        left_in(&window, &models, mode);
+        // Row 1 (x.txt), as Shift+F10 asks for it.
+        window.invoke_show_item_menu(0, 1);
+        choose_item(&window, "연결 프로그램으로 열기…");
+        assert_eq!(commands.take(), ["open-with"], "{mode:?}");
+        // It noted where it showed, inside the left pane, for the menu of apps.
+        let (x, y) = at();
+        let pane = labelled(&window, "왼쪽 패널", AccessibleRole::Groupbox);
+        let (origin, size) = pane
+            .first()
+            .map(|pane| (pane.absolute_position(), pane.size()))
+            .expect("the left pane");
+        assert!(
+            x > origin.x && x < origin.x + size.width && y > origin.y && y < origin.y + size.height,
+            "{mode:?}: ({x}, {y}) outside the pane"
+        );
+        // Nothing chosen: the folder's menu.
+        window.invoke_show_blank_menu(0);
+        choose_item(&window, "새로 고침  (F5)");
+        assert_eq!(commands.take(), ["refresh"], "{mode:?}");
+    }
+}
+
+#[test]
+fn the_menu_of_apps_opens_the_file_with_the_one_chosen() {
+    let window = window();
+    let chosen = Calls::default();
+    let record = chosen.clone();
+    window.on_open_with_chosen(move |index| record.note(format!("app {index}")));
+    window.set_open_with_apps(ModelRc::new(slint::VecModel::from(vec![
+        SharedString::from("미리보기 (기본)"),
+        SharedString::from("TextEdit"),
+    ])));
+    window.invoke_show_open_with();
+    choose_item(&window, "TextEdit");
+    assert_eq!(chosen.take(), ["app 1"]);
+    window.invoke_show_open_with();
+    choose_item(&window, "미리보기 (기본)");
+    assert_eq!(chosen.take(), ["app 0"]);
 }
 
 #[test]

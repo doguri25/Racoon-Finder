@@ -13,7 +13,8 @@
 // The keys (KEY-02): Esc, and Enter while no button is chosen, close it (닫기 is its main
 // button). Tab and Shift+Tab go round 중지 (while the count goes on), the algorithms (← →; Space
 // chooses the one chosen again, which makes what 계산 중지 left), the checksums (↑ ↓ among several
-// files; Space or Enter copies the row's), 계산 중지 (while checksums are made), 비교 and 닫기,
+// files; Space or Enter copies the row's), 계산 중지 (while checksums are made), 비교, OS 속성 창
+// 열기 (for one item: the system's own window takes the place of this one, OPS-06) and 닫기,
 // past what does not show; Space or Enter presses the button the keys are on. A fact whose
 // value is shortened (a long path) has the whole of it in a tooltip and for screen readers.
 
@@ -70,6 +71,8 @@ export struct PropertiesView {
     hash-note: string,
     // Several files: their names show, and ↑ ↓ choose among them.
     several: bool,
+    // One item: OS 속성 창 열기 shows.
+    system: bool,
     hashes: [HashRowView],
     // What the comparison says ("일치", "불일치", "계산이 끝나면 비교합니다"), and which it is.
     verdict: string,
@@ -189,11 +192,13 @@ export component PropertiesDialog inherits DialogFrame {
     callback hashes-stopped();
     callback copy(row: int);
     callback compare-edited(text: string);
+    // OS 속성 창 열기.
+    callback system-properties();
     callback cancelled();
 
     property <bool> composing: compare.composing;
     // Where the keys are: -1 nowhere yet, 0 중지 (of the count), 1 the algorithms, 2 the
-    // checksums, 3 계산 중지, 4 비교, 5 닫기.
+    // checksums, 3 계산 중지, 4 비교, 5 OS 속성 창 열기, 6 닫기.
     property <int> stop: -1;
     // The row of the checksums the keys are on, among several files.
     property <int> cursor-row: 0;
@@ -230,24 +235,28 @@ export component PropertiesDialog inherits DialogFrame {
         if (stop == 3) {
             return root.view.hashing;
         }
-        return stop == 5;
+        if (stop == 5) {
+            return root.view.system;
+        }
+        return stop == 6;
     }
 
-    // The stop `step` places after `stop`, among the six, going round.
+    // The stop `step` places after `stop`, among the seven, going round.
     pure function after(stop: int, step: int) -> int {
-        return Math.mod(stop + step + 6, 6);
+        return Math.mod(stop + step + 7, 7);
     }
 
     // The keys go `step` stops on, past those that do not show (닫기 always does).
     function go(step: int) {
-        let first = root.stop < 0 ? (step > 0 ? 0 : 5) : root.after(root.stop, step);
+        let first = root.stop < 0 ? (step > 0 ? 0 : 6) : root.after(root.stop, step);
         let second = root.shows(first) ? first : root.after(first, step);
         let third = root.shows(second) ? second : root.after(second, step);
         let fourth = root.shows(third) ? third : root.after(third, step);
         let fifth = root.shows(fourth) ? fourth : root.after(fourth, step);
         let sixth = root.shows(fifth) ? fifth : root.after(fifth, step);
-        root.stop = sixth;
-        if (sixth == 4) {
+        let seventh = root.shows(sixth) ? sixth : root.after(sixth, step);
+        root.stop = seventh;
+        if (seventh == 4) {
             // A field the keys go to has all its text selected: what is pasted replaces it.
             compare.take-focus-all();
         } else {
@@ -309,7 +318,11 @@ export component PropertiesDialog inherits DialogFrame {
                 root.hashes-stopped();
                 return accept;
             }
-            if ((root.stop == 5 && DialogKeys.presses(event)) || event.text == Key.Return) {
+            if (root.stop == 5 && DialogKeys.presses(event)) {
+                root.system-properties();
+                return accept;
+            }
+            if ((root.stop == 6 && DialogKeys.presses(event)) || event.text == Key.Return) {
                 root.cancelled();
                 return accept;
             }
@@ -566,15 +579,23 @@ export component PropertiesDialog inherits DialogFrame {
                 spacing: Theme.gap-s;
                 padding-top: Theme.gap-s;
 
-                // The room on the left is for the button that opens the system's own window
-                // for the item (OPS-06, M1-06 Task 10).
+                // The system's own window of the one item (OPS-06): File Explorer's properties,
+                // Finder's 정보 가져오기.
+                if root.view.system: OutlineButton {
+                    button-height: 36px;
+                    text: "OS 속성 창 열기";
+                    focused: root.stop == 5;
+                    clicked => {
+                        root.system-properties();
+                    }
+                }
                 Rectangle {
                     horizontal-stretch: 1;
                 }
                 PrimaryButton {
                     button-height: 36px;
                     text: "닫기";
-                    focused: root.stop == 5;
+                    focused: root.stop == 6;
                     clicked => {
                         root.cancelled();
                     }

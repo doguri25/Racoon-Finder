@@ -8,12 +8,13 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use rf_core::{EntryKind, ErrorKind, VPath};
+use rf_core::{EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{
     ConflictPolicy, DeleteMethod, FailureReason, IssueKind, ItemFailure, JobKind, JobSpec,
     JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
 use rf_platform::KnownFolder;
+use rf_platform::shell::App;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
@@ -787,6 +788,69 @@ pub fn clipboard_not_emptied() -> &'static str {
 /// take (a device or a volume of Windows).
 pub fn paste_left_out(count: usize) -> String {
     format!("클립보드의 항목 {count}개는 붙여넣을 수 없는 경로라 건너뛰었습니다")
+}
+
+/// What the app asked of the system ([`ShellWork`](crate::state::ShellWork)), for the notice
+/// when it was not done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShellAction {
+    /// 연결 프로그램으로 열기.
+    OpenWith,
+    /// 관리자 권한으로 실행.
+    RunAsAdmin,
+    /// 터미널에서 열기.
+    Terminal,
+    /// OS 속성 창 열기.
+    SystemProperties,
+}
+
+/// The notice when the system did not do `action` on `os`: it does not do it there
+/// (`이 시스템에서는 OS 속성 창을 지원하지 않습니다`; for a terminal, none was found), macOS did
+/// not let the app control Finder, or else what went wrong
+/// (`터미널을 열지 못했습니다: 찾을 수 없습니다`).
+pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
+    match (action, kind) {
+        (ShellAction::OpenWith, ErrorKind::Unsupported) => {
+            "이 시스템에서는 연결 프로그램 고르기를 지원하지 않습니다".to_owned()
+        }
+        (ShellAction::RunAsAdmin, ErrorKind::Unsupported) => {
+            "이 시스템에서는 관리자 권한으로 실행할 수 없습니다".to_owned()
+        }
+        (ShellAction::Terminal, ErrorKind::Unsupported) => {
+            "터미널 프로그램을 찾지 못했습니다".to_owned()
+        }
+        (ShellAction::SystemProperties, ErrorKind::Unsupported) => {
+            "이 시스템에서는 OS 속성 창을 지원하지 않습니다".to_owned()
+        }
+        (ShellAction::SystemProperties, ErrorKind::PermissionDenied) if os == Os::MacOs => {
+            "Finder를 제어할 권한이 없어 정보 창을 열지 못했습니다. 시스템 설정 ▸ 개인정보 보호 및 \
+             보안 ▸ 자동화에서 허용해 주세요"
+                .to_owned()
+        }
+        (action, kind) => {
+            let what = match action {
+                ShellAction::OpenWith => "연결 프로그램으로 열지 못했습니다",
+                ShellAction::RunAsAdmin => "관리자 권한으로 실행하지 못했습니다",
+                ShellAction::Terminal => "터미널을 열지 못했습니다",
+                ShellAction::SystemProperties => "OS 속성 창을 열지 못했습니다",
+            };
+            format!("{what}: {}", error_kind(kind))
+        }
+    }
+}
+
+/// The system knows no app that opens the file (연결 프로그램, macOS).
+pub fn no_apps() -> &'static str {
+    "이 파일을 열 수 있는 앱이 없습니다"
+}
+
+/// An app of the menu of 연결 프로그램: its name, and `(기본)` after the system's default one.
+pub fn app_title(app: &App) -> String {
+    if app.default {
+        format!("{} (기본)", app.name)
+    } else {
+        app.name.clone()
+    }
 }
 
 /// `항목 3개`.
@@ -2487,5 +2551,62 @@ mod tests {
         );
         // A date that cannot be told is left out.
         assert_eq!(preview_facts("파일 폴더", None, Some("")), "파일\u{a0}폴더");
+    }
+
+    #[test]
+    fn shell_failures_say_what_was_not_done() {
+        use ShellAction as A;
+        assert_eq!(
+            shell_failed(A::OpenWith, ErrorKind::Unsupported, Os::Other),
+            "이 시스템에서는 연결 프로그램 고르기를 지원하지 않습니다"
+        );
+        assert_eq!(
+            shell_failed(A::SystemProperties, ErrorKind::Unsupported, Os::Other),
+            "이 시스템에서는 OS 속성 창을 지원하지 않습니다"
+        );
+        // No terminal program, and a folder gone since.
+        assert_eq!(
+            shell_failed(A::Terminal, ErrorKind::Unsupported, Os::Other),
+            "터미널 프로그램을 찾지 못했습니다"
+        );
+        assert_eq!(
+            shell_failed(A::Terminal, ErrorKind::NotFound, Os::Windows),
+            "터미널을 열지 못했습니다: 찾을 수 없습니다"
+        );
+        // Only macOS asks the user to let the app control Finder.
+        let refused = shell_failed(A::SystemProperties, ErrorKind::PermissionDenied, Os::MacOs);
+        assert!(refused.contains("자동화"), "{refused}");
+        assert_eq!(
+            shell_failed(
+                A::SystemProperties,
+                ErrorKind::PermissionDenied,
+                Os::Windows
+            ),
+            "OS 속성 창을 열지 못했습니다: 권한이 없습니다"
+        );
+        assert_eq!(
+            shell_failed(A::RunAsAdmin, ErrorKind::Other, Os::Windows),
+            "관리자 권한으로 실행하지 못했습니다: 알 수 없는 오류가 났습니다"
+        );
+        for action in [A::OpenWith, A::RunAsAdmin, A::Terminal, A::SystemProperties] {
+            for kind in ERROR_KINDS {
+                for os in [Os::Windows, Os::MacOs, Os::Other] {
+                    let words = shell_failed(action, kind, os);
+                    assert!(is_korean(&words), "{action:?} {kind:?}: {words:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_app_says_so() {
+        let app = |default| App {
+            name: "미리보기".to_owned(),
+            path: std::path::PathBuf::from("/System/Applications/Preview.app"),
+            default,
+        };
+        assert_eq!(app_title(&app(true)), "미리보기 (기본)");
+        assert_eq!(app_title(&app(false)), "미리보기");
+        assert!(is_korean(no_apps()));
     }
 }

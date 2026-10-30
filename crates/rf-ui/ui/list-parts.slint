@@ -6,16 +6,41 @@
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
 
+// What the item menu offers for the items it opens for, besides what it always has: Rust sets it
+// (`AppState::item_menu`) before the menu shows. And where an item menu showed last, in the
+// window, for the menu of the apps that can open a file (macOS), which shows there after it.
+export global ItemMenu {
+    // One file: 연결 프로그램으로 열기….
+    in property <bool> one-file;
+    // One program the system runs as administrator (Windows): 관리자 권한으로 실행.
+    in property <bool> runnable;
+    // One folder: 터미널에서 열기.
+    in property <bool> one-folder;
+    // One item: OS 속성 창 열기.
+    in property <bool> one-item;
+    in-out property <length> at-x;
+    in-out property <length> at-y;
+
+    // An item menu shows at (`x`, `y`) of the window.
+    public function showing(x: length, y: length) {
+        ItemMenu.at-x = x;
+        ItemMenu.at-y = y;
+    }
+}
+
 // The menu of an item: move and copy first (OPS-05), then the clipboard, and 속성 last, as in
 // File Explorer, each command with its key (KEY-03). It wraps what is right-clicked; the press
 // selects the item first, then calls `show`. The clipboard's items are the system's: 잘라내기
 // where File Explorer has it (not on macOS), 여기로 이동 where Finder has it (macOS only);
 // 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
-// else into the pane's folder.
+// else into the pane's folder. The system's ways to open an item (OPS-04, OPS-06, OPS-11) show
+// for the items they act on (`ItemMenu`): 관리자 권한으로 실행 and 연결 프로그램으로 열기… by
+// 열기 for one file, 터미널에서 열기 for one folder, OS 속성 창 열기 after 속성 for one item.
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
-    // copy-files, paste-into, paste-move-into, copy-path-<form>, open, quick-look, rename,
-    // delete, delete-permanently, properties).
+    // copy-files, paste-into, paste-move-into, copy-path-<form>, open, run-as-admin, open-with,
+    // quick-look, open-terminal, rename, delete, delete-permanently, properties,
+    // system-properties).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -77,10 +102,28 @@ export component RowMenu inherits ContextMenuArea {
                 root.command("open");
             }
         }
+        if ItemMenu.runnable: MenuItem {
+            title: "관리자 권한으로 실행";
+            activated => {
+                root.command("run-as-admin");
+            }
+        }
+        if ItemMenu.one-file: MenuItem {
+            title: "연결 프로그램으로 열기…";
+            activated => {
+                root.command("open-with");
+            }
+        }
         MenuItem {
             title: Shortcuts.titled("빠른 보기", Shortcuts.quick-look);
             activated => {
                 root.command("quick-look");
+            }
+        }
+        if ItemMenu.one-folder: MenuItem {
+            title: Shortcuts.titled("터미널에서 열기", Shortcuts.open-terminal);
+            activated => {
+                root.command("open-terminal");
             }
         }
         MenuItem {
@@ -103,23 +146,28 @@ export component RowMenu inherits ContextMenuArea {
             }
         }
         MenuSeparator { }
-        // The app's own window (OPS-06); the system's own one ("OS 속성 창 열기") comes after it
-        // with M1-06 Task 10.
+        // The app's own window (OPS-06), then the system's.
         MenuItem {
             title: Shortcuts.titled("속성", Shortcuts.properties);
             activated => {
                 root.command("properties");
             }
         }
+        if ItemMenu.one-item: MenuItem {
+            title: "OS 속성 창 열기";
+            activated => {
+                root.command("system-properties");
+            }
+        }
     }
 }
 
 // The menu of the part of a list without items: a new folder there, a paste into the folder,
-// the folder listed again (NAV-13), each with its key (KEY-03), and the folder's own 속성, as
-// in File Explorer. It wraps that part of the list.
+// the folder listed again (NAV-13), each with its key (KEY-03), a terminal in the folder
+// (OPS-11), and the folder's own 속성, as in File Explorer. It wraps that part of the list.
 export component BlankMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (new-folder, paste,
-    // paste-move, refresh, folder-properties).
+    // paste-move, refresh, folder-terminal, folder-properties).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -152,6 +200,14 @@ export component BlankMenu inherits ContextMenuArea {
                 root.command("refresh");
             }
         }
+        // The folder's, whatever is chosen: no key beside it, since the key (Shift+F4) opens a
+        // folder that is chosen when there is one.
+        MenuItem {
+            title: "터미널에서 열기";
+            activated => {
+                root.command("folder-terminal");
+            }
+        }
         MenuSeparator { }
         // The folder's, whatever is chosen: no key beside it, since the key (Alt+Enter, ⌘I)
         // shows the chosen items' when there are some.
@@ -159,6 +215,59 @@ export component BlankMenu inherits ContextMenuArea {
             title: "속성";
             activated => {
                 root.command("folder-properties");
+            }
+        }
+    }
+}
+
+// The item menu and the folder's menu of a list, shown from the keyboard (Shift+F10, the menu
+// key, macOS ⌃↩) where the list says: they have no room, so they take no click, and a right
+// click still reaches the menus of the rows and of the part without them.
+export component KeyMenus {
+    // An item of either menu: the name of the window's command it runs.
+    callback command(name: string);
+
+    width: 0px;
+    height: 0px;
+
+    // The item menu at (`x`, `y`) of the list (where this lies at its top left corner).
+    public function item(x: length, y: length) {
+        row-menu.show({ x: x, y: y });
+    }
+
+    // The folder's menu at (`x`, `y`) of the list.
+    public function blank(x: length, y: length) {
+        blank-menu.show({ x: x, y: y });
+    }
+
+    row-menu := RowMenu {
+        command(name) => {
+            root.command(name);
+        }
+    }
+
+    blank-menu := BlankMenu {
+        command(name) => {
+            root.command(name);
+        }
+    }
+}
+
+// The menu of the apps that can open a file (연결 프로그램, macOS): Rust lists them (the default
+// one first, "(기본)" after its name) and shows the menu where the item menu showed. It takes no
+// click itself (`enabled: false`): it shows only when it is asked to.
+export component OpenWithMenu inherits ContextMenuArea {
+    in property <[string]> apps;
+    // App `index` was chosen.
+    callback chosen(index: int);
+
+    enabled: false;
+
+    Menu {
+        for app[index] in root.apps: MenuItem {
+            title: app;
+            activated => {
+                root.chosen(index);
             }
         }
     }

@@ -55,6 +55,7 @@ mod pick;
 mod preview;
 mod properties;
 mod select;
+mod shell;
 mod sidebar;
 mod tabs;
 mod view;
@@ -73,6 +74,7 @@ pub use preview::{
     preview_width,
 };
 pub use select::{MATCH_STRETCH, MatchRequest, Matched};
+pub use shell::{MenuFacts, MenuShown, ShellWork, menu_facts};
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
     MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
@@ -138,6 +140,12 @@ pub enum Effect {
         path: VPath,
         after: Duration,
     },
+    /// Ask the system for something on a worker thread (`crate::open::shell`): 연결 프로그램, a
+    /// program run as administrator, a terminal, its properties window. A list of apps comes
+    /// back to [`AppState::apps_found`]; a failure shows as a notice.
+    Shell(ShellWork),
+    /// Show a menu that no click opened: from the keys, or once a worker found what it lists.
+    ShowMenu(MenuShown),
     /// Show a notice in the corner of the window.
     Notice(String),
     /// Show the path of pane `side` as text to edit.
@@ -316,6 +324,8 @@ pub struct AppState {
     clipboard: clipboard::ClipWork,
     /// The properties window (module `properties`).
     properties: properties::PropertiesWork,
+    /// The item menu and the system's ways to open an item (module `shell`).
+    shell: shell::ShellState,
 }
 
 impl AppState {
@@ -405,6 +415,7 @@ impl AppState {
             preview: preview::PreviewWork::default(),
             clipboard: clipboard::ClipWork::default(),
             properties: properties::PropertiesWork::default(),
+            shell: shell::ShellState::default(),
         };
         (state, effects)
     }
@@ -496,7 +507,7 @@ impl AppState {
     /// the active pane lays its rows out: how many items a line of the view holds and how many
     /// lines `PageUp` and `PageDown` move. `None` for a command of the shortcut table this
     /// window does not do yet (`docs/ux/keyboard.md` says which task brings each): the key goes
-    /// on to the system.
+    /// on to the system. Since the item menu's keys (M1-06 Task 10) there is no such command.
     pub fn key(
         &mut self,
         command: Command,
@@ -602,7 +613,11 @@ impl AppState {
             Command::PasteMove => self.paste(side, true),
             Command::CopyPath => self.copy_paths(side, PathForm::of_key(Os::CURRENT)),
             Command::Properties => self.open_properties(side),
-            Command::ContextMenu => return None,
+            Command::ContextMenu => self.context_menu(side),
+            Command::OpenWith => self.open_with(side),
+            Command::RunAsAdmin => self.run_as_admin(side),
+            Command::OpenTerminal => self.open_terminal(side),
+            Command::SystemProperties => self.system_properties(side),
         };
         Some(effects)
     }
@@ -620,7 +635,7 @@ impl AppState {
     /// A right click on row `row` of pane `side`, before its menu opens: the pane gets the
     /// keyboard, and the row the cursor. A row that is not selected becomes the selection, as
     /// a click would make it; a selected one leaves the selection as it is, so that the menu
-    /// acts on all of it.
+    /// acts on all of it. The menu offers what [`AppState::item_menu`] then says.
     pub fn row_menu(&mut self, side: usize, row: usize) -> Vec<Effect> {
         self.activate(side);
         let (selection, rows) = self.tab_mut(side).selection_mut();
@@ -629,6 +644,7 @@ impl AppState {
             Some(_) => selection.click(row, rows),
             None => {}
         }
+        self.note_item_menu(side);
         Vec::new()
     }
 

@@ -46,9 +46,10 @@ impl Mods {
 /// when `mods.shift` is set, and moves the cursor alone when `mods.ctrl` is (Windows and Linux;
 /// `Selection::go_to`). The view lays the rows out, and says where each key goes
 /// (`state::target`): ← and → move along a row of icons and across the columns of 목록, and
-/// scroll 자세히 sideways when its columns are wider than the pane. Some commands are in the table before
-/// the window can do them (`AppState::key` gives `None` for those, and the key goes on to the
-/// system); `docs/ux/keyboard.md` says which task brings each.
+/// scroll 자세히 sideways when its columns are wider than the pane. A command may be in the table
+/// before the window can do it (`AppState::key` gives `None` for it, and the key goes on to the
+/// system; none is, since the item menu's keys); `docs/ux/keyboard.md` says which task brings
+/// each.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     /// The other pane becomes active.
@@ -134,8 +135,18 @@ pub enum Command {
     FitColumns,
     /// Open the 보기 menu.
     ViewMenu,
-    /// Open the menu of the selected items, as a right click on them does.
+    /// Open the menu of the selected items, as a right click on them does; with none, the menu
+    /// of the pane's folder.
     ContextMenu,
+    /// Choose the app that opens the file (연결 프로그램으로 열기…): the system's dialog, or a
+    /// menu of the apps that can open it.
+    OpenWith,
+    /// Run the program as administrator (Windows).
+    RunAsAdmin,
+    /// Open a terminal in the folder chosen, or else in the pane's folder (터미널에서 열기).
+    OpenTerminal,
+    /// Show the system's own properties window of the item (OS 속성 창 열기).
+    SystemProperties,
     /// Show the item under the cursor in a popup (빠른 보기, VIEW-01), or close it.
     QuickLook,
     /// Show or hide the preview panel.
@@ -198,6 +209,10 @@ impl Command {
                 | Command::CopyPath
                 | Command::Properties
                 | Command::ContextMenu
+                | Command::OpenWith
+                | Command::RunAsAdmin
+                | Command::OpenTerminal
+                | Command::SystemProperties
                 | Command::QuickLook
                 | Command::TypeToSelect(_)
         )
@@ -669,6 +684,9 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::F10, NONE), C::ViewMenu),
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
+    // File Explorer has no key for a terminal; Dolphin's 터미널 열기 is Shift+F4, a key File
+    // Explorer does not use (F4 alone is its address bar's).
+    (k(Key::F4, SHIFT), C::OpenTerminal),
     // Finder's Quick Look; File Explorer's Space selects the cursor's row, which Ctrl+Space
     // does here. While a name is being typed, Space types (`pane_command`).
     (k(Key::Space, NONE), C::QuickLook),
@@ -775,6 +793,11 @@ static MACOS: &[(Chord, Command)] = &[
     (k(Key::F12, NONE), C::ToggleDualPane),
     (k(Key::F12, SHIFT), C::ToggleSplit),
     (c('u', CMD), C::SwapPanes),
+    // Finder has no key for a terminal: the same key as on Windows.
+    (k(Key::F4, SHIFT), C::OpenTerminal),
+    // macOS has no key for the item menu; ⌃↩ goes with the ⌃-click that opens it, and neither
+    // Finder nor macOS takes it.
+    (k(Key::Return, CTL), C::ContextMenu),
 ];
 
 #[cfg(test)]
@@ -927,6 +950,8 @@ mod tests {
             (key(Key::F10), NONE, C::ViewMenu),
             (key(Key::F10), SHIFT, C::ContextMenu),
             (key(Key::Menu), NONE, C::ContextMenu),
+            // Dolphin's 터미널 열기; File Explorer has no key for it.
+            (key(Key::F4), SHIFT, C::OpenTerminal),
             (text("p"), ALT, C::TogglePreview),
             (text("b"), CTRL, C::ToggleTree),
             (key(Key::F9), NONE, C::SameFolderInOther),
@@ -1010,6 +1035,9 @@ mod tests {
             (key(Key::F12), SHIFT, C::ToggleSplit),
             (text("u"), CMD, C::SwapPanes),
             (key(Key::F6), NONE, C::FocusTree),
+            (key(Key::F4), SHIFT, C::OpenTerminal),
+            // The item menu: ⌃↩, as a ⌃-click opens it.
+            (key(Key::Return), CTL, C::ContextMenu),
         ];
         cases.extend(cursor_moves());
         check(Os::MacOs, &cases);
@@ -1286,6 +1314,27 @@ mod tests {
         [C::InvertSelection, C::SelectPattern, C::SelectSameExtension];
 
     #[test]
+    fn the_app_s_own_keys_keep_clear_of_the_file_managers() {
+        // 터미널 열기 is in neither file manager; the item menu's ⌃↩ is not Finder's either.
+        for (os, taken) in [
+            (Os::Windows, explorer_keys()),
+            (Os::Other, explorer_keys()),
+            (Os::MacOs, finder_keys()),
+        ] {
+            for command in [C::OpenTerminal, C::ContextMenu] {
+                for (chord, _) in bindings(os).filter(|(_, bound)| *bound == &command) {
+                    let ours = command == C::OpenTerminal || os == Os::MacOs;
+                    assert!(
+                        !ours || !taken.contains(&chord),
+                        "{os:?} {command:?}: {} is the system's",
+                        label(chord, os)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn selection_tools_keep_clear_of_the_file_managers() {
         for (os, mut taken) in [
             (Os::Windows, explorer_keys()),
@@ -1406,6 +1455,12 @@ mod tests {
             (C::CursorLeft, Some("←"), Some("←")),
             // Space first; ⌘Y, Finder's other key, is macOS's second.
             (C::QuickLook, Some("Space"), Some("Space")),
+            (C::ContextMenu, Some("Shift+F10"), Some("⌃↩")),
+            (C::OpenTerminal, Some("Shift+F4"), Some("⇧F4")),
+            // Neither file manager has a key for them: the item menu has them.
+            (C::OpenWith, None, None),
+            (C::RunAsAdmin, None, None),
+            (C::SystemProperties, None, None),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];
@@ -1520,6 +1575,11 @@ mod tests {
             C::Properties,
             C::QuickLook,
             C::SwitchPane,
+            C::ContextMenu,
+            C::OpenWith,
+            C::RunAsAdmin,
+            C::OpenTerminal,
+            C::SystemProperties,
             C::TypeToSelect("a".to_owned()),
         ] {
             assert!(command.acts_on_rows(), "{command:?}");

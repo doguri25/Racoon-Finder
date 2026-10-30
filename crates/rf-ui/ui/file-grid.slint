@@ -14,7 +14,7 @@ import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
-import { RowMenu, BlankMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
 
 // What the pointer did to an item.
 enum TileEvent {
@@ -83,6 +83,7 @@ component Tile inherits Rectangle {
                     }
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                         root.event(TileEvent.menu, false, false, "");
+                        ItemMenu.showing(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                         item-menu.show({ x: self.mouse-x, y: self.mouse-y });
                     }
                 }
@@ -240,6 +241,20 @@ export component FileGrid inherits Rectangle {
         icons.content-y = y;
     }
 
+    // The item menu by item `index`, from the keyboard (Shift+F10, the menu key, macOS ⌃↩);
+    // Rust has scrolled the item into view. The menu shows over its lower part.
+    public function show-item-menu(index: int) {
+        let x = root.columnar ? root.pad + floor(index / root.per-column) * root.tile-w + columns-view.content-x + 24px : root.pad + Math.mod(index, root.per-row) * root.tile-w + 24px;
+        let y = root.columnar ? root.pad + (Math.mod(index, root.per-column) + 0.75) * root.tile-h : (floor(index / root.per-row) + 0.75) * root.tile-h + icons.content-y;
+        ItemMenu.showing(root.absolute-position.x + x, root.absolute-position.y + y);
+        key-menus.item(x, y);
+    }
+
+    // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
+    public function show-blank-menu() {
+        key-menus.blank(root.pad + 24px, root.pad + 16px);
+    }
+
     settle := ListSettle { }
 
     drop := DropArea {
@@ -361,5 +376,13 @@ export component FileGrid inherits Rectangle {
         frame: drop.has-drag && drop.target < 0;
         label: root.drag-label;
         refusal: root.refusal;
+    }
+
+    key-menus := KeyMenus {
+        x: 0px;
+        y: 0px;
+        command(name) => {
+            root.menu-command(name);
+        }
     }
 }

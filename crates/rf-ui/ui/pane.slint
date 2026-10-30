@@ -662,6 +662,24 @@ export component Pane inherits Rectangle {
         }
     }
 
+    // The item menu by row `index` of the view (Shift+F10, the menu key, macOS ⌃↩).
+    public function show-item-menu(index: int) {
+        if (root.view.mode == 0) {
+            files.show-item-menu(index);
+        } else {
+            grid.show-item-menu(index);
+        }
+    }
+
+    // The menu of the pane's folder, by the top of its list (the same keys, nothing chosen).
+    public function show-blank-menu() {
+        if (root.view.mode == 0) {
+            files.show-blank-menu();
+        } else {
+            grid.show-blank-menu();
+        }
+    }
+
     // 자세히 scrolls a step sideways (← and →), as far as its columns reach.
     public function scroll-sideways(right: bool) {
         files.scroll-sideways(right);
