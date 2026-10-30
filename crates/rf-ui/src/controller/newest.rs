@@ -11,7 +11,8 @@
 //!
 //! Nothing a slot waits for is lost: a job that panics, or that no thread can be started for,
 //! comes back as [`Outcome::Failed`] with its [`Job::Ticket`], for the state to stop waiting. A
-//! worker that ends anyway is started again by the next job.
+//! delivery that panics loses only what it delivered: the worker goes on with the jobs that
+//! wait. A worker that ends anyway is started again by the next job.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -260,7 +261,9 @@ fn run<J: Job, D>(shared: &Shared<J>, work: &Work<J, D>, deliver: &Deliver<J, D>
             !token.is_cancelled()
         };
         if let (true, Some(outcome)) = (current, outcome) {
-            deliver(outcome);
+            // Caught too, so that the jobs that wait are not left until the next one comes. Every
+            // delivery of the app hands the outcome to the event loop, which cannot panic.
+            let _ = catch_unwind(AssertUnwindSafe(|| deliver(outcome)));
         }
     }
 }
@@ -322,28 +325,36 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_that_ended_starts_again_with_the_next_job() {
-        // The delivery panics once: the thread ends, and the next job starts another one.
+    fn a_delivery_that_panics_leaves_no_job_that_waits_behind() {
+        // Job 1 is held until job 2 waits behind it; then its delivery panics.
+        let (go, hold) = mpsc::channel::<()>();
+        let hold = Mutex::new(hold);
+        let (started, starts) = mpsc::channel::<u64>();
+        let started = Mutex::new(started);
         let (delivered, outcomes) = mpsc::channel();
         let delivered = Mutex::new(delivered);
         let worker = Newest::new(
             "rf-ui-test",
             Duration::ZERO,
-            |job: Named, _: &CancelToken| Some(job.name),
+            move |job: Named, _: &CancelToken| {
+                let _ = started.lock().expect("one worker").send(job.name);
+                if job.name == 1 {
+                    let _ = hold.lock().expect("one worker").recv_timeout(WAIT);
+                }
+                Some(job.name)
+            },
             move |outcome: Outcome<u64, u64>| {
                 assert_ne!(outcome, Outcome::Done(1), "a bug in the delivery");
                 let _ = delivered.lock().expect("one worker").send(outcome);
             },
         );
         worker.submit(Named { slot: 1, name: 1 }).expect("a worker");
-        // The thread ends, and says so, a moment later.
-        let deadline = Instant::now() + WAIT;
-        while worker.lock().started && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!worker.lock().started);
-        worker.submit(Named { slot: 1, name: 2 }).expect("a worker");
+        assert_eq!(starts.recv_timeout(WAIT).ok(), Some(1));
+        worker.submit(Named { slot: 2, name: 2 }).expect("a worker");
+        go.send(()).expect("the worker listens");
+        // Job 2 is done without another job to wake the worker.
         assert_eq!(outcomes.recv_timeout(WAIT).ok(), Some(Outcome::Done(2)));
+        assert!(worker.lock().started, "the same worker goes on");
     }
 
     #[test]
@@ -393,20 +404,40 @@ mod tests {
 
     #[test]
     fn a_stop_drops_what_waits() {
+        // No clock: job 1 holds the worker, so that job 2 waits behind it, until the stop.
+        let (go, hold) = mpsc::channel::<()>();
+        let hold = Mutex::new(hold);
+        let (started, starts) = mpsc::channel::<u64>();
+        let started = Mutex::new(started);
         let (delivered, outcomes) = mpsc::channel();
         let delivered = Mutex::new(delivered);
         let worker = Newest::new(
             "rf-ui-test",
-            Duration::from_millis(150),
-            |job: Named, _: &CancelToken| Some(job.name),
+            Duration::ZERO,
+            move |job: Named, _: &CancelToken| {
+                let _ = started.lock().expect("one worker").send(job.name);
+                if job.name == 1 {
+                    let _ = hold.lock().expect("one worker").recv_timeout(WAIT);
+                }
+                Some(job.name)
+            },
             move |outcome: Outcome<u64, u64>| {
                 let _ = delivered.lock().expect("one worker").send(outcome);
             },
         );
         worker.submit(Named { slot: 1, name: 1 }).expect("a worker");
+        assert_eq!(starts.recv_timeout(WAIT).ok(), Some(1));
+        worker.submit(Named { slot: 2, name: 2 }).expect("a worker");
         worker.stop();
-        assert_eq!(outcomes.recv_timeout(QUIET * 2).ok(), None);
-        worker.submit(Named { slot: 1, name: 2 }).expect("a worker");
-        assert_eq!(outcomes.recv_timeout(WAIT).ok(), Some(Outcome::Done(2)));
+        go.send(()).expect("the worker listens");
+        // Neither the one under way nor the one that waited gives anything: the first outcome
+        // after them is the next job's, which runs in their place.
+        worker.submit(Named { slot: 1, name: 3 }).expect("a worker");
+        assert_eq!(outcomes.recv_timeout(WAIT).ok(), Some(Outcome::Done(3)));
+        assert_eq!(
+            starts.recv_timeout(WAIT).ok(),
+            Some(3),
+            "job 2 never started"
+        );
     }
 }
