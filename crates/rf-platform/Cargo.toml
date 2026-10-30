@@ -25,7 +25,7 @@ libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray", "NSBundle"] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2", "UNNotification"] }
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }

@@ -648,7 +648,6 @@ fn connect_pick(window: &MainWindow) {
     });
 }
 
-/// The callbacks of the dialogs, the job panel and the toast, and the close button.
 /// The buttons of the job panel's 최근 완료, and the question's 트레이에서 계속.
 fn connect_report(window: &MainWindow) {
     window.on_recent_toggled(|| {
@@ -678,6 +677,7 @@ fn connect_report(window: &MainWindow) {
     });
 }
 
+/// The callbacks of the dialogs, the job panel and the toast, and the close button.
 fn connect_jobs(window: &MainWindow) {
     window.on_row_menu(|s, i| {
         with(|c| c.update_at(i, |state, i| state.row_menu(side(s), i)));
@@ -1723,7 +1723,6 @@ impl Controller {
         }
     }
 
-    /// Does an effect that shows on the screen.
     /// Gives the keys to the part of the window `effect` names: the filter box, the tree, the
     /// panes or the job panel.
     fn give_keys(&self, effect: &Effect) {
@@ -1738,6 +1737,7 @@ impl Controller {
         }
     }
 
+    /// Does an effect that shows on the screen.
     fn show(&self, effect: Effect) {
         match effect {
             Effect::Notice(text) => self.notice(&text),

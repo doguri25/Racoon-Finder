@@ -467,6 +467,7 @@ pub fn save_log(report: &JobReport, folder: &Path, name: &str) -> io::Result<Pat
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         };
+        // `write_log` buffers its records itself, and flushes them at its end.
         let written = report.write_log(&mut file).and_then(|()| file.flush());
         drop(file);
         return match written {

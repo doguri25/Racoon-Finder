@@ -1,16 +1,29 @@
 //! Notifications through the User Notifications framework (see the module above).
+//!
+//! The system shows nothing of an app's notification while that app is in front, unless the
+//! notification center's delegate says how to present it: the app stays in front after its
+//! window hides behind the menu bar icon, so a delegate of its own ([`Presenter`]) has every
+//! notification shown as a banner and kept in the list, wherever the app is.
+
+#![allow(
+    unsafe_code,
+    reason = "a delegate class for the notification center, defined with `define_class!`"
+)]
 
 use std::io;
+use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
-use block2::RcBlock;
-use objc2::rc::autoreleasepool;
-use objc2::runtime::Bool;
-use objc2_foundation::{NSBundle, NSError, NSString};
+use block2::{DynBlock, RcBlock};
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::{Bool, ProtocolObject};
+use objc2::{AllocAnyThread, define_class, msg_send};
+use objc2_foundation::{NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-    UNUserNotificationCenter,
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNNotificationPresentationOptions, UNNotificationRequest, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 
 use super::ASK_WAIT;
@@ -22,6 +35,54 @@ pub const TRAY: bool = true;
 /// notification that has the identifier of one it shows.
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+/// The notification center's delegate is set once, for the app's life.
+static PRESENTER: Once = Once::new();
+
+define_class!(
+    // SAFETY: `NSObject` has no requirement that a subclass could break; this one adds no
+    // instance variables and has no `Drop`.
+    #[unsafe(super(NSObject))]
+    #[name = "RFJobNoticePresenter"]
+    struct Presenter;
+
+    // SAFETY: `NSObjectProtocol` asks nothing of a subclass of `NSObject`.
+    unsafe impl NSObjectProtocol for Presenter {}
+
+    // SAFETY: the method has the selector and the signature the protocol declares, and calls
+    // the completion handler once, as the protocol requires.
+    unsafe impl UNUserNotificationCenterDelegate for Presenter {
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _notification: &UNNotification,
+            completion_handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            completion_handler
+                .call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List,));
+        }
+    }
+);
+
+impl Presenter {
+    fn new() -> Retained<Presenter> {
+        let this = Presenter::alloc().set_ivars(());
+        // SAFETY: `NSObject`'s `init`, on an object just allocated, once.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Makes the notification center show the app's notifications while the app is in front too.
+/// The center holds its delegate weakly, so the delegate is kept for the app's life.
+fn present_in_front(center: &UNUserNotificationCenter) {
+    PRESENTER.call_once(|| {
+        let presenter = Presenter::new();
+        center.setDelegate(Some(ProtocolObject::from_ref(&*presenter)));
+        std::mem::forget(presenter);
+    });
+}
+
 pub fn notify(title: &str, body: &str) -> io::Result<()> {
     autoreleasepool(|_| {
         if !in_app_bundle() {
@@ -31,6 +92,7 @@ pub fn notify(title: &str, body: &str) -> io::Result<()> {
             ));
         }
         let center = UNUserNotificationCenter::currentNotificationCenter();
+        present_in_front(&center);
         // The first time, the system asks the user; later it answers at once.
         let (sender, answer) = mpsc::channel();
         let granted = RcBlock::new(move |granted: Bool, _error: *mut NSError| {

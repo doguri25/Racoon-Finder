@@ -8,7 +8,9 @@
 //!   Windows has: they show "Windows PowerShell" as their app, a gap until an installer registers
 //!   the app's own id. The tray icon is the notification area's (`Shell_NotifyIconW`).
 //! - **macOS:** the User Notifications framework (`UNUserNotificationCenter`), which asks the user
-//!   once whether the app may notify. Only an app bundle may use it (outside one it raises an
+//!   once whether the app may notify. A delegate of the app's has each notification shown as a
+//!   banner and in the list even while the app is in front, as it still is after its window hid
+//!   behind the menu bar icon. Only an app bundle may use it (outside one it raises an
 //!   Objective-C exception, which would end the app), so a program run outside a bundle, as by
 //!   `cargo run`, gets `io::ErrorKind::Unsupported` and nothing is asked. The tray icon is an icon
 //!   of the menu bar (`NSStatusItem`).
