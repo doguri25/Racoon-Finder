@@ -233,8 +233,11 @@ pub enum TreeKey {
     Collapse,
     /// Enter (and the system's key to open): the active pane shows the row's folder.
     Open,
-    /// Esc, Tab, Shift+Tab, and the key that gave the tree the keys: back to the active pane.
+    /// Esc, Tab, Shift+Tab: back to the active pane.
     Leave,
+    /// The key that gave the tree the keys (F6): on to the next part of the window, the job
+    /// panel while it shows ([`PanelKey`]), else back to the active pane.
+    Next,
 }
 
 /// What `text`, held with `mods`, does in the sidebar's tree on `os`; `None` for a key that is
@@ -266,7 +269,60 @@ pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
     }
     match command_for(text, mods, os)? {
         Command::Open => Some(TreeKey::Open),
-        Command::FocusTree => Some(TreeKey::Leave),
+        Command::FocusTree => Some(TreeKey::Next),
+        _ => None,
+    }
+}
+
+/// What a key does while the job panel has the keys (KEY-02), which F6 gives it after the tree:
+/// the moves among its buttons, as among a dialog's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PanelKey {
+    /// ↑: the line above (a job's row, and below them the lines of the finished jobs).
+    Up,
+    /// ↓: the line below.
+    Down,
+    /// ←: the button before on the line.
+    Left,
+    /// →: the button after.
+    Right,
+    /// Space, Enter: the button the keys are on.
+    Press,
+    /// Esc, Tab, Shift+Tab, and F6 (the next part of the window after the panel): back to the
+    /// active pane.
+    Leave,
+}
+
+/// What `text`, held with `mods`, does in the job panel on `os`; `None` for a key that is the
+/// window's ([`command_for`]).
+pub fn panel_key(text: &str, mods: Mods, os: Os) -> Option<PanelKey> {
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        let (c, held) = pressed(c, mods);
+        let plain = [
+            (Key::UpArrow, PanelKey::Up),
+            (Key::DownArrow, PanelKey::Down),
+            (Key::LeftArrow, PanelKey::Left),
+            (Key::RightArrow, PanelKey::Right),
+            (Key::Space, PanelKey::Press),
+            (Key::Return, PanelKey::Press),
+            (Key::Escape, PanelKey::Leave),
+            (Key::Tab, PanelKey::Leave),
+        ];
+        let found = plain
+            .into_iter()
+            .find(|&(key, _)| char::from(key) == c)
+            .map(|(_, panel)| panel);
+        match found {
+            Some(panel) if held == Mods::NONE => return Some(panel),
+            Some(PanelKey::Leave) if held == SHIFT && c == char::from(Key::Tab) => {
+                return Some(PanelKey::Leave);
+            }
+            _ => {}
+        }
+    }
+    match command_for(text, mods, os)? {
+        Command::FocusTree => Some(PanelKey::Leave),
         _ => None,
     }
 }
@@ -1491,8 +1547,8 @@ mod tests {
                 (Key::Return, TreeKey::Open),
                 (Key::Escape, TreeKey::Leave),
                 (Key::Tab, TreeKey::Leave),
-                // F6, which gave the tree the keys, gives them back.
-                (Key::F6, TreeKey::Leave),
+                // F6, which gave the tree the keys, goes on to the next part of the window.
+                (Key::F6, TreeKey::Next),
             ] {
                 assert_eq!(t(os, &key(k), NONE), Some(wanted), "{os:?} {k:?}");
             }
@@ -1512,6 +1568,40 @@ mod tests {
         // The system's own key to open opens too.
         assert_eq!(t(Os::MacOs, &key(Key::DownArrow), CMD), Some(TreeKey::Open));
         assert_eq!(t(Os::MacOs, "o", CMD), Some(TreeKey::Open));
+    }
+
+    #[test]
+    fn the_job_panel_takes_the_arrows_and_presses_its_buttons() {
+        let p = |os: Os, text: &str, mods: Mods| panel_key(text, mods, os);
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            for (k, wanted) in [
+                (Key::UpArrow, PanelKey::Up),
+                (Key::DownArrow, PanelKey::Down),
+                (Key::LeftArrow, PanelKey::Left),
+                (Key::RightArrow, PanelKey::Right),
+                (Key::Space, PanelKey::Press),
+                (Key::Return, PanelKey::Press),
+                (Key::Escape, PanelKey::Leave),
+                (Key::Tab, PanelKey::Leave),
+                // F6 goes round the window's parts: from the panel, back to the panes.
+                (Key::F6, PanelKey::Leave),
+            ] {
+                assert_eq!(p(os, &key(k), NONE), Some(wanted), "{os:?} {k:?}");
+            }
+            assert_eq!(p(os, &key(Key::Tab), SHIFT), Some(PanelKey::Leave));
+            assert_eq!(p(os, &key(Key::Backtab), SHIFT), Some(PanelKey::Leave));
+            // Other keys are the window's: its undo too, which is the toast's 되돌리기.
+            for (text, mods) in [
+                (text("z"), CTRL),
+                (text("a"), NONE),
+                (key(Key::DownArrow), SHIFT),
+                (key(Key::Space), CTRL),
+                (key(Key::Delete), NONE),
+                (key(Key::F12), NONE),
+            ] {
+                assert_eq!(p(os, &text, mods), None, "{os:?} {text:?} {mods:?}");
+            }
+        }
     }
 
     #[test]

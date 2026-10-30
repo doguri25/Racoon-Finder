@@ -5,7 +5,8 @@
 //! showing it first if it is hidden. The tree has a cursor of its own, apart from its
 //! selection (the active pane's folder): it starts on the selection's row, or the first row,
 //! and the keys of [`TreeKey`] move it, open and close its row, or show its folder in the
-//! active pane, which leaves the keys with the tree. Esc, Tab and F6 give them back to the
+//! active pane, which leaves the keys with the tree. Esc and Tab give them back to the active
+//! pane; F6 takes them on to the job panel while it shows (module `panel`), else back to the
 //! active pane. While the tree has the keys, the window's other commands work as from the
 //! panes, and those of the panes' rows do nothing
 //! ([`Command::acts_on_rows`](crate::keys::Command::acts_on_rows)).
@@ -37,8 +38,10 @@ impl AppState {
     /// A key of the tree while it has the keys ([`crate::keys::tree_key`]). A cursor whose row
     /// no longer shows (a row above it was closed) starts again from the selection's row.
     pub fn tree_key(&mut self, key: TreeKey) -> Vec<Effect> {
-        if key == TreeKey::Leave {
-            return vec![Effect::FocusPanes];
+        match key {
+            TreeKey::Leave => return vec![Effect::FocusPanes],
+            TreeKey::Next => return self.tree_next(),
+            _ => {}
         }
         let rows = self.tree.rows();
         let Some(row) = self
@@ -80,7 +83,7 @@ impl AppState {
                 effects = self.open_tree_row(row);
                 row
             }
-            TreeKey::Leave => row,
+            TreeKey::Leave | TreeKey::Next => row,
         };
         self.tree_cursor = self.tree.node_at(to);
         effects.push(Effect::ScrollTree(to));

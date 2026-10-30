@@ -51,6 +51,7 @@ mod copies;
 mod drag;
 mod jobs;
 mod layout;
+mod panel;
 mod pick;
 mod preview;
 mod properties;
@@ -69,6 +70,7 @@ pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use panel::PanelButton;
 pub use preview::{
     PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
     preview_width,
@@ -162,6 +164,8 @@ pub enum Effect {
     /// Give the keys back to the panes (from the tree, or from a part of the window that is
     /// gone).
     FocusPanes,
+    /// Give the job panel the keys (module `state::panel`).
+    FocusPanel,
     /// Scroll pane `side` so that `row` shows.
     ScrollTo { side: usize, row: usize },
     /// Scroll 자세히 of pane `side` sideways, a step to the right or to the left, when its
@@ -326,6 +330,9 @@ pub struct AppState {
     properties: properties::PropertiesWork,
     /// The item menu and the system's ways to open an item (module `shell`).
     shell: shell::ShellState,
+    /// The line and the button of the job panel's keyboard cursor (module `panel`), as last
+    /// moved; [`AppState::panel_cursor`] keeps it within the lines there are.
+    panel_at: (usize, usize),
 }
 
 impl AppState {
@@ -416,6 +423,7 @@ impl AppState {
             clipboard: clipboard::ClipWork::default(),
             properties: properties::PropertiesWork::default(),
             shell: shell::ShellState::default(),
+            panel_at: (0, 0),
         };
         (state, effects)
     }

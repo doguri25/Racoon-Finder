@@ -96,6 +96,11 @@ export component MainWindow inherits Window {
     in property <bool> can-undo;
     // The rows of the job panel; the panel shows while there is one.
     in property <[JobRowView]> job-rows;
+    // The line and the button of the job panel's keyboard cursor, which shows while the panel
+    // has the keys; -1 for none.
+    in property <int> panel-line: -1;
+    in property <int> panel-button: -1;
+    private property <bool> panel-shows: root.job-rows.length > 0;
     // The dialog that is open, and what each kind shows. Rust sets the view before the kind.
     in property <DialogKind> dialog: DialogKind.none;
     in property <NameView> name-view;
@@ -204,6 +209,8 @@ export component MainWindow inherits Window {
     callback command(name: string);
     // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
     callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // A key while the job panel has the keys, as `key`; `true` when the panel used it.
+    callback panel-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     // A key while quick look shows, as `key`: it goes nowhere else. Then a click on its close
     // button or beside it.
     callback quick-look-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool);
@@ -344,6 +351,14 @@ export component MainWindow inherits Window {
     public function focus-panes() {
         keys.focus();
     }
+
+    // The job panel takes the keys, while it shows.
+    public function focus-panel() {
+        if (root.panel-shows) {
+            panel-keys.focus();
+        }
+    }
+
 
     // The 보기 menu's 분할선을 왼쪽으로/오른쪽으로 (위로/아래로): the divider moves by `step` of
     // the room, as far as a drag could take it.
@@ -1230,19 +1245,45 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // The job panel takes room only while a job runs.
-            jobs := JobPanel {
-                height: root.job-rows.length > 0 ? self.preferred-height : 0px;
-                visible: root.job-rows.length > 0;
-                rows: root.job-rows;
-                pause(index) => {
-                    root.job-pause(index);
+            // The job panel takes room only while a job runs. It takes the keys of its buttons
+            // while it has them (F6 after the tree), and passes the others on to the window's.
+            panel-keys := FocusScope {
+                height: root.panel-shows ? jobs.preferred-height : 0px;
+                visible: root.panel-shows;
+                focus-on-click: false;
+                focus-on-tab-navigation: false;
+                // The panel goes once its last job has ended, and the window takes its keys
+                // away: the panes take them, once the window has done so.
+                focus-lost(reason) => {
+                    if (!root.panel-shows) {
+                        panel-gone-later.running = true;
+                    }
                 }
-                resume(index) => {
-                    root.job-resume(index);
+                key-pressed(event) => {
+                    if (root.dialog != DialogKind.none) {
+                        return reject;
+                    }
+                    if (root.panel-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                        return accept;
+                    }
+                    reject
                 }
-                cancel(index) => {
-                    root.job-cancel(index);
+
+                jobs := JobPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    rows: root.job-rows;
+                    focus-line: panel-keys.has-focus ? root.panel-line : -1;
+                    focus-button: panel-keys.has-focus ? root.panel-button : -1;
+                    pause(index) => {
+                        root.job-pause(index);
+                    }
+                    resume(index) => {
+                        root.job-resume(index);
+                    }
+                    cancel(index) => {
+                        root.job-cancel(index);
+                    }
                 }
             }
         }
@@ -1343,6 +1384,19 @@ export component MainWindow inherits Window {
             self.running = false;
             if (root.quick-look) {
                 root.give-quick-look-keys();
+            }
+        }
+    }
+
+    // The job panel had the keys as it went: the panes take them, unless another part of the
+    // window has meanwhile.
+    panel-gone-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.dialog == DialogKind.none && !root.quick-look && !panel-keys.has-focus && !tree-keys.has-focus && !left.editing && !right.editing && !filter-box.has-focus) {
+                keys.focus();
             }
         }
     }

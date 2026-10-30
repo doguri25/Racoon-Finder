@@ -21,6 +21,7 @@ mod drag;
 mod jobs;
 mod layout;
 mod nav;
+mod panel;
 mod pick;
 mod preview;
 mod properties;

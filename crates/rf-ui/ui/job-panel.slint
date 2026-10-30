@@ -1,6 +1,7 @@
 // The job panel under the panes: one row for each job a worker runs, with its title, what it
 // works on, its bar and its progress line, and its pause and cancel buttons. It takes room
-// only while a job runs (the window gives it no height otherwise).
+// only while a job runs (the window gives it no height otherwise). F6 gives it the keys after
+// the tree (KEY-02): the button they are on has the dialogs' focus border.
 
 import { Theme } from "theme.slint";
 import { ProgressBar, OutlineButton } from "widgets.slint";
@@ -19,6 +20,10 @@ export struct JobRowView {
 
 export component JobPanel inherits Rectangle {
     in property <[JobRowView]> rows;
+    // The line (a job's row) and the button (0 일시정지 or 계속, 1 취소) the keys are on; -1 while
+    // the panel does not have them.
+    in property <int> focus-line: -1;
+    in property <int> focus-button: -1;
     callback pause(index: int);
     callback resume(index: int);
     callback cancel(index: int);
@@ -81,6 +86,7 @@ export component JobPanel inherits Rectangle {
                         OutlineButton {
                             button-height: 44px;
                             text: row.paused ? "계속" : "일시정지";
+                            focused: root.focus-line == i && root.focus-button == 0;
                             clicked => {
                                 if (row.paused) {
                                     root.resume(i);
@@ -96,6 +102,7 @@ export component JobPanel inherits Rectangle {
                         OutlineButton {
                             button-height: 44px;
                             text: "취소";
+                            focused: root.focus-line == i && root.focus-button == 1;
                             clicked => {
                                 root.cancel(i);
                             }

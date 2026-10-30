@@ -246,6 +246,11 @@ fn index(index: i32) -> Option<usize> {
     usize::try_from(index).ok()
 }
 
+/// `value` as a number for the window, at most `i32::MAX`.
+fn number(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
 fn connect(window: &MainWindow) {
     window.on_key(|text, ctrl, shift, alt, meta| {
         let mods = Mods {
@@ -267,6 +272,15 @@ fn connect(window: &MainWindow) {
             meta,
         };
         with(|c| c.tree_key(&text, mods)).unwrap_or(false)
+    });
+    window.on_panel_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        with(|c| c.panel_key(&text, mods)).unwrap_or(false)
     });
     connect_quick_look(window);
     window.on_split_changed(|share| {
@@ -1079,6 +1093,16 @@ impl Controller {
         keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
     }
 
+    /// A key while the job panel has the keys; `true` when it is used there, as with the tree
+    /// ([`Controller::tree_key`]).
+    fn panel_key(&self, text: &str, mods: Mods) -> bool {
+        if let Some(key) = keys::panel_key(text, mods, Os::CURRENT) {
+            self.update(|state| state.panel_key(key));
+            return true;
+        }
+        keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
+    }
+
     /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`)
     /// and asks for `action`: the action the place takes, or `none`. What a drop there would
     /// do goes to the label beside it. Called at every move of the pointer, it changes nothing
@@ -1434,6 +1458,7 @@ impl Controller {
                 | Effect::ShowViewMenu
                 | Effect::FocusTree
                 | Effect::FocusPanes
+                | Effect::FocusPanel
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollSideways { .. }
                 | Effect::FitColumns(_)
@@ -1627,6 +1652,7 @@ impl Controller {
             | Effect::ShowViewMenu
             | Effect::FocusTree
             | Effect::FocusPanes
+            | Effect::FocusPanel
             | Effect::ScrollTo { .. }
             | Effect::ScrollSideways { .. }
             | Effect::FitColumns(_)
@@ -1641,6 +1667,20 @@ impl Controller {
     }
 
     /// Does an effect that shows on the screen.
+    /// Gives the keys to the part of the window `effect` names: the filter box, the tree, the
+    /// panes or the job panel.
+    fn give_keys(&self, effect: &Effect) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        match effect {
+            Effect::FocusFilter => window.invoke_focus_filter(),
+            Effect::FocusTree => window.invoke_focus_tree(),
+            Effect::FocusPanel => window.invoke_focus_panel(),
+            _ => window.invoke_focus_panes(),
+        }
+    }
+
     fn show(&self, effect: Effect) {
         match effect {
             Effect::Notice(text) => self.notice(&text),
@@ -1654,24 +1694,12 @@ impl Controller {
                     window.invoke_fill_path(side_number(side), text.into());
                 }
             }
-            Effect::FocusFilter => {
-                if let Some(window) = self.window.upgrade() {
-                    window.invoke_focus_filter();
-                }
+            Effect::FocusFilter | Effect::FocusTree | Effect::FocusPanes | Effect::FocusPanel => {
+                self.give_keys(&effect);
             }
             Effect::ShowViewMenu => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_show_view_menu();
-                }
-            }
-            Effect::FocusTree => {
-                if let Some(window) = self.window.upgrade() {
-                    window.invoke_focus_tree();
-                }
-            }
-            Effect::FocusPanes => {
-                if let Some(window) = self.window.upgrade() {
-                    window.invoke_focus_panes();
                 }
             }
             Effect::ScrollTo { side, row } => self.scroll_to(side, row),
@@ -1961,6 +1989,11 @@ impl Controller {
         );
         window.set_can_undo(state.can_undo());
         window.set_notice_action_live(state.toast_button_live());
+        let (line, button) = state
+            .panel_cursor()
+            .map_or((-1, -1), |(line, button)| (number(line), number(button)));
+        window.set_panel_line(line);
+        window.set_panel_button(button);
     }
 
     /// Shows the dialog of the state, setting its view before its kind (the dialog reads the

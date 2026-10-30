@@ -4119,6 +4119,61 @@ fn the_tree_takes_the_keys_until_it_gives_them_back() {
     assert_eq!(calls.take(), ["key"]);
 }
 
+/// One running job's row of the job panel.
+fn job_row(title: &str) -> JobRowView {
+    JobRowView {
+        title: title.into(),
+        detail: "assets → 백업".into(),
+        progress: 0.25,
+        progress_text: "3 / 12 항목".into(),
+        paused: false,
+        waiting: false,
+    }
+}
+
+#[test]
+fn the_job_panel_takes_the_keys_while_it_shows() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    // The panel uses ↓ (as its arrows, Space, Enter and Esc); F12 is the window's.
+    let down = special(Key::DownArrow);
+    window.on_panel_key(move |text, _, _, _, _| {
+        let used = text == down.as_str();
+        record.note(if used { "panel ↓" } else { "panel other" });
+        used
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    // Without a job the panel does not show, and does not take the keys.
+    window.invoke_focus_panel();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+
+    let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    window.set_panel_line(0);
+    window.set_panel_button(1);
+    window.invoke_focus_panel();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["panel ↓"]);
+    // A key the panel does not use goes on to the window's keys.
+    press(&window, Key::F12);
+    assert_eq!(calls.take(), ["panel other", "key"]);
+
+    // The panel goes with its last job: the keys go back to the panes.
+    rows.remove(0);
+    // The window takes the keys from the panel as it goes; the panes take them a moment later.
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    slint::platform::update_timers_and_animations();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+}
+
 #[test]
 fn the_view_menu_gives_the_tree_the_keys() {
     let window = window();
