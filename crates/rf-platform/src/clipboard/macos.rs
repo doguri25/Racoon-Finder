@@ -87,33 +87,52 @@ pub fn put_files(paths: &[PathBuf], _effect: DropEffect) -> io::Result<u64> {
     })
 }
 
+/// How many times [`get_files`] reads the pasteboard while another app writes to it.
+const READ_TRIES: u32 = 3;
+
 pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     autoreleasepool(|_| {
         let board = NSPasteboard::generalPasteboard();
-        let change = count(board.changeCount());
-        let items = board
-            .pasteboardItems()
-            .map(|items| items.to_vec())
-            .unwrap_or_default();
-        let paths: Vec<PathBuf> = items
-            .iter()
-            .filter_map(|item| {
-                let text = item.stringForType(file_url_type())?;
-                // A file reference URL (Finder's) becomes the path URL of its item.
-                let url = NSURL::URLWithString(&text)?;
-                let url = url.filePathURL()?;
-                url.isFileURL()
-                    .then(|| url.path())
-                    .flatten()
-                    .map(|path| PathBuf::from(path.to_string()))
-            })
-            .collect();
-        Ok((!paths.is_empty()).then_some(ClipboardFiles {
-            paths,
-            effect: None,
-            change,
-        }))
+        // The change count before and after the items: when they differ, another app wrote
+        // while they were read, and they may be half its and half what was there.
+        for _ in 0..READ_TRIES {
+            let change = board.changeCount();
+            let paths = file_paths(&board);
+            if board.changeCount() != change {
+                continue;
+            }
+            return Ok((!paths.is_empty()).then_some(ClipboardFiles {
+                paths,
+                effect: None,
+                change: count(change),
+            }));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "the pasteboard kept changing while it was read",
+        ))
     })
+}
+
+/// The paths of the file URLs of the pasteboard's items.
+fn file_paths(board: &NSPasteboard) -> Vec<PathBuf> {
+    let items = board
+        .pasteboardItems()
+        .map(|items| items.to_vec())
+        .unwrap_or_default();
+    items
+        .iter()
+        .filter_map(|item| {
+            let text = item.stringForType(file_url_type())?;
+            // A file reference URL (Finder's) becomes the path URL of its item.
+            let url = NSURL::URLWithString(&text)?;
+            let url = url.filePathURL()?;
+            url.isFileURL()
+                .then(|| url.path())
+                .flatten()
+                .map(|path| PathBuf::from(path.to_string()))
+        })
+        .collect()
 }
 
 pub fn put_text(text: &str) -> io::Result<u64> {

@@ -23,13 +23,14 @@
 //! `io::ErrorKind::ResourceBusy` (about 100 ms at most); another app's delayed data may take
 //! longer to come. On macOS the pasteboard server answers. Call them from a worker thread, one
 //! at a time, rather than from the UI thread; [`change_count`] alone is cheap. Nothing here
-//! touches a file.
+//! changes a file, though the system may look at one: macOS's `fileURLWithPath` asks whether
+//! a path is a folder, and reading Finder's file reference URLs finds their items.
 //!
 //! The buffers of the Windows formats are made and read by pure functions of this module,
 //! which the tests check on every system.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 #[cfg(target_os = "macos")]
 use self::macos as imp;
@@ -119,6 +120,20 @@ pub fn universal_path(path: &Path) -> Option<PathBuf> {
     imp::universal_path(path)
 }
 
+/// Whether `path` is a Windows path in the verbatim (`\\?\…`) or device (`\\.\…`)
+/// namespace. A local path normalized as `rf_core::VPath` stores it keeps such a form only when
+/// it names no folder of a drive or a share (`\\?\GLOBALROOT\Device\…`, `\\?\Volume{…}\…`):
+/// a device or a volume that another app may put on the clipboard and that is no place for a
+/// paste to read from. Always `false` on other systems, whose paths have no such prefix.
+pub fn is_device_path(path: &Path) -> bool {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+        }
+        _ => false,
+    }
+}
+
 /// `CF_UNICODETEXT`, from `Win32::System::Ole`, whose feature the build leaves out.
 #[cfg_attr(
     not(windows),
@@ -184,7 +199,9 @@ enum DropList {
 /// The paths of the `CF_HDROP` buffer `bytes`; `None` for a buffer that is not one: too short
 /// for its header, a list that starts outside it, a path that does not end with a NUL inside
 /// it (it may be cut short, and a path cut short may name another item), or no path at all.
-/// The list ends at its empty path, or at the end of the buffer right after a path.
+/// A wide list ends at its empty path, or at the end of the buffer right after a path. A
+/// narrow list, which the system reads, must end with its double NUL inside the buffer, so
+/// that the system's reading stays inside it too.
 #[cfg_attr(
     not(windows),
     allow(dead_code, reason = "used by Windows code; tested on every OS")
@@ -199,7 +216,10 @@ fn read_drop_files(bytes: &[u8]) -> Option<DropList> {
         return None;
     }
     if word(16)? == 0 {
-        return Some(DropList::Narrow);
+        // A code page's second byte of a character is never 0: the first two NULs in a row end
+        // the list. At the start there is no path at all.
+        let end = bytes[start..].windows(2).position(|pair| pair == [0, 0])?;
+        return (end > 0).then_some(DropList::Narrow);
     }
     let units: Vec<u16> = bytes[start..]
         .as_chunks::<2>()
@@ -445,10 +465,39 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_list_is_left_to_the_system() {
-        let mut narrow = drop_files(&wides(&["C:\\a"])).expect("a list");
-        narrow[16..20].copy_from_slice(&0u32.to_le_bytes());
-        assert_eq!(read_drop_files(&narrow), Some(DropList::Narrow));
+    fn a_narrow_list_is_left_to_the_system_once_it_ends_inside_its_buffer() {
+        let narrow = |list: &[u8]| {
+            let mut buffer = drop_files(&wides(&["C:\\a"])).expect("a list");
+            buffer.truncate(20);
+            buffer[16..20].copy_from_slice(&0u32.to_le_bytes());
+            buffer.extend_from_slice(list);
+            read_drop_files(&buffer)
+        };
+        assert_eq!(narrow(b"C:\\a\0D:\\b c\0\0"), Some(DropList::Narrow));
+        // Bytes after the end are not the list's.
+        assert_eq!(narrow(b"C:\\a\0\0\x41\x42"), Some(DropList::Narrow));
+        // No double NUL inside the buffer: the system would read past it.
+        assert_eq!(narrow(b"C:\\a\0D:\\b"), None);
+        assert_eq!(narrow(b"C:\\a\0"), None);
+        assert_eq!(narrow(b""), None);
+        // No path at all.
+        assert_eq!(narrow(b"\0\0"), None);
+    }
+
+    #[test]
+    fn only_device_and_verbatim_paths_are_device_paths() {
+        for path in ["/home/a", "C:\\a", "\\\\server\\share\\a", "relative"] {
+            assert!(!is_device_path(Path::new(path)), "{path}");
+        }
+        // Windows alone parses these prefixes; elsewhere they are names like any other.
+        for path in [
+            "\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\a.txt",
+            "\\\\?\\Volume{12345678-0000-0000-0000-000000000000}\\a.txt",
+            "\\\\?\\C:\\a.txt",
+            "\\\\.\\COM1",
+        ] {
+            assert_eq!(is_device_path(Path::new(path)), cfg!(windows), "{path}");
+        }
     }
 
     #[test]

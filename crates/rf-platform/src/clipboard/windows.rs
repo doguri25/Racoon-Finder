@@ -116,8 +116,10 @@ impl Global {
     /// Hands the block to the clipboard as `format`. From a call that worked on the system owns
     /// it; a call that failed leaves it ours, and the drop frees it.
     fn hand_over(self, format: u32) -> io::Result<()> {
-        // SAFETY: the clipboard is open on this thread and was emptied by it, so this process
-        // owns its content; the block is an unlocked movable one.
+        // SAFETY: this thread holds the clipboard open (`put` opened it and emptied it; the
+        // owner window is NULL, as `OpenClipboard(None)` leaves it), which is what
+        // `SetClipboardData` needs; the block is an unlocked movable one that nothing else
+        // refers to.
         match unsafe { SetClipboardData(format, Some(HANDLE(self.0.0))) } {
             Ok(_) => {
                 std::mem::forget(self);
@@ -291,6 +293,11 @@ pub fn universal_path(path: &Path) -> Option<PathBuf> {
     let [letter, colon, ..] = local.as_slice() else {
         return None;
     };
+    // Only a drive letter can be mapped to a share: anything else is not asked about.
+    let is_letter = u8::try_from(*letter).is_ok_and(|letter| letter.is_ascii_alphabetic());
+    if !is_letter || *colon != u16::from(b':') {
+        return None;
+    }
     let device = [*letter, *colon, 0];
     let mut size: u32 = 512;
     loop {
