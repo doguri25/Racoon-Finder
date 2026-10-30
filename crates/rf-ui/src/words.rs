@@ -16,8 +16,8 @@ use rf_jobs::{
 use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
+use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
-use crate::selection::{MAX_PATTERN_CHARS, PatternError};
 use crate::state::Column;
 
 /// How many characters a path takes at most in a row of a recovered job, beside its buttons:

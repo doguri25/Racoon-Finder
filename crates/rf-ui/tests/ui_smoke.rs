@@ -4469,6 +4469,7 @@ fn hidden_extensions_leave_the_names_before_them_in_every_view() {
     let window = window();
     let mut pane = listed_pane(vec![
         entry("photos.2026", EntryKind::Dir, 0),
+        entry("앨범.2025", EntryKind::Symlink, 0),
         entry(".bashrc", EntryKind::File, 1),
         entry("설계안.pdf", EntryKind::File, 10),
     ]);
@@ -4489,8 +4490,10 @@ fn hidden_extensions_leave_the_names_before_them_in_every_view() {
         let shown = |name: &str| labelled(&window, name, AccessibleRole::ListItem).len();
         assert_eq!(shown("설계안"), 1, "{mode:?}");
         assert_eq!(shown("설계안.pdf"), 0, "{mode:?}");
-        // A folder's name and a dot file's have no extension to leave out.
+        // A folder's name and a dot file's have no extension to leave out, and a link's shows
+        // whole (it may lead to a folder).
         assert_eq!(shown("photos.2026"), 1, "{mode:?}");
+        assert_eq!(shown("앨범.2025"), 1, "{mode:?}");
         assert_eq!(shown(".bashrc"), 1, "{mode:?}");
     }
     // Shown again: the whole names, at once.

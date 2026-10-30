@@ -517,12 +517,14 @@ export component MainWindow inherits Window {
 
     forward-focus: keys;
 
+    // Whoever adds a button to the toolbar checks these two widths again (see `compact`).
     init => {
         root.compact = root.width < 1200px;
         root.titled = root.width >= 1400px;
         root.show-theme();
     }
     changed width => {
+        // The same widths as in `init`: a new toolbar button means checking them again.
         root.compact = root.width < 1200px;
         root.titled = root.width >= 1400px;
         root.window-resized();

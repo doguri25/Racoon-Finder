@@ -16,9 +16,9 @@ use rf_jobs::{
     UndoRecord, numbered_name,
 };
 
+use crate::pattern::{NamePattern, PatternError, PatternSyntax};
 use crate::pick::Picker;
 use crate::resolver::QuestionId;
-use crate::selection::{NamePattern, PatternError, PatternSyntax};
 use crate::state::FolderView;
 use crate::words::{self, JobWork};
 

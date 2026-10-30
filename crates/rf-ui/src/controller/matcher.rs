@@ -45,7 +45,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::selection::{NamePattern, PatternSyntax};
+    use crate::pattern::{NamePattern, PatternSyntax};
 
     fn request(generation: u64, rows: usize) -> MatchRequest {
         let names: Arc<[OsString]> = (0..rows)

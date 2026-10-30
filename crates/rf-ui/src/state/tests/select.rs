@@ -4,7 +4,7 @@
 use super::*;
 use crate::dialogs::{Counting, PatternDialog};
 use crate::pane::INLINE_SORT_ROWS;
-use crate::selection::{PatternError, PatternSyntax};
+use crate::pattern::{PatternError, PatternSyntax};
 
 fn hidden(mut entry: Entry) -> Entry {
     entry.attributes |= Attributes::HIDDEN;
@@ -173,6 +173,32 @@ fn the_extension_of_the_cursor_s_row_selects_its_like_ignoring_case() {
 }
 
 #[test]
+fn extensions_beyond_ascii_are_alike_ignoring_case() {
+    let mut state = ready(
+        vec![
+            file("É.JPG"),
+            file("é.jpg"),
+            file("PHOTO.ÉPS"),
+            file("x.éps"),
+            file("y.eps"),
+        ],
+        vec![],
+    );
+    let names = rows(&state, LEFT);
+    let at = |name: &str| names.iter().position(|row| *row == name).expect("a row");
+    let (jpg, eps) = (at("É.JPG"), at("PHOTO.ÉPS"));
+    state.click_row(LEFT, jpg, false, false);
+    press(&mut state, "S", CTRL_SHIFT);
+    assert_eq!(selected_names(&state, LEFT).len(), 2);
+    assert!(selected_names(&state, LEFT).contains(&"é.jpg"));
+    state.click_row(LEFT, eps, false, false);
+    press(&mut state, "S", CTRL_SHIFT);
+    let mut chosen = selected_names(&state, LEFT);
+    chosen.sort_unstable();
+    assert_eq!(chosen, ["PHOTO.ÉPS", "x.éps"]);
+}
+
+#[test]
 fn the_pattern_window_counts_on_a_worker_and_drops_late_answers() {
     let mut state = ready(photos(), vec![file("x.jpg")]);
     // Nothing typed yet: nothing to count, and 선택 is off.
@@ -239,7 +265,7 @@ fn a_text_that_is_no_pattern_says_why_and_selects_nothing() {
     state.pattern_matched(request.run(&|| true).expect("not stopped"));
     assert_eq!(pattern_dialog(&state).count, Some(2));
     // Too long: said, and nothing asked.
-    let long = "a".repeat(crate::selection::MAX_PATTERN_CHARS + 1);
+    let long = "a".repeat(crate::pattern::MAX_PATTERN_CHARS + 1);
     assert_eq!(state.pattern_edited(&long), []);
     assert_eq!(pattern_dialog(&state).problem, Some(PatternError::TooLong));
     // Esc closes it, selecting nothing.
@@ -518,4 +544,91 @@ fn a_sort_the_worker_could_not_make_leaves_the_rows_in_their_order() {
     // A late answer of that sort is dropped.
     assert_eq!(state.sorted(sort.run()), []);
     assert_eq!(rows(&state, LEFT)[0], "f0000");
+}
+
+#[test]
+fn a_choice_that_waits_for_the_count_waits_through_a_change_of_the_rows() {
+    let mut state = ready(vec![file("a.txt"), file("b.jpg")], vec![]);
+    press(&mut state, "s", CTRL);
+    let before = the_match(&state.pattern_edited("*.txt"));
+    // 선택 while the worker counts; then another app makes a file before it answers.
+    assert_eq!(state.pattern_confirmed("*.txt"), []);
+    let generation = state.panes()[LEFT].active_tab().generation();
+    let after = the_match(&state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Upsert(file("n.txt"))],
+    }));
+    assert!(pattern_dialog(&state).confirming);
+    // The answer for the rows before is dropped; the one for the rows now selects them.
+    assert_eq!(
+        state.pattern_matched(before.run(&|| true).expect("run")),
+        []
+    );
+    assert!(matches!(state.modal(), Some(Modal::Pattern(_))));
+    assert_eq!(state.pattern_matched(after.run(&|| true).expect("run")), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(selected_names(&state, LEFT), ["a.txt", "n.txt"]);
+    // A change of the pattern after 선택 drops it: the press was for the pattern before.
+    press(&mut state, "s", CTRL);
+    let _ = state.pattern_edited("*.jpg");
+    assert_eq!(state.pattern_confirmed("*.jpg"), []);
+    let _ = state.pattern_edited("*.png");
+    assert!(!pattern_dialog(&state).confirming);
+}
+
+/// A window state like [`ready`] with a job that runs, so that closing the window asks first.
+fn ready_with_a_job(left: Vec<Entry>) -> AppState {
+    let mut state = ready(left, vec![]);
+    state.track(crate::jobs::Started {
+        id: JobId(1),
+        spec: None,
+        work: words::JobWork::Trash,
+        origin: None,
+        via_history: false,
+    });
+    state
+}
+
+#[test]
+fn a_pattern_window_behind_the_quit_question_keeps_up_and_comes_back_counted() {
+    let mut state = ready_with_a_job(vec![file("a.txt"), file("b.jpg")]);
+    press(&mut state, "s", CTRL);
+    let first = the_match(&state.pattern_edited("*.txt"));
+    // The window's close button: the question whether to quit shows over the pattern window.
+    assert_eq!(state.request_close(), []);
+    assert!(matches!(state.modal(), Some(Modal::Confirm(_))));
+    // Meanwhile the worker answers, and the rows change: the waiting window takes both.
+    assert_eq!(state.pattern_matched(first.run(&|| true).expect("run")), []);
+    let generation = state.panes()[LEFT].active_tab().generation();
+    let again = the_match(&state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Upsert(file("n.txt"))],
+    }));
+    assert_eq!(state.pattern_matched(again.run(&|| true).expect("run")), []);
+    // Staying: the window shows again, counted, and 선택 selects at once.
+    assert_eq!(state.dialog_cancelled(), []);
+    let dialog = pattern_dialog(&state);
+    assert_eq!((dialog.count, dialog.counting), (Some(2), Counting::Idle));
+    assert_eq!(state.pattern_confirmed("*.txt"), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(selected_names(&state, LEFT), ["a.txt", "n.txt"]);
+}
+
+#[test]
+fn a_choice_made_before_the_quit_question_selects_when_the_count_comes() {
+    let mut state = ready_with_a_job(vec![file("a.txt"), file("b.jpg")]);
+    press(&mut state, "s", CTRL);
+    let request = the_match(&state.pattern_edited("*.txt"));
+    assert_eq!(state.pattern_confirmed("*.txt"), []);
+    state.request_close();
+    // The answer comes while the question shows: the rows are selected, the waiting window
+    // goes, and the question stays.
+    assert_eq!(
+        state.pattern_matched(request.run(&|| true).expect("run")),
+        []
+    );
+    assert!(matches!(state.modal(), Some(Modal::Confirm(_))));
+    assert_eq!(selected_names(&state, LEFT), ["a.txt"]);
+    assert_eq!(state.dialog_cancelled(), []);
+    assert_eq!(state.modal(), None);
 }

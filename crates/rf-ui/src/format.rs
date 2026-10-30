@@ -150,11 +150,15 @@ pub fn folder_label(path: &VPath) -> String {
 }
 
 /// The name the rows show for `entry`: the whole name, or, with the extensions hidden
-/// (`show_extensions` off, NAV-11), the name without the dot and the extension the 확장자
-/// column shows. A folder, a name without an extension and a dot file (`.bashrc`) show whole.
+/// (`show_extensions` off, NAV-11), a file's name without the dot and the extension the 확장자
+/// column shows. A folder, a link (which may lead to a folder), a name without an extension and
+/// a dot file (`.bashrc`) show whole.
 pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
     let name = entry.name.to_string_lossy();
-    let extension = entry.extension().filter(|_| !show_extensions);
+    // A link may lead to a folder, whose name has no extension: the listing does not tell.
+    let extension = entry
+        .extension()
+        .filter(|_| !show_extensions && entry.kind == EntryKind::File);
     let stem = extension.and_then(|extension| {
         name.strip_suffix(&*extension.to_string_lossy())?
             .strip_suffix('.')
@@ -271,9 +275,15 @@ mod tests {
         assert_eq!(shown("설계안.pdf", EntryKind::File, false), "설계안");
         assert_eq!(shown("a.tar.gz", EntryKind::File, false), "a.tar");
         assert_eq!(shown("PHOTO.JPG", EntryKind::File, false), "PHOTO");
-        // A link's name is a file's; a folder's has no extension.
-        assert_eq!(shown("문서.lnk", EntryKind::Symlink, false), "문서");
+        // A folder's name has no extension, and a link's shows whole: it may lead to a folder
+        // (the listing does not follow it). Windows' shortcuts (.lnk) are files.
         assert_eq!(shown("photos.2026", EntryKind::Dir, false), "photos.2026");
+        assert_eq!(
+            shown("photos.2026", EntryKind::Symlink, false),
+            "photos.2026"
+        );
+        assert_eq!(shown("문서.lnk", EntryKind::File, false), "문서");
+        assert_eq!(shown("장치", EntryKind::Other, false), "장치");
         // Nothing after the dot, or nothing before it: no extension.
         assert_eq!(shown(".bashrc", EntryKind::File, false), ".bashrc");
         assert_eq!(shown("README", EntryKind::File, false), "README");

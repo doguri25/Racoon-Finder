@@ -1209,7 +1209,7 @@ pub fn pattern_view(dialog: &PatternDialog) -> PatternView {
     };
     PatternView {
         initial: dialog.initial.as_str().into(),
-        regex: dialog.choice.syntax == crate::selection::PatternSyntax::Regex,
+        regex: dialog.choice.syntax == crate::pattern::PatternSyntax::Regex,
         ignore_case: !dialog.choice.match_case,
         add: dialog.choice.add,
         count,

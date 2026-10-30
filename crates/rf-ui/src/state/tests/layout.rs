@@ -772,6 +772,22 @@ fn a_wait_goes_on_through_f5_in_the_other_pane() {
 }
 
 #[test]
+fn a_wait_goes_on_through_a_retry_in_the_other_pane() {
+    let (mut state, waiting) = synced_waiting();
+    let _ = state.open_row(LEFT, 0);
+    // 다시 시도 lists it again as F5 does: sync waits for that listing.
+    let again = the_load(&state.retry(RIGHT));
+    state.activate(LEFT);
+    let effects = state.loaded(LoadEvent::Listed {
+        generation: again.generation,
+        entries: vec![dir("x")],
+    });
+    assert_ne!(again.generation, waiting.generation);
+    assert_eq!(listed(&effects), [in_c("x")]);
+    assert!(state.syncing());
+}
+
+#[test]
 fn swapping_the_panes_while_sync_waits_turns_it_off() {
     let (mut state, waiting) = synced_waiting();
     let _ = state.open_row(LEFT, 0);

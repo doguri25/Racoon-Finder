@@ -14,6 +14,7 @@ pub mod keys;
 pub mod loader;
 pub mod open;
 pub mod pane;
+pub mod pattern;
 pub mod pick;
 pub mod places;
 pub mod preview;

@@ -9,8 +9,10 @@
 //! 100,000 items does not stop the window at each key: each request has a new generation, the
 //! worker drops a request as soon as a newer one comes, and the window takes only the answer
 //! for the pattern as it is ([`AppState::pattern_matched`]). The rows its 선택 selects are those
-//! the worker matched, so no pattern is matched on the UI thread; when the rows change while
-//! it shows (a watch), the worker matches them again.
+//! the worker matched, so no pattern is matched on the UI thread (unless the worker failed);
+//! when the rows change while it shows (a watch), the worker matches them again, and a 선택 that
+//! waited goes on waiting. A window that waits behind the question whether to quit keeps taking
+//! the answers and the changes of the rows, so it is up to date when it shows again.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -20,7 +22,7 @@ use super::{AppState, Effect};
 use crate::dialogs::{Counting, Modal, PatternChoice, PatternDialog};
 use crate::keys::Command;
 use crate::pane::next_generation;
-use crate::selection::{NamePattern, PatternSyntax};
+use crate::pattern::{NamePattern, PatternSyntax};
 use crate::words;
 
 /// The names of a pane's rows for a worker to match against a pattern
@@ -172,7 +174,7 @@ impl AppState {
         let dialog = PatternDialog::new(side, tab, self.pattern.last.clone());
         self.open(Modal::Pattern(dialog));
         self.pattern.rows = None;
-        self.match_pattern()
+        self.match_pattern(false)
     }
 
     /// The pattern window's field changed to `text`.
@@ -234,7 +236,7 @@ impl AppState {
     /// on this thread when it is pressed (at once, when it was pressed already). An answer for a
     /// pattern typed over is dropped.
     pub fn pattern_failed(&mut self, generation: u64) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &mut self.modal else {
+        let Some(dialog) = self.pattern_window_mut() else {
             return Vec::new();
         };
         if generation != dialog.generation || dialog.counting != Counting::Running {
@@ -250,9 +252,10 @@ impl AppState {
 
     /// What the worker found for a [`MatchRequest`]: the window shows how many rows match, when
     /// it is still for the pattern as it is (an answer for an older one is dropped), and
-    /// selects them when 선택 waits for it.
+    /// selects them when 선택 waits for it. A window waiting behind another one (the question
+    /// whether to quit) takes it too.
     pub fn pattern_matched(&mut self, matched: Matched) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &mut self.modal else {
+        let Some(dialog) = self.pattern_window_mut() else {
             return Vec::new();
         };
         if matched.generation != dialog.generation || dialog.counting != Counting::Running {
@@ -270,9 +273,10 @@ impl AppState {
     }
 
     /// The rows of tab `index` of pane `side` changed (its listing came, its watch told of a
-    /// change): when the pattern window selects among them, the worker matches them again.
+    /// change): when the pattern window selects among them, the worker matches them again. A
+    /// 선택 that waited for the count waits for the new one.
     pub(super) fn pattern_rows_changed(&mut self, side: usize, index: usize) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &self.modal else {
+        let Some(dialog) = self.pattern_window() else {
             return Vec::new();
         };
         let id = self.panes[side].tabs().get(index).map(super::Tab::id);
@@ -280,15 +284,37 @@ impl AppState {
             return Vec::new();
         }
         self.pattern.rows = None;
-        self.match_pattern()
+        self.match_pattern(true)
     }
 
-    /// Drops what the pattern window worked with, once it no longer shows.
+    /// Drops what the pattern window worked with, once it is gone.
     pub(super) fn drop_closed_pattern(&mut self) {
-        if !matches!(self.modal, Some(Modal::Pattern(_))) {
+        if self.pattern_window().is_none() {
             self.pattern.rows = None;
             self.pattern.found = None;
         }
+    }
+
+    /// The pattern window: the one that shows, or one that waits behind another window (the
+    /// question whether to quit shows over it); there is one at most.
+    fn pattern_window(&self) -> Option<&PatternDialog> {
+        self.modal
+            .iter()
+            .chain(&self.later)
+            .find_map(|modal| match modal {
+                Modal::Pattern(dialog) => Some(dialog),
+                _ => None,
+            })
+    }
+
+    fn pattern_window_mut(&mut self) -> Option<&mut PatternDialog> {
+        self.modal
+            .iter_mut()
+            .chain(&mut self.later)
+            .find_map(|modal| match modal {
+                Modal::Pattern(dialog) => Some(dialog),
+                _ => None,
+            })
     }
 
     /// Changes the pattern window's choices with `change`; the worker matches the names
@@ -302,14 +328,16 @@ impl AppState {
         if dialog.choice == before {
             return Vec::new();
         }
-        self.match_pattern()
+        self.match_pattern(false)
     }
 
     /// Asks a worker to match the names of the pattern window's rows against its pattern as it
     /// is, under a new generation; or, for a text that is no pattern or has nothing to match,
-    /// says so in the window and asks nothing.
-    fn match_pattern(&mut self) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &self.modal else {
+    /// says so in the window and asks nothing. A 선택 that waited for the count waits for the
+    /// new one when `keep_choice` (the rows changed), and is dropped otherwise (the pattern
+    /// changed after it).
+    fn match_pattern(&mut self, keep_choice: bool) -> Vec<Effect> {
+        let Some(dialog) = self.pattern_window() else {
             return Vec::new();
         };
         let (side, tab) = (dialog.side, dialog.tab);
@@ -330,11 +358,11 @@ impl AppState {
             names
         };
         self.pattern.found = None;
-        let Some(Modal::Pattern(dialog)) = &mut self.modal else {
+        let Some(dialog) = self.pattern_window_mut() else {
             return Vec::new();
         };
         dialog.generation = next_generation();
-        dialog.confirming = false;
+        dialog.confirming &= keep_choice;
         let (pattern, problem) = match dialog.choice.pattern() {
             Ok(pattern) => (pattern, None),
             Err(problem) => (None, Some(problem)),
@@ -364,7 +392,7 @@ impl AppState {
     /// Matches the names of the pattern window's rows on this thread, which the worker could not
     /// do, and selects the rows that match ([`AppState::select_matched`]).
     fn match_here(&mut self) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &self.modal else {
+        let Some(dialog) = self.pattern_window() else {
             return Vec::new();
         };
         let Ok(Some(pattern)) = dialog.choice.pattern() else {
@@ -381,9 +409,9 @@ impl AppState {
 
     /// Selects the rows the worker matched, in the tab the pattern window was opened for (if it
     /// is still in its pane), by their names: in place of the selection or with it. The window
-    /// closes, and the next one starts with its choices.
+    /// closes (or, waiting behind another one, goes), and the next one starts with its choices.
     fn select_matched(&mut self) -> Vec<Effect> {
-        let Some(Modal::Pattern(dialog)) = &self.modal else {
+        let Some(dialog) = self.pattern_window() else {
             return Vec::new();
         };
         let (side, tab, choice) = (dialog.side, dialog.tab, dialog.choice.clone());
@@ -402,7 +430,13 @@ impl AppState {
             });
         }
         self.pattern.last = choice;
-        self.close();
+        if matches!(self.modal, Some(Modal::Pattern(_))) {
+            self.close();
+        } else {
+            self.later
+                .retain(|modal| !matches!(modal, Modal::Pattern(_)));
+            self.drop_closed_pattern();
+        }
         Vec::new()
     }
 }
