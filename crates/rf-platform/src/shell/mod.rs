@@ -666,42 +666,53 @@ mod tests {
 
     #[test]
     fn programs_are_looked_for_in_absolute_folders_only() {
+        // Folders that are absolute on the system the test runs on: on Windows a path needs a
+        // drive or a UNC prefix for that, so `/usr/bin` would be relative there, and so is a
+        // path from the root of the current drive (`\bin`).
+        let (local_bin, bin, term) = if cfg!(windows) {
+            (r"C:\Tools\bin", r"C:\Windows\System32", r"C:\Opt\term.exe")
+        } else {
+            ("/usr/local/bin", "/usr/bin", "/opt/term")
+        };
         let dirs = || {
-            vec![
-                PathBuf::new(),
-                PathBuf::from("."),
-                PathBuf::from("bin"),
-                PathBuf::from("/usr/local/bin"),
-                PathBuf::from("/usr/bin"),
-            ]
+            let mut dirs = vec![PathBuf::new(), PathBuf::from("."), PathBuf::from("bin")];
+            if cfg!(windows) {
+                dirs.push(PathBuf::from(r"\bin"));
+            }
+            dirs.extend([PathBuf::from(local_bin), PathBuf::from(bin)]);
+            dirs
         };
         let everywhere = |_: &Path| true;
         // The first absolute folder that has it.
         assert_eq!(
             find_program(OsStr::new("x-terminal-emulator"), dirs(), everywhere),
-            Some(PathBuf::from("/usr/local/bin/x-terminal-emulator"))
+            Some(Path::new(local_bin).join("x-terminal-emulator"))
         );
-        let only_usr_bin = |path: &Path| path.starts_with("/usr/bin");
+        let only_bin = |path: &Path| path.starts_with(bin);
         assert_eq!(
-            find_program(OsStr::new("kitty"), dirs(), only_usr_bin),
-            Some(PathBuf::from("/usr/bin/kitty"))
+            find_program(OsStr::new("kitty"), dirs(), only_bin),
+            Some(Path::new(bin).join("kitty"))
         );
         assert_eq!(find_program(OsStr::new("kitty"), dirs(), |_| false), None);
         // An absolute path is itself, when it is there.
         assert_eq!(
-            find_program(OsStr::new("/opt/term"), dirs(), everywhere),
-            Some(PathBuf::from("/opt/term"))
+            find_program(OsStr::new(term), dirs(), everywhere),
+            Some(PathBuf::from(term))
         );
-        assert_eq!(
-            find_program(OsStr::new("/opt/term"), dirs(), |_| false),
-            None
-        );
-        // A relative path with a folder would be read in the current folder.
+        assert_eq!(find_program(OsStr::new(term), dirs(), |_| false), None);
+        // A relative path with a folder would be read in the current folder, and so would a
+        // path from the current drive's root on Windows.
         assert_eq!(
             find_program(OsStr::new("bin/term"), dirs(), everywhere),
             None
         );
         assert_eq!(find_program(OsStr::new("./term"), dirs(), everywhere), None);
+        if cfg!(windows) {
+            assert_eq!(
+                find_program(OsStr::new(r"\Opt\term.exe"), dirs(), everywhere),
+                None
+            );
+        }
         assert_eq!(find_program(OsStr::new(""), dirs(), everywhere), None);
     }
 
