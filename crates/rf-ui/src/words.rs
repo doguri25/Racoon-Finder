@@ -176,6 +176,12 @@ pub fn no_subfolders() -> &'static str {
     "하위 폴더가 없습니다"
 }
 
+/// Under the folders of a `›`'s list when the listing left links unexamined (past the most it
+/// follows) that may lead to more folders, and no folder was left out otherwise.
+pub fn links_unexamined() -> &'static str {
+    "바로 가기 일부는 확인하지 않았습니다"
+}
+
 /// Under the names a list of the address bar shows: how many more folders there are.
 pub fn more_folders(count: usize) -> String {
     format!("외 {count}개")

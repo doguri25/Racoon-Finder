@@ -574,7 +574,8 @@ fn the_path_field_completes_the_folders_after_its_last_separator() {
         state.completion(LEFT).map(Completion::names),
         Some(&Names::Listed {
             names: names(&["docs", "doctor"]),
-            more: 3
+            more: 3,
+            links_left: false,
         })
     );
     // A listing that left folders out is narrowed only while a new one is out.

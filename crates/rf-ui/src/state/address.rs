@@ -79,9 +79,14 @@ impl Environment {
 pub enum Names {
     /// The worker is listing the folder.
     Loading,
-    /// The folders, in the natural order of their names, and how many more there are than
-    /// [`MAX_NAMES`].
-    Listed { names: Vec<FolderName>, more: usize },
+    /// The folders, in the natural order of their names, how many more there are than
+    /// [`MAX_NAMES`], and whether links were left unexamined that may lead to more
+    /// ([`LoadEvent::Names`]).
+    Listed {
+        names: Vec<FolderName>,
+        more: usize,
+        links_left: bool,
+    },
     /// The folder could not be listed.
     Failed(ErrorKind),
 }
@@ -102,7 +107,11 @@ impl Names {
             Names::Listed { mut names, .. } => {
                 let start = NameStart::new(prefix, os);
                 names.retain(|each| start.matches(&each.name));
-                Names::Listed { names, more: 0 }
+                Names::Listed {
+                    names,
+                    more: 0,
+                    links_left: false,
+                }
             }
             Names::Loading | Names::Failed(_) => Names::Loading,
         }
@@ -877,7 +886,16 @@ impl AppState {
 fn take_names(names: &mut Names, cursor: &mut Option<usize>, event: LoadEvent) {
     let kept = cursor.and_then(|row| names.rows().get(row).map(|each| each.name.clone()));
     *names = match event {
-        LoadEvent::Names { names, more, .. } => Names::Listed { names, more },
+        LoadEvent::Names {
+            names,
+            more,
+            links_left,
+            ..
+        } => Names::Listed {
+            names,
+            more,
+            links_left,
+        },
         LoadEvent::Failed { kind, .. } => Names::Failed(kind),
         // A listing of names sends nothing else.
         LoadEvent::Listed { .. }

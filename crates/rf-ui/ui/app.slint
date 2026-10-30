@@ -180,14 +180,27 @@ export component MainWindow inherits Window {
     private property <length> subfolders-bottom;
     // How many rows PageUp and PageDown move in that list: the rows it shows.
     out property <int> subfolders-page: max(1, min(root.subfolders.rows.length, root.subfolders-rows));
-    // The list goes under the `›`, or above it as a system's drop-down list goes: when the whole
-    // list fits there and not under the `›`, or when not even its first three rows fit under it
-    // and there is more room above. It shows the rows that fit where it goes.
+    // The list goes under the `›`, or above it as a system's drop-down list goes: when a full
+    // list (ten rows and a note) fits there and not under the `›`, or when not even three rows
+    // fit under it and there is more room above. The side is chosen at the click
+    // (`place-subfolders`), before the folder is listed, and kept while the list shows, so that
+    // the list does not jump when its names come after "불러오는 중…". It shows the rows that
+    // fit where it goes.
+    private property <bool> subfolders-up;
     private property <length> subfolders-below: root.height - root.subfolders-bottom - 2px - 8px;
     private property <length> subfolders-above: root.subfolders-top - 2px - 8px;
-    private property <int> subfolders-wanted: min(root.subfolders.rows.length, 10);
-    private property <bool> subfolders-up: MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < root.subfolders-wanted && (MenuRoom.rows(root.subfolders-above, root.subfolders.note != "") >= root.subfolders-wanted || (MenuRoom.rows(root.subfolders-below, root.subfolders.note != "") < min(root.subfolders.rows.length, 3) && root.subfolders-above > root.subfolders-below));
     private property <int> subfolders-rows: MenuRoom.rows(root.subfolders-up ? root.subfolders-above : root.subfolders-below, root.subfolders.note != "");
+
+    // The `›` at `x` of the window, from `top` to `bottom`, was clicked: the list of its
+    // folders goes there, on the side that has room for it.
+    function place-subfolders(x: length, top: length, bottom: length) {
+        root.subfolders-x = x;
+        root.subfolders-top = top;
+        root.subfolders-bottom = bottom;
+        let below = MenuRoom.rows(root.subfolders-below, true);
+        let above = MenuRoom.rows(root.subfolders-above, true);
+        root.subfolders-up = below < 10 && (above >= 10 || (below < 3 && root.subfolders-above > root.subfolders-below));
+    }
     // The completion list of the path field being edited: the pane whose list shows (0 or 1;
     // -1 for none), the list, and where that pane's field is. It goes under the field, or above
     // it when not even its first three rows fit under it and there is more room above.
@@ -1026,9 +1039,7 @@ export component MainWindow inherits Window {
                             keys.focus();
                         }
                         subfolders-clicked(index, x, top, bottom) => {
-                            root.subfolders-x = x;
-                            root.subfolders-top = top;
-                            root.subfolders-bottom = bottom;
+                            root.place-subfolders(x, top, bottom);
                             keys.focus();
                             root.subfolders-clicked(0, index);
                         }
@@ -1168,9 +1179,7 @@ export component MainWindow inherits Window {
                             keys.focus();
                         }
                         subfolders-clicked(index, x, top, bottom) => {
-                            root.subfolders-x = x;
-                            root.subfolders-top = top;
-                            root.subfolders-bottom = bottom;
+                            root.place-subfolders(x, top, bottom);
                             keys.focus();
                             root.subfolders-clicked(1, index);
                         }

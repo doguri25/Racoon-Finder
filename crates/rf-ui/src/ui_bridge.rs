@@ -234,8 +234,9 @@ impl PaneModels {
 
 /// What a list of the address bar shows of `list` (its names and the keyboard's row; `None`
 /// when it is closed), with `model` as its rows. The list of a piece's folders (`notes`) shows
-/// from the click on, and says while the folder is listed, when it could not be, and when it has
-/// no folder; the completion list shows only while it has names. Both say how many folders more
+/// from the click on, and says while the folder is listed, when it could not be, when it has
+/// no folder, and when links it did not follow may lead to more; the completion list shows only
+/// while it has names. Both say how many folders more
 /// there are than their rows, and mark the links among them, and whether their first names are
 /// still on their way (`pending`).
 pub fn folder_menu(
@@ -261,6 +262,10 @@ pub fn folder_menu(
         .collect();
     let note = match names {
         Names::Listed { more, .. } if *more > 0 => words::more_folders(*more),
+        // Only links the listing did not follow cut the list short: it may have more folders.
+        Names::Listed {
+            links_left: true, ..
+        } if notes => words::links_unexamined().to_owned(),
         Names::Listed { names, .. } if names.is_empty() && notes => {
             words::no_subfolders().to_owned()
         }
@@ -2286,5 +2291,32 @@ mod tests {
         // None fits: the list hides, and a Tab still waits.
         let _ = request(&state.path_edited(LEFT, &format!("{typed}z")));
         assert_eq!(shown(&state), (false, true));
+    }
+
+    #[test]
+    fn a_list_of_subfolders_says_when_links_it_did_not_follow_may_lead_to_more() {
+        use crate::loader::FolderName;
+        let model = Rc::new(VecModel::default());
+        let listed = |names: &[&str], more: usize, links_left: bool| Names::Listed {
+            names: names.iter().map(|name| FolderName::folder(*name)).collect(),
+            more,
+            links_left,
+        };
+        let note = |names: &Names, notes: bool| {
+            folder_menu(&model, Some((names, None)), notes)
+                .note
+                .to_string()
+        };
+        let unexamined = "바로 가기 일부는 확인하지 않았습니다";
+        // Only links left unexamined cut the list short.
+        assert_eq!(note(&listed(&["docs"], 0, true), true), unexamined);
+        // Not even one folder: there may be some among those links.
+        assert_eq!(note(&listed(&[], 0, true), true), unexamined);
+        assert_eq!(note(&listed(&[], 0, false), true), "하위 폴더가 없습니다");
+        // Folders left out say how many; the whole list says nothing.
+        assert_eq!(note(&listed(&["docs"], 4, true), true), "외 4개");
+        assert_eq!(note(&listed(&["docs"], 0, false), true), "");
+        // The completion list has no such note.
+        assert_eq!(note(&listed(&["docs"], 0, true), false), "");
     }
 }

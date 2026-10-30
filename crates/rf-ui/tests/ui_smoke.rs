@@ -338,10 +338,9 @@ fn a_pieces_chevron_asks_for_its_folders_and_the_list_takes_clicks() {
     let labels: Vec<String> = view.crumbs.iter().map(|crumb| crumb.label.into()).collect();
     let pieces = labels.len();
     window.set_right_pane(view);
-    // A row too long for the pane puts its last piece at its end as the window takes in an
-    // event (its pieces' places come out of the layout): the pointer comes over the window
-    // first, as it does before any click.
-    pointer(&window, "move", LogicalPosition::new(1.0, 1.0));
+    // A row too long for the pane puts its last piece at its end once the window has run its
+    // change handlers (its pieces' places come out of the layout), as it does before it draws.
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
     // The buttons of the right pane's path row, as it shows them: its pieces (the "…" one
     // named for the folder it stands for) and their `›`s.
     let path_row = || {
@@ -742,47 +741,69 @@ fn the_completion_list_fits_a_short_pane_and_shows_its_cursor() {
 }
 
 #[test]
-fn the_subfolder_list_opens_above_its_chevron_when_only_there_it_fits_whole() {
+fn the_subfolder_list_keeps_the_side_its_click_chose() {
     let window = window();
+    // One pane above the other, the lower one as short as a pane gets.
     window.set_stacked(true);
     window.set_split_share(0.9);
     let pane = listed_pane(vec![]);
     let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, false));
     window.set_right_pane(models.view(&pane, true));
-    pointer(&window, "move", LogicalPosition::new(1.0, 1.0));
-    let chevron = path_row_of(&window, "오른쪽 패널")
-        .query_descendants()
-        .match_accessible_role(AccessibleRole::Button)
-        .find_all()
-        .into_iter()
-        .rfind(|button| {
-            button
-                .accessible_label()
-                .is_some_and(|label| label.ends_with(SUBFOLDERS))
-        })
-        .expect("the last piece's chevron");
-    chevron.mock_single_click(slint::platform::PointerEventButton::Left);
-    let (top, bottom) = (
-        chevron.absolute_position().y,
-        chevron.absolute_position().y + chevron.size().height,
-    );
-    let place = |count: usize| {
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::ZERO);
+    let chevron_of = |pane: &str| {
+        path_row_of(&window, pane)
+            .query_descendants()
+            .match_accessible_role(AccessibleRole::Button)
+            .find_all()
+            .into_iter()
+            .rfind(|button| {
+                button
+                    .accessible_label()
+                    .is_some_and(|label| label.ends_with(SUBFOLDERS))
+            })
+            .expect("the last piece's chevron")
+    };
+    let loading = FolderMenuView {
+        pending: true,
+        ..folder_menu(&[], -1, "불러오는 중…")
+    };
+    let names = |count: usize| {
         let names: Vec<String> = (1..=count).map(|n| format!("여행 {n}")).collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        window.set_subfolders(folder_menu(&names, -1, ""));
+        folder_menu(&names, -1, "")
+    };
+    let place = |view: FolderMenuView| {
+        window.set_subfolders(view);
         let list = labelled(&window, "하위 폴더", AccessibleRole::Groupbox).remove(0);
         (
             list.absolute_position().y,
             list.absolute_position().y + list.size().height,
         )
     };
-    // Three rows fit under the `›` of the short lower pane: the list goes there.
-    let (list_top, _) = place(3);
-    assert!(list_top >= bottom, "{list_top} {bottom}");
-    // Eight do not, and fit above it: the list goes above, whole.
-    let (_, list_bottom) = place(8);
-    assert!(list_bottom <= top, "{list_bottom} {top}");
-    assert_eq!(window.get_subfolders_page(), 8);
+    for (pane, up) in [("오른쪽 패널", true), ("왼쪽 패널", false)] {
+        let chevron = chevron_of(pane);
+        chevron.mock_single_click(slint::platform::PointerEventButton::Left);
+        let (top, bottom) = (
+            chevron.absolute_position().y,
+            chevron.absolute_position().y + chevron.size().height,
+        );
+        // Under the short lower pane's `›` a full list does not fit, and above it it does: the
+        // list goes above from the click on, while its folder is listed, and stays there
+        // whatever comes, three names that would fit under it or eight. Under the upper
+        // pane's, it goes under.
+        for view in [loading.clone(), names(3), names(8)] {
+            let rows = view.rows.row_count();
+            let (list_top, list_bottom) = place(view);
+            if up {
+                assert!(list_bottom <= top, "{pane} {rows}: {list_bottom} {top}");
+            } else {
+                assert!(list_top >= bottom, "{pane} {rows}: {list_top} {bottom}");
+            }
+        }
+        assert_eq!(window.get_subfolders_page(), 8, "{pane}");
+        window.set_subfolders(FolderMenuView::default());
+    }
 }
 
 #[test]
