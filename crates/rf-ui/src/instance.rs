@@ -4,12 +4,34 @@
 //! The lock is a file, [`LOCK_FILE`], in the folder of the journal, held with the system's
 //! file lock (`File::try_lock`) for as long as the [`InstanceLock`] lives. The system lets go
 //! of it when the process ends, however it ends, so a crash never leaves the app locked out.
+//!
+//! A second start of the app asks the one that runs to show its window (it may be hidden
+//! behind the tray icon, XFER-15) and ends quietly: it puts a request file, [`SHOW_REQUEST`],
+//! beside the lock ([`ask_to_show`]); the running app looks for it every [`SHOW_POLL`] on a
+//! thread of its own ([`InstanceLock::watch_requests`]), takes it away and shows its window.
+//! When nothing takes the request within [`SHOW_WAIT`] (an app that hangs, or an older one),
+//! the second start takes it back and says that the app runs, as it did before. A request
+//! left over from an earlier run goes when the lock is taken.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// The name of the lock file in the journal's folder.
 pub const LOCK_FILE: &str = "instance.lock";
+
+/// The name of the file a second start of the app puts beside the lock to have the running one
+/// show its window.
+pub const SHOW_REQUEST: &str = "show.request";
+
+/// How often the running app looks for a request to show its window.
+pub const SHOW_POLL: Duration = Duration::from_millis(250);
+
+/// How long a second start waits for the running app to take its request.
+pub const SHOW_WAIT: Duration = Duration::from_secs(3);
 
 /// The single-instance lock. Dropping it lets another process take it.
 #[derive(Debug)]
@@ -52,7 +74,11 @@ impl InstanceLock {
             .open(&path)
             .map_err(io)?;
         match file.try_lock() {
-            Ok(()) => Ok(InstanceLock { _file: file, path }),
+            Ok(()) => {
+                // A request of a start that came while the last run was ending.
+                let _ = std::fs::remove_file(dir.join(SHOW_REQUEST));
+                Ok(InstanceLock { _file: file, path })
+            }
             Err(TryLockError::WouldBlock) => Err(InstanceError::AlreadyRunning(path)),
             Err(TryLockError::Error(source)) => Err(io(source)),
         }
@@ -61,6 +87,74 @@ impl InstanceLock {
     /// The lock file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Looks every [`SHOW_POLL`], on a thread of its own, for a second start's request to show
+    /// the window ([`ask_to_show`]); takes each one away and calls `on_show`. The look stops
+    /// when the [`RequestWatch`] is dropped.
+    pub fn watch_requests(
+        &self,
+        on_show: impl Fn() + Send + 'static,
+    ) -> std::io::Result<RequestWatch> {
+        let request = self
+            .path
+            .parent()
+            .map_or_else(|| PathBuf::from(SHOW_REQUEST), |dir| dir.join(SHOW_REQUEST));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("rf-ui-instance".to_owned())
+            .spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    std::thread::sleep(SHOW_POLL);
+                    // Only the one that takes the file away answers it.
+                    if std::fs::remove_file(&request).is_ok() {
+                        on_show();
+                    }
+                }
+            })?;
+        Ok(RequestWatch {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+/// The look for requests to show the window ([`InstanceLock::watch_requests`]); dropping it
+/// stops the look, within a [`SHOW_POLL`].
+#[derive(Debug)]
+pub struct RequestWatch {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for RequestWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Asks the app that holds the lock in the folder `dir` to show its window, and waits up to
+/// `wait` for it to take the request: `true` once it has. A request nobody took is taken back,
+/// so that it does not show the window of the next run at a moment nobody asked for.
+pub fn ask_to_show(dir: &Path, wait: Duration) -> bool {
+    let request = dir.join(SHOW_REQUEST);
+    if std::fs::write(&request, b"show").is_err() {
+        return false;
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        if !request.exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            // Taken meanwhile after all, if it is gone already.
+            return std::fs::remove_file(&request).is_err() && !request.exists();
+        }
+        std::thread::sleep(SHOW_POLL / 5);
     }
 }
 
@@ -87,6 +181,58 @@ mod tests {
         drop(first);
         let next = InstanceLock::acquire(&journal).expect("the lock is free again");
         drop(next);
+    }
+
+    #[test]
+    fn a_second_start_has_the_running_app_show_its_window() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let journal = dir.path().join("data");
+        let running = InstanceLock::acquire(&journal).expect("the running app's lock");
+        let (shown, asked) = std::sync::mpsc::channel();
+        let watch = running
+            .watch_requests(move || {
+                let _ = shown.send(());
+            })
+            .expect("the look starts");
+        // The second start's lock is refused; its request is taken, and answered.
+        assert!(matches!(
+            InstanceLock::acquire(&journal),
+            Err(InstanceError::AlreadyRunning(_))
+        ));
+        assert!(ask_to_show(&journal, Duration::from_secs(10)));
+        asked
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the running app shows its window");
+        assert!(!journal.join(SHOW_REQUEST).exists());
+        // Each request once: a second one is answered again.
+        assert!(ask_to_show(&journal, Duration::from_secs(10)));
+        asked
+            .recv_timeout(Duration::from_secs(10))
+            .expect("shown again");
+        // Once the look stops, nobody answers: the request is taken back.
+        drop(watch);
+        assert!(!ask_to_show(&journal, Duration::from_millis(300)));
+        assert!(!journal.join(SHOW_REQUEST).exists());
+        assert_eq!(
+            asked.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn a_request_left_from_an_earlier_run_goes_with_the_lock() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let journal = dir.path().join("data");
+        std::fs::create_dir_all(&journal).expect("the folder");
+        std::fs::write(journal.join(SHOW_REQUEST), b"show").expect("a request left over");
+        let lock = InstanceLock::acquire(&journal).expect("the lock");
+        assert!(!journal.join(SHOW_REQUEST).exists());
+        drop(lock);
+        // Without a folder there is nobody to ask.
+        assert!(!ask_to_show(
+            &dir.path().join("no folder"),
+            Duration::from_millis(100)
+        ));
     }
 
     #[test]

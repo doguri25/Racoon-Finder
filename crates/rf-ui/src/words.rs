@@ -816,6 +816,17 @@ pub fn all_jobs_done() -> &'static str {
     "모든 작업을 마쳐 앱을 끝냈습니다."
 }
 
+/// What the last notification adds after the window's jobs went on in the tray and all of them
+/// have ended, some of them with items they could not process: the window shows them.
+pub fn all_jobs_done_with_failures() -> &'static str {
+    "처리하지 못한 항목이 있어 창을 다시 열었습니다. 최근 완료의 자세히에서 볼 수 있습니다."
+}
+
+/// The notice of a window that stays shown because it could not make the tray icon.
+pub fn tray_unavailable() -> &'static str {
+    "트레이 아이콘을 만들지 못해 창을 닫지 않았습니다."
+}
+
 /// The button of the question before the window closes while jobs run that keeps them going
 /// behind the system's tray icon (Windows) or menu bar icon (macOS), on `os`.
 pub fn continue_in_tray(os: Os) -> &'static str {

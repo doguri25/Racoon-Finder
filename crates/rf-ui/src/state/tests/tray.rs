@@ -156,6 +156,8 @@ fn the_tray_menu_pauses_resumes_opens_and_quits() {
             Effect::Job(JobEffect::Resume(JobId(2)))
         ]
     );
+    set_state(&mut state, 1, JobState::Running);
+    set_state(&mut state, 2, JobState::Running);
     // 창 열기: the window comes back, and the icon goes.
     assert_eq!(state.tray_command(TrayCommand::Open), [Effect::FromTray]);
     assert!(!state.background());
@@ -237,4 +239,109 @@ fn jobs_that_end_before_the_answer_end_the_app_at_once() {
     // Nothing is left to go on behind the tray.
     assert_eq!(state.confirm_alternative(), [Effect::Quit]);
     assert!(state.quitting() && !state.background());
+}
+
+#[test]
+fn every_job_paused_offers_no_tray() {
+    let mut state = with_jobs(&[1, 2]);
+    set_state(&mut state, 1, JobState::Paused);
+    set_state(&mut state, 2, JobState::Paused);
+    // Nothing behind the tray would end them: the plain question.
+    state.request_close();
+    assert_eq!(the_confirm(&state).alt, "");
+    assert_eq!(state.confirm_alternative(), []);
+    state.dialog_cancelled();
+    // One going on again: the tray is offered.
+    set_state(&mut state, 2, JobState::Running);
+    state.request_close();
+    assert_ne!(the_confirm(&state).alt, "");
+}
+
+#[test]
+fn only_paused_jobs_left_bring_the_window_back() {
+    let mut state = with_jobs(&[1, 2]);
+    to_tray(&mut state);
+    set_state(&mut state, 2, JobState::Paused);
+    // The running one ends; the paused one would never end behind the tray.
+    let effects = finish(&mut state, 1, &trash(&["x1"]), JobWork::Trash, |_| {});
+    assert!(effects.contains(&Effect::FromTray), "{effects:?}");
+    assert!(!effects.contains(&Effect::Quit));
+    assert!(!state.background() && !state.quitting());
+    assert_eq!(state.active_jobs(), 1);
+}
+
+#[test]
+fn whatever_asks_the_user_brings_a_hidden_window_back() {
+    let mut state = with_jobs(&[1]);
+    to_tray(&mut state);
+    assert_eq!(state.follow_background(), []);
+    // A confirmation, however it came, is never left behind the hidden window.
+    state.open(Modal::Confirm(crate::dialogs::Confirm::quit(1, None)));
+    assert_eq!(state.follow_background(), [Effect::FromTray]);
+    assert!(!state.background());
+    assert_eq!(state.follow_background(), []);
+}
+
+#[test]
+fn a_job_that_failed_out_of_sight_brings_the_window_back_at_the_end() {
+    let mut state = with_jobs(&[1, 2]);
+    to_tray(&mut state);
+    // One fails while the other goes on: the jobs go on hidden.
+    let effects = finish(&mut state, 1, &trash(&["x1"]), JobWork::Trash, |report| {
+        report.outcome = rf_jobs::Outcome::CompletedWithErrors;
+        report.failures.push(ItemFailure {
+            source: Some(folder("a").join("x1").expect("a name")),
+            target: None,
+            stage: Stage::Delete,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        });
+    });
+    assert!(!effects.contains(&Effect::FromTray), "{effects:?}");
+    assert!(state.background());
+    // The last one ends well: the notification says the window came back to show what failed,
+    // and the app goes on, with 최근 완료 and its 자세히.
+    let effects = finish(&mut state, 2, &trash(&["x2"]), JobWork::Trash, |_| {});
+    let notified = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Notify(notice) => Some(notice.body.clone()),
+            _ => None,
+        })
+        .expect("told");
+    assert_eq!(
+        notified,
+        format!("x2\n{}", words::all_jobs_done_with_failures())
+    );
+    assert!(effects.contains(&Effect::FromTray), "{effects:?}");
+    assert!(!effects.contains(&Effect::Quit));
+    assert!(!state.quitting() && !state.background());
+    assert!(state.recent_rows().iter().any(|row| row.details));
+}
+
+#[test]
+fn a_second_start_shows_the_window() {
+    let mut state = with_jobs(&[1]);
+    // In front already: it comes forward all the same.
+    assert_eq!(state.show_asked(), [Effect::FromTray]);
+    to_tray(&mut state);
+    assert_eq!(state.show_asked(), [Effect::FromTray]);
+    assert!(!state.background());
+    assert_eq!(state.tray_view("앱"), None);
+}
+
+#[test]
+fn a_tray_icon_that_could_not_be_made_leaves_the_window_and_the_offer_goes() {
+    let mut state = with_jobs(&[1]);
+    to_tray(&mut state);
+    let effects = state.tray_unavailable();
+    assert_eq!(
+        effects,
+        [Effect::Notice(words::tray_unavailable().to_owned())]
+    );
+    assert!(!state.background());
+    // From now on the question is the plain one.
+    state.request_close();
+    assert_eq!(the_confirm(&state).alt, "");
 }

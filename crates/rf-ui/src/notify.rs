@@ -149,8 +149,9 @@ pub struct TrayView {
 
 /// What shows the tray icon: the window's tray component, or a fake in tests.
 pub trait TrayHost {
-    /// Shows the icon with `view`, or shows `view` on the icon that shows.
-    fn show(&self, view: &TrayView);
+    /// Shows the icon with `view`, or shows `view` on the icon that shows; `false` when it
+    /// could not be made, so that the window does not hide behind no icon.
+    fn show(&self, view: &TrayView) -> bool;
 
     /// Takes the icon away.
     fn hide(&self);
@@ -180,17 +181,23 @@ impl Tray {
     }
 
     /// Shows the icon with `view`, or with `None` takes it away; nothing when that is what
-    /// shows already.
-    pub fn follow(&self, view: Option<TrayView>) {
+    /// shows already. `false` when the icon could not be shown: nothing is noted then, and the
+    /// next call tries again.
+    pub fn follow(&self, view: Option<TrayView>) -> bool {
         let mut shown = self.shown.borrow_mut();
         if *shown == view {
-            return;
+            return true;
         }
-        match &view {
-            Some(view) => self.host.show(view),
-            None => self.host.hide(),
+        let done = if let Some(view) = &view {
+            self.host.show(view)
+        } else {
+            self.host.hide();
+            true
+        };
+        if done {
+            *shown = view;
         }
-        *shown = view;
+        done
     }
 
     /// Whether the icon shows.
@@ -242,25 +249,30 @@ impl SlintTray {
 }
 
 impl TrayHost for SlintTray {
-    fn show(&self, view: &TrayView) {
+    fn show(&self, view: &TrayView) -> bool {
         let mut tray = self.tray.borrow_mut();
         if tray.is_none() {
             match self.make() {
                 Ok(made) => *tray = Some(made),
                 Err(error) => {
                     log_failure(&io::Error::other(error.to_string()));
-                    return;
+                    return false;
                 }
             }
         }
-        if let Some(tray) = tray.as_ref() {
-            tray.set_status(view.status.as_str().into());
-            tray.set_label(view.label.as_str().into());
-            tray.set_all_paused(view.all_paused);
-            if let Err(error) = tray.show() {
-                log_failure(&io::Error::other(error.to_string()));
-            }
+        let Some(shown) = tray.as_ref() else {
+            return false;
+        };
+        shown.set_status(view.status.as_str().into());
+        shown.set_label(view.label.as_str().into());
+        shown.set_all_paused(view.all_paused);
+        if let Err(error) = shown.show() {
+            log_failure(&io::Error::other(error.to_string()));
+            // Made again at the next try.
+            *tray = None;
+            return false;
         }
+        true
     }
 
     fn hide(&self) {
@@ -293,6 +305,7 @@ const TRAY_ICON: &[u8] = include_bytes!("../ui/tray-icon.png");
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::sync::mpsc;
 
     use super::*;
@@ -355,12 +368,15 @@ mod tests {
         assert!(notifier.wait_idle(Duration::ZERO));
     }
 
-    /// Records what the tray was told.
-    struct Recorder(Rc<RefCell<Vec<String>>>);
+    /// Records what the tray was told; its icon can be made while `.1` says so.
+    struct Recorder(Rc<RefCell<Vec<String>>>, Rc<Cell<bool>>);
 
     impl TrayHost for Recorder {
-        fn show(&self, view: &TrayView) {
-            self.0.borrow_mut().push(format!("show {}", view.label));
+        fn show(&self, view: &TrayView) -> bool {
+            let made = self.1.get();
+            let call = if made { "show" } else { "failed" };
+            self.0.borrow_mut().push(format!("{call} {}", view.label));
+            made
         }
 
         fn hide(&self) {
@@ -378,7 +394,10 @@ mod tests {
     #[test]
     fn the_tray_host_hears_only_of_changes() {
         let calls = Rc::new(RefCell::new(Vec::new()));
-        let tray = Tray::new(Box::new(Recorder(Rc::clone(&calls))));
+        let tray = Tray::new(Box::new(Recorder(
+            Rc::clone(&calls),
+            Rc::new(Cell::new(true)),
+        )));
         let view = |label: &str| TrayView {
             status: "앱\n복사 중 25%".to_owned(),
             label: label.to_owned(),
@@ -393,5 +412,26 @@ mod tests {
         tray.follow(None);
         tray.follow(None);
         assert_eq!(calls.take(), ["show 25%", "show 26%", "hide"]);
+    }
+
+    #[test]
+    fn an_icon_that_could_not_be_made_is_tried_again() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let made = Rc::new(Cell::new(false));
+        let tray = Tray::new(Box::new(Recorder(Rc::clone(&calls), Rc::clone(&made))));
+        let view = TrayView {
+            status: "앱\n복사 중 25%".to_owned(),
+            label: "25%".to_owned(),
+            all_paused: false,
+        };
+        // Not made: the caller hears it, nothing is noted, and the next call tries again.
+        assert!(!tray.follow(Some(view.clone())));
+        assert!(!tray.showing());
+        made.set(true);
+        assert!(tray.follow(Some(view.clone())));
+        assert!(tray.showing());
+        // What shows is not told again.
+        assert!(tray.follow(Some(view)));
+        assert_eq!(calls.take(), ["failed 25%", "show 25%"]);
     }
 }

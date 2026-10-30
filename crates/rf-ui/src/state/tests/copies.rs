@@ -562,3 +562,39 @@ fn a_delete_of_the_copies_that_fails_keeps_the_record() {
     );
     assert_eq!(the_toast(&effects).1, "항목 1개를 처리하지 못했습니다");
 }
+
+#[test]
+fn a_look_at_copies_brings_a_hidden_window_back_with_its_question() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    state.set_tray(true);
+    let (spec, record) = copy_of(&["a.txt"]);
+    finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.undo = Some(record.clone());
+    });
+    // The undo runs, and the window goes behind the tray icon meanwhile.
+    state.track(Started {
+        id: JobId(2),
+        spec: Some(Arc::new(JobSpec::Undo(record.clone()))),
+        work: JobWork::Undo,
+        origin: None,
+        via_history: true,
+    });
+    state.job_event(JobEvent::State {
+        id: JobId(2),
+        state: rf_jobs::JobState::Running,
+    });
+    state.request_close();
+    assert_eq!(state.confirm_alternative(), [Effect::ToTray]);
+    // Its trash refused the copy: a worker looks at the original, which may end in a
+    // question. The window comes back for it rather than the app ending.
+    let effects = undo_refused(&mut state, 2, &record, &[in_b("a.txt")]);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CheckCopies { .. })),
+        "{effects:?}"
+    );
+    assert!(effects.contains(&Effect::FromTray), "{effects:?}");
+    assert!(!effects.contains(&Effect::Quit));
+    assert!(!state.background() && !state.quitting());
+}

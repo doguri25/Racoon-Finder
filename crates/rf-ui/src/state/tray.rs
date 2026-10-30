@@ -8,11 +8,18 @@
 //! have got ([`AppState::tray_view`]), with a menu of 창 열기, 모두 일시정지 (or 모두 계속) and
 //! 끝내기 ([`TrayCommand`]). The settings are saved as before meanwhile.
 //!
-//! Whatever asks the user brings the window back ([`Effect::FromTray`]): a question of a job,
-//! or a window a job's end opens. Once the last job has ended, a notification says so and the
-//! app ends the way it always does ([`AppState::begin_quit`]: the settings are written, the
-//! engine shuts down, then the questions are released). 끝내기 while jobs run brings the window
-//! back with the question before the app ends, without the tray this time.
+//! The window is never left hidden with nothing to show it again: it comes back
+//! ([`Effect::FromTray`]) whenever something waits for the user (a question of a job, a window
+//! a job's end opens, a look at copies that may end in one, [`AppState::follow_background`]),
+//! when every job left is paused (nothing would end them), and when the last job has ended but
+//! one that ended out of sight did not do it all, so that 최근 완료 and its 자세히 show. Only
+//! when the last job has ended with everything done does a notification say so and the app
+//! end the way it always does ([`AppState::begin_quit`]: the settings are written, the engine
+//! shuts down, then the questions are released). Nor is the tray offered while every job is
+//! paused. 끝내기 while jobs run brings the window back with the question before the app ends,
+//! without the tray this time. A second start of the app shows the window too
+//! ([`AppState::show_asked`], module `instance`), and so does a tray icon the window could not
+//! make ([`AppState::tray_unavailable`]), which the window then never hides behind.
 
 use rf_core::Os;
 use rf_jobs::{JobId, JobReport, JobState};
@@ -104,43 +111,82 @@ impl AppState {
         match command {
             TrayCommand::PauseAll => control(false, JobEffect::Pause),
             TrayCommand::ResumeAll => control(true, JobEffect::Resume),
-            TrayCommand::Open => {
-                self.background = false;
-                vec![Effect::FromTray]
-            }
+            TrayCommand::Open => self.come_back(),
             TrayCommand::Quit => {
                 let running = self.jobs.active();
                 if running == 0 {
                     return self.begin_quit();
                 }
-                self.background = false;
                 self.open(Modal::Confirm(Confirm::quit(running, None)));
-                vec![Effect::FromTray]
+                self.come_back()
             }
         }
     }
 
     /// The system the question before the app ends offers the tray on: this one, where it has a
-    /// tray, while the window shows and nothing else waits for the user.
+    /// tray, while the window shows, nothing else waits for the user, and a job goes on (not
+    /// when every job is paused, which nothing behind the tray would end).
     pub(super) fn tray_offer(&self) -> Option<Os> {
-        (self.tray && !self.background && self.modal.is_none() && self.later.is_empty())
-            .then_some(Os::CURRENT)
+        (self.tray
+            && !self.background
+            && self.modal.is_none()
+            && self.later.is_empty()
+            && self.jobs_go_on())
+        .then_some(Os::CURRENT)
     }
 
-    /// The window comes back from behind the tray icon, if it was there, to show what asks the
-    /// user.
-    pub(super) fn come_back(&mut self) -> Vec<Effect> {
-        if self.background && self.modal.is_some() {
-            self.background = false;
-            return vec![Effect::FromTray];
+    /// Whether a job is under way that is not paused: one that will end by itself.
+    fn jobs_go_on(&self) -> bool {
+        self.jobs
+            .states()
+            .iter()
+            .any(|(_, state)| *state != JobState::Paused)
+    }
+
+    /// Whether something waits for the user: a window over the main window, or one waiting to
+    /// show, or a look at copies an undo could not trash, which may end in a question.
+    fn waits_for_user(&self) -> bool {
+        self.modal.is_some() || !self.later.is_empty() || self.checking_copies()
+    }
+
+    /// The window comes back from behind the tray icon, if it is there, when something waits
+    /// for the user: called after every change of the state, so that no question and no
+    /// confirmation is ever left behind a hidden window.
+    pub fn follow_background(&mut self) -> Vec<Effect> {
+        if self.background && self.waits_for_user() {
+            return self.come_back();
         }
         Vec::new()
     }
 
+    /// A second start of the app asked this one to show its window (module `instance`): it
+    /// comes back from behind the tray icon, or to the front.
+    pub fn show_asked(&mut self) -> Vec<Effect> {
+        self.come_back()
+    }
+
+    /// The window could not make the tray icon: it stays shown, and the tray is not offered
+    /// any more.
+    pub fn tray_unavailable(&mut self) -> Vec<Effect> {
+        self.tray = false;
+        self.background = false;
+        self.background_failed = false;
+        vec![Effect::Notice(words::tray_unavailable().to_owned())]
+    }
+
+    /// The window shows again, from behind the tray icon or to the front.
+    fn come_back(&mut self) -> Vec<Effect> {
+        self.background = false;
+        self.background_failed = false;
+        vec![Effect::FromTray]
+    }
+
     /// After a job ended as `work` with `report`, of which `notice` tells, if anything: while
-    /// the window shows, only the notice. Behind the tray icon, the window comes back if the
-    /// job's end asks the user something; and once the last job has ended, one notification
-    /// tells of it, whatever time it took, and the app ends.
+    /// the window shows, only the notice. Behind the tray icon the jobs go on hidden while one
+    /// that is not paused is left and nothing waits for the user; otherwise the window comes
+    /// back. Once the last job has ended, one notification tells of it, whatever time it took,
+    /// and the app ends, unless a job that ended out of sight left items it could not process:
+    /// then the window comes back to show them.
     pub(super) fn after_job(
         &mut self,
         work: JobWork,
@@ -152,9 +198,15 @@ impl AppState {
             effects.extend(notice.map(Effect::Notify));
             return effects;
         }
-        if self.modal.is_some() || self.jobs.active() > 0 {
+        if !report.failures.is_empty() {
+            self.background_failed = true;
+        }
+        let ended = self.jobs.active() == 0;
+        if !ended || self.waits_for_user() {
             effects.extend(notice.map(Effect::Notify));
-            effects.extend(self.come_back());
+            if self.waits_for_user() || !self.jobs_go_on() {
+                effects.extend(self.come_back());
+            }
             return effects;
         }
         let title = words::job_notice(
@@ -165,13 +217,22 @@ impl AppState {
         )
         .unwrap_or_else(|| words::outcome(report.outcome, work));
         let detail = words::job_detail(&report.spec);
-        let body = if detail.is_empty() {
-            words::all_jobs_done().to_owned()
+        let last = if self.background_failed {
+            words::all_jobs_done_with_failures()
         } else {
-            format!("{detail}\n{}", words::all_jobs_done())
+            words::all_jobs_done()
+        };
+        let body = if detail.is_empty() {
+            last.to_owned()
+        } else {
+            format!("{detail}\n{last}")
         };
         effects.push(Effect::Notify(Notice { title, body }));
-        effects.extend(self.begin_quit());
+        if self.background_failed {
+            effects.extend(self.come_back());
+        } else {
+            effects.extend(self.begin_quit());
+        }
         effects
     }
 }

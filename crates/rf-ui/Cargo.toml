@@ -32,15 +32,26 @@ rf-vfs = { version = "0.1.0", path = "../rf-vfs" }
 serde = { version = "1.0.229", features = ["derive"] }
 sha1 = { version = "0.11.0", default-features = false }
 sha2 = { version = "0.11.1", default-features = false }
-slint = { version = "1.18.1", features = ["unstable-winit-030"] }
+# Pinned, with its build and test crates: `unstable-winit-030` (the window's focus, and bringing
+# it back to the front from the tray) is not covered by Slint's semver, and the tray relies on
+# Slint 1.18's own `SystemTrayIcon`. An update of Slint is a deliberate step, checked on every
+# system.
+slint = { version = "=1.18.1", features = ["unstable-winit-030"] }
 thiserror = "2.0.21"
 toml = "1.1.8"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [build-dependencies]
-slint-build = "1.18.1"
+slint-build = "=1.18.1"
 
 [dev-dependencies]
-i-slint-backend-testing = "1.18.1"
-i-slint-core = { version = "1.18.1", default-features = false }
+i-slint-backend-testing = "=1.18.1"
+i-slint-core = { version = "=1.18.1", default-features = false }
 tempfile = "3.27.0"
+
+# The real tray icon, by hand (`cargo test -p rf-ui --test tray -- --ignored`): on macOS the
+# icon is AppKit's, which only the main thread may make, and the test harness runs each test on
+# a thread of its own, so this test has its own `main`.
+[[test]]
+name = "tray"
+harness = false

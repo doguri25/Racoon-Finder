@@ -364,6 +364,9 @@ pub struct AppState {
     /// and whether they do now.
     tray: bool,
     background: bool,
+    /// A job that ended while the window was hidden left items it could not process: once the
+    /// last one has ended, the window comes back rather than the app ending (module `tray`).
+    background_failed: bool,
 }
 
 impl AppState {
@@ -461,6 +464,7 @@ impl AppState {
             window_active: true,
             tray: false,
             background: false,
+            background_failed: false,
         };
         (state, effects)
     }

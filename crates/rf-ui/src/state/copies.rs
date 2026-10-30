@@ -82,6 +82,12 @@ pub(super) struct Copies {
 }
 
 impl AppState {
+    /// Whether a worker looks at copies an undo could not trash, a look that may end in a
+    /// question to the user.
+    pub(super) fn checking_copies(&self) -> bool {
+        self.copies.checking.is_some()
+    }
+
     /// Notes where the items of the copy job that gave `report` came from, when its record is
     /// a copy's.
     pub(super) fn note_copies(&mut self, report: &JobReport) {

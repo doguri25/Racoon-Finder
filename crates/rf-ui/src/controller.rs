@@ -126,6 +126,12 @@ pub fn post_question(question: Question) -> bool {
     .is_ok()
 }
 
+/// A second start of the app asked this one to show its window ([`crate::instance`]), from
+/// the thread that looks for such requests.
+pub fn show_requested() {
+    post(|c| c.update(AppState::show_asked));
+}
+
 /// Opens `file` with the system's default app, on a worker thread; a failure shows as a notice.
 fn open_file(file: VPath) {
     open::open_file(file, |kind| {
@@ -1447,6 +1453,8 @@ impl Controller {
             state.settle_views(&mut effects);
             effects.extend(state.follow_preview());
             effects.extend(state.follow_properties());
+            // Nothing that asks the user stays behind a hidden window.
+            effects.extend(state.follow_background());
             effects
         };
         self.apply(effects);
@@ -2080,14 +2088,25 @@ impl Controller {
     }
 
     /// Carries out what the window asks of the desktop outside it: a notification of the
-    /// system; the window hiding while the jobs go on behind the tray icon, which the redraw
-    /// shows; or the window showing again, in front, the redraw taking the icon away.
+    /// system; the window hiding while the jobs go on behind the tray icon, once it shows; or
+    /// the window showing again, in front, the redraw taking the icon away.
     fn desktop(&self, effect: Effect) {
         let window = self.window.upgrade();
         match (effect, window) {
             (Effect::Notify(notice), _) => self.notifier.notify(notice),
             (Effect::ToTray, Some(window)) => {
-                let _ = window.hide();
+                // The window hides only behind an icon that shows: one that could not be made
+                // leaves it shown, and the tray is not offered again.
+                let view = self
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|state| state.tray_view(rf_core::identity::DISPLAY_NAME));
+                if view.is_some_and(|view| self.tray.follow(Some(view))) {
+                    let _ = window.hide();
+                } else {
+                    post(|c| c.update(AppState::tray_unavailable));
+                }
             }
             (Effect::FromTray, Some(window)) => {
                 let _ = window.show();

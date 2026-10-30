@@ -50,7 +50,8 @@ pub enum RunError {
     /// The app's data folders could not be located or made.
     #[error("app folders: {0}")]
     Paths(#[from] rf_core::Error),
-    /// Another instance of the app runs and holds the job journal; it was told to the user.
+    /// Another instance of the app runs and holds the job journal, and did not answer the request
+    /// to show its window; it was told to the user.
     #[error("another instance of the app is running")]
     AlreadyRunning,
     /// The single-instance lock of the job journal's folder could not be taken.
@@ -70,19 +71,28 @@ pub enum RunError {
 /// folder, or home.
 ///
 /// One instance of the app runs at a time: it takes the lock in the folder of the job
-/// journal ([`instance`]) before anything else, and a second one only says so, in a small
-/// window, and ends with [`RunError::AlreadyRunning`]. The job engine keeps its journal in
-/// that folder. When the window closes, the settings are written (waiting
-/// [`controller::FINAL_SAVE_WAIT`] at most), and the engine is shut down and the jobs'
-/// questions are released ([`jobs::close_down`]), before this returns. Where the system has a
-/// tray, the window may instead hide while its jobs go on behind the tray icon; the app ends
-/// the same way once they have ended ([`notify`]).
+/// journal ([`instance`]) before anything else. A second one has the running one show its
+/// window and ends quietly, with `Ok` ([`instance::ask_to_show`]); only when the running one
+/// does not answer does it say that the app runs, in a small window, and end with
+/// [`RunError::AlreadyRunning`]. The job engine keeps its journal in that folder.
+///
+/// When the window closes, the settings are written (waiting [`controller::FINAL_SAVE_WAIT`] at
+/// most), and the engine is shut down and the jobs' questions are released
+/// ([`jobs::close_down`]), before this returns. Where the system has a tray, the window may
+/// instead hide while its jobs go on behind the tray icon; the app ends the same way once they
+/// have ended ([`notify`]).
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
     let lock = match instance::InstanceLock::acquire(paths.data_dir()) {
         Ok(lock) => lock,
         Err(instance::InstanceError::AlreadyRunning(_)) => {
+            // The instance that runs shows its window, which may be hidden behind the tray
+            // icon; only when it does not answer does this one say that it runs.
+            if instance::ask_to_show(paths.data_dir(), instance::SHOW_WAIT) {
+                // What the user asked for is done: the app shows. Nothing to tell.
+                return Ok(());
+            }
             // The theme of the instance that runs, read only: that one writes the settings.
             let theme = settings::peek_theme(paths.config_dir());
             show_notice(words::already_running(), theme)?;
@@ -109,6 +119,9 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         log_dir: rf_core::VPath::local(paths.log_dir()).ok(),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
+    // A second start of the app shows this one's window. Without the look (no thread), a second
+    // start says that the app runs, as before.
+    let requests = lock.watch_requests(controller::show_requested).ok();
     // The loop runs until the controller ends it (the app's end, `controller::quit`): the
     // window hides while its jobs go on behind the tray icon, which must not end it.
     let result = window
@@ -118,6 +131,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     // `None` when the end through the close button has taken them already.
     let last = controller.final_settings();
     // Stops the listings and the watches before the window goes.
+    drop(requests);
     drop(controller);
     controller::end();
     if !jobs.is_closed() || last.is_some() {

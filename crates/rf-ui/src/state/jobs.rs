@@ -126,7 +126,7 @@ impl AppState {
         };
         self.open(modal);
         // Behind the tray icon, nobody would see it: the window comes back to ask.
-        self.come_back()
+        self.follow_background()
     }
 
     /// The name in the name window changed to `text`.
