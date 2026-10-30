@@ -30,22 +30,25 @@ use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
+use crate::preview::{self, PREVIEW_DELAY};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
     AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, RIGHT, Subfolders, start_folders,
 };
-use crate::ui_bridge::{self, PaneModels, PickModels, TreeRows, post};
+use crate::ui_bridge::{self, PaneModels, PickModels, PreviewModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
 mod matcher;
 mod persist;
+mod previewer;
 mod sorter;
 
 use matcher::Matcher;
 pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
+pub use previewer::Previewer;
 use sorter::Sorter;
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
@@ -220,6 +223,7 @@ fn connect(window: &MainWindow) {
         };
         with(|c| c.tree_key(&text, mods)).unwrap_or(false)
     });
+    connect_quick_look(window);
     window.on_split_changed(|share| {
         with(|c| {
             c.update(|state| {
@@ -282,6 +286,30 @@ fn connect(window: &MainWindow) {
     connect_tabs(window);
     connect_jobs(window);
     connect_pick(window);
+}
+
+/// The callbacks of quick look (VIEW-01): its keys, which go nowhere else, and its close button
+/// and the click beside it.
+fn connect_quick_look(window: &MainWindow) {
+    window.on_quick_look_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        if let Some(key) = keys::quick_look_key(&text, mods, Os::CURRENT) {
+            with(|c| c.update(|state| state.quick_look_key(key)));
+        }
+    });
+    window.on_quick_look_closed(|| {
+        with(|c| {
+            c.update(|state| {
+                state.close_quick_look();
+                Vec::new()
+            });
+        });
+    });
 }
 
 /// The callbacks of the panes' views (NAV-07, NAV-08, NAV-10): the order, the columns of 자세히
@@ -647,6 +675,10 @@ pub struct Controller {
     sorter: Sorter,
     /// Matches the names of the pattern window's rows, the newest request only.
     matcher: Matcher,
+    /// Makes the previews of the preview panel and quick look, the newest request only.
+    previewer: Previewer,
+    /// The models of the preview's view.
+    preview: PreviewModels,
 }
 
 impl fmt::Debug for Controller {
@@ -708,6 +740,15 @@ impl Controller {
             matcher: Matcher::new(|matched| {
                 post(move |c| c.update(|state| state.pattern_matched(matched)));
             }),
+            previewer: {
+                let vfs = rf_vfs::Vfs::with_local();
+                Previewer::new(
+                    PREVIEW_DELAY,
+                    move |request, cancel| preview::make_preview(request, &vfs, cancel),
+                    |previewed| post(move |c| c.update(|state| state.previewed(previewed))),
+                )
+            },
+            preview: PreviewModels::default(),
         }
     }
 
@@ -878,7 +919,14 @@ impl Controller {
             self.update(|state| state.subfolders_key(key, page));
             return true;
         }
-        let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
+        // A Space while a name is being typed types into it.
+        let now = Instant::now();
+        let typing = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.typing(now));
+        let Some(command) = keys::pane_command(text, mods, Os::CURRENT, typing) else {
             return false;
         };
         // How the active pane's view lays its rows out.
@@ -891,7 +939,7 @@ impl Controller {
             });
         let mut used = false;
         self.update(|state| {
-            let effects = state.key(command, mods, paging, Instant::now());
+            let effects = state.key(command, mods, paging, now);
             used = effects.is_some();
             effects.unwrap_or_default()
         });
@@ -1096,6 +1144,7 @@ impl Controller {
             "view-medium-icons" => Command::ViewMediumIcons,
             "view-large-icons" => Command::ViewLargeIcons,
             "fit-columns" => Command::FitColumns,
+            "quick-look" => Command::QuickLook,
             _ => return,
         };
         self.update(|state| {
@@ -1119,6 +1168,7 @@ impl Controller {
             state.drop_stale_address();
             effects.extend(state.follow_active());
             state.settle_views(&mut effects);
+            effects.extend(state.follow_preview());
             effects
         };
         self.apply(effects);
@@ -1164,6 +1214,8 @@ impl Controller {
                         self.notice(words::background_failed());
                     }
                 }
+                Effect::Preview(request) => self.preview_on_worker(request),
+                Effect::StopPreview => self.previewer.stop(),
                 Effect::Load(request) => {
                     let generation = request.generation;
                     let ticket = self.loader.request(request, |event| {
@@ -1237,6 +1289,14 @@ impl Controller {
         self.plan_save();
     }
 
+    /// Hands `request` to the worker of the previews ([`Previewer`]), in the place of the one
+    /// before.
+    fn preview_on_worker(&self, request: preview::PreviewRequest) {
+        if self.previewer.preview(request).is_err() {
+            self.notice(words::background_failed());
+        }
+    }
+
     /// Carries out an effect whose work blocks, on a worker thread of its own: its result comes
     /// back to the state on the UI thread.
     fn on_worker(&self, effect: Effect) {
@@ -1306,6 +1366,8 @@ impl Controller {
             Effect::Load(_)
             | Effect::Sort(_)
             | Effect::MatchNames(_)
+            | Effect::Preview(_)
+            | Effect::StopPreview
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::Follow { .. }
@@ -1411,6 +1473,8 @@ impl Controller {
             Effect::Load(_)
             | Effect::Sort(_)
             | Effect::MatchNames(_)
+            | Effect::Preview(_)
+            | Effect::StopPreview
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
             | Effect::FindExisting { .. }
@@ -1516,6 +1580,12 @@ impl Controller {
                     .and_then(|row| i32::try_from(row).ok())
                     .unwrap_or(-1),
             );
+            window.set_preview(self.preview.view(
+                state.preview(),
+                state.show_extensions(),
+                &self.tz.borrow(),
+            ));
+            window.set_quick_look(state.quick_look_open());
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);
         }

@@ -18,7 +18,7 @@ use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuRow, FolderMenuView, JobRowView,
     MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
-    PreflightView, RecoveryView, Theme,
+    PreflightView, PreviewKind, PreviewView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -4571,4 +4571,208 @@ fn the_menu_of_a_list_s_empty_part_lists_the_folder_again_in_every_view() {
         choose_item(&window, "새로 고침  (F5)");
         assert_eq!(calls.take(), ["pane 0", "command refresh"], "{mode:?}");
     }
+}
+
+/// A preview of `name` of `kind`, with `note`.
+fn preview_of(kind: PreviewKind, name: &str, note: &str) -> PreviewView {
+    PreviewView {
+        kind,
+        name: name.into(),
+        icon: "file".into(),
+        facts: "파일 · 3 KB · 2026-10-30 09:12".into(),
+        note: note.into(),
+        ..PreviewView::default()
+    }
+}
+
+fn picture(width: u32, height: u32) -> slint::Image {
+    slint::Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(
+        width, height,
+    ))
+}
+
+fn lines(texts: &[&str]) -> ModelRc<SharedString> {
+    let lines: Vec<SharedString> = texts.iter().map(|text| (*text).into()).collect();
+    ModelRc::new(slint::VecModel::from(lines))
+}
+
+#[test]
+fn the_preview_panel_shows_an_image_a_text_and_why_it_shows_nothing() {
+    let window = window();
+    window.set_show_preview(true);
+    let panel = labelled(&window, "미리 보기", AccessibleRole::Groupbox);
+    assert_eq!(panel.len(), 1);
+    let panel_width = panel[0].size().width;
+    assert_eq!(
+        labelled(&window, "미리 볼 항목이 없습니다", AccessibleRole::Text).len(),
+        1
+    );
+
+    // An image as large as it is, when it fits.
+    window.set_preview(PreviewView {
+        image: picture(40, 20),
+        ..preview_of(PreviewKind::Image, "사진.png", "40 × 20")
+    });
+    let image = labelled(&window, "사진.png", AccessibleRole::Image);
+    assert_eq!(image.len(), 1);
+    assert_eq!(image[0].size(), LogicalSize::new(40.0, 20.0));
+    assert_eq!(labelled(&window, "40 × 20", AccessibleRole::Text).len(), 1);
+    // A wide one fits the panel, its sides as they were.
+    window.set_preview(PreviewView {
+        image: picture(1600, 400),
+        ..preview_of(PreviewKind::Image, "넓은.png", "1600 × 400")
+    });
+    let size = labelled(&window, "넓은.png", AccessibleRole::Image)[0].size();
+    assert!(size.width < panel_width, "{size:?} in {panel_width}");
+    assert!((size.width / size.height - 4.0).abs() < 0.05, "{size:?}");
+
+    // A text, its lines and its encoding.
+    window.set_preview(PreviewView {
+        lines: lines(&["첫 줄입니다", "둘째 줄"]),
+        ..preview_of(PreviewKind::Text, "메모.txt", "EUC-KR")
+    });
+    assert_eq!(
+        labelled(&window, "첫 줄입니다", AccessibleRole::Text).len(),
+        1
+    );
+    assert_eq!(labelled(&window, "EUC-KR", AccessibleRole::Text).len(), 1);
+    assert_eq!(labelled(&window, "메모.txt", AccessibleRole::Text).len(), 1);
+
+    // A folder's count, and a file that cannot be shown.
+    window.set_preview(preview_of(PreviewKind::Folder, "문서", "항목 12개"));
+    assert_eq!(
+        labelled(&window, "항목 12개", AccessibleRole::Text).len(),
+        1
+    );
+    window.set_preview(preview_of(
+        PreviewKind::Unavailable,
+        "깨진.png",
+        "미리 볼 수 없습니다",
+    ));
+    assert_eq!(
+        labelled(&window, "미리 볼 수 없습니다", AccessibleRole::Text).len(),
+        1
+    );
+    assert!(labelled(&window, "깨진.png", AccessibleRole::Image).is_empty());
+}
+
+#[test]
+fn the_preview_panel_never_takes_the_keys() {
+    let window = window();
+    let keys = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&keys);
+    window.on_key(move |text, _, _, _, _| {
+        record.borrow_mut().push(text.to_string());
+        true
+    });
+    window.set_show_preview(true);
+    window.set_preview(PreviewView {
+        lines: lines(&["a", "b", "c"]),
+        ..preview_of(PreviewKind::Text, "a.txt", "UTF-8")
+    });
+    // A click in the panel, on its text: the panes keep the keys.
+    let panel = &labelled(&window, "미리 보기", AccessibleRole::Groupbox)[0];
+    let (at, size) = (panel.absolute_position(), panel.size());
+    click_at(&window, at.x + size.width / 2.0, at.y + size.height / 3.0);
+    let down = char::from(Key::DownArrow).to_string();
+    let tab = char::from(Key::Tab).to_string();
+    chord(&window, &[&down]);
+    chord(&window, &[&tab]);
+    assert_eq!(keys.borrow().as_slice(), [down, tab]);
+}
+
+#[test]
+fn quick_look_takes_every_key_while_it_shows() {
+    let window = window();
+    let keys = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&keys);
+    window.on_key(move |text, _, _, _, _| {
+        record.borrow_mut().push(text.to_string());
+        true
+    });
+    let looked = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&looked);
+    window.on_quick_look_key(move |text, ctrl, _, _, _| {
+        record.borrow_mut().push((text.to_string(), ctrl));
+    });
+    let closed = Rc::new(RefCell::new(0));
+    let record = Rc::clone(&closed);
+    window.on_quick_look_closed(move || *record.borrow_mut() += 1);
+    window.set_preview(preview_of(PreviewKind::Plain, "a.bin", ""));
+    window.set_quick_look(true);
+    assert_eq!(
+        labelled(&window, "a.bin", AccessibleRole::Text).len(),
+        1,
+        "its name shows"
+    );
+
+    let control = char::from(Key::Control).to_string();
+    let [down, left, right, tab, esc, delete] = [
+        Key::DownArrow,
+        Key::LeftArrow,
+        Key::RightArrow,
+        Key::Tab,
+        Key::Escape,
+        Key::Delete,
+    ]
+    .map(|key| char::from(key).to_string());
+    for keys in [
+        vec![left.as_str()],
+        vec![right.as_str()],
+        vec![down.as_str()],
+        vec![tab.as_str()],
+        vec![delete.as_str()],
+        vec!["a"],
+        vec![&control, "t"],
+        vec![" "],
+        vec![esc.as_str()],
+    ] {
+        chord(&window, &keys);
+    }
+    // None reached the panes; Rust had them all.
+    assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
+    let had: Vec<(String, bool)> = looked
+        .borrow()
+        .iter()
+        .filter(|(text, _)| *text != control)
+        .cloned()
+        .collect();
+    let plain = |text: &str| (text.to_owned(), false);
+    assert_eq!(
+        had,
+        [
+            plain(&left),
+            plain(&right),
+            plain(&down),
+            plain(&tab),
+            plain(&delete),
+            plain("a"),
+            ("t".to_owned(), true),
+            plain(" "),
+            plain(&esc),
+        ]
+    );
+
+    // The text of a text scrolls with ↑ ↓, which stay in quick look.
+    looked.borrow_mut().clear();
+    window.set_preview(PreviewView {
+        lines: lines(&["줄"; 200]),
+        ..preview_of(PreviewKind::Text, "long.txt", "UTF-8")
+    });
+    chord(&window, &[&down]);
+    assert_eq!(looked.borrow().as_slice(), Vec::<(String, bool)>::new());
+    assert_eq!(keys.borrow().as_slice(), Vec::<String>::new());
+
+    // A click on the card does nothing; one beside it closes.
+    let card = &labelled(&window, "빠른 보기", AccessibleRole::Groupbox)[0];
+    let (at, size) = (card.absolute_position(), card.size());
+    click_at(&window, at.x + size.width / 2.0, at.y + size.height / 2.0);
+    assert_eq!(*closed.borrow(), 0);
+    click_at(&window, 4.0, 4.0);
+    assert_eq!(*closed.borrow(), 1);
+
+    // Closed, the panes have the keys again.
+    window.set_quick_look(false);
+    chord(&window, &[&down]);
+    assert_eq!(keys.borrow().as_slice(), [down]);
 }

@@ -33,14 +33,16 @@ use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
+use crate::preview::PreviewContent;
 use crate::selection::Selection;
-use crate::state::{Column, Completion, Names};
+use crate::state::{Column, Completion, Names, PreviewShown};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow,
     FolderMenuView, JobRowView, MainWindow, MessageView, NameView, PaneView, PatternView,
-    PickTarget, PickView, PreflightView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, RecoveryView, SectionHead,
+    Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -843,6 +845,100 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_select_pattern(key(Command::SelectPattern));
     shown.set_select_same_extension(key(Command::SelectSameExtension));
     shown.set_refresh(key(Command::Refresh));
+    shown.set_quick_look(key(Command::QuickLook));
+}
+
+/// The models the view of the preview panel and quick look keeps between redraws: the lines of
+/// a text and the image of the item shown go to the screen once for each item, not at every
+/// redraw.
+#[derive(Default)]
+pub struct PreviewModels {
+    lines: Rc<VecModel<SharedString>>,
+    image: RefCell<slint::Image>,
+    /// The generation of the item whose content `lines` and `image` hold.
+    held: Cell<Option<u64>>,
+}
+
+impl fmt::Debug for PreviewModels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreviewModels")
+            .field("lines", &self.lines.row_count())
+            .field("held", &self.held.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreviewModels {
+    /// The view of `preview`, what the preview shows (`None`: nothing), with the names as the
+    /// panes show them (`show_extensions`) and the dates in `tz`.
+    pub fn view(
+        &self,
+        preview: Option<PreviewShown<'_>>,
+        show_extensions: bool,
+        tz: &TimeZone,
+    ) -> PreviewView {
+        let held = preview.and_then(|shown| shown.content.map(|_| shown.generation));
+        if self.held.replace(held) != held {
+            let content = preview.and_then(|shown| shown.content);
+            let lines = match content {
+                Some(PreviewContent::Text(text)) => {
+                    text.lines.iter().map(SharedString::from).collect()
+                }
+                _ => Vec::new(),
+            };
+            self.lines.set_vec(lines);
+            *self.image.borrow_mut() = match content {
+                Some(PreviewContent::Image(image)) => {
+                    slint::Image::from_rgba8(image.pixels.clone())
+                }
+                _ => slint::Image::default(),
+            };
+        }
+        let lines = ModelRc::from(Rc::clone(&self.lines));
+        let Some(shown) = preview else {
+            return PreviewView {
+                kind: PreviewKind::None,
+                lines,
+                ..PreviewView::default()
+            };
+        };
+        let entry = shown.entry;
+        let (kind, note) = match shown.content {
+            None => (PreviewKind::Loading, String::new()),
+            Some(PreviewContent::Image(image)) => (
+                PreviewKind::Image,
+                words::preview_image_size(image.width, image.height),
+            ),
+            Some(PreviewContent::Text(text)) => (
+                PreviewKind::Text,
+                words::preview_text_note(text.encoding, text.truncated),
+            ),
+            Some(PreviewContent::Folder { items, more }) => {
+                (PreviewKind::Folder, words::preview_items(*items, *more))
+            }
+            Some(PreviewContent::Plain) => (PreviewKind::Plain, String::new()),
+            Some(PreviewContent::TooLarge) => {
+                (PreviewKind::Large, words::preview_too_large().to_owned())
+            }
+            Some(PreviewContent::Unavailable) => (
+                PreviewKind::Unavailable,
+                words::preview_unavailable().to_owned(),
+            ),
+        };
+        let size = (entry.kind == EntryKind::File).then(|| format_size(entry.size));
+        let modified = entry.modified.map(|time| format_time_in(time, tz));
+        PreviewView {
+            kind,
+            name: shown_name(entry, show_extensions).into(),
+            icon: file_icon(entry).into(),
+            folder: entry.kind == EntryKind::Dir,
+            facts: words::preview_facts(&kind_label(entry), size.as_deref(), modified.as_deref())
+                .into(),
+            note: note.into(),
+            image: self.image.borrow().clone(),
+            lines,
+        }
+    }
 }
 
 /// A row of the job panel.

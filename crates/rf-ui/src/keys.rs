@@ -136,7 +136,7 @@ pub enum Command {
     ViewMenu,
     /// Open the menu of the selected items, as a right click on them does.
     ContextMenu,
-    /// Show the item under the cursor in a popup.
+    /// Show the item under the cursor in a popup (빠른 보기, VIEW-01), or close it.
     QuickLook,
     /// Show or hide the preview panel.
     TogglePreview,
@@ -155,8 +155,9 @@ pub enum Command {
     /// Going into a folder in one pane goes into the folder of the same name in the other.
     SyncNavigation,
     /// Text typed with no Ctrl, Alt or Meta: go to the first row whose name starts with what was
-    /// typed (NAV-14). Joining presses that come within a second is the caller's job, and so
-    /// is deciding what a lone space does.
+    /// typed (NAV-14). Joining presses that come within a second is the caller's job. A lone
+    /// Space is [`Command::QuickLook`] in the tables, and types only while a name is being typed
+    /// ([`pane_command`]).
     TypeToSelect(String),
 }
 
@@ -337,6 +338,48 @@ pub fn command_for(text: &str, mods: Mods, os: Os) -> Option<Command> {
     }
     let typed = !text.is_empty() && text.chars().all(|c| !c.is_control() && !is_private_use(c));
     (typed && !mods.ctrl && !mods.alt && !mods.meta).then(|| Command::TypeToSelect(text.to_owned()))
+}
+
+/// The command of `text` held with `mods` on `os` for the panes, as [`command_for`] gives it
+/// but for one rule of type-to-select (NAV-14): while a name is being typed (`typing`, which
+/// [`Tab::typing`](crate::pane::Tab::typing) tells), the Space key alone types a space into it
+/// rather than open quick look, so that a name with spaces can be typed (`새 폴더`).
+pub fn pane_command(text: &str, mods: Mods, os: Os, typing: bool) -> Option<Command> {
+    let command = command_for(text, mods, os)?;
+    if typing && command == Command::QuickLook && text == char::from(Key::Space).to_string() {
+        return Some(Command::TypeToSelect(text.to_owned()));
+    }
+    Some(command)
+}
+
+/// What a key does while quick look shows ([`quick_look_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuickLookKey {
+    /// ←: the file before, in the order of the rows.
+    Previous,
+    /// →: the file after.
+    Next,
+    /// Space, Esc, and the key that opened it: quick look closes.
+    Close,
+}
+
+/// What `text`, held with `mods`, does while quick look shows on `os`; `None` for any other key,
+/// which does nothing then (no key reaches the panes behind it).
+pub fn quick_look_key(text: &str, mods: Mods, os: Os) -> Option<QuickLookKey> {
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next())
+        && mods == Mods::NONE
+    {
+        let plain = [
+            (Key::LeftArrow, QuickLookKey::Previous),
+            (Key::RightArrow, QuickLookKey::Next),
+            (Key::Escape, QuickLookKey::Close),
+        ];
+        if let Some((_, key)) = plain.into_iter().find(|&(key, _)| char::from(key) == c) {
+            return Some(key);
+        }
+    }
+    (command_for(text, mods, os)? == Command::QuickLook).then_some(QuickLookKey::Close)
 }
 
 /// The shortcuts of `os`, in the table's order: a command's first one is the one its menu
@@ -617,6 +660,9 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::F10, NONE), C::ViewMenu),
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
+    // Finder's Quick Look; File Explorer's Space selects the cursor's row, which Ctrl+Space
+    // does here. While a name is being typed, Space types (`pane_command`).
+    (k(Key::Space, NONE), C::QuickLook),
     (c('p', ALT), C::TogglePreview),
     (c('b', CTRL), C::ToggleTree),
     (k(Key::F6, NONE), C::FocusTree),
@@ -706,6 +752,9 @@ static MACOS: &[(Chord, Command)] = &[
     // Zoom's; ⌃⌘= neither Finder nor macOS takes.
     (c('=', CTL_CMD), C::FitColumns),
     (c('j', CMD), C::ViewMenu),
+    // Finder's Quick Look: Space (which types while a name is being typed, `pane_command`), and
+    // ⌘Y.
+    (k(Key::Space, NONE), C::QuickLook),
     (c('y', CMD), C::QuickLook),
     (c('p', CMD_SHIFT), C::TogglePreview),
     // AppKit's Show/Hide Sidebar, then Finder's own.
@@ -877,6 +926,7 @@ mod tests {
             (key(Key::F12), SHIFT, C::ToggleSplit),
             (text("u"), CTRL, C::SwapPanes),
             (key(Key::F6), NONE, C::FocusTree),
+            (key(Key::Space), NONE, C::QuickLook),
         ];
         cases.extend(cursor_moves());
         check(Os::Windows, &cases);
@@ -940,6 +990,7 @@ mod tests {
             (text("2"), CMD, C::ViewDetails),
             (text("3"), CMD, C::ViewList),
             (text("="), CTL_CMD, C::FitColumns),
+            (key(Key::Space), NONE, C::QuickLook),
             (text("y"), CMD, C::QuickLook),
             (text("P"), CMD_SHIFT, C::TogglePreview),
             (text("s"), CTL_CMD, C::ToggleTree),
@@ -1344,6 +1395,8 @@ mod tests {
             // File Explorer and Finder show the extensions from a menu or the settings alone.
             (C::ToggleExtensions, None, None),
             (C::CursorLeft, Some("←"), Some("←")),
+            // Space first; ⌘Y, Finder's other key, is macOS's second.
+            (C::QuickLook, Some("Space"), Some("Space")),
             // No key at all.
             (C::TypeToSelect("a".to_owned()), None, None),
         ];
@@ -1510,7 +1563,10 @@ mod tests {
             assert_eq!(command_for("가", NONE, os), typed("가"));
             assert_eq!(command_for("7", NONE, os), typed("7"));
             assert_eq!(command_for(".", NONE, os), typed("."));
-            assert_eq!(command_for(" ", NONE, os), typed(" "));
+            // A space alone is quick look ([`pane_command`] has it type while a name is being
+            // typed); with Shift it types.
+            assert_eq!(command_for(" ", NONE, os), Some(C::QuickLook));
+            assert_eq!(command_for(" ", SHIFT, os), typed(" "));
             assert_eq!(command_for("한글", NONE, os), typed("한글"));
             // Held with a modifier other than Shift, a letter types nothing.
             for mods in [CTRL, ALT, META] {
@@ -1556,5 +1612,64 @@ mod tests {
                 "{text:?} {mods:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_space_types_into_a_name_being_typed_and_opens_quick_look_otherwise() {
+        let typed = |text: &str| Some(C::TypeToSelect(text.to_owned()));
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            assert_eq!(pane_command(" ", NONE, os, false), Some(C::QuickLook));
+            assert_eq!(pane_command(" ", NONE, os, true), typed(" "));
+            // Every other key is as the table has it, typing or not.
+            for typing in [false, true] {
+                assert_eq!(pane_command("a", NONE, os, typing), typed("a"));
+                assert_eq!(pane_command(" ", SHIFT, os, typing), typed(" "));
+                assert_eq!(
+                    pane_command(&key(Key::DownArrow), NONE, os, typing),
+                    Some(C::CursorDown)
+                );
+                assert_eq!(pane_command("q", CTRL, os, typing), None);
+            }
+        }
+        // Ctrl+Space selects on Windows whether a name is being typed or not; ⌘Y is quick look.
+        assert_eq!(
+            pane_command(" ", CTRL, Os::Windows, true),
+            Some(C::ToggleSelect)
+        );
+        assert_eq!(pane_command("y", CMD, Os::MacOs, true), Some(C::QuickLook));
+    }
+
+    #[test]
+    fn quick_look_takes_the_arrows_space_and_esc() {
+        let ql = |os: Os, text: &str, mods: Mods| quick_look_key(text, mods, os);
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            assert_eq!(
+                ql(os, &key(Key::LeftArrow), NONE),
+                Some(QuickLookKey::Previous)
+            );
+            assert_eq!(
+                ql(os, &key(Key::RightArrow), NONE),
+                Some(QuickLookKey::Next)
+            );
+            assert_eq!(ql(os, " ", NONE), Some(QuickLookKey::Close));
+            assert_eq!(ql(os, &key(Key::Escape), NONE), Some(QuickLookKey::Close));
+            // Anything else does nothing there (and goes nowhere else).
+            for (text, mods) in [
+                (key(Key::LeftArrow), SHIFT),
+                (key(Key::RightArrow), ALT),
+                (key(Key::Tab), NONE),
+                (key(Key::Return), NONE),
+                (key(Key::Delete), NONE),
+                (key(Key::F2), NONE),
+                (text("a"), NONE),
+                (text("a"), CTRL),
+                (key(Key::Space), SHIFT),
+            ] {
+                assert_eq!(ql(os, &text, mods), None, "{os:?} {text:?} {mods:?}");
+            }
+        }
+        // Finder's ⌘Y closes it as it opened it.
+        assert_eq!(ql(Os::MacOs, "y", CMD), Some(QuickLookKey::Close));
+        assert_eq!(ql(Os::Windows, "y", CTRL), None);
     }
 }

@@ -9,8 +9,8 @@ import { Shortcuts } from "shortcuts.slint";
 // The menu of an item: move and copy first (OPS-05), each command with its key (KEY-03). It wraps
 // what is right-clicked; the press selects the item first, then calls `show`.
 export component RowMenu inherits ContextMenuArea {
-    // An item of the menu: the name of the toolbar command it runs (move, copy, open, rename,
-    // delete, delete-permanently).
+    // An item of the menu: the name of the toolbar command it runs (move, copy, open,
+    // quick-look, rename, delete, delete-permanently).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -35,6 +35,12 @@ export component RowMenu inherits ContextMenuArea {
             title: Shortcuts.titled("열기", Shortcuts.open);
             activated => {
                 root.command("open");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("빠른 보기", Shortcuts.quick-look);
+            activated => {
+                root.command("quick-look");
             }
         }
         MenuItem {

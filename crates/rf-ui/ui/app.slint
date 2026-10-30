@@ -8,7 +8,9 @@
 // other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
 // under it takes them (`drop-check`). A tab dragged along its strip, or into the other pane's,
 // moves there (`tab-move-check`). The `›` of a piece of a pane's path row opens the list of that
-// folder's folders under it (`subfolders`, NAV-03); its keys go to Rust with the window's.
+// folder's folders under it (`subfolders`, NAV-03); its keys go to Rust with the window's. The
+// preview panel shows the item under the active pane's cursor (`preview`), and so does quick
+// look over the window (`quick-look`), which takes every key while it shows (`quick-look-key`).
 
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -31,11 +33,12 @@ import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
+import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView
+    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -136,6 +139,10 @@ export component MainWindow inherits Window {
     // The row of the tree's keyboard cursor, which shows while the tree has the keys; -1 for
     // none.
     in property <int> tree-cursor: -1;
+    // What the preview panel and quick look show of the item under the active pane's cursor,
+    // and whether quick look shows (over everything but a dialog).
+    in property <PreviewView> preview;
+    in property <bool> quick-look;
     // The size the window opens at: the one of the last run, from the settings.
     in property <length> start-width: 1280px;
     in property <length> start-height: 800px;
@@ -178,10 +185,15 @@ export component MainWindow inherits Window {
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
     // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
     // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
-    // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons.
+    // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons,
+    // quick-look.
     callback command(name: string);
     // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
     callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // A key while quick look shows, as `key`: it goes nowhere else. Then a click on its close
+    // button or beside it.
+    callback quick-look-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool);
+    callback quick-look-closed();
     // The divider was let go at `share` of the room, or double-clicked (0.5), or the 보기 menu
     // asked for an even split or moved it.
     callback split-changed(share: float);
@@ -453,9 +465,30 @@ export component MainWindow inherits Window {
     private property <string> notice-action-text;
     private property <int> notice-token;
     private property <bool> notice-lasting;
-    // The keyboard goes back to the panes when a dialog closes.
+    // The keyboard goes back to the panes when a dialog closes (to quick look, if it shows).
     changed dialog => {
         if (root.dialog == DialogKind.none) {
+            if (root.quick-look) {
+                quick-look.take-keys();
+            } else {
+                keys.focus();
+            }
+        }
+    }
+    // Quick look takes the keys as it opens, and gives them back to the panes as it closes. A
+    // menu that opened it gives the keys back as it closes, after this: they come to quick look
+    // once the menu has closed (`quick-look-keys-later`).
+    changed quick-look => {
+        root.give-quick-look-keys();
+        quick-look-keys-later.running = true;
+    }
+    function give-quick-look-keys() {
+        if (root.dialog != DialogKind.none) {
+            return;
+        }
+        if (root.quick-look) {
+            quick-look.take-keys();
+        } else if (!left.editing && !right.editing && !filter-box.has-focus) {
             keys.focus();
         }
     }
@@ -529,8 +562,8 @@ export component MainWindow inherits Window {
         }
         key-pressed(event) => {
             // A text field that has focus passes up the keys it does not use; they are not
-            // shortcuts while it is open, nor while a dialog is.
-            if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none) {
+            // shortcuts while it is open, nor while a dialog or quick look is.
+            if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none || root.quick-look) {
                 return reject;
             }
             if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
@@ -972,7 +1005,7 @@ export component MainWindow inherits Window {
                         menu-command(name) => {
                             root.pane-activated(0);
                             root.command(name);
-                            keys.focus();
+                            root.give-quick-look-keys();
                         }
                         retry => {
                             root.retry(0);
@@ -1114,7 +1147,7 @@ export component MainWindow inherits Window {
                         menu-command(name) => {
                             root.pane-activated(1);
                             root.command(name);
-                            keys.focus();
+                            root.give-quick-look-keys();
                         }
                         retry => {
                             root.retry(1);
@@ -1139,24 +1172,10 @@ export component MainWindow inherits Window {
                     width: root.show-preview ? Theme.gap-m : 0px;
                 }
 
-                // The preview panel's place (LAY-06), at the right end; empty for now.
-                if root.show-preview: Rectangle {
+                // The preview panel (LAY-06, VIEW-02), at the right end.
+                if root.show-preview: PreviewPanel {
                     width: 260px;
-                    background: Theme.panel;
-                    border-width: 1px;
-                    border-color: Theme.border;
-                    border-radius: Theme.radius-large;
-                    accessible-role: groupbox;
-                    accessible-label: "미리 보기";
-
-                    Text {
-                        x: Theme.gap-l;
-                        y: Theme.gap-l;
-                        accessible-role: none;
-                        text: "미리 보기";
-                        font-weight: 700;
-                        color: Theme.text;
-                    }
+                    view: root.preview;
                 }
             }
 
@@ -1248,6 +1267,32 @@ export component MainWindow inherits Window {
             }
             keys.focus();
             root.completion-chosen(side, index);
+        }
+    }
+
+    // Quick look over the window (VIEW-01), under a dialog. It shows the item the preview panel
+    // shows, and takes every key.
+    quick-look := QuickLook {
+        visible: root.quick-look && root.dialog == DialogKind.none;
+        view: root.preview;
+        key(text, ctrl, shift, alt, meta) => {
+            root.quick-look-key(text, ctrl, shift, alt, meta);
+        }
+        closed => {
+            root.quick-look-closed();
+        }
+    }
+
+    // A menu that opened quick look gives the keys back, as it closes, to what had them before:
+    // they go to quick look once it has closed.
+    quick-look-keys-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.quick-look) {
+                root.give-quick-look-keys();
+            }
         }
     }
 

@@ -668,6 +668,20 @@ impl Tab {
         Some(row)
     }
 
+    /// Whether a name is being typed to select (NAV-14) at `now`: some of it has been typed, its
+    /// last key came within [`TYPE_TO_SELECT_WINDOW`], and no other key came since
+    /// ([`Tab::end_typing`]). A Space then types into the name rather than open quick look
+    /// ([`keys::pane_command`](crate::keys::pane_command)).
+    pub fn typing(&self, now: Instant) -> bool {
+        let (prefix, last) = &self.type_buffer;
+        !prefix.is_empty() && now.saturating_duration_since(*last) <= TYPE_TO_SELECT_WINDOW
+    }
+
+    /// A key other than a typed character came: the next one starts a new name.
+    pub fn end_typing(&mut self) {
+        self.type_buffer.0.clear();
+    }
+
     /// Selects the row called `name` alone and puts the cursor on it: the item a job has just
     /// made or renamed. A name that does not show yet is selected when it comes (by the
     /// listing or the watch), unless the tab moves to another folder first. Gives the row when

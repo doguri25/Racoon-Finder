@@ -16,6 +16,7 @@ pub mod open;
 pub mod pane;
 pub mod pick;
 pub mod places;
+pub mod preview;
 pub mod resolver;
 pub mod selection;
 pub mod settings;

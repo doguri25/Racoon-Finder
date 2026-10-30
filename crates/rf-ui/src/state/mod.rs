@@ -9,7 +9,8 @@
 //! ([`AppState::drag`]), the address bar's lists (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
-//! tools, listing a folder again and the extensions shown or not (module `select`). Its methods
+//! tools, listing a folder again and the extensions shown or not (module `select`), and the
+//! item the preview panel and quick look show (module `preview`). Its methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -34,6 +35,7 @@ use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, SortRequest, Tab, ancestors};
 use crate::places::Place;
+use crate::preview::PreviewRequest;
 use crate::selection::Pick;
 use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
@@ -45,6 +47,7 @@ mod drag;
 mod jobs;
 mod layout;
 mod pick;
+mod preview;
 mod select;
 mod sidebar;
 mod tabs;
@@ -58,6 +61,7 @@ pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use preview::PreviewShown;
 pub use select::{MATCH_STRETCH, MatchRequest, Matched};
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
@@ -84,6 +88,13 @@ pub enum Effect {
     /// Match the names of the pattern window's rows on a worker thread ([`MatchRequest::run`],
     /// which a newer request stops), then hand what it found to [`AppState::pattern_matched`].
     MatchNames(MatchRequest),
+    /// Make the preview of an item on the worker of the previews, after
+    /// [`PREVIEW_DELAY`](crate::preview::PREVIEW_DELAY) and in the place of (stopping) the one
+    /// asked for before ([`make_preview`](crate::preview::make_preview)), then hand it to
+    /// [`AppState::previewed`].
+    Preview(PreviewRequest),
+    /// Stop the preview asked for last: nothing it would show shows any more.
+    StopPreview,
     /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
     /// gone: find on a worker thread where to go
     /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
@@ -273,6 +284,8 @@ pub struct AppState {
     views: ViewStore,
     /// What the pattern window works with (module `select`).
     pattern: select::PatternWork,
+    /// What the preview panel and quick look show (module `preview`).
+    preview: preview::PreviewWork,
 }
 
 impl AppState {
@@ -359,6 +372,7 @@ impl AppState {
             environment: Environment::default(),
             views: ViewStore::default(),
             pattern: select::PatternWork::default(),
+            preview: preview::PreviewWork::default(),
         };
         (state, effects)
     }
@@ -461,6 +475,10 @@ impl AppState {
             return Some(Vec::new());
         }
         let side = self.active;
+        // Any other key ends the name being typed: a Space after it opens quick look.
+        if !matches!(command, Command::TypeToSelect(_)) {
+            self.tab_mut(side).end_typing();
+        }
         // Shift selects a range, Ctrl moves the cursor alone (Windows and Linux).
         let pick = if mods.shift {
             Pick::Extend
@@ -539,14 +557,14 @@ impl AppState {
             Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
             Command::FitColumns => self.fit_columns(side),
+            Command::QuickLook => self.toggle_quick_look(side),
             Command::Copy
             | Command::Cut
             | Command::Paste
             | Command::PasteMove
             | Command::CopyPath
             | Command::Properties
-            | Command::ContextMenu
-            | Command::QuickLook => return None,
+            | Command::ContextMenu => return None,
         };
         Some(effects)
     }

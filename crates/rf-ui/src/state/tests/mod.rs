@@ -20,6 +20,7 @@ mod jobs;
 mod layout;
 mod nav;
 mod pick;
+mod preview;
 mod select;
 mod session;
 mod sidebar;

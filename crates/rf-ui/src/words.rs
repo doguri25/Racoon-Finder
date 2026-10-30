@@ -1339,6 +1339,54 @@ pub fn drop_refused(validity: Validity) -> String {
     format!("여기에 놓을 수 없습니다: {why}")
 }
 
+/// What the preview panel and quick look say of an item that cannot be shown: it could not be
+/// read, or its content is broken (a damaged image, bytes not valid in their encoding).
+pub fn preview_unavailable() -> &'static str {
+    "미리 볼 수 없습니다"
+}
+
+/// What the preview says of an image file too large to decode (over 50 MB): its size shows
+/// beside it.
+pub fn preview_too_large() -> &'static str {
+    "파일이 커서 미리 보지 않습니다"
+}
+
+/// How many items a folder in the preview shows: `항목 12개`, or `항목 10000개 이상` past the
+/// count's cap (`more`).
+pub fn preview_items(items: usize, more: bool) -> String {
+    let count = item_count(items);
+    if more {
+        format!("{count} 이상")
+    } else {
+        count
+    }
+}
+
+/// The size of an image in the preview, as its file has it: `3200 × 800`.
+pub fn preview_image_size(width: u32, height: u32) -> String {
+    format!("{width} × {height}")
+}
+
+/// What the preview says of a text: the encoding it was read in, and when the file goes on past
+/// its first 256 KB, that only those show: `EUC-KR · 앞 256 KB만 보입니다`.
+pub fn preview_text_note(encoding: &str, truncated: bool) -> String {
+    if truncated {
+        let shown = format_size(u64::try_from(crate::preview::TEXT_BYTES).unwrap_or(u64::MAX));
+        format!("{encoding} · 앞 {shown}만 보입니다")
+    } else {
+        encoding.to_owned()
+    }
+}
+
+/// The facts the preview shows under an item: its kind, its size (`size`, for a file) and when
+/// it was last changed (`modified`, when known): `PNG 이미지 · 1.2 MB · 2026-10-30 09:12`.
+pub fn preview_facts(kind: &str, size: Option<&str>, modified: Option<&str>) -> String {
+    let mut parts = vec![kind];
+    parts.extend(size);
+    parts.extend(modified.filter(|modified| !modified.is_empty()));
+    parts.join(" · ")
+}
+
 /// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
 /// Hangul is read by its last syllable, digits and Latin letters by their Korean names
 /// (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else takes `가`.
