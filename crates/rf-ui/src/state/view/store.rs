@@ -1,7 +1,7 @@
 //! The folder views remembered (NAV-10): at most [`MAX_FOLDER_VIEWS`], the one used longest ago
 //! first, each folder known by its `VPath::to_uri` under the system's rule of names (case, and
-//! on macOS the Unicode form). See the
-//! module `state::view` for what a view is and how a folder finds its own.
+//! on macOS the Unicode form). See the module `state::view` for what a view is and how a folder
+//! finds its own.
 
 use std::ffi::OsStr;
 

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 
 use rf_core::Os;
-use unicode_normalization::{UnicodeNormalization, is_nfc};
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// How a file system tells two names of one folder apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,7 +63,8 @@ impl NameFolding {
 /// own, as a pattern's is.
 pub fn name_text(name: &OsStr, folding: NameFolding) -> Cow<'_, str> {
     let text = name.to_string_lossy();
-    if folding.ignores_form() && !is_nfc(&text) {
+    // The quick check needs no composition; a text it cannot settle is composed once.
+    if folding.ignores_form() && is_nfc_quick(text.chars()) != IsNormalized::Yes {
         Cow::Owned(text.nfc().collect())
     } else {
         text

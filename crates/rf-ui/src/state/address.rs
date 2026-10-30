@@ -44,7 +44,7 @@ use rf_vfs::VisibilityFilter;
 
 use super::{AppState, Effect, Layout, load};
 use crate::keys::ListKey;
-use crate::loader::{FolderName, LoadEvent, NamesRequest, name_starts_with};
+use crate::loader::{FolderName, LoadEvent, NameStart, NamesRequest, name_starts_with};
 use crate::pane::{ancestors, next_generation};
 use crate::words;
 
@@ -100,7 +100,8 @@ impl Names {
     fn narrowed(self, prefix: &str, os: Os) -> Names {
         match self {
             Names::Listed { mut names, .. } => {
-                names.retain(|each| name_starts_with(&each.name, prefix, os));
+                let start = NameStart::new(prefix, os);
+                names.retain(|each| start.matches(&each.name));
                 Names::Listed { names, more: 0 }
             }
             Names::Loading | Names::Failed(_) => Names::Loading,

@@ -217,8 +217,18 @@ fn a_rename_that_changes_only_the_unicode_form_renames_the_item() {
         eprintln!("skipped: this volume tells the two forms apart");
         return;
     }
-    p.rename(&nfc, &nfd, RenameMode::NoReplace).unwrap();
-    assert_eq!(std::fs::read(nfd.as_local().unwrap()).unwrap(), b"one");
+    // The folder lists the item under the spelling it was renamed to, each way round.
+    let listed = || -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(root.as_local().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    for (from, to) in [(&nfc, &nfd), (&nfd, &nfc)] {
+        p.rename(from, to, RenameMode::NoReplace).unwrap();
+        assert_eq!(listed(), [to.file_name().unwrap()], "{from} -> {to}");
+        assert_eq!(std::fs::read(to.as_local().unwrap()).unwrap(), b"one");
+    }
 }
 
 /// Makes `link` lead to the folder `target`: a symbolic link on Unix.

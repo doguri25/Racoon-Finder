@@ -12,6 +12,28 @@ use rf_jobs::preflight::{
 use rf_jobs::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
 };
+use rf_vfs::NameFolding;
+
+#[test]
+fn each_file_system_folds_names_by_its_own_rule() {
+    use NameFolding::{Case, CaseAndForm, Exact};
+    let rules = [
+        (FsKind::Ntfs, Case),
+        (FsKind::ReFs, Case),
+        (FsKind::Fat32, Case),
+        (FsKind::ExFat, Case),
+        (FsKind::Apfs, CaseAndForm),
+        (FsKind::HfsPlus, CaseAndForm),
+        (FsKind::Smb, Case),
+        (FsKind::Other, Exact),
+    ];
+    assert_eq!(rules.map(|(fs, _)| fs), ALL_KINDS, "every kind, once");
+    for (fs, folding) in rules {
+        assert_eq!(fs.folding(), folding, "{fs:?}");
+        // Case folds exactly where the file system ignores case.
+        assert_eq!(folding.ignores_case(), fs.case_insensitive(), "{fs:?}");
+    }
+}
 
 const ALL_KINDS: [FsKind; 8] = [
     FsKind::Ntfs,

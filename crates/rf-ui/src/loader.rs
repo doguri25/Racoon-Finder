@@ -26,7 +26,7 @@ use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_jobs::{CopyFound, CreatedItem};
 use rf_vfs::{
     CancelToken, Capabilities, Change, NameFolding, Provider, SortSpec, Vfs, VisibilityFilter,
-    WatchEvent, WatchHandle, fold_name, sort_by_name, sort_entries,
+    WatchEvent, WatchHandle, fold_name, name_text, sort_by_name, sort_entries,
 };
 
 use crate::pane::OpenAction;
@@ -89,11 +89,39 @@ impl FolderName {
 /// ignoring case on Windows and macOS, and on macOS the Unicode form too (a name in NFD, as
 /// HFS+ writes it, starts with the NFC text an input method types); as spelled elsewhere.
 pub fn name_starts_with(name: &OsStr, prefix: &str, os: Os) -> bool {
-    if prefix.is_empty() {
-        return true;
+    NameStart::new(prefix, os).matches(name)
+}
+
+/// The start of a folder name typed into the path field, folded once by the rule of a system
+/// ([`name_starts_with`]), to test many names against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameStart {
+    folding: NameFolding,
+    key: String,
+}
+
+impl NameStart {
+    /// `prefix`, as the names of `os` are compared.
+    pub fn new(prefix: &str, os: Os) -> NameStart {
+        let folding = NameFolding::of(os);
+        NameStart {
+            folding,
+            key: fold_name(OsStr::new(prefix), folding),
+        }
     }
-    let folding = NameFolding::of(os);
-    fold_name(name, folding).starts_with(&fold_name(OsStr::new(prefix), folding))
+
+    /// Whether `name` starts with it. Where case counts, the name is not copied (only a name
+    /// that is no Unicode, or one to compose to NFC, is).
+    pub fn matches(&self, name: &OsStr) -> bool {
+        if self.key.is_empty() {
+            return true;
+        }
+        if self.folding.ignores_case() {
+            fold_name(name, self.folding).starts_with(&self.key)
+        } else {
+            name_text(name, self.folding).starts_with(&self.key)
+        }
+    }
 }
 
 /// What the work of one [`LoadRequest`] reports, from a worker thread or the watch's thread.
@@ -232,10 +260,9 @@ impl Loader {
             sort: SortSpec::default(),
         };
         let rule = NameRule {
-            prefix,
+            start: NameStart::new(&prefix, os),
             filter,
             limit,
-            os,
         };
         self.start(request, Mode::Names(rule), sink)
     }
@@ -616,10 +643,10 @@ enum Mode {
 /// Which folders a [`Mode::Names`] listing keeps, and how many of their names it sends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NameRule {
-    prefix: String,
+    /// The start of the names wanted, folded once.
+    start: NameStart,
     filter: VisibilityFilter,
     limit: usize,
-    os: Os,
 }
 
 impl NameRule {
@@ -631,11 +658,10 @@ impl NameRule {
             EntryKind::Symlink => true,
             EntryKind::File | EntryKind::Other => return None,
         };
-        (self.filter.is_visible(&entry) && name_starts_with(&entry.name, &self.prefix, self.os))
-            .then_some(FolderName {
-                name: entry.name,
-                link,
-            })
+        (self.filter.is_visible(&entry) && self.start.matches(&entry.name)).then_some(FolderName {
+            name: entry.name,
+            link,
+        })
     }
 }
 
