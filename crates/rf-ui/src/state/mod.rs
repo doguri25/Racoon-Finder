@@ -559,9 +559,9 @@ impl AppState {
 
     /// Carries out the shortcut `command`, held with `mods`, on the active pane. `paging` is how
     /// the active pane lays its rows out: how many items a line of the view holds and how many
-    /// lines `PageUp` and `PageDown` move. `None` for a command of the shortcut table this
-    /// window does not do yet (`docs/ux/keyboard.md` says which task brings each): the key goes
-    /// on to the system. Since the item menu's keys (M1-06 Task 10) there is no such command.
+    /// lines `PageUp` and `PageDown` move. `None` would leave the key to the system, for a
+    /// command of the shortcut table the window does not do; the window does every one, so it
+    /// is always `Some`.
     pub fn key(
         &mut self,
         command: Command,

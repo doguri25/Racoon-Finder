@@ -80,8 +80,7 @@ impl Keys {
         Keys {
             name: NaturalKey::new(&entry.name),
             extension: entry
-                .extension()
-                .filter(|_| entry.kind == EntryKind::File)
+                .file_extension()
                 .map(|ext| ext.to_string_lossy().to_lowercase())
                 .unwrap_or_default(),
         }

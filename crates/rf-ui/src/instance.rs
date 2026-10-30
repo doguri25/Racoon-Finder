@@ -11,19 +11,16 @@
 //! thread of its own ([`InstanceLock::watch_requests`]), takes it away and shows its window.
 //! When nothing takes the request within [`SHOW_WAIT`] (an app that hangs, an older one, or one
 //! that is ending and takes no more requests, [`RequestStop`]), the second start takes it back
-//! and goes on trying the lock for [`QUIT_WAIT`]: an app that is ending lets it go once it has
-//! saved its settings and stopped its jobs. Only then does it say that the app runs, as it did
-//! before ([`take_or_ask`]). A request left over from an earlier run
-//! goes when the lock is taken.
+//! and goes on trying the lock for the wait it is given (the app's is [`crate::QUIT_WAIT`]):
+//! an app that is ending lets it go once it has saved its settings and stopped its jobs. Only
+//! then does it say that the app runs, as it did before ([`take_or_ask`]). A request left over
+//! from an earlier run goes when the lock is taken.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-use crate::controller::FINAL_SAVE_WAIT;
-use crate::jobs::QUIT_TIMEOUT;
 
 /// The name of the lock file in the journal's folder.
 pub const LOCK_FILE: &str = "instance.lock";
@@ -37,14 +34,6 @@ pub const SHOW_POLL: Duration = Duration::from_millis(250);
 
 /// How long a second start waits for the running app to take its request.
 pub const SHOW_WAIT: Duration = Duration::from_secs(3);
-
-/// How long a second start whose request nobody took goes on trying the lock: an app that is
-/// ending takes no request, and lets the lock go only once it has written its settings (at most
-/// [`FINAL_SAVE_WAIT`]) and stopped its jobs (at most [`QUIT_TIMEOUT`]), [`SHOW_WAIT`] more
-/// for the rest of its end.
-pub const QUIT_WAIT: Duration = SHOW_WAIT
-    .saturating_add(FINAL_SAVE_WAIT)
-    .saturating_add(QUIT_TIMEOUT);
 
 /// The single-instance lock. Dropping it lets another process take it.
 #[derive(Debug)]
@@ -193,7 +182,7 @@ pub enum Start {
 /// window with `ask` (the app's is [`ask_to_show`] with [`SHOW_WAIT`]: `true` once it was
 /// taken). A request nobody took may mean the app that holds the lock is ending, which takes no
 /// more requests and lets the lock go only at the end of its end: the lock is tried every
-/// [`SHOW_POLL`] for `wait` (the app's is [`QUIT_WAIT`]) before the app is said to run.
+/// [`SHOW_POLL`] for `wait` (the app's is [`crate::QUIT_WAIT`]) before the app is said to run.
 pub fn take_or_ask(
     dir: &Path,
     ask: impl FnOnce(&Path) -> bool,
@@ -244,6 +233,10 @@ pub fn ask_to_show(dir: &Path, wait: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long the tests' second starts go on trying the lock: long enough for an app that ends
+    /// a moment later.
+    const WAIT: Duration = Duration::from_secs(10);
 
     #[test]
     fn second_instance_is_refused() {
@@ -329,13 +322,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary folder");
         let journal = dir.path().join("data");
         // Nobody runs: the lock.
-        let first = match take_or_ask(&journal, |_| panic!("nobody to ask"), QUIT_WAIT) {
+        let first = match take_or_ask(&journal, |_| panic!("nobody to ask"), WAIT) {
             Ok(Start::Lock(lock)) => lock,
             other => panic!("the lock, not {other:?}"),
         };
         // It runs and takes the request: shown.
         assert!(matches!(
-            take_or_ask(&journal, |_| true, QUIT_WAIT),
+            take_or_ask(&journal, |_| true, WAIT),
             Ok(Start::Shown)
         ));
         // It runs and does not take it, and still holds the lock once the wait is over: it
@@ -379,12 +372,10 @@ mod tests {
                 asked.send(()).expect("the ending app");
                 false
             },
-            QUIT_WAIT,
+            WAIT,
         );
         quit.join().expect("the ending app");
         assert!(matches!(start, Ok(Start::Lock(_))), "{start:?}");
-        // The wait covers the end's own waits.
-        assert!(QUIT_WAIT >= SHOW_WAIT + FINAL_SAVE_WAIT + QUIT_TIMEOUT);
     }
 
     #[test]

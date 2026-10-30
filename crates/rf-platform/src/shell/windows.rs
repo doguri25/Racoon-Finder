@@ -126,8 +126,9 @@ fn shell_execute(execute: Execute) -> io::Result<()> {
         };
         // SAFETY: `info` is a whole `SHELLEXECUTEINFOW` with its size set; every string in it
         // is NUL-terminated and owned by `execute`, which outlives the call; the window, if
-        // any, is the app's, which outlives the app's calls; no item ID list is passed, and the
-        // mask asks for no process handle back.
+        // any, is only a handle the call reads (it may have been destroyed at the app's end, and
+        // user32 checks a handle before using it: a stale one is no owner); no item ID list is
+        // passed, and the mask asks for no process handle back.
         match unsafe { ShellExecuteExW(&raw mut info) } {
             Ok(()) => Ok(()),
             Err(error) if cancelled(&error) => Ok(()),
@@ -207,7 +208,8 @@ pub fn open_with_dialog(path: &Path, owner: Owner) -> io::Result<()> {
             oaifInFlags: OAIF_EXEC,
         };
         // SAFETY: `info` and the NUL-terminated `file` it points to outlive the call, which
-        // returns once the dialog is closed; the owner, if any, is the app's window.
+        // returns once the dialog is closed; the owner, if any, is only a handle the call reads,
+        // which user32 checks before using (the app's window may be gone at its end).
         match unsafe { SHOpenWithDialog(owner_window(owner), &raw const info) } {
             Ok(()) => Ok(()),
             Err(error) if cancelled(&error) => Ok(()),
@@ -219,9 +221,10 @@ pub fn open_with_dialog(path: &Path, owner: Owner) -> io::Result<()> {
 pub fn show_properties(path: &Path, owner: Owner) -> io::Result<()> {
     let name = wide(path.as_os_str());
     on_shell_thread(move || {
-        // SAFETY: `name` is NUL-terminated and outlives the call; the owner, if any, is the
-        // app's window, and no page name is passed. The shell shows the window on a thread of
-        // its own and returns.
+        // SAFETY: `name` is NUL-terminated and outlives the call; the owner, if any, is only a
+        // handle the call reads, which user32 checks before using (the app's window may be gone
+        // at its end); no page name is passed. The shell shows the window on a thread of its
+        // own and returns.
         let shown = unsafe {
             SHObjectProperties(
                 owner_window(owner),

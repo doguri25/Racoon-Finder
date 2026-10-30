@@ -150,10 +150,11 @@ pub fn folder_label(path: &VPath) -> String {
 }
 
 /// The extension of `entry` as the rows show it, in the 확장자 column and for 같은 확장자 선택:
-/// a file's alone. A folder has none, and neither has a link, which may lead to a folder
-/// (`앨범.2025`): the listing does not tell.
+/// a file's alone ([`Entry::file_extension`], the one the sort by 확장자 uses). A folder has
+/// none, and neither has a link, which may lead to a folder (`앨범.2025`): the listing does not
+/// tell.
 pub fn file_extension(entry: &Entry) -> Option<&OsStr> {
-    entry.extension().filter(|_| entry.kind == EntryKind::File)
+    entry.file_extension()
 }
 
 /// The name the rows show for `entry`: the whole name, or, with the extensions hidden

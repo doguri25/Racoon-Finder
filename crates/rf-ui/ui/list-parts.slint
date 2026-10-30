@@ -44,9 +44,10 @@ export global ItemMenu {
 // selects the item first, then calls `show`. The clipboard's items are the system's: 잘라내기
 // where File Explorer has it (not on macOS), 여기로 이동 where Finder has it (macOS only);
 // 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
-// else into the pane's folder; they are off while the clipboard holds no files. The system's ways to open an item (OPS-04, OPS-06, OPS-11) show
-// for the items they act on (`ItemMenu`): 관리자 권한으로 실행 and 연결 프로그램으로 열기… by
-// 열기 for one file, 터미널에서 열기 for one folder, OS 속성 창 열기 after 속성 for one item.
+// else into the pane's folder; they are off while the clipboard holds no files. The system's
+// ways to open an item (OPS-04, OPS-06, OPS-11) show for the items they act on (`ItemMenu`):
+// 관리자 권한으로 실행 and 연결 프로그램으로 열기… by 열기 for one file, 터미널에서 열기 for one
+// folder, OS 속성 창 열기 after 속성 for one item.
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
     // copy-files, paste-into, paste-move-into, copy-path-<form>, open, run-as-admin, open-with,

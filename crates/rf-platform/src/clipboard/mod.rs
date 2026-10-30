@@ -102,8 +102,9 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
 /// a menu opens (its 붙여넣기 is off without them, as in File Explorer). Windows asks whether
 /// `CF_HDROP` is there, which needs no hold of the clipboard; macOS asks the pasteboard whether
 /// an item has a file URL; elsewhere it is whether this process put files there. Files that
-/// [`get_files`] then leaves out ([`ClipboardFiles::skipped`]) count: a paste of them says why
-/// it pasted nothing.
+/// [`get_files`] then leaves out ([`ClipboardFiles::skipped`]) count too, so 붙여넣기 stays on
+/// for them; when they are all the clipboard holds, [`get_files`] gives `None`, and a paste
+/// says only that there are no files to paste.
 pub fn has_files() -> bool {
     imp::has_files()
 }

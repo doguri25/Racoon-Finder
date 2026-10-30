@@ -29,6 +29,21 @@ fn extension_rules() {
 }
 
 #[test]
+fn a_list_shows_the_extension_of_a_file_alone() {
+    let ext = |n: &str, k| {
+        Entry::new(n, k)
+            .file_extension()
+            .map(|e| e.to_string_lossy().into_owned())
+    };
+    assert_eq!(ext("a.tar.gz", EntryKind::File).as_deref(), Some("gz"));
+    assert_eq!(ext(".bashrc", EntryKind::File), None);
+    // A link may lead to a folder: none, though its name has one.
+    assert_eq!(ext("앨범.2025", EntryKind::Symlink), None);
+    assert_eq!(ext("photos.2026", EntryKind::Dir), None);
+    assert_eq!(ext("events.pipe", EntryKind::Other), None);
+}
+
+#[test]
 fn special_files_have_no_extension() {
     let fifo = Entry::new("events.pipe", EntryKind::Other);
     assert_eq!(fifo.kind, EntryKind::Other);

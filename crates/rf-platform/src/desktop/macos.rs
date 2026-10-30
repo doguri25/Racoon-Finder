@@ -1,14 +1,14 @@
+#![allow(
+    unsafe_code,
+    reason = "a delegate class for the notification center, defined with `define_class!`"
+)]
+
 //! Notifications through the User Notifications framework (see the module above).
 //!
 //! The system shows nothing of an app's notification while that app is in front, unless the
 //! notification center's delegate says how to present it: the app stays in front after its
 //! window hides behind the menu bar icon, so a delegate of its own ([`Presenter`]) has every
 //! notification shown as a banner and kept in the list, wherever the app is.
-
-#![allow(
-    unsafe_code,
-    reason = "a delegate class for the notification center, defined with `define_class!`"
-)]
 
 use std::io;
 use std::sync::Once;

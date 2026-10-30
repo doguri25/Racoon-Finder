@@ -46,10 +46,9 @@ impl Mods {
 /// when `mods.shift` is set, and moves the cursor alone when `mods.ctrl` is (Windows and Linux;
 /// `Selection::go_to`). The view lays the rows out, and says where each key goes
 /// (`state::target`): ← and → move along a row of icons and across the columns of 목록, and
-/// scroll 자세히 sideways when its columns are wider than the pane. A command may be in the table
-/// before the window can do it (`AppState::key` gives `None` for it, and the key goes on to the
-/// system; none is, since the item menu's keys); `docs/ux/keyboard.md` says which task brings
-/// each.
+/// scroll 자세히 sideways when its columns are wider than the pane. The window does every
+/// command of the table (`AppState::key`); `docs/ux/keyboard.md` lists them with why each key
+/// was chosen.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     /// The other pane becomes active.

@@ -100,6 +100,12 @@ impl Entry {
             .filter(|ext| !ext.is_empty())
     }
 
+    /// The extension a list shows and sorts by: a file's alone ([`Entry::extension`]). A link
+    /// has none, as it may lead to a folder (`앨범.2025`), which its listing does not tell.
+    pub fn file_extension(&self) -> Option<&OsStr> {
+        self.extension().filter(|_| self.kind == EntryKind::File)
+    }
+
     /// The key for reconnecting a record to a moved file. `Some` only when both
     /// the volume ID and the file ID are known.
     pub fn identity(&self) -> Option<(VolumeId, FileId)> {

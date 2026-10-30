@@ -1,6 +1,7 @@
 //! Slint screens and view models of the demo app.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use slint::ComponentHandle;
 
@@ -43,6 +44,18 @@ mod generated {
 }
 
 pub use generated::*;
+
+/// How long a second start of the app whose request to show the window nobody took goes on
+/// trying the lock ([`instance::take_or_ask`]): an app that is ending takes no request, and lets
+/// the lock go only at the end of its end, once it has emptied the clipboard of a cancelled cut
+/// ([`controller::CLEAR_AT_END`]), written its settings ([`controller::FINAL_SAVE_WAIT`]),
+/// stopped its jobs ([`jobs::QUIT_TIMEOUT`]) and handed its last notifications to the system
+/// ([`notify::NOTICE_WAIT`]), each at most, with [`instance::SHOW_WAIT`] more for the rest.
+pub const QUIT_WAIT: Duration = instance::SHOW_WAIT
+    .saturating_add(controller::CLEAR_AT_END)
+    .saturating_add(controller::FINAL_SAVE_WAIT)
+    .saturating_add(jobs::QUIT_TIMEOUT)
+    .saturating_add(notify::NOTICE_WAIT);
 
 /// Why [`run`] could not keep the main window open.
 #[derive(Debug, thiserror::Error)]
@@ -100,7 +113,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     // when it does not answer, and has not ended a while later (one that is ending lets the lock
     // go only at the end of its end), does this one say that it runs.
     let ask = |dir: &std::path::Path| instance::ask_to_show(dir, instance::SHOW_WAIT);
-    let lock = match instance::take_or_ask(paths.data_dir(), ask, instance::QUIT_WAIT) {
+    let lock = match instance::take_or_ask(paths.data_dir(), ask, QUIT_WAIT) {
         Ok(instance::Start::Lock(lock)) => lock,
         // What the user asked for is done: the app shows. Nothing to tell.
         Ok(instance::Start::Shown) => return Ok(()),
@@ -196,8 +209,10 @@ fn finish(jobs: &jobs::Jobs, saver: &settings::Saver, last: Option<String>) {
 
 /// Tells the user that the app could not start, when `error` says so: in a small window, or,
 /// when no window can open, in `startup-error.log` in the app's log folder. A release build on
-/// Windows has no console, so this is the only place the user sees why. Nothing for
-/// [`RunError::AlreadyRunning`], which was told already.
+/// Windows has no console, so this is the only place the user sees why. The file holds the
+/// reason of the last start that failed, written over each time (an exception the plan lists:
+/// the app's own file, which does not grow). Nothing for [`RunError::AlreadyRunning`], which
+/// was told already.
 pub fn report_startup_failure(error: &RunError) {
     let reason = match error {
         RunError::AlreadyRunning => return,
