@@ -7,6 +7,7 @@ pub mod fsops;
 pub mod known;
 pub mod meta;
 pub mod natural;
+pub mod shell;
 pub mod sparse;
 pub mod trash;
 pub mod volume;
