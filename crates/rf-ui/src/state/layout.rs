@@ -161,10 +161,11 @@ impl AppState {
         }
     }
 
-    /// Shows or hides the preview panel's place.
+    /// Shows or hides the preview panel (in a window too narrow for it, the first time it is
+    /// turned on a notice says why it does not show).
     pub(super) fn toggle_preview(&mut self) -> Vec<Effect> {
         self.layout.preview = !self.layout.preview;
-        Vec::new()
+        self.tell_cramped()
     }
 
     /// The two panes trade their tab sets, each tab with its folder, rows, history and

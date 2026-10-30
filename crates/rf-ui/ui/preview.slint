@@ -200,6 +200,8 @@ export component PreviewPanel inherits Rectangle {
                 color: Theme.text;
                 wrap: word-wrap;
             }
+            // Its facts keep their words together (no-break spaces): the line breaks only
+            // between them.
             Text {
                 text: root.view.facts;
                 font-size: Theme.font-small;

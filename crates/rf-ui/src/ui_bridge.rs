@@ -917,6 +917,9 @@ impl PreviewModels {
                 (PreviewKind::Folder, words::preview_items(*items, *more))
             }
             Some(PreviewContent::Plain) => (PreviewKind::Plain, String::new()),
+            Some(PreviewContent::OnlineOnly) => {
+                (PreviewKind::Plain, words::preview_online_only().to_owned())
+            }
             Some(PreviewContent::TooLarge) => {
                 (PreviewKind::Large, words::preview_too_large().to_owned())
             }

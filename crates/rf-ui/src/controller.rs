@@ -34,7 +34,8 @@ use crate::preview::{self, PREVIEW_DELAY};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
-    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, RIGHT, Subfolders, start_folders,
+    AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, RIGHT, Subfolders, preview_width,
+    start_folders,
 };
 use crate::ui_bridge::{self, PaneModels, PickModels, PreviewModels, TreeRows, post};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
@@ -807,6 +808,7 @@ impl Controller {
         }
         *self.state.borrow_mut() = Some(state);
         self.apply(effects);
+        self.fit_preview();
     }
 
     /// An event of the job engine. Progress only redraws the job panel; an end, the journal's
@@ -1102,11 +1104,39 @@ impl Controller {
         }
     }
 
-    /// The window's size changed: the settings keep it, and the list of subfolders, which
-    /// stays where its `›` was, closes.
+    /// The window's size changed: the settings keep it, the list of subfolders, which stays
+    /// where its `›` was, closes, and the preview panel fits the new width.
     fn window_resized(&self) {
         self.close_subfolders();
+        self.fit_preview();
         self.plan_save();
+    }
+
+    /// Gives the preview panel its width for the window's width, and hides it while the window
+    /// is too narrow for it ([`preview_width`]); the setting stays.
+    fn fit_preview(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let shown = window.window();
+        let width = shown.size().to_logical(shown.scale_factor()).width;
+        // Not laid out yet.
+        if width <= 0.0 {
+            return;
+        }
+        let fitted = preview_width(width);
+        if let Some(fitted) = fitted {
+            window.set_preview_width(fitted);
+        }
+        let cramped = fitted.is_none();
+        let changed = self
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.preview_cramped() != cramped);
+        if changed {
+            self.update(|state| state.set_preview_cramped(cramped));
+        }
     }
 
     /// Tab in the path field of pane `side`, which holds `text`: the completed text, empty when
@@ -1579,6 +1609,7 @@ impl Controller {
             window.set_show_hidden(state.show_hidden());
             window.set_show_extensions(state.show_extensions());
             show_layout(&window, state.layout(), state.syncing());
+            window.set_preview_fits(!state.preview_cramped());
             let list = state.subfolders().map(|list| (list.names(), list.cursor()));
             window.set_subfolders(ui_bridge::folder_menu(&self.subfolder_rows, list, true));
             // The active pane's own filter (another pane's, or none once the tab moved on).

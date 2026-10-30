@@ -12,7 +12,12 @@
 //! time, and which items a folder counts. When it is another one, it gets a new generation and
 //! a worker is asked for its content ([`Effect::Preview`]), which replaces and stops the one
 //! asked for before; [`AppState::previewed`] takes only the answer with the generation shown. A
-//! link or a special file shows its facts alone, without a worker.
+//! link or a special file shows its facts alone, without a worker, and so does a file stored
+//! online only (`Attributes::OFFLINE`), which opening would download.
+//!
+//! The panel needs a window at least [`PREVIEW_MIN_WINDOW`] wide: in a narrower one it hides
+//! ([`AppState::set_preview_cramped`]) and asks for nothing, and the setting stays, so it comes
+//! back when the window is wide enough; the first time, a notice says so.
 //!
 //! Quick look opens on Space (and ⌘Y on macOS; while a name is being typed Space types, see
 //! `keys::pane_command`) over the item, and takes every key while it shows
@@ -23,7 +28,7 @@
 
 use std::time::SystemTime;
 
-use rf_core::{Entry, EntryKind, VPath};
+use rf_core::{Attributes, Entry, EntryKind, VPath};
 use rf_vfs::VisibilityFilter;
 
 use super::{AppState, Effect};
@@ -31,12 +36,33 @@ use crate::keys::QuickLookKey;
 use crate::pane::next_generation;
 use crate::preview::{PreviewContent, PreviewRequest, Previewed};
 use crate::selection::Pick;
+use crate::words;
 
-/// What the preview shows, and where quick look opened.
+/// The narrowest window that shows the preview panel; in a narrower one it hides.
+pub const PREVIEW_MIN_WINDOW: f32 = 1000.0;
+/// The preview panel's width: this share of the window's, from [`PREVIEW_MIN_WIDTH`] to
+/// [`PREVIEW_MAX_WIDTH`].
+pub const PREVIEW_SHARE: f32 = 0.2;
+pub const PREVIEW_MIN_WIDTH: f32 = 200.0;
+pub const PREVIEW_MAX_WIDTH: f32 = 360.0;
+
+/// The width of the preview panel in a window `window_width` wide (logical pixels), or `None`
+/// when the window is too narrow for it ([`PREVIEW_MIN_WINDOW`]).
+pub fn preview_width(window_width: f32) -> Option<f32> {
+    (window_width >= PREVIEW_MIN_WINDOW)
+        .then(|| (window_width * PREVIEW_SHARE).clamp(PREVIEW_MIN_WIDTH, PREVIEW_MAX_WIDTH))
+}
+
+/// What the preview shows, where quick look opened, and whether the window has room for the
+/// panel.
 #[derive(Debug, Default)]
 pub(super) struct PreviewWork {
     shown: Option<Shown>,
     quick_look: Option<QuickLookAt>,
+    /// The window is too narrow for the panel ([`PREVIEW_MIN_WINDOW`]).
+    cramped: bool,
+    /// The notice that the panel hid for the window's width has shown (once is enough).
+    cramped_told: bool,
 }
 
 /// The item the preview shows.
@@ -57,6 +83,8 @@ struct Target {
     size: u64,
     modified: Option<SystemTime>,
     filter: VisibilityFilter,
+    /// A file stored online only, which opening would download: it shows its facts alone.
+    online_only: bool,
 }
 
 /// The tab quick look opened in: pane `side`'s tab `tab` at `folder`.
@@ -93,6 +121,33 @@ impl AppState {
         self.preview.quick_look.is_some()
     }
 
+    /// Whether the preview panel shows: it is on, and the window has room for it.
+    pub fn preview_panel_shows(&self) -> bool {
+        self.layout.preview && !self.preview.cramped
+    }
+
+    /// Whether the window is too narrow for the preview panel.
+    pub fn preview_cramped(&self) -> bool {
+        self.preview.cramped
+    }
+
+    /// The window became too narrow for the preview panel (`cramped`), or wide enough again:
+    /// the panel hides or shows as its setting says, and the first time it hides, a notice says
+    /// why.
+    pub fn set_preview_cramped(&mut self, cramped: bool) -> Vec<Effect> {
+        self.preview.cramped = cramped;
+        self.tell_cramped()
+    }
+
+    /// The notice that the panel is on but hidden for the window's width, once.
+    pub(super) fn tell_cramped(&mut self) -> Vec<Effect> {
+        if self.layout.preview && self.preview.cramped && !self.preview.cramped_told {
+            self.preview.cramped_told = true;
+            return vec![Effect::Notice(words::preview_no_room().to_owned())];
+        }
+        Vec::new()
+    }
+
     /// Whether a name is being typed to select in the active pane at `now`
     /// ([`Tab::typing`](crate::pane::Tab::typing)): a Space then types.
     pub fn typing(&self, now: std::time::Instant) -> bool {
@@ -106,7 +161,7 @@ impl AppState {
         if self.quick_look_strays() {
             self.preview.quick_look = None;
         }
-        let wanted = self.layout.preview || self.preview.quick_look.is_some();
+        let wanted = self.preview_panel_shows() || self.preview.quick_look.is_some();
         let Some((target, entry)) = self.preview_target().filter(|_| wanted) else {
             // Quick look has nothing to show.
             self.preview.quick_look = None;
@@ -124,7 +179,8 @@ impl AppState {
         }
         let generation = next_generation();
         let mut effects = Vec::new();
-        let content = if matches!(target.kind, EntryKind::File | EntryKind::Dir) {
+        let online_only = target.online_only;
+        let content = if matches!(target.kind, EntryKind::File | EntryKind::Dir) && !online_only {
             effects.push(Effect::Preview(PreviewRequest {
                 generation,
                 path: target.path.clone(),
@@ -142,7 +198,11 @@ impl AppState {
             {
                 effects.push(Effect::StopPreview);
             }
-            Some(PreviewContent::Plain)
+            Some(if online_only {
+                PreviewContent::OnlineOnly
+            } else {
+                PreviewContent::Plain
+            })
         };
         self.preview.shown = Some(Shown {
             target,
@@ -247,6 +307,8 @@ impl AppState {
             size: entry.size,
             modified: entry.modified,
             filter: tab.filter(),
+            online_only: entry.kind == EntryKind::File
+                && entry.attributes.contains(Attributes::OFFLINE),
         };
         Some((target, entry.clone()))
     }

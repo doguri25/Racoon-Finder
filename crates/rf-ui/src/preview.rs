@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::Encoding;
+use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, Limits};
 use rf_core::{EntryKind, ErrorKind, VPath};
 use rf_vfs::{CancelToken, Provider, Vfs, VisibilityFilter};
@@ -90,6 +91,9 @@ pub enum PreviewContent {
     Plain,
     /// An image file too large to decode ([`MAX_IMAGE_BYTES`]): its size shows.
     TooLarge,
+    /// A file stored online only (`Attributes::OFFLINE`: a cloud drive's placeholder), which
+    /// opening would download: its facts show, and it is not opened.
+    OnlineOnly,
     /// It cannot be read, or its content is broken: "미리 볼 수 없습니다".
     Unavailable,
 }
@@ -140,7 +144,25 @@ pub enum ImageRefused {
     TooLarge,
     /// It is not an image of a format this preview knows, or it is broken.
     Broken,
+    /// The request was stopped (a newer one came): the work stopped at its next checkpoint.
+    Stopped,
 }
+
+/// What an image must keep to before it is decoded: the most pixels on a side, in all, and the
+/// most bytes its pixels take.
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    side: u32,
+    pixels: u64,
+    bytes: u64,
+}
+
+/// The bounds of the preview.
+const BOUNDS: Bounds = Bounds {
+    side: MAX_DIMENSION,
+    pixels: MAX_PIXELS,
+    bytes: MAX_DECODE_BYTES,
+};
 
 /// What the first part of a file is as text ([`read_text`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +181,9 @@ pub fn make_preview(
     vfs: &Vfs,
     cancel: &CancelToken,
 ) -> Option<PreviewContent> {
+    if cancel.is_cancelled() {
+        return None;
+    }
     // A link or a special file is not opened: a FIFO's reader would wait for its writer.
     if !matches!(request.kind, EntryKind::File | EntryKind::Dir) {
         return Some(PreviewContent::Plain);
@@ -175,44 +200,57 @@ pub fn make_preview(
             MAX_ITEMS_COUNTED,
         );
     }
-    Some(file_preview(provider.as_ref(), &request.path))
+    file_preview(provider.as_ref(), &request.path, cancel)
 }
 
 /// The preview of the file at `path`: an image by its extension, else its first part as text.
-fn file_preview(provider: &dyn Provider, path: &VPath) -> PreviewContent {
+/// `None` when `cancel` stopped it, which it looks at before it opens the file, after it read
+/// it, and between the steps of an image's decoding ([`decode_image`]).
+fn file_preview(
+    provider: &dyn Provider,
+    path: &VPath,
+    cancel: &CancelToken,
+) -> Option<PreviewContent> {
+    if cancel.is_cancelled() {
+        return None;
+    }
     let Ok(mut stream) = provider.open_read(path) else {
-        return PreviewContent::Unavailable;
+        return Some(PreviewContent::Unavailable);
     };
     let Ok(length) = stream.seek(SeekFrom::End(0)) else {
-        return PreviewContent::Unavailable;
+        return Some(PreviewContent::Unavailable);
     };
     if stream.rewind().is_err() {
-        return PreviewContent::Unavailable;
+        return Some(PreviewContent::Unavailable);
     }
     if let Some(format) = path.file_name().and_then(image_format) {
         if length > MAX_IMAGE_BYTES {
-            return PreviewContent::TooLarge;
+            return Some(PreviewContent::TooLarge);
         }
-        return match guarded(|| decode_image(BufReader::new(stream), format)) {
-            Some(Ok(image)) => PreviewContent::Image(image),
-            Some(Err(_)) | None => PreviewContent::Unavailable,
+        return match guarded(|| decode_image(BufReader::new(stream), format, cancel)) {
+            Some(Ok(image)) => Some(PreviewContent::Image(image)),
+            Some(Err(ImageRefused::Stopped)) => None,
+            Some(Err(_)) | None => Some(PreviewContent::Unavailable),
         };
     }
     let wanted = usize::try_from(length).map_or(TEXT_BYTES, |length| length.min(TEXT_BYTES));
     let mut head = Vec::with_capacity(wanted);
     let limit = u64::try_from(TEXT_BYTES).unwrap_or(u64::MAX);
     if stream.take(limit).read_to_end(&mut head).is_err() {
-        return PreviewContent::Unavailable;
+        return Some(PreviewContent::Unavailable);
+    }
+    if cancel.is_cancelled() {
+        return None;
     }
     if head.is_empty() {
-        return PreviewContent::Plain;
+        return Some(PreviewContent::Plain);
     }
     let whole = u64::try_from(head.len()).is_ok_and(|read| read >= length);
-    match guarded(|| read_text(&head, whole)) {
+    Some(match guarded(|| read_text(&head, whole)) {
         Some(TextRead::Text(text)) => PreviewContent::Text(text),
         Some(TextRead::Binary) => PreviewContent::Plain,
         Some(TextRead::Malformed) | None => PreviewContent::Unavailable,
-    }
+    })
 }
 
 /// How many items of the folder `dir` `filter` shows, up to `cap`: `(items, more)`, with
@@ -286,11 +324,32 @@ fn shown_format(format: ImageFormat) -> bool {
 }
 
 /// Decodes the image `reader` holds (in `format`, or the format its first bytes say), within the
-/// limits of the module, and makes it at most [`MAX_SIDE`] on its long side.
+/// limits of the module, makes it at most [`MAX_SIDE`] on its long side, and turns it as its file
+/// says to show it. It looks at `cancel` before it decodes and after each step (decoding,
+/// shrinking, turning), and stops there once a newer request came ([`ImageRefused::Stopped`]).
 pub fn decode_image(
     reader: impl BufRead + Seek,
     format: ImageFormat,
+    cancel: &CancelToken,
 ) -> Result<PreviewImage, ImageRefused> {
+    decode_within(reader, format, cancel, BOUNDS)
+}
+
+/// [`decode_image`] within `bounds`.
+fn decode_within(
+    reader: impl BufRead + Seek,
+    format: ImageFormat,
+    cancel: &CancelToken,
+    bounds: Bounds,
+) -> Result<PreviewImage, ImageRefused> {
+    let checkpoint = || {
+        if cancel.is_cancelled() {
+            Err(ImageRefused::Stopped)
+        } else {
+            Ok(())
+        }
+    };
+    checkpoint()?;
     let mut reader = ImageReader::with_format(reader, format)
         .with_guessed_format()
         .map_err(|_| ImageRefused::Broken)?;
@@ -298,8 +357,8 @@ pub fn decode_image(
         return Err(ImageRefused::Broken);
     }
     let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_DIMENSION);
-    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_image_width = Some(bounds.side);
+    limits.max_image_height = Some(bounds.side);
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     reader.limits(limits);
     let mut decoder = reader.into_decoder().map_err(|error| refusal(&error))?;
@@ -308,17 +367,34 @@ pub fn decode_image(
         return Err(ImageRefused::Broken);
     }
     // The decoded pixels are the decoder's largest allocation: refused before it is made.
-    if u64::from(width) * u64::from(height) > MAX_PIXELS || decoder.total_bytes() > MAX_DECODE_BYTES
+    if u64::from(width) * u64::from(height) > bounds.pixels || decoder.total_bytes() > bounds.bytes
     {
         return Err(ImageRefused::TooLarge);
     }
     let orientation = decoder.orientation().map_err(|error| refusal(&error))?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(|error| refusal(&error))?;
-    image.apply_orientation(orientation);
-    let (width, height) = (image.width(), image.height());
+    checkpoint()?;
+    // Shrunk before it is turned: a turn by a quarter copies the image, and the bound is the
+    // same on both sides, so the result is the same.
     if width > MAX_SIDE || height > MAX_SIDE {
         image = image.thumbnail(MAX_SIDE, MAX_SIDE);
+        checkpoint()?;
     }
+    image.apply_orientation(orientation);
+    checkpoint()?;
+    // The size the image has, turned as it shows.
+    let quarter = matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    );
+    let (width, height) = if quarter {
+        (height, width)
+    } else {
+        (width, height)
+    };
     let rgba = image.into_rgba8();
     let pixels = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
         rgba.as_raw(),
@@ -466,7 +542,7 @@ mod tests {
     }
 
     fn decode(bytes: Vec<u8>, format: ImageFormat) -> Result<PreviewImage, ImageRefused> {
-        decode_image(Cursor::new(bytes), format)
+        decode_image(Cursor::new(bytes), format, &CancelToken::new())
     }
 
     #[test]
@@ -653,8 +729,17 @@ mod tests {
             read_text(b"PK\x03\x04\x00\x00binary", true),
             TextRead::Binary
         );
-        let controls: Vec<u8> = (0..200u8).map(|i| i % 8).collect();
+        // Control characters without a NUL: more than one in a hundred is no text.
+        let mut controls = b"header ".repeat(20);
+        controls.extend((1..=6u8).cycle().take(10));
+        assert!(!controls.contains(&0));
         assert_eq!(read_text(&controls, true), TextRead::Binary);
+        // One in more than a hundred is (a bell in a log), and tabs, line breaks, form feeds and
+        // escapes are no controls here.
+        let mut text = b"a line of a log ".repeat(10);
+        text.push(0x07);
+        text.extend_from_slice(b"\t\r\n\x0c\x1b[0m end\n");
+        assert!(matches!(read_text(&text, true), TextRead::Text(_)));
         // A mark that names UTF-8 before bytes that are not.
         let mut broken = vec![0xEF, 0xBB, 0xBF];
         broken.extend_from_slice(&[b'a', 0xFF, 0xFE, 0xC3, b'b']);
@@ -864,5 +949,114 @@ mod tests {
                 more: false
             }
         );
+    }
+
+    /// A JPEG of `width` × `height` pixels, red on its left half and blue on its right, whose
+    /// EXIF says to show it turned a quarter clockwise (orientation 6).
+    fn turned_jpeg(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        use image::codecs::jpeg::JpegEncoder;
+        let image: RgbaImage = ImageBuffer::from_fn(width, height, |x, _| {
+            if x < width / 2 {
+                Rgba([220, 20, 20, 255])
+            } else {
+                Rgba([20, 20, 220, 255])
+            }
+        });
+        let rgb = DynamicImage::ImageRgba8(image).into_rgb8();
+        // A TIFF header (little endian) and one IFD entry: Orientation (0x0112), a SHORT, 6.
+        let mut exif = Vec::new();
+        exif.extend_from_slice(b"II");
+        exif.extend_from_slice(&42u16.to_le_bytes());
+        exif.extend_from_slice(&8u32.to_le_bytes());
+        exif.extend_from_slice(&1u16.to_le_bytes());
+        exif.extend_from_slice(&0x0112u16.to_le_bytes());
+        exif.extend_from_slice(&3u16.to_le_bytes());
+        exif.extend_from_slice(&1u32.to_le_bytes());
+        exif.extend_from_slice(&6u16.to_le_bytes());
+        exif.extend_from_slice(&[0, 0]);
+        exif.extend_from_slice(&0u32.to_le_bytes());
+        let mut bytes = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut bytes, 90);
+        encoder.set_exif_metadata(exif).expect("JPEG takes EXIF");
+        encoder
+            .write_image(rgb.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .expect("the picture encodes");
+        bytes
+    }
+
+    /// The color of pixel (`x`, `y`) of `image`.
+    fn pixel(image: &PreviewImage, x: u32, y: u32) -> [u8; 4] {
+        let at = usize::try_from(y * image.pixels.width() + x).expect("a small picture") * 4;
+        let bytes = image.pixels.as_bytes();
+        [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
+    }
+
+    #[test]
+    fn an_image_is_shrunk_then_turned_as_its_file_says() {
+        // Turned a quarter clockwise, the left (red) half is on top.
+        let small = decode(turned_jpeg(40, 24), ImageFormat::Jpeg).expect("the picture decodes");
+        assert_eq!((small.width, small.height), (24, 40));
+        assert_eq!((small.pixels.width(), small.pixels.height()), (24, 40));
+        let top = pixel(&small, 12, 6);
+        let bottom = pixel(&small, 12, 34);
+        assert!(top[0] > 150 && top[2] < 100, "{top:?}");
+        assert!(bottom[2] > 150 && bottom[0] < 100, "{bottom:?}");
+        // A large one is shrunk first, then turned: the bound is the same on both sides.
+        let large = decode(turned_jpeg(3200, 800), ImageFormat::Jpeg).expect("the picture decodes");
+        assert_eq!((large.width, large.height), (800, 3200));
+        assert_eq!((large.pixels.width(), large.pixels.height()), (400, 1600));
+        let top = pixel(&large, 200, 100);
+        assert!(top[0] > 150 && top[2] < 100, "{top:?}");
+    }
+
+    #[test]
+    fn the_bytes_of_the_pixels_are_bounded_on_their_own() {
+        // 40 × 24 RGBA pixels take 3,840 bytes: within every bound but a byte bound under that.
+        let bytes = || Cursor::new(picture(40, 24, ImageFormat::Png));
+        let tight = Bounds {
+            bytes: 3_000,
+            ..BOUNDS
+        };
+        let cancel = CancelToken::new();
+        assert_eq!(
+            decode_within(bytes(), ImageFormat::Png, &cancel, tight).err(),
+            Some(ImageRefused::TooLarge)
+        );
+        let room = Bounds {
+            bytes: 3_840,
+            ..BOUNDS
+        };
+        assert!(decode_within(bytes(), ImageFormat::Png, &cancel, room).is_ok());
+    }
+
+    #[test]
+    fn a_stopped_request_does_no_more_work() {
+        let stopped = CancelToken::new();
+        stopped.cancel();
+        assert_eq!(
+            decode_image(
+                Cursor::new(picture(40, 24, ImageFormat::Png)),
+                ImageFormat::Png,
+                &stopped
+            )
+            .err(),
+            Some(ImageRefused::Stopped)
+        );
+        let dir = scratch();
+        let png = write(dir.path(), "a.png", &picture(30, 20, ImageFormat::Png));
+        let notes = write(dir.path(), "a.txt", b"hello\n");
+        let vfs = Vfs::with_local();
+        for (path, kind) in [
+            (png.as_path(), EntryKind::File),
+            (notes.as_path(), EntryKind::File),
+            (dir.path(), EntryKind::Dir),
+        ] {
+            assert_eq!(
+                make_preview(&request(path, kind), &vfs, &stopped),
+                None,
+                "{path:?}"
+            );
+        }
     }
 }

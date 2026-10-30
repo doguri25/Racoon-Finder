@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::*;
 use crate::keys::QuickLookKey;
 use crate::preview::{PreviewContent, Previewed};
+use crate::words;
 use rf_vfs::Change;
 
 const ALL_MODES: [ViewMode; 5] = [
@@ -298,4 +299,96 @@ fn a_space_while_a_name_is_typed_types_and_otherwise_opens_quick_look() {
     assert!(!state.typing(at(2_200)));
     key(&mut state, " ", 2_200);
     assert!(state.quick_look_open());
+}
+
+#[test]
+fn a_file_stored_online_only_is_not_opened() {
+    let mut online = file("클라우드.docx");
+    online.attributes |= Attributes::OFFLINE;
+    let (mut state, effects) = with_panel(vec![file("a.txt"), online, dir("d")], vec![]);
+    the_preview(&effects);
+    // No worker opens it (which would download it): the request before it stops.
+    press(&mut state, &special(Key::DownArrow), NONE);
+    assert_eq!(state.follow_preview(), [Effect::StopPreview]);
+    assert_eq!(
+        state.preview().expect("shown").content,
+        Some(&PreviewContent::OnlineOnly)
+    );
+    // A folder is counted as ever.
+    press(&mut state, &special(Key::DownArrow), NONE);
+    assert_eq!(the_preview(&state.follow_preview()).kind, EntryKind::Dir);
+}
+
+#[test]
+fn a_click_or_another_pane_ends_the_name_being_typed() {
+    let mut state = ready(
+        vec![file("apple"), file("banana"), file("cherry")],
+        vec![file("x")],
+    );
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let typed = |state: &mut AppState, text: &str, ms: u64| {
+        let command = Command::TypeToSelect(text.to_owned());
+        state.key(command, NONE, Paging::rows(10), at(ms));
+    };
+    typed(&mut state, "a", 0);
+    assert!(state.typing(at(100)));
+    // A click on a row: a Space right after it opens quick look.
+    state.press_row(LEFT, 2, false, false);
+    state.release_row(LEFT, 2);
+    assert!(!state.typing(at(200)));
+    let command = keys::pane_command(" ", NONE, Os::Windows, state.typing(at(200)));
+    assert_eq!(command, Some(Command::QuickLook));
+    state.key(Command::QuickLook, NONE, Paging::rows(10), at(200));
+    assert!(state.quick_look_open());
+    state.close_quick_look();
+
+    // A click that gives the other pane the keys ends it too, in both panes.
+    typed(&mut state, "b", 1_000);
+    assert!(state.typing(at(1_100)));
+    state.activate(RIGHT);
+    assert!(!state.typing(at(1_100)));
+    state.activate(LEFT);
+    assert!(!state.typing(at(1_100)));
+}
+
+#[test]
+fn the_panel_is_a_fifth_of_the_window_and_hides_in_a_narrow_one() {
+    assert_eq!(preview_width(900.0), None);
+    assert_eq!(preview_width(999.0), None);
+    assert_eq!(preview_width(1000.0), Some(200.0));
+    assert_eq!(preview_width(1280.0), Some(256.0));
+    assert_eq!(preview_width(1800.0), Some(360.0));
+    assert_eq!(preview_width(2560.0), Some(360.0));
+}
+
+#[test]
+fn a_window_too_narrow_hides_the_panel_and_keeps_its_setting() {
+    let (mut state, effects) = with_panel(mixed(), vec![]);
+    the_preview(&effects);
+    // Too narrow: the panel hides, what it asked for stops, and a notice says why.
+    let notice = Effect::Notice(words::preview_no_room().to_owned());
+    assert_eq!(
+        state.set_preview_cramped(true),
+        std::slice::from_ref(&notice)
+    );
+    assert!(state.layout().preview);
+    assert!(!state.preview_panel_shows());
+    assert_eq!(state.follow_preview(), [Effect::StopPreview]);
+    assert!(state.preview().is_none());
+    // Quick look still shows.
+    press(&mut state, " ", NONE);
+    the_preview(&state.follow_preview());
+    state.close_quick_look();
+    assert_eq!(state.follow_preview(), [Effect::StopPreview]);
+    // Wide again, it shows and asks again; narrow again, the notice does not come twice.
+    assert_eq!(state.set_preview_cramped(false), []);
+    the_preview(&state.follow_preview());
+    assert_eq!(state.set_preview_cramped(true), []);
+    // Turned on in a narrow window, it says so the first time.
+    let mut state = ready(mixed(), vec![]);
+    assert_eq!(state.set_preview_cramped(true), []);
+    assert_eq!(press(&mut state, "p", ALT), Some(vec![notice]));
+    assert!(state.layout().preview);
+    assert_eq!(state.follow_preview(), []);
 }

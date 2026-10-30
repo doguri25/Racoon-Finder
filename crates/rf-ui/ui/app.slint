@@ -143,6 +143,11 @@ export component MainWindow inherits Window {
     // and whether quick look shows (over everything but a dialog).
     in property <PreviewView> preview;
     in property <bool> quick-look;
+    // The preview panel's width, and whether the window has room for it (Rust sets both from
+    // the window's width: `state::preview_width`); without room it hides, and `show-preview`,
+    // the setting, stays.
+    in property <length> preview-width: 260px;
+    in property <bool> preview-fits: true;
     // The size the window opens at: the one of the last run, from the settings.
     in property <length> start-width: 1280px;
     in property <length> start-height: 800px;
@@ -1171,12 +1176,12 @@ export component MainWindow inherits Window {
                 }
 
                 Rectangle {
-                    width: root.show-preview ? Theme.gap-m : 0px;
+                    width: root.show-preview && root.preview-fits ? Theme.gap-m : 0px;
                 }
 
                 // The preview panel (LAY-06, VIEW-02), at the right end.
-                if root.show-preview: PreviewPanel {
-                    width: 260px;
+                if root.show-preview && root.preview-fits: PreviewPanel {
+                    width: root.preview-width;
                     view: root.preview;
                 }
             }

@@ -145,17 +145,20 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
     const QUIET: Duration = Duration::from_millis(300);
+    /// The delay of the tests that need one: long enough that the few calls made right after
+    /// one another before it is over are so even on a loaded CI runner.
+    const DELAY: Duration = Duration::from_secs(1);
 
     #[test]
     fn requests_within_the_delay_leave_only_the_last_one_to_be_made() {
-        let (previewer, starts, answers) = previewer(Duration::from_millis(200), None);
+        let (previewer, starts, answers) = previewer(DELAY, None);
         let asked = Instant::now();
         for generation in 1..=5 {
             previewer.preview(request(generation)).expect("a worker");
         }
         assert_eq!(starts.recv_timeout(WAIT).ok(), Some(5));
         // Not before the delay has passed since the last request.
-        assert!(asked.elapsed() >= Duration::from_millis(200));
+        assert!(asked.elapsed() >= DELAY);
         assert_eq!(answers.recv_timeout(WAIT).ok(), Some(5));
         assert_eq!(starts.recv_timeout(QUIET).ok(), None);
     }
@@ -178,10 +181,11 @@ mod tests {
 
     #[test]
     fn a_stop_drops_the_request_that_waits_and_the_one_being_made() {
-        let (previewer, starts, _answers) = previewer(Duration::from_millis(150), None);
+        let (previewer, starts, _answers) = previewer(DELAY, None);
         previewer.preview(request(1)).expect("a worker");
         previewer.stop();
-        assert_eq!(starts.recv_timeout(QUIET).ok(), None);
+        // Well past the time it would have started.
+        assert_eq!(starts.recv_timeout(DELAY + DELAY / 2).ok(), None);
         let (go, hold) = mpsc::channel::<()>();
         let (previewer, starts, made) =
             self::previewer(Duration::ZERO, Some(Arc::new(Mutex::new(hold))));

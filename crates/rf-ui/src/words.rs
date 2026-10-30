@@ -1391,12 +1391,30 @@ pub fn preview_text_note(encoding: &str, truncated: bool) -> String {
 }
 
 /// The facts the preview shows under an item: its kind, its size (`size`, for a file) and when
-/// it was last changed (`modified`, when known): `PNG 이미지 · 1.2 MB · 2026-10-30 09:12`.
+/// it was last changed (`modified`, when known): `PNG 이미지 · 1.2 MB · 2026-10-30 09:12`. Each
+/// fact keeps its words together with no-break spaces, so that a narrow panel breaks the line
+/// only between the facts (never between a date and its time).
 pub fn preview_facts(kind: &str, size: Option<&str>, modified: Option<&str>) -> String {
     let mut parts = vec![kind];
     parts.extend(size);
     parts.extend(modified.filter(|modified| !modified.is_empty()));
-    parts.join(" · ")
+    parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// What the preview says of a file stored online only (a cloud drive's placeholder): it is not
+/// downloaded to be shown.
+pub fn preview_online_only() -> &'static str {
+    "온라인 전용 파일은 미리 보지 않습니다"
+}
+
+/// The notice when the preview panel is hidden because the window is too narrow for it; it
+/// comes back when the window is wide enough.
+pub fn preview_no_room() -> &'static str {
+    "창이 좁아 미리 보기 패널을 숨겼습니다. 창을 넓히면 다시 보입니다"
 }
 
 /// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
@@ -2189,5 +2207,16 @@ mod tests {
             drag_label(1, TransferMode::Copy, "Downloads"),
             "항목 1개 복사 → Downloads"
         );
+    }
+
+    #[test]
+    fn the_facts_of_a_preview_break_only_between_them() {
+        let facts = preview_facts("JPG 이미지", Some("98 KB"), Some("2026-10-30 01:29"));
+        assert_eq!(
+            facts,
+            "JPG\u{a0}이미지 · 98\u{a0}KB · 2026-10-30\u{a0}01:29"
+        );
+        // A date that cannot be told is left out.
+        assert_eq!(preview_facts("파일 폴더", None, Some("")), "파일\u{a0}폴더");
     }
 }

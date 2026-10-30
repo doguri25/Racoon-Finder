@@ -61,7 +61,10 @@ pub use copies::copy_origins;
 pub use drag::{Drag, DropOffer, DropSpot};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
-pub use preview::PreviewShown;
+pub use preview::{
+    PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
+    preview_width,
+};
 pub use select::{MATCH_STRETCH, MatchRequest, Matched};
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
@@ -449,9 +452,15 @@ impl AppState {
             .collect()
     }
 
-    /// Gives pane `side` the keyboard.
+    /// Gives pane `side` the keyboard (a key, or a click on the pane or its rows), which ends
+    /// the name being typed to select (NAV-14) in either pane.
     pub fn activate(&mut self, side: usize) {
         self.active = side.min(RIGHT);
+        // A click on a pane or its rows ends a name being typed: a Space after it opens quick
+        // look.
+        for pane in &mut self.panes {
+            pane.active_tab_mut().end_typing();
+        }
     }
 
     /// Carries out the shortcut `command`, held with `mods`, on the active pane. `paging` is how
