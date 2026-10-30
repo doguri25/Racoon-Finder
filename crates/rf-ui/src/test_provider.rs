@@ -4,12 +4,14 @@
 //! dehydrated after it was listed, a file that takes long to open).
 
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 use rf_core::{Entry, Scheme, VPath};
 use rf_vfs::{
-    CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LocalProvider, Provider, ReadStream,
-    RenameMode, Vfs, WatchHandle, WatchSink, WriteMode, WriteStream,
+    CancelToken, Capabilities, DeleteMode, Deleted, DiskSpace, LinkTarget, LocalProvider,
+    MetadataPatch, Provider, ReadStream, RenameMode, Vfs, WatchHandle, WatchSink, WriteMode,
+    WriteStream,
 };
 
 /// Changes the entry `stat` gives for a path.
@@ -17,7 +19,9 @@ type StatHook = dyn Fn(&VPath, &mut Entry) + Send + Sync;
 /// Hears of an `open_read` of a path, before it opens.
 type OpenHook = dyn Fn(&VPath) + Send + Sync;
 
-/// The local provider, with its hooks.
+/// The local provider, with its hooks: `stat` and `stat_target` give what the stat hook makes
+/// of the local entry, `open_read` tells the open hook first, and every other method of
+/// [`Provider`], the optional ones too, is the local provider's own.
 pub struct Hooked {
     local: LocalProvider,
     stat: Box<StatHook>,
@@ -101,5 +105,51 @@ impl Provider for Hooked {
 
     fn watch(&self, dir: &VPath, sink: WatchSink) -> rf_core::Result<WatchHandle> {
         self.local.watch(dir, sink)
+    }
+
+    fn stat_target(&self, path: &VPath) -> rf_core::Result<Entry> {
+        let mut entry = self.local.stat_target(path)?;
+        (self.stat)(path, &mut entry);
+        Ok(entry)
+    }
+
+    fn read_link(&self, path: &VPath) -> rf_core::Result<LinkTarget> {
+        self.local.read_link(path)
+    }
+
+    fn create_symlink(&self, link: &VPath, target: &LinkTarget) -> rf_core::Result<()> {
+        self.local.create_symlink(link, target)
+    }
+
+    fn set_metadata(&self, path: &VPath, patch: &MetadataPatch) -> rf_core::Result<()> {
+        self.local.set_metadata(path, patch)
+    }
+
+    fn copy_extras(&self, from: &VPath, to: &VPath) -> rf_core::Result<()> {
+        self.local.copy_extras(from, to)
+    }
+
+    fn remove_dir(&self, path: &VPath) -> rf_core::Result<()> {
+        self.local.remove_dir(path)
+    }
+
+    fn delete_leaf(&self, path: &VPath) -> rf_core::Result<()> {
+        self.local.delete_leaf(path)
+    }
+
+    fn sync_dir(&self, path: &VPath) -> rf_core::Result<()> {
+        self.local.sync_dir(path)
+    }
+
+    fn fs_name(&self, path: &VPath) -> Option<String> {
+        self.local.fs_name(path)
+    }
+
+    fn data_ranges(&self, path: &VPath) -> rf_core::Result<Option<Vec<Range<u64>>>> {
+        self.local.data_ranges(path)
+    }
+
+    fn restore_trashed(&self, location: &VPath, original: &VPath) -> rf_core::Result<()> {
+        self.local.restore_trashed(location, original)
     }
 }

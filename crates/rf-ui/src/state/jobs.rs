@@ -5,11 +5,12 @@
 
 use std::ffi::{OsStr, OsString};
 use std::slice;
+use std::sync::Arc;
 
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
-    JobSpec, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
+    JobSpec, LanePolicy, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 
 use super::{AppState, Effect, RIGHT, ToastAction};
@@ -90,6 +91,12 @@ impl AppState {
     /// Takes what the engine's history can undo and redo next.
     pub fn set_history(&mut self, history: History) {
         self.history = history;
+    }
+
+    /// Takes the lanes the engine runs the jobs in ([`Jobs::lanes`](crate::jobs::Jobs::lanes)),
+    /// which tell which queued jobs wait behind a paused one.
+    pub fn set_lanes(&mut self, lanes: Arc<dyn LanePolicy>) {
+        self.jobs.set_lanes(lanes);
     }
 
     /// Takes an event of the job engine: the job panel follows it, a job that ended is told of

@@ -996,6 +996,7 @@ impl Controller {
         }
         effects.extend(state.follow_active());
         state.set_history(self.jobs.history());
+        state.set_lanes(self.jobs.lanes());
         if let Some(dir) = self.log_dir.borrow_mut().take() {
             state.set_log_dir(dir);
         }

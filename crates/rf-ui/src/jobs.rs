@@ -51,6 +51,8 @@ pub const QUIT_TIMEOUT_ASKING: Duration = Duration::from_millis(500);
 pub struct Jobs {
     engine: JobEngine,
     resolver: Arc<UiResolver>,
+    /// The lanes of the engine's config.
+    lanes: Arc<dyn LanePolicy>,
     /// Set once [`Jobs::close_down`] has run.
     closed: Arc<AtomicBool>,
 }
@@ -137,14 +139,22 @@ impl Jobs {
         let resolver = Arc::new(UiResolver::new(on_question));
         let config = EngineConfig::new(Vfs::with_local(), Arc::clone(&resolver) as _)
             .with_journal(journal_dir);
+        let lanes = Arc::clone(&config.lanes);
         let (engine, events) = JobEngine::start(config);
         // The bridge waits for it; it ends only after this.
         let _ = hand_over.send(events);
         Ok(Jobs {
             engine,
             resolver,
+            lanes,
             closed: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Which lane the engine runs each job in: the rule of its config, for the window to tell
+    /// which queued jobs wait behind a paused one ([`JobRows::set_lanes`]).
+    pub fn lanes(&self) -> Arc<dyn LanePolicy> {
+        Arc::clone(&self.lanes)
     }
 
     pub fn engine(&self) -> &JobEngine {
@@ -538,9 +548,28 @@ pub struct JobRows {
     jobs: Vec<Tracked>,
     /// The number the next job to start gets.
     next_start: u64,
+    /// The engine's lanes ([`JobRows::set_lanes`]).
+    lanes: Lanes,
+}
+
+/// Which lane each job runs in, as the engine's config says: [`DefaultLanes`], the engine's
+/// own default, until the window is given the engine's.
+#[derive(Clone, Debug)]
+struct Lanes(Arc<dyn LanePolicy>);
+
+impl Default for Lanes {
+    fn default() -> Lanes {
+        Lanes(Arc::new(DefaultLanes))
+    }
 }
 
 impl JobRows {
+    /// Takes the lanes the engine runs the jobs in ([`Jobs::lanes`]), which
+    /// [`JobRows::going_on`] follows.
+    pub fn set_lanes(&mut self, lanes: Arc<dyn LanePolicy>) {
+        self.lanes = Lanes(lanes);
+    }
+
     /// Follows the job `started`, which the window submitted. Its events may come before this
     /// is called only on another thread than the UI thread's, which never happens: the events
     /// reach the UI thread after the call that submitted the job.
@@ -650,10 +679,10 @@ impl JobRows {
     /// Whether a job will end by itself: one that is not paused, and is not queued in a lane
     /// whose job under way is paused. A lane runs one job at a time and passes over only the
     /// queued jobs that are paused, so a paused job a worker took up holds the jobs queued
-    /// behind it. The lanes are those the engine starts with ([`DefaultLanes`]); a job whose
-    /// lane is not known (its spec has not come) is taken to wait behind any paused one.
+    /// behind it. The lanes are the engine's ([`JobRows::set_lanes`]); a job whose lane is not
+    /// known (its spec has not come) is taken to wait behind any paused one.
     pub fn going_on(&self) -> bool {
-        let lane = |job: &Tracked| job.spec.as_deref().map(|spec| DefaultLanes.lane(spec));
+        let lane = |job: &Tracked| job.spec.as_deref().map(|spec| self.lanes.0.lane(spec));
         let held: Vec<Option<LaneId>> = self
             .jobs
             .iter()
@@ -926,6 +955,52 @@ mod tests {
             })
             .expect("the job ended");
         assert_eq!((ended.work, ended.origin), (JobWork::Copy, None));
+    }
+
+    /// Every job in one lane.
+    #[derive(Debug)]
+    struct OneLane;
+
+    impl LanePolicy for OneLane {
+        fn lane(&self, _spec: &JobSpec) -> LaneId {
+            LaneId::MAIN
+        }
+    }
+
+    #[test]
+    fn the_jobs_go_on_by_the_lanes_of_the_engine() {
+        // A copy under way is paused; a rename waits. The engine's usual lanes run a rename in
+        // a lane of its own, so it goes on; an engine that runs everything in one lane holds it
+        // behind the copy.
+        let rename = JobSpec::Rename {
+            from: path("a"),
+            to: path("b"),
+        };
+        let rows_with = |lanes: Option<Arc<dyn LanePolicy>>| {
+            let mut rows = JobRows::default();
+            if let Some(lanes) = lanes {
+                rows.set_lanes(lanes);
+            }
+            for (id, spec, work) in [
+                (1, copy_spec(), JobWork::Copy),
+                (2, rename.clone(), JobWork::Rename),
+            ] {
+                rows.track(Started {
+                    id: JobId(id),
+                    spec: Some(Arc::new(spec)),
+                    work,
+                    origin: None,
+                    via_history: false,
+                });
+            }
+            rows.apply(state(1, JobState::Running));
+            rows.apply(state(1, JobState::Paused));
+            rows.apply(state(2, JobState::Queued));
+            rows
+        };
+        assert!(rows_with(None).going_on());
+        assert!(rows_with(Some(Arc::new(DefaultLanes))).going_on());
+        assert!(!rows_with(Some(Arc::new(OneLane))).going_on());
     }
 
     #[test]

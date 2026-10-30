@@ -11,8 +11,9 @@
 //! thread of its own ([`InstanceLock::watch_requests`]), takes it away and shows its window.
 //! When nothing takes the request within [`SHOW_WAIT`] (an app that hangs, an older one, or one
 //! that is ending and takes no more requests, [`RequestStop`]), the second start takes it back
-//! and tries the lock once more: the app may have ended meanwhile. Only then does it say that
-//! the app runs, as it did before ([`take_or_ask`]). A request left over from an earlier run
+//! and goes on trying the lock for [`QUIT_WAIT`]: an app that is ending lets it go once it has
+//! saved its settings and stopped its jobs. Only then does it say that the app runs, as it did
+//! before ([`take_or_ask`]). A request left over from an earlier run
 //! goes when the lock is taken.
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -20,6 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use crate::controller::FINAL_SAVE_WAIT;
+use crate::jobs::QUIT_TIMEOUT;
 
 /// The name of the lock file in the journal's folder.
 pub const LOCK_FILE: &str = "instance.lock";
@@ -33,6 +37,14 @@ pub const SHOW_POLL: Duration = Duration::from_millis(250);
 
 /// How long a second start waits for the running app to take its request.
 pub const SHOW_WAIT: Duration = Duration::from_secs(3);
+
+/// How long a second start whose request nobody took goes on trying the lock: an app that is
+/// ending takes no request, and lets the lock go only once it has written its settings (at most
+/// [`FINAL_SAVE_WAIT`]) and stopped its jobs (at most [`QUIT_TIMEOUT`]), [`SHOW_WAIT`] more
+/// for the rest of its end.
+pub const QUIT_WAIT: Duration = SHOW_WAIT
+    .saturating_add(FINAL_SAVE_WAIT)
+    .saturating_add(QUIT_TIMEOUT);
 
 /// The single-instance lock. Dropping it lets another process take it.
 #[derive(Debug)]
@@ -180,8 +192,13 @@ pub enum Start {
 /// Takes the lock in `dir`, or, while another process holds it, asks that one to show its
 /// window with `ask` (the app's is [`ask_to_show`] with [`SHOW_WAIT`]: `true` once it was
 /// taken). A request nobody took may mean the app that holds the lock is ending, which takes no
-/// more requests: the lock is tried once more before the app is said to run.
-pub fn take_or_ask(dir: &Path, ask: impl FnOnce(&Path) -> bool) -> Result<Start, InstanceError> {
+/// more requests and lets the lock go only at the end of its end: the lock is tried every
+/// [`SHOW_POLL`] for `wait` (the app's is [`QUIT_WAIT`]) before the app is said to run.
+pub fn take_or_ask(
+    dir: &Path,
+    ask: impl FnOnce(&Path) -> bool,
+    wait: Duration,
+) -> Result<Start, InstanceError> {
     match InstanceLock::acquire(dir) {
         Ok(lock) => return Ok(Start::Lock(lock)),
         Err(InstanceError::AlreadyRunning(_)) => {}
@@ -190,10 +207,16 @@ pub fn take_or_ask(dir: &Path, ask: impl FnOnce(&Path) -> bool) -> Result<Start,
     if ask(dir) {
         return Ok(Start::Shown);
     }
-    match InstanceLock::acquire(dir) {
-        Ok(lock) => Ok(Start::Lock(lock)),
-        Err(InstanceError::AlreadyRunning(_)) => Ok(Start::Running),
-        Err(error) => Err(error),
+    let deadline = Instant::now() + wait;
+    loop {
+        match InstanceLock::acquire(dir) {
+            Ok(lock) => return Ok(Start::Lock(lock)),
+            Err(InstanceError::AlreadyRunning(_)) if Instant::now() < deadline => {
+                std::thread::sleep(SHOW_POLL);
+            }
+            Err(InstanceError::AlreadyRunning(_)) => return Ok(Start::Running),
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -306,26 +329,62 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary folder");
         let journal = dir.path().join("data");
         // Nobody runs: the lock.
-        let first = match take_or_ask(&journal, |_| panic!("nobody to ask")) {
+        let first = match take_or_ask(&journal, |_| panic!("nobody to ask"), QUIT_WAIT) {
             Ok(Start::Lock(lock)) => lock,
             other => panic!("the lock, not {other:?}"),
         };
         // It runs and takes the request: shown.
-        assert!(matches!(take_or_ask(&journal, |_| true), Ok(Start::Shown)));
-        // It runs and does not take it: it runs.
         assert!(matches!(
-            take_or_ask(&journal, |_| false),
+            take_or_ask(&journal, |_| true, QUIT_WAIT),
+            Ok(Start::Shown)
+        ));
+        // It runs and does not take it, and still holds the lock once the wait is over: it
+        // runs.
+        assert!(matches!(
+            take_or_ask(&journal, |_| false, Duration::ZERO),
             Ok(Start::Running)
         ));
         // It ended while it was asked (an app that is ending takes no request): the lock.
         let mut held = Some(first);
-        match take_or_ask(&journal, |_| {
-            drop(held.take());
-            false
-        }) {
-            Ok(Start::Lock(lock)) => assert_eq!(lock.path(), journal.join(LOCK_FILE)),
+        let lock = match take_or_ask(
+            &journal,
+            |_| {
+                drop(held.take());
+                false
+            },
+            Duration::ZERO,
+        ) {
+            Ok(Start::Lock(lock)) => lock,
             other => panic!("the lock, not {other:?}"),
-        }
+        };
+        assert_eq!(lock.path(), journal.join(LOCK_FILE));
+    }
+
+    #[test]
+    fn a_second_start_waits_out_an_app_that_ends_slowly() {
+        // The app that runs is ending: it took no request, and lets the lock go only once it
+        // has saved its settings and stopped its jobs, a while after the request was given up.
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let journal = dir.path().join("data");
+        let first = InstanceLock::acquire(&journal).expect("the lock");
+        let (asked, ending) = std::sync::mpsc::channel::<()>();
+        let quit = std::thread::spawn(move || {
+            ending.recv().expect("the request was given up");
+            std::thread::sleep(Duration::from_millis(300));
+            drop(first);
+        });
+        let start = take_or_ask(
+            &journal,
+            |_| {
+                asked.send(()).expect("the ending app");
+                false
+            },
+            QUIT_WAIT,
+        );
+        quit.join().expect("the ending app");
+        assert!(matches!(start, Ok(Start::Lock(_))), "{start:?}");
+        // The wait covers the end's own waits.
+        assert!(QUIT_WAIT >= SHOW_WAIT + FINAL_SAVE_WAIT + QUIT_TIMEOUT);
     }
 
     #[test]

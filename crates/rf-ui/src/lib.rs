@@ -89,9 +89,10 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
     // The instance that runs shows its window, which may be hidden behind the tray icon; only
-    // when it does not answer, and has not ended meanwhile, does this one say that it runs.
+    // when it does not answer, and has not ended a while later (one that is ending lets the lock
+    // go only at the end of its end), does this one say that it runs.
     let ask = |dir: &std::path::Path| instance::ask_to_show(dir, instance::SHOW_WAIT);
-    let lock = match instance::take_or_ask(paths.data_dir(), ask) {
+    let lock = match instance::take_or_ask(paths.data_dir(), ask, instance::QUIT_WAIT) {
         Ok(instance::Start::Lock(lock)) => lock,
         // What the user asked for is done: the app shows. Nothing to tell.
         Ok(instance::Start::Shown) => return Ok(()),
