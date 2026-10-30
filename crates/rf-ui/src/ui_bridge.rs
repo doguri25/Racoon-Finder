@@ -31,10 +31,10 @@ use crate::format::{
     short_path, shown_name,
 };
 use crate::hashing::Algorithm;
-use crate::jobs::JobRow;
+use crate::jobs::{JobRow, RecentRow};
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
-use crate::pick::{POLICIES, PickRequest, Picker, validate};
+use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
@@ -46,7 +46,7 @@ use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FactRow, FileRow, FolderMenuRow,
     FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow, MessageView, NameView, PaneView,
     PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -1003,6 +1003,17 @@ pub fn job_row_view(row: &JobRow) -> JobRowView {
     }
 }
 
+/// A line of the job panel's 최근 완료.
+pub fn recent_row_view(row: &RecentRow) -> RecentRowView {
+    RecentRowView {
+        title: row.title.as_str().into(),
+        detail: row.detail.as_str().into(),
+        stats: row.stats.as_str().into(),
+        details: row.details,
+        ok: row.ok,
+    }
+}
+
 /// Which dialog shows for `modal`, or the closing note while the app ends.
 pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
     if quitting {
@@ -1203,9 +1214,21 @@ impl PickModels {
                 .unwrap_or_default(),
         };
         let (policy_note, policy_danger) = words::pick_policy(picker.policy);
+        let (title, summary, confirm_text) = match &picker.purpose {
+            PickPurpose::Transfer => (
+                words::pick_title(request.mode).to_owned(),
+                crate::pick::summary(request),
+                words::pick_confirm(request.mode).to_owned(),
+            ),
+            PickPurpose::SaveLog { title, detail, .. } => (
+                words::pick_log_title().to_owned(),
+                words::pick_log_summary(title, detail),
+                words::pick_log_confirm().to_owned(),
+            ),
+        };
         PickView {
-            title: words::pick_title(request.mode).into(),
-            summary: crate::pick::summary(request).into(),
+            title: title.into(),
+            summary: summary.into(),
             chips: ModelRc::from(Rc::clone(&self.chips)),
             more: if more > 0 {
                 words::pick_more(more).into()
@@ -1245,8 +1268,9 @@ impl PickModels {
                 .into(),
             hint: pick_hint(picker).into(),
             unentered_hint: words::pick_path_unentered().into(),
-            confirm_text: words::pick_confirm(request.mode).into(),
+            confirm_text: confirm_text.into(),
             can_confirm: picker.can_confirm(),
+            for_log: picker.for_a_log(),
         }
     }
 }
@@ -1381,6 +1405,7 @@ pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
         question: confirm.question.as_str().into(),
         ok_text: confirm.ok.as_str().into(),
         danger: confirm.danger,
+        alt_text: confirm.alt.as_str().into(),
     }
 }
 

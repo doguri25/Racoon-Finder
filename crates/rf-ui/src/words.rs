@@ -18,6 +18,7 @@ use rf_platform::shell::App;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
+use crate::jobs::JobRow;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
 use crate::state::{ClipboardFailure, Column};
@@ -705,6 +706,159 @@ pub fn job_planning() -> &'static str {
 /// The progress line of a job that waits for the user to answer its question.
 pub fn job_waiting() -> &'static str {
     "답을 기다리는 중"
+}
+
+/// What a job that ended did, in the job panel's 최근 완료 (XFER-14): `복사 12개 · 건너뜀 1개 ·
+/// 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초`. The speed, the bytes moved over the whole
+/// job's time, shows only for a job that moved bytes.
+pub fn job_report(
+    work: JobWork,
+    done: u64,
+    skipped: u64,
+    failed: usize,
+    average_speed: Option<u64>,
+    elapsed: Duration,
+) -> String {
+    let counted = match work {
+        JobWork::Copy => "복사",
+        JobWork::Move => "이동",
+        JobWork::Trash => "휴지통",
+        JobWork::Delete => "삭제",
+        JobWork::Rename => "이름 바꿈",
+        JobWork::Create => "만듦",
+        JobWork::Undo => "되돌림",
+        JobWork::Redo => "다시 실행",
+        JobWork::Other => "처리",
+    };
+    let mut parts = vec![
+        format!("{counted} {done}개"),
+        format!("건너뜀 {skipped}개"),
+        format!("오류 {failed}개"),
+    ];
+    if let Some(speed) = average_speed {
+        parts.push(format!("평균 {}/s", format_size(speed)));
+    }
+    parts.push(format!("걸린 시간 {}", took(elapsed)));
+    parts.join(" · ")
+}
+
+/// How long a job took: `1초 미만`, `12초`, `1분 20초`, `2분`, `1시간 5분`, in whole seconds.
+pub fn took(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0 => "1초 미만".to_owned(),
+        1..60 => format!("{secs}초"),
+        60..3600 => match secs % 60 {
+            0 => format!("{}분", secs / 60),
+            rest => format!("{}분 {rest}초", secs / 60),
+        },
+        _ => match secs / 60 % 60 {
+            0 => format!("{}시간", secs / 3600),
+            rest => format!("{}시간 {rest}분", secs / 3600),
+        },
+    }
+}
+
+/// The notice of a log saved as `name` (XFER-14's 로그 저장).
+pub fn log_saved(name: &str) -> String {
+    format!("로그를 저장했습니다: {name}")
+}
+
+/// The notice of a log that could not be saved, for an error of `kind`.
+pub fn log_failed(kind: ErrorKind) -> String {
+    format!("로그를 저장하지 못했습니다: {}", error_kind(kind))
+}
+
+/// The title of the destination picker that chooses where a job's log goes (PICK-09).
+pub fn pick_log_title() -> &'static str {
+    "로그를 어디에 저장할까요?"
+}
+
+/// The head of the quick target of the app's own folder for logs.
+pub fn pick_log_folder() -> &'static str {
+    "로그 폴더"
+}
+
+/// The picker's confirm button when it chooses where a log goes.
+pub fn pick_log_confirm() -> &'static str {
+    "여기에 저장"
+}
+
+/// The picker's line under its title when it chooses where the log of a job goes: how the job
+/// ended (`title`) and what it worked on (`detail`).
+pub fn pick_log_summary(title: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title} · {detail}")
+    }
+}
+
+/// The title of the system's notification of a job that ended while the window was not in
+/// front (XFER-14): `복사를 마쳤습니다 · 항목 12개`, the job having been asked to act on `count`
+/// items, `failed` of which it could not process; `None` for a job the user cancelled.
+pub fn job_notice(work: JobWork, outcome: Outcome, count: usize, failed: usize) -> Option<String> {
+    let Phrases { object, .. } = work.phrases();
+    Some(match outcome {
+        Outcome::Completed => format!("{object} 마쳤습니다 · 항목 {count}개"),
+        Outcome::CompletedWithErrors => {
+            format!("{object} 마쳤지만 항목 {failed}개를 처리하지 못했습니다")
+        }
+        Outcome::Cancelled => return None,
+        Outcome::Aborted => format!("문제가 생겨 {object} 중단했습니다"),
+        _ => format!("{object} 끝냈습니다"),
+    })
+}
+
+/// What the last notification adds after the window's jobs went on in the tray and all of them
+/// have ended: the app has ended too.
+pub fn all_jobs_done() -> &'static str {
+    "모든 작업을 마쳐 앱을 끝냈습니다."
+}
+
+/// The button of the question before the window closes while jobs run that keeps them going
+/// behind the system's tray icon (Windows) or menu bar icon (macOS), on `os`.
+pub fn continue_in_tray(os: Os) -> &'static str {
+    match os {
+        Os::MacOs => "메뉴 막대에서 계속",
+        Os::Windows | Os::Other => "트레이에서 계속",
+    }
+}
+
+/// What the question before the window closes while jobs run asks when the jobs can go on
+/// behind the tray icon (XFER-15), on `os`.
+pub fn quit_or_tray(os: Os) -> &'static str {
+    match os {
+        Os::MacOs => "작업이 끝날 때까지 메뉴 막대에서 계속할까요?",
+        Os::Windows | Os::Other => "작업이 끝날 때까지 트레이에서 계속할까요?",
+    }
+}
+
+/// The tooltip of the tray icon while the jobs go on behind it: `app`, then each job a worker
+/// has taken up, three at most, with how far it has got (`복사 중 25%`), and the first one's
+/// progress line; `대기 중` before any has started.
+pub fn tray_status(app: &str, rows: &[JobRow]) -> String {
+    let mut lines = vec![app.to_owned()];
+    if rows.is_empty() {
+        lines.push("대기 중".to_owned());
+    }
+    for row in rows.iter().take(3) {
+        lines.push(format!("{} {}", row.title, percent(row.fraction)));
+    }
+    if let Some(row) = rows.first().filter(|row| !row.progress.is_empty()) {
+        lines.push(row.progress.clone());
+    }
+    lines.join("\n")
+}
+
+/// `fraction` (0 to 1) as a whole percent, rounded down: `25%`.
+pub fn percent(fraction: f32) -> String {
+    let hundredths = fraction.clamp(0.0, 1.0) * 100.0;
+    let whole = (0..=100_u8)
+        .rev()
+        .find(|&step| f32::from(step) <= hundredths)
+        .unwrap_or(0);
+    format!("{whole}%")
 }
 
 /// What a job works on, beside its title in the job panel: `assets → 백업` for a transfer (the
@@ -2239,6 +2393,111 @@ mod tests {
         assert_eq!(time_left(Duration::from_secs(150)), "남은 시간 약 3분");
         assert_eq!(time_left(Duration::from_hours(1)), "남은 시간 약 1시간");
         assert_eq!(time_left(Duration::from_mins(65)), "남은 시간 약 1시간 5분");
+    }
+
+    #[test]
+    fn a_finished_job_tells_what_it_did_and_how_long_it_took() {
+        assert_eq!(
+            job_report(
+                JobWork::Copy,
+                12,
+                1,
+                0,
+                Some(48 * 1024 * 1024),
+                Duration::from_secs(80)
+            ),
+            "복사 12개 · 건너뜀 1개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초"
+        );
+        assert_eq!(
+            job_report(JobWork::Delete, 3, 0, 2, None, Duration::from_millis(400)),
+            "삭제 3개 · 건너뜀 0개 · 오류 2개 · 걸린 시간 1초 미만"
+        );
+        for (secs, text) in [
+            (0, "1초 미만"),
+            (12, "12초"),
+            (60, "1분"),
+            (80, "1분 20초"),
+            (3600, "1시간"),
+            (3900, "1시간 5분"),
+        ] {
+            assert_eq!(took(Duration::from_secs(secs)), text);
+        }
+    }
+
+    #[test]
+    fn a_job_that_ended_unseen_is_told_unless_it_was_cancelled() {
+        assert_eq!(
+            job_notice(JobWork::Copy, Outcome::Completed, 12, 0).as_deref(),
+            Some("복사를 마쳤습니다 · 항목 12개")
+        );
+        assert_eq!(
+            job_notice(JobWork::Move, Outcome::CompletedWithErrors, 5, 2).as_deref(),
+            Some("이동을 마쳤지만 항목 2개를 처리하지 못했습니다")
+        );
+        assert_eq!(
+            job_notice(JobWork::Trash, Outcome::Aborted, 1, 0).as_deref(),
+            Some("문제가 생겨 휴지통으로 보내기를 중단했습니다")
+        );
+        assert_eq!(job_notice(JobWork::Copy, Outcome::Cancelled, 1, 0), None);
+    }
+
+    #[test]
+    fn the_tray_is_named_as_the_system_names_it() {
+        assert_eq!(continue_in_tray(Os::Windows), "트레이에서 계속");
+        assert_eq!(continue_in_tray(Os::MacOs), "메뉴 막대에서 계속");
+        assert_eq!(
+            quit_or_tray(Os::Windows),
+            "작업이 끝날 때까지 트레이에서 계속할까요?"
+        );
+        assert_eq!(
+            quit_or_tray(Os::MacOs),
+            "작업이 끝날 때까지 메뉴 막대에서 계속할까요?"
+        );
+    }
+
+    #[test]
+    fn the_tray_tooltip_shows_how_far_the_jobs_have_got() {
+        let row = |title: &str, fraction: f32, progress: &str| JobRow {
+            id: rf_jobs::JobId(1),
+            title: title.to_owned(),
+            detail: String::new(),
+            fraction,
+            progress: progress.to_owned(),
+            paused: false,
+            waiting: false,
+        };
+        assert_eq!(tray_status("앱", &[]), "앱\n대기 중");
+        assert_eq!(
+            tray_status(
+                "앱",
+                &[
+                    row("복사 중", 0.257, "3 / 12 항목 · 대기 중인 작업 1개"),
+                    row("일시정지됨", 1.0, "")
+                ]
+            ),
+            "앱\n복사 중 25%\n일시정지됨 100%\n3 / 12 항목 · 대기 중인 작업 1개"
+        );
+        assert_eq!(percent(0.0), "0%");
+        assert_eq!(percent(0.999), "99%");
+        assert_eq!(percent(2.0), "100%");
+    }
+
+    #[test]
+    fn the_log_picker_and_its_notices_say_what_they_are_for() {
+        assert_eq!(pick_log_title(), "로그를 어디에 저장할까요?");
+        assert_eq!(
+            pick_log_summary("복사했습니다", "assets → 백업"),
+            "복사했습니다 · assets → 백업"
+        );
+        assert_eq!(pick_log_summary("복사했습니다", ""), "복사했습니다");
+        assert_eq!(
+            log_saved("job-copy-20261030-143207.log"),
+            "로그를 저장했습니다: job-copy-20261030-143207.log"
+        );
+        assert_eq!(
+            log_failed(ErrorKind::PermissionDenied),
+            "로그를 저장하지 못했습니다: 권한이 없습니다"
+        );
     }
 
     #[test]

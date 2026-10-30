@@ -13,6 +13,7 @@ pub mod instance;
 pub mod jobs;
 pub mod keys;
 pub mod loader;
+pub mod notify;
 pub mod open;
 pub mod pane;
 pub mod pattern;
@@ -73,7 +74,9 @@ pub enum RunError {
 /// window, and ends with [`RunError::AlreadyRunning`]. The job engine keeps its journal in
 /// that folder. When the window closes, the settings are written (waiting
 /// [`controller::FINAL_SAVE_WAIT`] at most), and the engine is shut down and the jobs'
-/// questions are released ([`jobs::close_down`]), before this returns.
+/// questions are released ([`jobs::close_down`]), before this returns. Where the system has a
+/// tray, the window may instead hide while its jobs go on behind the tray icon; the app ends
+/// the same way once they have ended ([`notify`]).
 pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
@@ -103,9 +106,15 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         start,
         settings: loaded.settings,
         saver: saver.clone(),
+        log_dir: rf_core::VPath::local(paths.log_dir()).ok(),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
-    let result = window.run();
+    // The loop runs until the controller ends it (the app's end, `controller::quit`): the
+    // window hides while its jobs go on behind the tray icon, which must not end it.
+    let result = window
+        .show()
+        .and_then(|()| slint::run_event_loop_until_quit());
+    let _ = window.hide();
     // `None` when the end through the close button has taken them already.
     let last = controller.final_settings();
     // Stops the listings and the watches before the window goes.

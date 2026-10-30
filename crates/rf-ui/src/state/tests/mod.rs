@@ -25,11 +25,13 @@ mod panel;
 mod pick;
 mod preview;
 mod properties;
+mod report;
 mod select;
 mod session;
 mod shell;
 mod sidebar;
 mod tabs;
+mod tray;
 mod view;
 
 fn folder(name: &str) -> VPath {

@@ -23,6 +23,7 @@ use rf_core::{ErrorKind, VPath};
 use rf_jobs::{ConflictPolicy, TransferMode, TransferOptions, TransferSpec};
 
 use crate::format::{folder_label, short_path};
+use crate::jobs::SharedReport;
 use crate::pane::next_generation;
 use crate::places::{Place, PlaceKind};
 use crate::words;
@@ -191,9 +192,61 @@ pub fn quick_targets(
     recent: &[VPath],
     places: &[Place],
 ) -> Vec<TargetGroup> {
+    grouped(
+        req,
+        (words::pick_opposite(), opposite),
+        open_tabs,
+        recent,
+        places,
+    )
+}
+
+/// The folders the picker offers when it chooses where a job's log goes (PICK-09): the app's
+/// folder for logs `log_dir` first, which is chosen when the picker opens, then the folders of
+/// the open tabs, the `recent` targets and the favorites among `places`, as
+/// [`quick_targets`] gives them.
+pub fn log_targets(
+    req: &PickRequest,
+    log_dir: &VPath,
+    open_tabs: &[VPath],
+    recent: &[VPath],
+    places: &[Place],
+) -> Vec<TargetGroup> {
+    grouped(
+        req,
+        (words::pick_log_folder(), log_dir),
+        open_tabs,
+        recent,
+        places,
+    )
+}
+
+/// The request of the picker that chooses where a log goes: no items, so any folder can be
+/// chosen, and `log_dir`, the app's folder for logs, as the folder they would be in (a worker
+/// looks at a target from there).
+pub fn log_request(log_dir: VPath) -> PickRequest {
+    PickRequest {
+        mode: TransferMode::Copy,
+        sources: Vec::new(),
+        file_bytes: 0,
+        folder_count: 0,
+        other_count: 0,
+        from_dir: log_dir,
+    }
+}
+
+/// The heads of the quick targets: `first` (its head and its folder), then the open tabs, the
+/// recent targets and the favorites.
+fn grouped(
+    req: &PickRequest,
+    first: (&str, &VPath),
+    open_tabs: &[VPath],
+    recent: &[VPath],
+    places: &[Place],
+) -> Vec<TargetGroup> {
     let named = |path: &VPath| (folder_label(path), path.clone());
     let heads: [(&str, Vec<(String, VPath)>); 4] = [
-        (words::pick_opposite(), vec![named(opposite)]),
+        (first.0, vec![named(first.1)]),
         (words::pick_tabs(), open_tabs.iter().map(named).collect()),
         (
             words::pick_recent(),
@@ -230,9 +283,26 @@ pub fn quick_targets(
         .collect()
 }
 
+/// What the picker chooses a folder for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickPurpose {
+    /// The items of its request are copied or moved there.
+    Transfer,
+    /// The log of the job that left `report` is saved there as `name` (PICK-09; XFER-14's 로그
+    /// 저장). The request has no items, and the picker no move/copy toggle and no conflict
+    /// policy: a log never goes over a file ([`crate::jobs::save_log`]).
+    SaveLog {
+        report: SharedReport,
+        /// How the job ended and what it worked on, for the picker's summary.
+        title: String,
+        detail: String,
+    },
+}
+
 /// The picker while it shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picker {
+    pub purpose: PickPurpose,
     pub request: PickRequest,
     /// The pane the items are in.
     pub origin: usize,
@@ -293,6 +363,7 @@ impl Picker {
             .find(|item| item.validity.can_choose())
             .map(|item| item.path.clone());
         Picker {
+            purpose: PickPurpose::Transfer,
             request,
             origin,
             groups,
@@ -309,6 +380,26 @@ impl Picker {
             policy: ConflictPolicy::Ask,
             making: None,
         }
+    }
+
+    /// The picker that chooses where the log of a job goes, for `purpose`, with `request`
+    /// ([`log_request`]) and the app's folder for logs as the first of `groups`
+    /// ([`log_targets`]), chosen; it was opened from pane `origin`.
+    pub fn for_log(
+        purpose: PickPurpose,
+        request: PickRequest,
+        origin: usize,
+        groups: Vec<TargetGroup>,
+    ) -> Picker {
+        Picker {
+            purpose,
+            ..Picker::new(request, origin, groups)
+        }
+    }
+
+    /// Whether it chooses where a log goes, rather than where items go.
+    pub fn for_a_log(&self) -> bool {
+        matches!(self.purpose, PickPurpose::SaveLog { .. })
     }
 
     /// The quick targets in the order they show, every head's in turn.

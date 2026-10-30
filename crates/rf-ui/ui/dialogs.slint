@@ -53,6 +53,9 @@ export struct ConfirmView {
     ok-text: string,
     // Destroys something: Enter does not confirm.
     danger: bool,
+    // A third answer that keeps things going (트레이에서 계속), the main button, which Enter takes;
+    // empty for none. The ok button is then an outline one beside it.
+    alt-text: string,
 }
 
 export struct MessageView {
@@ -608,6 +611,8 @@ export component ConfirmDialog inherits DialogFrame {
     in property <ConfirmView> view;
     callback accepted();
     callback cancelled();
+    // The third answer (`alt-text`).
+    callback alternative();
 
     width: 500px;
     height: layout.preferred-height;
@@ -619,11 +624,13 @@ export component ConfirmDialog inherits DialogFrame {
     property <string> scroll-text;
     property <int> scroll-serial;
 
-    // The button the keys are on: 0 취소, 1 the other, -1 neither. A danger confirm starts on
-    // 취소, so Enter answers No until Tab moves to the button that deletes; any other starts
-    // on neither, and Enter there is Yes. The keys stay with the dialog's FocusScope (the
-    // buttons take no focus), which answers for the button it is on.
+    // The button the keys are on: 0 취소, 1 the other, 2 the third answer, -1 none. A danger
+    // confirm starts on 취소, so Enter answers No until Tab moves to the button that deletes;
+    // any other starts on none, and Enter there is Yes (the third answer, where there is one).
+    // The keys stay with the dialog's FocusScope (the buttons take no focus), which answers for
+    // the button it is on.
     property <int> on-button: -1;
+    property <int> buttons: root.view.alt-text != "" ? 3 : 2;
 
     init => {
         root.on-button = root.view.danger ? 0 : -1;
@@ -639,6 +646,8 @@ export component ConfirmDialog inherits DialogFrame {
             root.cancelled();
         } else if (button == 1) {
             root.accepted();
+        } else if (button == 2) {
+            root.alternative();
         }
     }
 
@@ -650,11 +659,11 @@ export component ConfirmDialog inherits DialogFrame {
             }
             let step = DialogKeys.tab-step(event);
             if (step > 0 || event.text == Key.RightArrow) {
-                root.on-button = root.on-button == 0 ? 1 : 0;
+                root.on-button = root.on-button + 1 >= root.buttons ? 0 : root.on-button + 1;
                 return accept;
             }
             if (step < 0 || event.text == Key.LeftArrow) {
-                root.on-button = root.on-button == 1 ? 0 : 1;
+                root.on-button = root.on-button <= 0 ? root.buttons - 1 : root.on-button - 1;
                 return accept;
             }
             if (event.text == " " && root.on-button >= 0) {
@@ -664,6 +673,8 @@ export component ConfirmDialog inherits DialogFrame {
             if (event.text == Key.Return) {
                 if (root.on-button >= 0) {
                     root.press(root.on-button);
+                } else if (root.view.alt-text != "") {
+                    root.alternative();
                 } else if (!root.view.danger) {
                     root.accepted();
                 }
@@ -717,7 +728,22 @@ export component ConfirmDialog inherits DialogFrame {
                         root.cancelled();
                     }
                 }
-                PrimaryButton {
+                if root.view.alt-text != "": OutlineButton {
+                    text: root.view.ok-text;
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.accepted();
+                    }
+                }
+                if root.view.alt-text != "": PrimaryButton {
+                    button-height: 36px;
+                    text: root.view.alt-text;
+                    focused: root.on-button == 2;
+                    clicked => {
+                        root.alternative();
+                    }
+                }
+                if root.view.alt-text == "": PrimaryButton {
                     button-height: 36px;
                     text: root.view.ok-text;
                     focused: root.on-button == 1;

@@ -119,15 +119,29 @@ fn the_panel_cursor_stays_on_the_lines_there_are() {
     state.panel_key(PanelKey::Down);
     state.panel_key(PanelKey::Right);
     assert_eq!(state.panel_cursor(), Some((1, 1)));
-    // The second job ends: the keys are on the line that is left, on the same button.
+    // The second job ends and goes into 최근 완료, whose head takes its line: the keys are on
+    // its 지우기 now.
     end(&mut state, 2);
+    assert_eq!(
+        state.panel_lines(),
+        [
+            vec![PanelButton::PauseOrResume(0), PanelButton::Cancel(0)],
+            vec![PanelButton::ToggleRecent, PanelButton::ClearRecent],
+        ]
+    );
+    assert_eq!(state.panel_cursor(), Some((1, 1)));
+    // 지우기 empties the list: the keys are on the line that is left, on the same button.
+    assert_eq!(state.panel_key(PanelKey::Press), []);
+    assert_eq!(state.recent_rows(), []);
     assert_eq!(state.panel_cursor(), Some((0, 1)));
     assert_eq!(
         state.panel_key(PanelKey::Press),
         [Effect::Job(JobEffect::Cancel(JobId(1)))]
     );
-    // With the last one gone the panel goes, and its keys go back to the panes.
+    // With the last one gone and the list cleared, the panel goes, and its keys go back to the
+    // panes.
     end(&mut state, 1);
+    state.recent_cleared();
     assert_eq!(state.panel_cursor(), None);
     assert_eq!(state.panel_key(PanelKey::Press), [Effect::FocusPanes]);
 }

@@ -11,8 +11,11 @@
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
 //! tools, listing a folder again and the extensions shown or not (module `select`), the
 //! item the preview panel and quick look show (module `preview`), what it put on the
-//! system's clipboard and pastes from there (module `clipboard`), and the properties window
-//! with the checksums of its files (module `properties`). Its methods
+//! system's clipboard and pastes from there (module `clipboard`), the properties window
+//! with the checksums of its files (module `properties`), the job panel from the keyboard
+//! (module `panel`), the jobs that ended and their logs and notifications (module `report`),
+//! and the jobs going on behind the tray icon while the window is hidden (module `tray`). Its
+//! methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -21,7 +24,8 @@
 //! drive the state without a window.
 //!
 //! Every change of a file is a job ([`Effect::Job`]); nothing here or in the controller writes
-//! a file itself.
+//! a file itself, but for the log of a job the user saves ([`Effect::SaveLog`]): a new file of
+//! the app's own, written on a worker thread and never over a file that is there.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -33,9 +37,10 @@ use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
 use crate::hashing::HashRequest;
-use crate::jobs::{History, JobEffect, JobRows};
+use crate::jobs::{History, JobEffect, JobRows, RecentJobs, SharedReport};
 use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
+use crate::notify::Notice;
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, SortRequest, Tab, ancestors};
 use crate::places::Place;
 use crate::preview::PreviewRequest;
@@ -55,10 +60,12 @@ mod panel;
 mod pick;
 mod preview;
 mod properties;
+mod report;
 mod select;
 mod shell;
 mod sidebar;
 mod tabs;
+mod tray;
 mod view;
 
 pub use address::{
@@ -77,6 +84,7 @@ pub use preview::{
 };
 pub use select::{MATCH_STRETCH, MatchRequest, Matched};
 pub use shell::{MenuFacts, MenuShown, ShellWork, menu_facts};
+pub use tray::TrayCommand;
 pub use view::{
     Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
     MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
@@ -241,6 +249,17 @@ pub enum Effect {
     /// End the app ([`crate::jobs::close_down`] on a worker thread, then the end of the event
     /// loop). [`AppState::begin_quit`] has closed the windows and stopped taking questions.
     Quit,
+    /// Show a notification of the system ([`crate::notify::Notifier`]), without waiting for it.
+    Notify(Notice),
+    /// Hide the window: the jobs go on behind the tray icon, which shows
+    /// [`AppState::tray_view`] from now on (XFER-15).
+    ToTray,
+    /// Show the window again, in front, and take the tray icon away.
+    FromTray,
+    /// Write the log of the job that left `report` into `folder`, named by the job
+    /// ([`crate::jobs::log_name`]) or a free name beside it, on a worker thread
+    /// ([`crate::jobs::save_log`]), then hand what came of it to [`AppState::log_saved`].
+    SaveLog { report: SharedReport, folder: VPath },
 }
 
 /// What the button of the toast on screen does.
@@ -333,6 +352,18 @@ pub struct AppState {
     /// The line and the button of the job panel's keyboard cursor (module `panel`), as last
     /// moved; [`AppState::panel_cursor`] keeps it within the lines there are.
     panel_at: (usize, usize),
+    /// The jobs that ended, for the job panel's 최근 완료 (module `report`), and whether the
+    /// list is open below its head.
+    recent_jobs: RecentJobs,
+    recent_open: bool,
+    /// The app's folder for logs, where a job's log goes unless the user chooses another.
+    log_dir: Option<VPath>,
+    /// Whether the window is the one in front, as the window last told (module `report`).
+    window_active: bool,
+    /// Whether the jobs can go on behind a tray icon while the window is hidden (module `tray`),
+    /// and whether they do now.
+    tray: bool,
+    background: bool,
 }
 
 impl AppState {
@@ -424,6 +455,12 @@ impl AppState {
             properties: properties::PropertiesWork::default(),
             shell: shell::ShellState::default(),
             panel_at: (0, 0),
+            recent_jobs: RecentJobs::default(),
+            recent_open: false,
+            log_dir: None,
+            window_active: true,
+            tray: false,
+            background: false,
         };
         (state, effects)
     }

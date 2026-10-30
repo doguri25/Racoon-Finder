@@ -17,7 +17,7 @@
 //!   There is no [`TRAY`]: a tray icon there needs a desktop that hosts `StatusNotifierItem`s,
 //!   and an app cannot tell whether its icon showed, so a hidden window could not be found again.
 //!
-//! [`notify`] blocks while the system takes the notification (on macOS also while the user
+//! [`notify()`] blocks while the system takes the notification (on macOS also while the user
 //! answers the first question, [`ASK_WAIT`] at most): call it from a worker thread, never from
 //! the UI thread. A failure only means that nothing showed; callers log it and go on.
 
@@ -38,7 +38,7 @@ mod xdg_or_toast;
 /// Windows (the notification area) and macOS (the menu bar), not Linux (see the module).
 pub const TRAY: bool = imp::TRAY;
 
-/// How long [`notify`] waits on macOS for the user's answer to whether the app may notify, the
+/// How long [`notify()`] waits on macOS for the user's answer to whether the app may notify, the
 /// first time it asks, and then for the system to take the notification. Past it nothing shows.
 pub const ASK_WAIT: Duration = Duration::from_secs(60);
 

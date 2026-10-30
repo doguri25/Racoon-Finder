@@ -17,9 +17,9 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DropPlace, FactRow, FolderMenuRow, FolderMenuView,
-    HashRowView, JobRowView, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
+    HashRowView, JobRowView, JobTray, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
     PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecoveryView, Theme,
+    RecentRowView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -1457,6 +1457,71 @@ fn the_job_panel_shows_its_rows_and_buttons() {
     assert_eq!(labelled(&window, "계속", AccessibleRole::Button).len(), 1);
 }
 
+/// A line of 최근 완료.
+fn recent_row(title: &str, details: bool) -> RecentRowView {
+    RecentRowView {
+        title: title.into(),
+        detail: "assets → 백업".into(),
+        stats: "복사 12개 · 건너뜀 0개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초".into(),
+        details,
+        ok: !details,
+    }
+}
+
+#[test]
+fn the_recent_list_shows_its_head_and_opens_to_its_lines() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_recent_toggled(move || record.note("toggled"));
+    let record = calls.clone();
+    window.on_recent_cleared(move || record.note("cleared"));
+    let record = calls.clone();
+    window.on_recent_details(move |i| record.note(format!("details {i}")));
+    let record = calls.clone();
+    window.on_recent_save(move |i| record.note(format!("save {i}")));
+    assert!(labelled(&window, "펼치기", AccessibleRole::Button).is_empty());
+
+    // With no job running, the panel shows for the jobs that ended: their head alone.
+    let rows = Rc::new(slint::VecModel::from(vec![
+        recent_row("복사했지만 일부 항목을 처리하지 못했습니다", true),
+        recent_row("복사했습니다", false),
+    ]));
+    window.set_recent_rows(ModelRc::from(Rc::clone(&rows)));
+    assert_eq!(
+        labelled(&window, "최근 완료 2개", AccessibleRole::Text).len(),
+        1
+    );
+    assert!(labelled(&window, "복사했습니다", AccessibleRole::Text).is_empty());
+    labelled(&window, "펼치기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    labelled(&window, "지우기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["toggled", "cleared"]);
+
+    // Open: each line, 자세히 only where there are items to tell of, 로그 저장… on each.
+    window.set_recent_open(true);
+    assert_eq!(labelled(&window, "접기", AccessibleRole::Button).len(), 1);
+    assert_eq!(
+        labelled(&window, "복사했습니다", AccessibleRole::Text).len(),
+        1
+    );
+    assert_eq!(
+        labelled(
+            &window,
+            "복사 12개 · 건너뜀 0개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초",
+            AccessibleRole::Text
+        )
+        .len(),
+        2
+    );
+    let details = labelled(&window, "자세히", AccessibleRole::Button);
+    assert_eq!(details.len(), 1);
+    details[0].invoke_accessible_default_action();
+    let saves = labelled(&window, "로그 저장…", AccessibleRole::Button);
+    assert_eq!(saves.len(), 2);
+    saves[1].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["details 0", "save 1"]);
+}
+
 #[test]
 fn a_toast_stays_while_the_pointer_is_over_it() {
     let window = window();
@@ -1691,6 +1756,127 @@ fn a_confirm_is_answered_from_the_keyboard_on_the_button_it_is_on() {
     chord(&window, &[&tab]);
     chord(&window, &[&enter]);
     assert_eq!(answers.borrow().as_slice(), ["accepted", "cancelled"]);
+}
+
+#[test]
+fn the_question_before_the_end_offers_the_tray_as_its_main_answer() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_confirm_accepted(move || record.note("quit"));
+    let record = calls.clone();
+    window.on_confirm_alternative(move || record.note("tray"));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("stay"));
+    window.set_confirm_view(ConfirmView {
+        title: "끝낼까요?".into(),
+        message: "진행 중인 작업 1개가 있습니다.\n끝내면 다음 실행 때 이어서 할 수 있습니다."
+            .into(),
+        question: "작업이 끝날 때까지 트레이에서 계속할까요?".into(),
+        ok_text: "끝내기".into(),
+        alt_text: "트레이에서 계속".into(),
+        ..ConfirmView::default()
+    });
+    window.set_dialog(DialogKind::Confirm);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        labelled(
+            &window,
+            "작업이 끝날 때까지 트레이에서 계속할까요?",
+            AccessibleRole::Text
+        )
+        .len(),
+        1
+    );
+    for label in ["취소", "끝내기", "트레이에서 계속"] {
+        assert_eq!(
+            labelled(&window, label, AccessibleRole::Button).len(),
+            1,
+            "{label}"
+        );
+    }
+    let key = |key: Key| char::from(key).to_string();
+    let (tab, back, enter) = (key(Key::Tab), key(Key::Backtab), key(Key::Return));
+    // Enter before Tab is the main answer: the jobs go on behind the tray.
+    chord(&window, &[&enter]);
+    assert_eq!(calls.take(), ["tray"]);
+    // Tab goes round the three: 취소, 끝내기, 트레이에서 계속, and 취소 again.
+    for (presses, answer) in [(1, "stay"), (1, "quit"), (1, "tray"), (1, "stay")] {
+        for _ in 0..presses {
+            chord(&window, &[&tab]);
+        }
+        chord(&window, &[&enter]);
+        assert_eq!(calls.take(), [answer]);
+    }
+    // Shift+Tab goes back.
+    chord(&window, &[&back]);
+    chord(&window, &[&enter]);
+    assert_eq!(calls.take(), ["tray"]);
+    // The buttons by the pointer too.
+    labelled(&window, "끝내기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["quit"]);
+}
+
+#[test]
+fn the_picker_of_a_log_has_no_toggle_and_no_conflict_policy() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    let record = calls.clone();
+    window.on_pick_mode(move |_| record.note("mode"));
+    let record = calls.clone();
+    window.on_pick_confirmed(move || record.note("confirmed"));
+    let record = calls.clone();
+    window.on_pick_new_folder(move || record.note("new folder"));
+    window.set_pick_view(PickView {
+        title: "로그를 어디에 저장할까요?".into(),
+        summary: "복사했습니다 · assets → 백업".into(),
+        chips: ModelRc::default(),
+        confirm_text: "여기에 저장".into(),
+        for_log: true,
+        ..pick_view()
+    });
+    window.set_dialog(DialogKind::Pick);
+    assert_eq!(
+        labelled(&window, "로그를 어디에 저장할까요?", AccessibleRole::Text).len(),
+        1
+    );
+    assert!(labelled(&window, "이름이 겹치면", AccessibleRole::Text).is_empty());
+    assert!(labelled(&window, "이동", AccessibleRole::RadioButton).is_empty());
+    assert_eq!(
+        labelled(&window, "여기에 저장", AccessibleRole::Button).len(),
+        1
+    );
+    // Tab passes from 새 폴더 straight to 취소 and to the button.
+    let key = |key: Key| char::from(key).to_string();
+    let (tab, space) = (key(Key::Tab), " ".to_owned());
+    for _ in 0..2 {
+        chord(&window, &[&tab]);
+    }
+    chord(&window, &[&space]);
+    chord(&window, &[&tab]);
+    chord(&window, &[&space]);
+    chord(&window, &[&tab]);
+    chord(&window, &[&space]);
+    assert_eq!(calls.take(), ["new folder", "cancelled", "confirmed"]);
+}
+
+#[test]
+fn the_tray_icon_builds_with_its_menu_s_words() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tray = JobTray::new().expect("the tray builds");
+    tray.set_status("앱\n복사 중 25%".into());
+    tray.set_label("25%".into());
+    tray.set_all_paused(true);
+    assert_eq!(tray.get_status(), "앱\n복사 중 25%");
+    assert!(tray.get_all_paused());
+    // Without a picture the system shows no icon: the test makes none.
+    let calls = Calls::default();
+    let record = calls.clone();
+    tray.on_open_window(move || record.note("open"));
+    tray.invoke_open_window();
+    assert_eq!(calls.take(), ["open"]);
 }
 
 #[test]

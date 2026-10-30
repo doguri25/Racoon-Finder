@@ -71,6 +71,8 @@ export struct PickView {
     unentered-hint: string,
     confirm-text: string,
     can-confirm: bool,
+    // It chooses where a job's log goes (PICK-09): no move/copy toggle and no conflict policy.
+    for-log: bool,
 }
 
 // The name of one of the items.
@@ -238,10 +240,14 @@ export component PickDialog inherits DialogFrame {
         filter.take-focus();
     }
 
-    // Whether stop `at` takes the keys now: a button that is off does not.
+    // Whether stop `at` takes the keys now: a button that is off does not, nor the move/copy
+    // toggle and the conflict policy of the picker of a log, which has none.
     pure function can-stop(at: int) -> bool {
         if (at == 2) {
             return root.view.can-make-folder && !path.composing;
+        }
+        if (at == 3 || at == 4) {
+            return !root.view.for-log;
         }
         if (at == 6) {
             return root.view.can-confirm && !path.composing;
@@ -249,11 +255,14 @@ export component PickDialog inherits DialogFrame {
         return true;
     }
 
-    // The keys go to the next stop that takes them, `step` (1 or -1) at a time. The stops that
-    // can be off are not side by side: one is passed over at most.
+    // The keys go to the next stop that takes them, `step` (1 or -1) at a time. Three stops
+    // side by side can be passed over at most (새 폴더, the toggle and the policy of a log's
+    // picker); the fields and 취소 always take them.
     function go(step: int) {
         let first = DialogKeys.cycle(root.stop, step, 7);
-        let next = root.can-stop(first) ? first : DialogKeys.cycle(first, step, 7);
+        let second = root.can-stop(first) ? first : DialogKeys.cycle(first, step, 7);
+        let third = root.can-stop(second) ? second : DialogKeys.cycle(second, step, 7);
+        let next = root.can-stop(third) ? third : DialogKeys.cycle(third, step, 7);
         root.stop = next;
         // A field Tab goes to has its text selected, as in the system's dialogs.
         if (next == 0) {
@@ -429,7 +438,7 @@ export component PickDialog inherits DialogFrame {
                         }
                     }
                 }
-                VerticalLayout {
+                if !root.view.for-log: VerticalLayout {
                     alignment: start;
 
                     SegmentTrack {
@@ -613,8 +622,8 @@ export component PickDialog inherits DialogFrame {
                 background: Theme.border;
             }
 
-            // What a name conflict does.
-            HorizontalLayout {
+            // What a name conflict does (a log never goes over a file: no such row for it).
+            if !root.view.for-log: HorizontalLayout {
                 spacing: 12px;
 
                 Text {

@@ -11,16 +11,26 @@
 //! [`JobRows`] is plain data: it takes the events and gives the rows of the panel and, for a job
 //! that ended, an [`Ended`] that the window turns into a notice
 //! ([`AppState::job_event`](crate::state::AppState::job_event)).
+//!
+//! [`RecentJobs`] keeps the jobs that ended for the panel's 최근 완료 (XFER-14), the newest
+//! first and [`RECENT_JOBS`] of them at most, each with its report; [`save_log`] writes a
+//! report's log (`JobReport::write_log`) into a folder, on a worker thread, never over a file
+//! that is there. The log is no file of the user's that a job changes: like the settings, it is
+//! written here and not through the engine.
 
-use std::path::Path;
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use jiff::tz::TimeZone;
 use rf_jobs::{
     ConflictAnswer, EngineConfig, JobEngine, JobEvent, JobId, JobReport, JobSpec, JobState,
-    PreflightAnswer, Progress, Totals, UndoRecord,
+    Outcome, PreflightAnswer, Progress, Totals, UndoRecord,
 };
 use rf_vfs::Vfs;
 
@@ -112,7 +122,7 @@ impl Jobs {
         journal_dir: &Path,
         on_event: impl Fn(JobEvent) + Send + 'static,
         on_question: impl Fn(Question) -> bool + Send + Sync + 'static,
-    ) -> std::io::Result<Jobs> {
+    ) -> io::Result<Jobs> {
         let (hand_over, handed) = mpsc::channel::<Receiver<JobEvent>>();
         std::thread::Builder::new()
             .name("rf-ui-jobs".to_owned())
@@ -302,6 +312,182 @@ pub fn close_down(
     ended
 }
 
+/// How many finished jobs the job panel's 최근 완료 keeps: a newer one pushes the oldest out.
+pub const RECENT_JOBS: usize = 20;
+
+/// The most numbers [`save_log`] tries after a name that is taken (`… (2).log` to `… (100).log`).
+pub const LOG_NAME_TRIES: u32 = 100;
+
+/// A job's report, shared, that compares by which report it is: two are equal when they are the
+/// same report (the report itself has no equality).
+#[derive(Clone, Debug)]
+pub struct SharedReport(pub Arc<JobReport>);
+
+impl PartialEq for SharedReport {
+    fn eq(&self, other: &SharedReport) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SharedReport {}
+
+/// A job that ended, as the panel's 최근 완료 keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    pub work: JobWork,
+    pub report: SharedReport,
+}
+
+impl Finished {
+    /// Whether it has items to tell of: failures, or warnings, which its 자세히 lists.
+    pub fn has_details(&self) -> bool {
+        !self.report.0.failures.is_empty() || !self.report.0.warnings.is_empty()
+    }
+}
+
+/// The jobs that ended, the newest first, [`RECENT_JOBS`] at most.
+#[derive(Clone, Debug, Default)]
+pub struct RecentJobs {
+    jobs: VecDeque<Finished>,
+}
+
+impl RecentJobs {
+    /// Puts the job that ended as `work` with `report` first; the oldest goes past
+    /// [`RECENT_JOBS`].
+    pub fn add(&mut self, work: JobWork, report: Arc<JobReport>) {
+        self.jobs.push_front(Finished {
+            work,
+            report: SharedReport(report),
+        });
+        self.jobs.truncate(RECENT_JOBS);
+    }
+
+    /// The job at `index`, the newest being 0.
+    pub fn get(&self, index: usize) -> Option<&Finished> {
+        self.jobs.get(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.jobs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.jobs.clear();
+    }
+
+    /// The rows of the list, the newest first.
+    pub fn rows(&self) -> Vec<RecentRow> {
+        self.jobs.iter().map(recent_row).collect()
+    }
+}
+
+/// One line of 최근 완료, as the window shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentRow {
+    /// How it ended: `복사했습니다`, `복사를 취소했습니다` ([`words::outcome`]).
+    pub title: String,
+    /// What it worked on ([`words::job_detail`]).
+    pub detail: String,
+    /// What it did: `복사 12개 · 건너뜀 1개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초`
+    /// ([`words::job_report`]).
+    pub stats: String,
+    /// It has items to tell of (failures, or warnings): its 자세히 lists them.
+    pub details: bool,
+    /// It did all it was asked, without a failure.
+    pub ok: bool,
+}
+
+/// The line of `finished` in 최근 완료.
+fn recent_row(finished: &Finished) -> RecentRow {
+    let report = &finished.report.0;
+    RecentRow {
+        title: words::outcome(report.outcome, finished.work),
+        detail: words::job_detail(&report.spec),
+        stats: words::job_report(
+            finished.work,
+            items(report.done),
+            report.skipped,
+            report.failures.len(),
+            (report.done.bytes > 0).then(|| report.average_speed()),
+            report.elapsed,
+        ),
+        details: finished.has_details(),
+        ok: report.outcome == Outcome::Completed && report.failures.is_empty(),
+    }
+}
+
+/// The lines 자세히 lists for `report`: each failure, then each warning, and why.
+pub fn report_lines(report: &JobReport) -> Vec<String> {
+    report
+        .failures
+        .iter()
+        .chain(&report.warnings)
+        .map(words::failure_line)
+        .collect()
+}
+
+/// The name the log of `report` is saved as: `job-copy-20261030-143207.log`, by the job's kind
+/// and the time it started in `tz`. The job's number is in the log's first line; two logs of
+/// the same second do not meet, as [`save_log`] numbers the second one.
+pub fn log_name(report: &JobReport, tz: &TimeZone) -> String {
+    let started = jiff::Timestamp::try_from(report.started).map_or_else(
+        |_| "0".to_owned(),
+        |at| {
+            at.to_zoned(tz.clone())
+                .strftime("%Y%m%d-%H%M%S")
+                .to_string()
+        },
+    );
+    format!("job-{}-{started}.log", report.kind.name())
+}
+
+/// Writes the log of `report` ([`JobReport::write_log`]) into `folder` as `name`, or, when a
+/// file of that name is there, as the first free one of `name (2).log` to `name (100).log`
+/// ([`LOG_NAME_TRIES`]): never over a file that is there, which the file is made anew to make
+/// sure of. A log that could not be written whole is taken away again. Gives the path written.
+/// Blocks: call it on a worker thread.
+pub fn save_log(report: &JobReport, folder: &Path, name: &str) -> io::Result<PathBuf> {
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    for number in 1..=LOG_NAME_TRIES {
+        let candidate = match (number, extension) {
+            (1, _) => name.to_owned(),
+            (_, Some(extension)) => format!("{stem} ({number}).{extension}"),
+            (_, None) => format!("{stem} ({number})"),
+        };
+        let path = folder.join(candidate);
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let written = report.write_log(&mut file).and_then(|()| file.flush());
+        drop(file);
+        return match written {
+            Ok(()) => Ok(path),
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                Err(error)
+            }
+        };
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+/// The kind of `error`, met writing a log into `folder`, for its words.
+pub fn log_error(folder: &Path, error: io::Error) -> rf_core::ErrorKind {
+    match rf_core::VPath::local(folder) {
+        Ok(path) => rf_core::Error::io("save log", path, error).kind(),
+        Err(_) => rf_core::ErrorKind::Other,
+    }
+}
+
 /// One row of the job panel, as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobRow {
@@ -484,6 +670,11 @@ impl JobRows {
     /// The id of row `row` of [`JobRows::rows`].
     pub fn row_id(&self, row: usize) -> Option<JobId> {
         self.rows().get(row).map(|view| view.id)
+    }
+
+    /// The jobs that have not ended, queued ones included, with their states.
+    pub fn states(&self) -> Vec<(JobId, JobState)> {
+        self.jobs.iter().map(|job| (job.id, job.state)).collect()
     }
 
     fn find(&self, id: JobId) -> Option<&Tracked> {
@@ -751,6 +942,144 @@ mod tests {
         });
         assert_eq!(rows.active(), 1);
         assert!(!rows.undo_running());
+    }
+
+    /// The report of job `id`, a copy of `copy_spec`, that ended as `outcome` after `secs`
+    /// seconds having copied `files` files of `bytes` bytes.
+    fn copy_report(id: u64, outcome: Outcome, files: u64, bytes: u64, secs: u64) -> JobReport {
+        let mut report = JobReport::new(JobId(id), &copy_spec());
+        report.outcome = outcome;
+        report.done = Totals {
+            files,
+            dirs: 0,
+            bytes,
+        };
+        report.elapsed = Duration::from_secs(secs);
+        report
+    }
+
+    #[test]
+    fn the_recent_list_keeps_the_newest_twenty() {
+        let mut recent = RecentJobs::default();
+        assert!(recent.is_empty());
+        for id in 1..=25 {
+            recent.add(
+                JobWork::Copy,
+                Arc::new(copy_report(id, Outcome::Completed, 1, 1, 1)),
+            );
+            assert_eq!(
+                recent.len(),
+                usize::try_from(id).unwrap_or(0).min(RECENT_JOBS)
+            );
+        }
+        // The newest first; the five oldest have gone.
+        assert_eq!(recent.len(), 20);
+        assert_eq!(recent.get(0).map(|job| job.report.0.id), Some(JobId(25)));
+        assert_eq!(recent.get(19).map(|job| job.report.0.id), Some(JobId(6)));
+        assert_eq!(recent.get(20), None);
+        assert_eq!(recent.rows().len(), 20);
+        recent.clear();
+        assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn a_recent_row_tells_what_the_job_did() {
+        let mut recent = RecentJobs::default();
+        let mut report = copy_report(1, Outcome::Completed, 12, 96 * 1024 * 1024, 2);
+        report.skipped = 1;
+        recent.add(JobWork::Copy, Arc::new(report));
+        assert_eq!(
+            recent.rows(),
+            [RecentRow {
+                title: "복사했습니다".to_owned(),
+                detail: "assets → 백업".to_owned(),
+                stats: "복사 12개 · 건너뜀 1개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 2초"
+                    .to_owned(),
+                details: false,
+                ok: true,
+            }]
+        );
+        // A trash moves no bytes: no speed. A failure has its 자세히.
+        let mut report = JobReport::new(
+            JobId(2),
+            &JobSpec::Delete(rf_jobs::DeleteSpec {
+                paths: vec![path("a"), path("b")],
+                method: rf_jobs::DeleteMethod::Trash,
+                errors: rf_jobs::ErrorPolicy::Continue,
+            }),
+        );
+        report.outcome = Outcome::CompletedWithErrors;
+        report.done.files = 1;
+        report.elapsed = Duration::from_millis(300);
+        report.failures.push(rf_jobs::ItemFailure {
+            source: Some(path("b")),
+            target: None,
+            stage: rf_jobs::Stage::Delete,
+            kind: rf_core::ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        });
+        recent.add(JobWork::Trash, Arc::new(report));
+        let row = &recent.rows()[0];
+        assert_eq!(
+            row.stats,
+            "휴지통 1개 · 건너뜀 0개 · 오류 1개 · 걸린 시간 1초 미만"
+        );
+        assert!(row.details && !row.ok);
+        let lines = report_lines(&recent.get(0).expect("the trash").report.0);
+        assert_eq!(lines, [format!("{}: 권한이 없습니다", path("b"))]);
+    }
+
+    #[test]
+    fn the_log_name_says_the_job_its_kind_and_when_it_started() {
+        let mut report = copy_report(12, Outcome::Completed, 1, 1, 1);
+        report.started = std::time::UNIX_EPOCH + Duration::from_secs(1_793_370_727);
+        assert_eq!(
+            log_name(&report, &TimeZone::UTC),
+            "job-copy-20261030-143207.log"
+        );
+    }
+
+    #[test]
+    fn a_log_is_saved_under_a_free_name_and_never_over_a_file() {
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        let report = copy_report(3, Outcome::Completed, 2, 10, 1);
+        let name = "job-copy-20261030-143207.log";
+        let first = save_log(&report, folder.path(), name).expect("written");
+        assert_eq!(first, folder.path().join(name));
+        let mut log = Vec::new();
+        report.write_log(&mut log).expect("the log");
+        assert_eq!(std::fs::read(&first).expect("read back"), log);
+        // A file of the name stays as it is: the next log takes a number.
+        std::fs::write(&first, "mine").expect("a file of the user's");
+        let second = save_log(&report, folder.path(), name).expect("written");
+        assert_eq!(
+            second,
+            folder.path().join("job-copy-20261030-143207 (2).log")
+        );
+        assert_eq!(std::fs::read_to_string(&first).expect("read"), "mine");
+        let third = save_log(&report, folder.path(), name).expect("written");
+        assert_eq!(
+            third,
+            folder.path().join("job-copy-20261030-143207 (3).log")
+        );
+        // A folder that is not there is an error, and nothing is made.
+        let gone = folder.path().join("없는 폴더");
+        let error = save_log(&report, &gone, name).expect_err("no folder");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!gone.exists());
+    }
+
+    #[test]
+    fn a_log_with_every_name_taken_is_not_written() {
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        let report = copy_report(4, Outcome::Completed, 1, 1, 1);
+        std::fs::write(folder.path().join("log"), "").expect("taken");
+        for number in 2..=LOG_NAME_TRIES {
+            std::fs::write(folder.path().join(format!("log ({number})")), "").expect("taken");
+        }
+        let error = save_log(&report, folder.path(), "log").expect_err("all taken");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     /// Records the order of the calls [`close_down`] makes, and the time it gives the

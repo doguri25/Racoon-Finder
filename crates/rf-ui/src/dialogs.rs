@@ -359,6 +359,10 @@ pub struct Confirm {
     pub ok: String,
     /// Whether it destroys something: then Enter does not confirm, only the button does.
     pub danger: bool,
+    /// The label of a third answer, which keeps things as they are and is the main button (Enter
+    /// takes it); empty for none. The question before the app ends while jobs run has one where
+    /// they can go on behind the tray icon: 트레이에서 계속.
+    pub alt: String,
 }
 
 impl Confirm {
@@ -378,6 +382,7 @@ impl Confirm {
             question: String::new(),
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
+            alt: String::new(),
             purpose: ConfirmPurpose::DeletePermanently(paths),
         }
     }
@@ -394,6 +399,7 @@ impl Confirm {
             question: words::delete_copies(copies.len()),
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
+            alt: String::new(),
             purpose: ConfirmPurpose::DeleteCopies {
                 copies,
                 originals,
@@ -402,17 +408,23 @@ impl Confirm {
         }
     }
 
-    /// The question before the app ends while `running` jobs run.
-    pub fn quit(running: usize) -> Confirm {
+    /// The question before the app ends while `running` jobs run. With `tray`, the system the
+    /// app runs on where the jobs can go on behind the tray icon (XFER-15), it offers that too,
+    /// as its main answer.
+    pub fn quit(running: usize, tray: Option<Os>) -> Confirm {
         Confirm {
             purpose: ConfirmPurpose::Quit,
             title: words::quit_title().to_owned(),
             message: words::quit_with_jobs(running),
             detail: String::new(),
             lines: Vec::new(),
-            question: String::new(),
+            question: tray.map(words::quit_or_tray).unwrap_or_default().to_owned(),
             ok: words::quit_button().to_owned(),
             danger: false,
+            alt: tray
+                .map(words::continue_in_tray)
+                .unwrap_or_default()
+                .to_owned(),
         }
     }
 
@@ -428,6 +440,7 @@ impl Confirm {
             question: String::new(),
             ok: words::view_apply_button().to_owned(),
             danger: false,
+            alt: String::new(),
         }
     }
 
@@ -718,13 +731,24 @@ mod tests {
         assert!(copies.danger);
         assert_eq!(copies.job(), None);
 
-        let quit = Confirm::quit(2);
+        let quit = Confirm::quit(2, None);
         assert!(!quit.danger);
         assert_eq!(quit.job(), None);
         assert_eq!(
             quit.message,
             "진행 중인 작업 2개가 있습니다.\n끝내면 다음 실행 때 이어서 할 수 있습니다."
         );
+        // Without a tray, the question and the buttons are as they were.
+        assert_eq!((quit.question.as_str(), quit.alt.as_str()), ("", ""));
+        // With one, it asks whether the jobs go on behind it, the main answer.
+        let tray = Confirm::quit(1, Some(Os::Windows));
+        assert_eq!(tray.question, "작업이 끝날 때까지 트레이에서 계속할까요?");
+        assert_eq!(
+            (tray.ok.as_str(), tray.alt.as_str()),
+            ("끝내기", "트레이에서 계속")
+        );
+        let menu_bar = Confirm::quit(1, Some(Os::MacOs));
+        assert_eq!(menu_bar.alt, "메뉴 막대에서 계속");
     }
 
     fn conflict(incoming: EntryKind, existing: EntryKind) -> ConflictQuestion {

@@ -22,6 +22,12 @@
 //! terminal, the system's properties window) goes to a worker thread of its own each time
 //! ([`open::shell`]): none of those calls needs the main thread, and some block until the user
 //! closes a dialog.
+//!
+//! The notifications of jobs that ended go to the system on worker threads too
+//! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
+//! hidden and the jobs go on behind the tray icon (XFER-15), the icon follows the state at each
+//! redraw ([`Tray`]); the event loop runs until the controller ends it, so the hidden window
+//! does not end it, and the app ends as it always does: settings, then the engine.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -36,14 +42,16 @@ use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
 use slint::language::DragAction;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
-use crate::jobs::{Jobs, QUIT_TIMEOUT};
+use crate::jobs::{self, Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
+use crate::notify::{NOTICE_WAIT, Notifier, OsNotifier, SlintTray, Tray};
 use crate::open::ShellNews;
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
@@ -58,7 +66,10 @@ use crate::state::{
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
 };
-use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
+use crate::{
+    DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, RecentRowView, TabDrop, open,
+    words,
+};
 
 pub mod clipboard;
 mod matcher;
@@ -139,6 +150,8 @@ pub struct Startup {
     pub settings: Settings,
     /// Writes them back (or, when the file there could not be read, writes nothing).
     pub saver: Saver,
+    /// The app's folder for logs, where a job's log goes unless the user chooses another.
+    pub log_dir: Option<VPath>,
 }
 
 /// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
@@ -150,6 +163,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         start,
         settings,
         saver,
+        log_dir,
     } = startup;
     if let Some((width, height)) = settings.window_size() {
         window.set_start_width(logical(width));
@@ -162,6 +176,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
+    *controller.log_dir.borrow_mut() = log_dir;
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
 
@@ -344,6 +359,7 @@ fn connect(window: &MainWindow) {
     });
     connect_tabs(window);
     connect_jobs(window);
+    connect_report(window);
     connect_pick(window);
     connect_properties(window);
 }
@@ -626,6 +642,35 @@ fn connect_pick(window: &MainWindow) {
 }
 
 /// The callbacks of the dialogs, the job panel and the toast, and the close button.
+/// The buttons of the job panel's 최근 완료, and the question's 트레이에서 계속.
+fn connect_report(window: &MainWindow) {
+    window.on_recent_toggled(|| {
+        with(|c| {
+            c.update(|state| {
+                state.recent_toggled();
+                Vec::new()
+            });
+        });
+    });
+    window.on_recent_cleared(|| {
+        with(|c| {
+            c.update(|state| {
+                state.recent_cleared();
+                Vec::new()
+            });
+        });
+    });
+    window.on_recent_details(|i| {
+        with(|c| c.update_at(i, AppState::recent_details));
+    });
+    window.on_recent_save(|i| {
+        with(|c| c.update_at(i, AppState::save_log_asked));
+    });
+    window.on_confirm_alternative(|| {
+        with(|c| c.update(AppState::confirm_alternative));
+    });
+}
+
 fn connect_jobs(window: &MainWindow) {
     window.on_row_menu(|s, i| {
         with(|c| c.update_at(i, |state, i| state.row_menu(side(s), i)));
@@ -711,6 +756,8 @@ fn connect_jobs(window: &MainWindow) {
         if with(Controller::close_requested).is_some() {
             CloseRequestResponse::KeepWindowShown
         } else {
+            // The event loop runs until it is ended (`crate::run`): a hidden window does not.
+            let _ = slint::quit_event_loop();
             CloseRequestResponse::HideWindow
         }
     });
@@ -783,6 +830,14 @@ pub struct Controller {
     clipboard_timer: slint::Timer,
     /// The titles of the menu of the apps that can open a file (macOS).
     open_with_apps: Rc<VecModel<slint::SharedString>>,
+    /// The lines of the job panel's 최근 완료.
+    recent_rows: Rc<VecModel<RecentRowView>>,
+    /// The app's folder for logs, until the state has it.
+    log_dir: RefCell<Option<VPath>>,
+    /// Shows the notifications of the system.
+    notifier: OsNotifier,
+    /// The tray icon while the window is hidden.
+    tray: Tray,
 }
 
 impl fmt::Debug for Controller {
@@ -809,6 +864,8 @@ impl Controller {
         window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
         let open_with_apps = Rc::new(VecModel::default());
         window.set_open_with_apps(ModelRc::from(Rc::clone(&open_with_apps)));
+        let recent_rows = Rc::new(VecModel::default());
+        window.set_recent_rows(ModelRc::from(Rc::clone(&recent_rows)));
         // A payload from the start: a drag only begins on a press whose area has one, and the
         // press readies the drag's own.
         window.set_drag_data(ui_bridge::drag_payload(0));
@@ -877,6 +934,12 @@ impl Controller {
             }),
             clipboard_timer: slint::Timer::default(),
             open_with_apps,
+            recent_rows,
+            log_dir: RefCell::new(None),
+            notifier: OsNotifier::system(),
+            tray: Tray::new(Box::new(SlintTray::new(|command| {
+                with(|c| c.update(|state| state.tray_command(command)));
+            }))),
         }
     }
 
@@ -911,6 +974,10 @@ impl Controller {
         }
         effects.extend(state.follow_active());
         state.set_history(self.jobs.history());
+        if let Some(dir) = self.log_dir.borrow_mut().take() {
+            state.set_log_dir(dir);
+        }
+        state.set_tray(rf_platform::desktop::TRAY);
         for early in self.early.take() {
             effects.extend(match early {
                 Early::Event(event) => state.job_event(event),
@@ -949,10 +1016,12 @@ impl Controller {
             return;
         }
         // The engine notes a job's record before its end is announced, so the history is up
-        // to date now.
+        // to date now. Whether the window is in front decides whether the end is notified.
         let history = self.jobs.history();
+        let active = self.window_active();
         self.update(|state| {
             state.set_history(history);
+            state.set_window_active(active);
             state.job_event(event)
         });
     }
@@ -986,6 +1055,7 @@ impl Controller {
         self.checks.borrow_mut().stop();
         let jobs = self.jobs.clone();
         let saver = self.saver.clone();
+        let notifier = self.notifier.clone();
         let last = self.final_settings();
         let taken = last.is_some();
         let started = std::thread::Builder::new()
@@ -997,6 +1067,9 @@ impl Controller {
                     let _ = saver.save_within(text, FINAL_SAVE_WAIT);
                 }
                 jobs.close_down(QUIT_TIMEOUT);
+                // The last notification, of the jobs that ended behind the tray icon, is not
+                // cut off by the end of the app.
+                notifier.wait_idle(NOTICE_WAIT);
                 let _ = slint::invoke_from_event_loop(|| {
                     let _ = slint::quit_event_loop();
                 });
@@ -1402,7 +1475,9 @@ impl Controller {
                 | Effect::FindExisting { .. }
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
+                Effect::SaveLog { report, folder } => self.save_log(report, folder),
                 Effect::Quit => self.quit(),
+                Effect::Notify(_) | Effect::ToTray | Effect::FromTray => self.desktop(effect),
                 Effect::Sort(_)
                 | Effect::MatchNames(_)
                 | Effect::Preview(_)
@@ -1416,26 +1491,8 @@ impl Controller {
                         on_screen.push(Effect::Notice(words::background_failed().to_owned()));
                     }
                 }
-                Effect::Load(request) => {
-                    let generation = request.generation;
-                    let ticket = self.loader.request(request, |event| {
-                        post(move |c| c.loaded(event));
-                    });
-                    self.tickets.borrow_mut().insert(generation, ticket);
-                }
-                Effect::LoadChildren(request) => {
-                    let generation = request.generation;
-                    let ticket = self.loader.list_folders(request, |event| {
-                        post(move |c| c.loaded(event));
-                    });
-                    self.tickets.borrow_mut().insert(generation, ticket);
-                }
-                Effect::ListNames(request) => {
-                    let generation = request.generation;
-                    let ticket = self.loader.list_names(request, |event| {
-                        post(move |c| c.loaded(event));
-                    });
-                    self.tickets.borrow_mut().insert(generation, ticket);
+                Effect::Load(_) | Effect::LoadChildren(_) | Effect::ListNames(_) => {
+                    self.list(effect);
                 }
                 Effect::Follow { generation, link } => {
                     self.loader.follow(generation, link, |followed| {
@@ -1583,25 +1640,7 @@ impl Controller {
                     post(move |c| c.update(|state| state.copies_checked(token, &found)));
                 });
             }
-            Effect::ReadSpace { tabs, drives } => {
-                let loader = self.loader.clone();
-                spawn_worker("rf-ui-space", move || {
-                    for (generation, path) in tabs {
-                        if let Some(available) = loader.free_space(&path) {
-                            let event = LoadEvent::Space {
-                                generation,
-                                available,
-                            };
-                            post(move |c| c.loaded(event));
-                        }
-                    }
-                    for drive in drives {
-                        if let Ok(space) = rf_platform::disk_space(&drive) {
-                            post(move |c| c.drive_space(&drive, space));
-                        }
-                    }
-                });
-            }
+            Effect::ReadSpace { tabs, drives } => self.read_space(tabs, drives),
             Effect::FindExisting { generation, path } => {
                 let loader = self.loader.clone();
                 spawn_worker("rf-ui-vanished", move || {
@@ -1662,7 +1701,11 @@ impl Controller {
             | Effect::Toast { .. }
             | Effect::Busy { .. }
             | Effect::NotBusy(_)
-            | Effect::Quit => {}
+            | Effect::SaveLog { .. }
+            | Effect::Quit
+            | Effect::Notify(_)
+            | Effect::ToTray
+            | Effect::FromTray => {}
         }
     }
 
@@ -1768,7 +1811,11 @@ impl Controller {
             | Effect::CheckCopies { .. }
             | Effect::InspectTarget { .. }
             | Effect::ReadSpace { .. }
-            | Effect::Quit => {}
+            | Effect::SaveLog { .. }
+            | Effect::Quit
+            | Effect::Notify(_)
+            | Effect::ToTray
+            | Effect::FromTray => {}
         }
     }
 
@@ -1989,11 +2036,116 @@ impl Controller {
         );
         window.set_can_undo(state.can_undo());
         window.set_notice_action_live(state.toast_button_live());
+        ui_bridge::set_rows(
+            &self.recent_rows,
+            state
+                .recent_rows()
+                .iter()
+                .map(ui_bridge::recent_row_view)
+                .collect(),
+        );
+        window.set_recent_open(state.recent_open());
         let (line, button) = state
             .panel_cursor()
             .map_or((-1, -1), |(line, button)| (number(line), number(button)));
         window.set_panel_line(line);
         window.set_panel_button(button);
+        self.tray
+            .follow(state.tray_view(rf_core::identity::DISPLAY_NAME));
+    }
+
+    /// Whether the window is the one in front, with the keyboard: not while it is hidden or
+    /// minimized, or another app's window is in front. A window of another backend than
+    /// winit's (the tests') counts as in front.
+    fn window_active(&self) -> bool {
+        self.window.upgrade().is_none_or(|window| {
+            window
+                .window()
+                .with_winit_window(slint::winit_030::winit::window::Window::has_focus)
+                .unwrap_or(true)
+        })
+    }
+
+    /// Carries out what the window asks of the desktop outside it: a notification of the
+    /// system; the window hiding while the jobs go on behind the tray icon, which the redraw
+    /// shows; or the window showing again, in front, the redraw taking the icon away.
+    fn desktop(&self, effect: Effect) {
+        let window = self.window.upgrade();
+        match (effect, window) {
+            (Effect::Notify(notice), _) => self.notifier.notify(notice),
+            (Effect::ToTray, Some(window)) => {
+                let _ = window.hide();
+            }
+            (Effect::FromTray, Some(window)) => {
+                let _ = window.show();
+                window.window().with_winit_window(|winit| {
+                    winit.set_minimized(false);
+                    winit.focus_window();
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads again on a worker thread the free space of the folders of `tabs`, for the tabs
+    /// that still have the generation each comes with, and of the drives `drives`.
+    fn read_space(&self, tabs: Vec<(u64, VPath)>, drives: Vec<VPath>) {
+        let loader = self.loader.clone();
+        spawn_worker("rf-ui-space", move || {
+            for (generation, path) in tabs {
+                if let Some(available) = loader.free_space(&path) {
+                    let event = LoadEvent::Space {
+                        generation,
+                        available,
+                    };
+                    post(move |c| c.loaded(event));
+                }
+            }
+            for drive in drives {
+                if let Ok(space) = rf_platform::disk_space(&drive) {
+                    post(move |c| c.drive_space(&drive, space));
+                }
+            }
+        });
+    }
+
+    /// Starts the listing `effect` asks for (a tab's folder, the folders of a folder of a tree,
+    /// or the names of a list of the address bar) on the loader; it comes back to
+    /// [`Controller::loaded`].
+    fn list(&self, effect: Effect) {
+        let loaded = |event: LoadEvent| post(move |c| c.loaded(event));
+        let (generation, ticket) = match effect {
+            Effect::Load(request) => (request.generation, self.loader.request(request, loaded)),
+            Effect::LoadChildren(request) => (
+                request.generation,
+                self.loader.list_folders(request, loaded),
+            ),
+            Effect::ListNames(request) => {
+                (request.generation, self.loader.list_names(request, loaded))
+            }
+            _ => return,
+        };
+        self.tickets.borrow_mut().insert(generation, ticket);
+    }
+
+    /// Writes the log of the job that left `report` into `folder` on a worker thread, named by
+    /// the job and the time it started here ([`jobs::log_name`]), and hands the name it was
+    /// written under, or why not, to the state.
+    fn save_log(&self, report: jobs::SharedReport, folder: VPath) {
+        let tz = self.tz.borrow().clone();
+        spawn_worker("rf-ui-log", move || {
+            let name = jobs::log_name(&report.0, &tz);
+            let saved = match folder.as_local() {
+                Some(folder) => jobs::save_log(&report.0, folder, &name)
+                    .map(|path| {
+                        path.file_name()
+                            .map_or(name, |name| name.to_string_lossy().into_owned())
+                    })
+                    .map_err(|error| jobs::log_error(folder, error)),
+                None => Err(rf_core::ErrorKind::Unsupported),
+            };
+            post(move |c| c.update(|state| state.log_saved(saved)));
+        });
     }
 
     /// Shows the dialog of the state, setting its view before its kind (the dialog reads the

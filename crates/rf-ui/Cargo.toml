@@ -32,7 +32,7 @@ rf-vfs = { version = "0.1.0", path = "../rf-vfs" }
 serde = { version = "1.0.229", features = ["derive"] }
 sha1 = { version = "0.11.0", default-features = false }
 sha2 = { version = "0.11.1", default-features = false }
-slint = "1.18.1"
+slint = { version = "1.18.1", features = ["unstable-winit-030"] }
 thiserror = "2.0.21"
 toml = "1.1.8"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }

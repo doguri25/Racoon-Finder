@@ -17,7 +17,7 @@ use crate::dialogs::{Modal, NameDialog};
 use crate::loader::LoadRequest;
 use crate::pane::{Pane, Tab};
 use crate::pick::{
-    Looked, PickRequest, Picker, RECENT_TARGETS, TargetFacts, quick_targets, validate,
+    Looked, PickPurpose, PickRequest, Picker, RECENT_TARGETS, TargetFacts, quick_targets, validate,
 };
 use crate::places::Place;
 use crate::tree::{NodeId, Tree};
@@ -75,14 +75,23 @@ impl AppState {
             return Vec::new();
         };
         let opposite = self.tab(RIGHT - side).location().clone();
-        let tabs: Vec<VPath> = self
-            .panes
+        let tabs = self.open_tab_folders();
+        let groups = quick_targets(&request, &opposite, &tabs, &self.recent, &self.places);
+        self.show_picker(Picker::new(request, side, groups))
+    }
+
+    /// The folders of the tabs of both panes, in their order.
+    pub(super) fn open_tab_folders(&self) -> Vec<VPath> {
+        self.panes
             .iter()
             .flat_map(Pane::tabs)
             .map(|tab| tab.location().clone())
-            .collect();
-        let groups = quick_targets(&request, &opposite, &tabs, &self.recent, &self.places);
-        let picker = Picker::new(request, side, groups);
+            .collect()
+    }
+
+    /// Shows `picker` with a folder tree of its own, opening on the way to its target, at which
+    /// a worker looks.
+    pub(super) fn show_picker(&mut self, picker: Picker) -> Vec<Effect> {
         let target = picker.target.clone();
         self.pick_tree = Tree::new(VisibilityFilter {
             show_hidden: self.show_hidden,
@@ -163,6 +172,13 @@ impl AppState {
         if !picker.can_confirm() {
             return Vec::new();
         }
+        if let (PickPurpose::SaveLog { report, .. }, Some(folder)) =
+            (&picker.purpose, picker.target.clone())
+        {
+            let report = report.clone();
+            self.close();
+            return vec![Effect::SaveLog { report, folder }];
+        }
         let (Some(target), Some(spec)) = (picker.target.clone(), picker.spec()) else {
             return Vec::new();
         };
@@ -177,14 +193,20 @@ impl AppState {
 
     /// The picker's 이동/복사 toggle.
     pub fn pick_mode(&mut self, mode: TransferMode) {
-        if let Some(picker) = self.active_picker_mut() {
+        if let Some(picker) = self
+            .active_picker_mut()
+            .filter(|picker| !picker.for_a_log())
+        {
             picker.set_mode(mode);
         }
     }
 
-    /// The picker's "이름이 겹치면" buttons.
+    /// The picker's "이름이 겹치면" buttons. A log never goes over a file: its picker has none.
     pub fn pick_policy(&mut self, policy: ConflictPolicy) {
-        if let Some(picker) = self.active_picker_mut() {
+        if let Some(picker) = self
+            .active_picker_mut()
+            .filter(|picker| !picker.for_a_log())
+        {
             picker.policy = policy;
         }
     }

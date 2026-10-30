@@ -23,7 +23,8 @@ import {
     MenuRoom
 } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
-import { JobPanel, JobRowView } from "job-panel.slint";
+import { JobPanel, JobRowView, RecentRowView } from "job-panel.slint";
+import { JobTray } from "tray.slint";
 import {
     NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
     RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow, PatternDialog,
@@ -38,7 +39,7 @@ import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properti
 import { ItemMenu, OpenWithMenu } from "list-parts.slint";
 
 export {
-    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
+    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu
@@ -100,7 +101,14 @@ export component MainWindow inherits Window {
     // has the keys; -1 for none.
     in property <int> panel-line: -1;
     in property <int> panel-button: -1;
-    private property <bool> panel-shows: root.job-rows.length > 0;
+    // The jobs that ended (최근 완료), and whether their lines show below its head.
+    in property <[RecentRowView]> recent-rows;
+    in property <bool> recent-open;
+    private property <bool> panel-shows: root.job-rows.length > 0 || root.recent-rows.length > 0;
+    // How many lines of 최근 완료 show at once: a window below 700px high (it can be 560px)
+    // keeps room for the panes with two. Set by the handlers of the height, as `compact` is:
+    // the window's height depends on the panel's.
+    private property <int> recent-lines: 3;
     // The dialog that is open, and what each kind shows. Rust sets the view before the kind.
     in property <DialogKind> dialog: DialogKind.none;
     in property <NameView> name-view;
@@ -324,6 +332,13 @@ export component MainWindow inherits Window {
     callback job-pause(index: int);
     callback job-resume(index: int);
     callback job-cancel(index: int);
+    // The buttons of 최근 완료: 펼치기 or 접기, 지우기, and 자세히 and 로그 저장… of line `index`.
+    callback recent-toggled();
+    callback recent-cleared();
+    callback recent-details(index: int);
+    callback recent-save(index: int);
+    // The confirmation's third answer (트레이에서 계속).
+    callback confirm-alternative();
     // The button of the toast `token`, and its end (closed, or its time ran out).
     callback notice-action(token: int);
     callback notice-closed(token: int);
@@ -585,6 +600,7 @@ export component MainWindow inherits Window {
     init => {
         root.compact = root.width < 1200px;
         root.titled = root.width >= 1400px;
+        root.recent-lines = root.height < 700px ? 2 : 3;
         root.show-theme();
     }
     changed width => {
@@ -594,6 +610,7 @@ export component MainWindow inherits Window {
         root.window-resized();
     }
     changed height => {
+        root.recent-lines = root.height < 700px ? 2 : 3;
         root.window-resized();
     }
 
@@ -1273,6 +1290,9 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     rows: root.job-rows;
+                    recent: root.recent-rows;
+                    recent-open: root.recent-open;
+                    recent-lines: root.recent-lines;
                     focus-line: panel-keys.has-focus ? root.panel-line : -1;
                     focus-button: panel-keys.has-focus ? root.panel-button : -1;
                     pause(index) => {
@@ -1283,6 +1303,18 @@ export component MainWindow inherits Window {
                     }
                     cancel(index) => {
                         root.job-cancel(index);
+                    }
+                    recent-toggled => {
+                        root.recent-toggled();
+                    }
+                    recent-cleared => {
+                        root.recent-cleared();
+                    }
+                    recent-details(index) => {
+                        root.recent-details(index);
+                    }
+                    recent-save(index) => {
+                        root.recent-save(index);
                     }
                 }
             }
@@ -1525,6 +1557,9 @@ export component MainWindow inherits Window {
             view: root.confirm-view;
             accepted => {
                 root.confirm-accepted();
+            }
+            alternative => {
+                root.confirm-alternative();
             }
             cancelled => {
                 root.dialog-cancelled();

@@ -101,7 +101,7 @@ impl AppState {
                 vec![Effect::Notice(words::journal_error().to_owned())]
             }
             event => match self.jobs.apply(event) {
-                Some(ended) => self.job_ended(ended),
+                Some(ended) => self.finished(ended),
                 None => Vec::new(),
             },
         }
@@ -125,7 +125,8 @@ impl AppState {
             Asked::Preflight(issues) => Modal::Preflight(PreflightQuestion { id, job, issues }),
         };
         self.open(modal);
-        Vec::new()
+        // Behind the tray icon, nobody would see it: the window comes back to ask.
+        self.come_back()
     }
 
     /// The name in the name window changed to `text`.
@@ -336,7 +337,8 @@ impl AppState {
     }
 
     /// The window's close button: with jobs under way, a confirmation first (over any window
-    /// that shows, which comes back if the user stays); without, the app ends.
+    /// that shows, which comes back if the user stays), which may offer to go on behind the
+    /// tray icon (module `tray`); without, the app ends.
     pub fn request_close(&mut self) -> Vec<Effect> {
         if self.quitting {
             return Vec::new();
@@ -350,10 +352,13 @@ impl AppState {
         {
             return Vec::new();
         }
+        // The jobs may go on behind the tray icon, where it is offered and nothing else waits
+        // for the user.
+        let tray = self.tray_offer();
         if let Some(shown) = self.modal.take() {
             self.later.push_front(shown);
         }
-        self.modal = Some(Modal::Confirm(Confirm::quit(running)));
+        self.modal = Some(Modal::Confirm(Confirm::quit(running, tray)));
         Vec::new()
     }
 
@@ -418,7 +423,7 @@ impl AppState {
     }
 
     /// Tells of the job that ended: see [`AppState::job_event`].
-    fn job_ended(&mut self, ended: Ended) -> Vec<Effect> {
+    pub(super) fn job_ended(&mut self, ended: Ended) -> Vec<Effect> {
         let Ended {
             work,
             origin,
@@ -752,7 +757,7 @@ pub(super) fn deleted_for_good(report: &JobReport) -> impl Iterator<Item = &Item
 
 /// The number of items a job was asked to act on at its top level: the items of a transfer,
 /// the paths of a delete, and one for the others.
-fn top_level_count(spec: &JobSpec) -> usize {
+pub(super) fn top_level_count(spec: &JobSpec) -> usize {
     match spec {
         JobSpec::Transfer(transfer) => transfer.items.len(),
         JobSpec::Delete(delete) => delete.paths.len(),

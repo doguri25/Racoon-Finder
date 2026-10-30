@@ -1,0 +1,52 @@
+// The icon of the system's tray (the notification area on Windows, the menu bar on macOS)
+// while the window is hidden and its jobs go on (XFER-15): its tooltip says how far they have
+// got, the menu bar shows the first one's percent beside it, and its menu opens the window,
+// pauses or resumes every job, or ends the app. A click on the icon opens the window too.
+// Rust makes it when the window hides and drops it when the window shows again; it has no
+// window of its own, and no globals shared with the main window (it uses none).
+
+export component JobTray inherits SystemTrayIcon {
+    in property <image> picture;
+    // The tooltip, and the text beside the icon in the macOS menu bar.
+    in property <string> status;
+    in property <string> label;
+    // Every job is paused: the menu offers 모두 계속.
+    in property <bool> all-paused;
+    callback open-window();
+    callback pause-all();
+    callback resume-all();
+    callback quit();
+
+    icon: root.picture;
+    tooltip: root.status;
+    title: root.label;
+    clicked => {
+        root.open-window();
+    }
+
+    Menu {
+        MenuItem {
+            title: "창 열기";
+            activated => {
+                root.open-window();
+            }
+        }
+        MenuItem {
+            title: root.all-paused ? "모두 계속" : "모두 일시정지";
+            activated => {
+                if (root.all-paused) {
+                    root.resume-all();
+                } else {
+                    root.pause-all();
+                }
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "끝내기";
+            activated => {
+                root.quit();
+            }
+        }
+    }
+}
