@@ -1,0 +1,112 @@
+// The keys of the commands the toolbar, the menus and the tooltips show (KEY-03), written as
+// the system the app runs on writes them ("Ctrl+Shift+N" on Windows, "⇧⌘N" on macOS). Rust sets
+// them from its shortcut table (`keys.rs`, `ui_bridge::show_shortcuts`); a command without a
+// key there has an empty one.
+
+export global Shortcuts {
+    in property <string> back;
+    in property <string> forward;
+    in property <string> up;
+    in property <string> new-folder;
+    in property <string> copy-to;
+    in property <string> move-to;
+    in property <string> trash;
+    in property <string> delete-permanently;
+    in property <string> rename;
+    in property <string> undo;
+    in property <string> redo;
+    in property <string> open;
+    in property <string> toggle-hidden;
+    in property <string> view-menu;
+    in property <string> filter;
+    in property <string> new-tab;
+    in property <string> close-tab;
+    in property <string> reopen-tab;
+    in property <string> move-tab-left;
+    in property <string> move-tab-right;
+    // The 보기 menu's layout and the commands between the panes.
+    in property <string> toggle-tree;
+    in property <string> focus-tree;
+    in property <string> toggle-preview;
+    in property <string> toggle-dual-pane;
+    in property <string> toggle-split;
+    in property <string> swap-panes;
+    in property <string> same-folder;
+    in property <string> sync-navigation;
+    // The view modes.
+    in property <string> view-details;
+    in property <string> view-list;
+    in property <string> view-small-icons;
+    in property <string> view-medium-icons;
+    in property <string> view-large-icons;
+    // 자세히's 모든 열 너비 맞추기.
+    in property <string> fit-columns;
+    // The 선택 menu, and listing the folder again.
+    in property <string> select-all;
+    in property <string> invert-selection;
+    in property <string> select-pattern;
+    in property <string> select-same-extension;
+    in property <string> refresh;
+    // 빠른 보기 (Space).
+    in property <string> quick-look;
+    // The clipboard: cut (none on macOS, whose Finder cuts no files), copy, paste, Finder's
+    // 여기로 이동 (⌥⌘V; none elsewhere), and 경로 복사, whose key copies the paths in the form
+    // numbered `copy-path-form` (`PathForms.titles`).
+    in property <string> cut;
+    in property <string> copy;
+    in property <string> paste;
+    in property <string> paste-move;
+    in property <string> copy-path;
+    in property <int> copy-path-form: -1;
+    // 속성 (the app's own window of the items).
+    in property <string> properties;
+    // 터미널에서 열기 (OPS-11).
+    in property <string> open-terminal;
+
+    // A menu item's title with its key after it, or the title alone for a command without
+    // one. A menu of a window (not of the menu bar) has no column for keys.
+    public pure function titled(title: string, keys: string) -> string {
+        return keys == "" ? title : "\{title}  (\{keys})";
+    }
+
+    // A tooltip's text: the name, and the key after it.
+    public pure function tip(name: string, keys: string) -> string {
+        return keys == "" ? name : "\{name} (\{keys})";
+    }
+}
+
+// The forms of 경로 복사 (OPS-07), in the order of their numbers (`PathForm::number`): a menu
+// item `i` runs the command `copy-path-i`.
+export global PathForms {
+    out property <[string]> titles: ["전체 경로", "이름만", "따옴표 포함", "UNC 경로", "슬래시 형식", "파일 URL"];
+
+    // The title of form `i`, with the key after it for the form the key copies.
+    public pure function title(i: int) -> string {
+        return Shortcuts.titled(PathForms.titles[i], i == Shortcuts.copy-path-form ? Shortcuts.copy-path : "");
+    }
+}
+
+// The keys every dialog moves its focus with: Tab and Shift+Tab among its buttons (and fields),
+// going round, as the system's dialogs do.
+export global DialogKeys {
+    // 1 for Tab, -1 for Shift+Tab (Tab with Shift, or Backtab), 0 for any other key.
+    public pure function tab-step(event: KeyEvent) -> int {
+        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            return 0;
+        }
+        if (event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) {
+            return -1;
+        }
+        return event.text == Key.Tab ? 1 : 0;
+    }
+
+    // Stop `from` moved `step` places among `count` stops, after the last one the first.
+    public pure function cycle(from: int, step: int, count: int) -> int {
+        return Math.mod(from + step, count);
+    }
+
+    // The key presses the button the keys are on: Space or Enter.
+    public pure function presses(event: KeyEvent) -> bool {
+        return event.text == " " || event.text == Key.Return;
+    }
+}

@@ -1,0 +1,301 @@
+// The job panel under the panes: one row for each job a worker runs, with its title, what it
+// works on, its bar and its progress line, and its pause and cancel buttons; under them the
+// head of 최근 완료, the jobs that ended (XFER-14), and, while it is open, their lines: how each
+// ended, what it did and how long it took, its 자세히 and its 로그 저장…. It takes room only
+// while a job runs or a finished one is listed (the window gives it no height otherwise). F6
+// gives it the keys after the tree (KEY-02): the button they are on has the dialogs' focus
+// border.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { ProgressBar, OutlineButton } from "widgets.slint";
+
+// One row, as Rust words it.
+export struct JobRowView {
+    title: string,
+    detail: string,
+    // 0 to 1.
+    progress: float,
+    progress-text: string,
+    paused: bool,
+    // The job waits for the answer to its question.
+    waiting: bool,
+}
+
+// One job that ended, as Rust words it.
+export struct RecentRowView {
+    title: string,
+    detail: string,
+    // What it did: 복사 12개 · 건너뜀 1개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초.
+    stats: string,
+    // It has items to tell of: its 자세히 shows.
+    details: bool,
+    // It did all it was asked, without a failure.
+    ok: bool,
+}
+
+export component JobPanel inherits Rectangle {
+    in property <[JobRowView]> rows;
+    in property <[RecentRowView]> recent;
+    in property <bool> recent-open;
+    // How many lines of 최근 완료 show at once; the list scrolls for the others.
+    in property <int> recent-lines: 3;
+    // The line and the button the keys are on; -1 while the panel does not have them. The
+    // lines are the jobs' rows (0 일시정지 or 계속, 1 취소), then the head of 최근 완료 (0 펼치기
+    // or 접기, 1 지우기), then its lines (자세히 where it shows, then 로그 저장…).
+    in property <int> focus-line: -1;
+    in property <int> focus-button: -1;
+    callback pause(index: int);
+    callback resume(index: int);
+    callback cancel(index: int);
+    callback recent-toggled();
+    callback recent-cleared();
+    callback recent-details(index: int);
+    callback recent-save(index: int);
+
+    // The line of the head of 최근 완료.
+    private property <int> head-line: root.rows.length;
+    private property <length> recent-height: 52px;
+
+    background: Theme.panel;
+    accessible-role: groupbox;
+    accessible-label: "작업";
+
+    // The keys on a line of 최근 완료 that does not show: the list scrolls to it.
+    changed focus-line => {
+        let index = root.focus-line - root.head-line - 1;
+        if (index < 0 || index >= root.recent.length) {
+            return;
+        }
+        let top = index * root.recent-height;
+        if (top < -recent-list.content-y) {
+            recent-list.content-y = -top;
+        } else if (top + root.recent-height > -recent-list.content-y + recent-list.visible-height) {
+            recent-list.content-y = recent-list.visible-height - top - root.recent-height;
+        }
+    }
+
+    VerticalLayout {
+        for row[i] in root.rows: Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 24px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+                    alignment: center;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        Text {
+                            horizontal-stretch: 0;
+                            text: row.title;
+                            font-weight: 700;
+                            color: Theme.text;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: row.detail;
+                            color: Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    ProgressBar {
+                        value: row.progress;
+                        bar-color: row.paused ? Theme.muted : Theme.accent;
+                        accessible-label: row.title;
+                    }
+                    Text {
+                        text: row.progress-text;
+                        font-size: Theme.font-small;
+                        color: Theme.muted;
+                        overflow: elide;
+                    }
+                }
+
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: Theme.gap-s;
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 44px;
+                            text: row.paused ? "계속" : "일시정지";
+                            focused: root.focus-line == i && root.focus-button == 0;
+                            clicked => {
+                                if (row.paused) {
+                                    root.resume(i);
+                                } else {
+                                    root.pause(i);
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 44px;
+                            text: "취소";
+                            focused: root.focus-line == i && root.focus-button == 1;
+                            clicked => {
+                                root.cancel(i);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // A line between rows, and above the first one.
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The head of 최근 완료: how many jobs it lists, and its buttons.
+        if root.recent.length > 0: Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: Theme.gap-s;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: "최근 완료 \{root.recent.length}개";
+                    font-weight: 600;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: root.recent-open ? "접기" : "펼치기";
+                    focused: root.focus-line == root.head-line && root.focus-button == 0;
+                    clicked => {
+                        root.recent-toggled();
+                    }
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: "지우기";
+                    focused: root.focus-line == root.head-line && root.focus-button == 1;
+                    clicked => {
+                        root.recent-cleared();
+                    }
+                }
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The lines of 최근 완료, the newest first.
+        recent-list := ScrollView {
+            visible: root.recent-open && root.recent.length > 0;
+            height: self.visible ? min(root.recent.length, root.recent-lines) * root.recent-height : 0px;
+            content-width: self.visible-width;
+            content-height: root.recent.length * root.recent-height;
+            accessible-role: list;
+            accessible-label: "최근 완료";
+
+            for entry[i] in root.recent: Rectangle {
+                y: i * root.recent-height;
+                width: parent.width;
+                height: root.recent-height;
+
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        Icon {
+                            width: 18px;
+                            height: 18px;
+                            name: entry.ok ? "check" : "warning";
+                            color: entry.ok ? Theme.accent : Theme.folder;
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            Text {
+                                horizontal-stretch: 0;
+                                text: entry.title;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: entry.detail;
+                                color: Theme.muted;
+                                overflow: elide;
+                            }
+                        }
+                        Text {
+                            text: entry.stats;
+                            font-size: Theme.font-small;
+                            color: Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    if entry.details: VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: "자세히";
+                            focused: root.focus-line == root.head-line + 1 + i && root.focus-button == 0;
+                            clicked => {
+                                root.recent-details(i);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: "로그 저장…";
+                            focused: root.focus-line == root.head-line + 1 + i && root.focus-button == (entry.details ? 1 : 0);
+                            clicked => {
+                                root.recent-save(i);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,52 @@
+// The 선택 menu of the toolbar (NAV-15): select every row of the active pane, none, the others,
+// the rows whose names match a pattern, or those with the extension of the cursor's row. Each
+// tool chooses among the rows on screen, whatever the view mode, and each item says its key
+// (KEY-03): the keys do the same from the panes, so the menu needs no key of its own (KEY-02).
+// 선택 해제 says none: Esc does more (with nothing selected it cancels a cut, as File
+// Explorer's does), and File Explorer's 선택 안 함 shows no key either.
+
+import { Shortcuts } from "shortcuts.slint";
+
+export component SelectMenu inherits ContextMenuArea {
+    // A command of the window's (`MainWindow.command`).
+    callback command(name: string);
+
+    // Opens the menu at `x`, `y`.
+    public function open(x: length, y: length) {
+        root.show({ x: x, y: y });
+    }
+
+    Menu {
+        MenuItem {
+            title: Shortcuts.titled("모두 선택", Shortcuts.select-all);
+            activated => {
+                root.command("select-all");
+            }
+        }
+        MenuItem {
+            title: "선택 해제";
+            activated => {
+                root.command("clear-selection");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("선택 반전", Shortcuts.invert-selection);
+            activated => {
+                root.command("invert-selection");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("패턴으로 선택…", Shortcuts.select-pattern);
+            activated => {
+                root.command("select-pattern");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("같은 확장자 선택", Shortcuts.select-same-extension);
+            activated => {
+                root.command("select-same-extension");
+            }
+        }
+    }
+}

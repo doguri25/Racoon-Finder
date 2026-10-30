@@ -1,0 +1,419 @@
+// The column heads and the rows of a folder listing in 자세히 (the other views are in
+// `file-grid.slint`, the heads and the places of the columns in `file-head.slint`). The rows are a
+// virtualized ListView: only the rows on screen exist as elements, so a folder of 100,000 items
+// scrolls as freely as one of ten. A right click opens the menu of the row (`RowMenu`), or of the
+// empty part of the list; each item says the key of its command (KEY-03).
+//
+// A row can be dragged (DND): its payload is what Rust readied when the row was pressed
+// (`drag-data`, the id of the items it noted). The whole list is one place to drop on, which
+// asks Rust about the row under the pointer: a folder's row takes the items into that folder,
+// any other row and the part below the rows into the pane's folder. A place that takes them
+// shows an accent frame, and what the drop would do; one that does not shows nothing, and the
+// pointer says so.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { FileHead, ColumnView } from "file-head.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+
+export { ColumnView }
+
+// One row of the list, as Rust formats it: the texts of every column, the line icon of the
+// other views, and how it shows.
+export struct FileRow {
+    name: string,
+    size: string,
+    modified: string,
+    created: string,
+    kind: string,
+    extension: string,
+    attributes: string,
+    // The line icon of the row, in every view (`Icon.name`).
+    icon: string,
+    is-dir: bool,
+    is-link: bool,
+    selected: bool,
+    hidden: bool,
+    // Cut to the clipboard (Ctrl+X), until it is pasted, the cut is cancelled or the clipboard
+    // holds something else: it shows dimmed (DND-10).
+    cut: bool,
+}
+
+// What a screen reader hears of an item besides its name: that it was cut.
+export global RowWords {
+    public pure function description(row: FileRow) -> string {
+        return row.cut ? "잘라낸 항목" : "";
+    }
+}
+
+
+// The text of the column numbered `id` of `row`.
+export global Cells {
+    public pure function text(row: FileRow, id: int) -> string {
+        if (id == 1) {
+            return row.size;
+        }
+        if (id == 2) {
+            return row.modified;
+        }
+        if (id == 3) {
+            return row.kind;
+        }
+        if (id == 4) {
+            return row.created;
+        }
+        if (id == 5) {
+            return row.extension;
+        }
+        if (id == 6) {
+            return row.attributes;
+        }
+        return row.name;
+    }
+}
+
+export component FileList inherits Rectangle {
+    in property <[FileRow]> rows;
+    // The keyboard cursor's row, or -1.
+    in property <int> cursor: -1;
+    // The columns after the name, in their order, and which columns show by number (0 to 6),
+    // for the head's menu.
+    in property <[ColumnView]> columns;
+    in property <[bool]> shows;
+    // The column the rows are sorted by first (0 name, then as `ColumnView.id`), and the one of
+    // the second key (-1 for none).
+    in property <int> sort-key;
+    in property <bool> sort-ascending: true;
+    in property <int> then-key: -1;
+    in property <bool> then-ascending: true;
+    // Whether this list's pane has the keyboard; the cursor frame shows only then.
+    in property <bool> active;
+    // How many whole rows fit on screen, for PageUp and PageDown, and the first row on screen.
+    out property <int> page-rows: max(1, floor(list.visible-height / Theme.row-height));
+    out property <int> first-row: max(0, floor(-list.content-y / Theme.row-height));
+    // The payload of a drag of the rows: the id of the items the last press readied.
+    in property <data-transfer> drag-data;
+    // What a drop here would do ("항목 3개 이동 → 백업"), as Rust last said while the drag
+    // hovered; shown while this list takes the drag.
+    in property <string> drag-label;
+    // Why the place under the pointer does not take the drag ("여기에 놓을 수 없습니다: …"), while
+    // a drag hovers there; empty otherwise.
+    in property <string> refusal;
+
+    // A click on the head of column `column` (with Shift: `then`).
+    callback sort(column: int, then: bool);
+    // The head's menu showed or hid the column numbered `column`.
+    callback column-toggled(column: int);
+    // The column at `from` among those after the name was dragged to `slot` (0 before the
+    // first of them, their number after the last).
+    callback column-moved(from: int, slot: int);
+    // The column numbered `column` is to be `width` wide.
+    callback column-resized(column: int, width: length);
+    // The texts of the column numbered `column` in `count` rows from row `first` on, one a
+    // line, for a fit to measure.
+    callback column-texts(column: int, first: int, count: int) -> string;
+    // A left press on row `index`, and its release when no drag came of it (a click).
+    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-released(index: int);
+    callback row-activated(index: int);
+    // A right click on row `index`, just before its menu opens.
+    callback row-menu(index: int);
+    // A menu item: the name of the toolbar command it runs (move, copy, open, rename, delete,
+    // delete-permanently, new-folder).
+    callback menu-command(name: string);
+    // A drag with the payload `data` is over row `index` (-1 below the rows) and asks for
+    // `action`: the action this list takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag of this list's rows ended.
+    callback drag-ended();
+
+    // Scrolls as little as needed to show row `index` whole (and keeps the place while the
+    // list settles after a long jump, `ListSettle`).
+    public function scroll-to(index: int) {
+        if (index < 0) {
+            return;
+        }
+        let y = ListScroll.into-view(index * Theme.row-height, Theme.row-height, list.content-y, list.visible-height);
+        if (y > 0) {
+            return;
+        }
+        settle.start(y);
+        list.content-y = y;
+    }
+
+    // Scrolls a step sideways (← and →), as far as the columns reach.
+    public function scroll-sideways(right: bool) {
+        list.content-x = max(-root.overflow, min(0px, list.content-x + (right ? -80px : 80px)));
+    }
+
+    // Fits every column to its texts in the rows on screen (모든 열 너비 맞추기).
+    public function fit-columns() {
+        head.fit-all();
+    }
+
+    // The item menu by row `index`, from the keyboard (Shift+F10, the menu key, macOS ⌃↩);
+    // Rust has scrolled the row into view.
+    public function show-item-menu(index: int) {
+        let x = head.pad + root.icon-room;
+        let y = head.height + list.content-y + (index + 0.75) * Theme.row-height;
+        ItemMenu.showing(root.absolute-position.x + x, root.absolute-position.y + y);
+        key-menus.item(x, y);
+    }
+
+    // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
+    public function show-blank-menu() {
+        key-menus.blank(head.pad + root.icon-room, head.height + Theme.row-height / 2);
+    }
+
+    settle := ListSettle { }
+
+    // How far the columns reach past the list's right edge; 0 while they fit.
+    private property <length> overflow: max(0px, head.content-width - list.visible-width);
+
+    // The room before a row's name: its icon.
+    private property <length> icon-room: 26px;
+
+    // The row at `y` in the list (the rows are all `Theme.row-height` tall), or -1 below them.
+    function row-at(y: length) -> int {
+        let row = floor((y - list.content-y) / Theme.row-height);
+        return row >= 0 && row < root.rows.length ? row : -1;
+    }
+
+    VerticalLayout {
+        head := FileHead {
+            columns: root.columns;
+            shows: root.shows;
+            sort-key: root.sort-key;
+            sort-ascending: root.sort-ascending;
+            then-key: root.then-key;
+            then-ascending: root.then-ascending;
+            first-row: root.first-row;
+            page-rows: root.page-rows;
+            scroll-x <=> list.content-x;
+            sort(column, then) => {
+                root.sort(column, then);
+            }
+            column-toggled(column) => {
+                root.column-toggled(column);
+            }
+            column-moved(from, slot) => {
+                root.column-moved(from, slot);
+            }
+            column-resized(column, width) => {
+                root.column-resized(column, width);
+            }
+            column-texts(column, first, count) => {
+                return root.column-texts(column, first, count);
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            drop := DropArea {
+                // The folder row the drag would go into; -1 for the pane's folder.
+                property <int> target-row: -1;
+                can-drop(event) => {
+                    let row = root.row-at(event.position.y);
+                    self.target-row = row >= 0 && root.rows[row].is-dir ? row : -1;
+                    return root.drop-check(event.data, row, event.proposed-action);
+                }
+                dropped(event) => {
+                    return root.dropped(event.data, root.row-at(event.position.y), event.proposed-action);
+                }
+
+                // The menu of the part of the list below the rows.
+                BlankMenu {
+                    width: parent.width;
+                    height: parent.height;
+                    command(name) => {
+                        root.menu-command(name);
+                    }
+
+                    list := ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        accessible-label: "항목 목록";
+                        // The list's own sideways bar would lie over its last row: the one
+                        // under the rows takes its place.
+                        horizontal-scrollbar-policy: always-off;
+                        changed content-y => {
+                            let y = settle.corrected(self.content-y);
+                            if (y != self.content-y) {
+                                self.content-y = y;
+                            }
+                        }
+                        scrolled => {
+                            settle.stop();
+                        }
+
+                        // As wide as the heads: wider than the list when the columns leave
+                        // the name too little room, and the list scrolls sideways then.
+                        for row[i] in root.rows: Rectangle {
+                            width: head.content-width;
+                            height: Theme.row-height;
+                            background: row.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                            accessible-role: list-item;
+                            accessible-label: row.name;
+                            accessible-item-index: i;
+                            accessible-item-selectable: true;
+                            accessible-item-selected: row.selected;
+                            accessible-description: RowWords.description(row);
+                            accessible-action-default => {
+                                root.row-activated(i);
+                            }
+
+                            // A press readies a drag of what it selects, or keeps selected.
+                            DragArea {
+                                data: root.drag-data;
+                                allow-move: true;
+                                allow-copy: true;
+                                drag-finished(action) => {
+                                    root.drag-ended();
+                                }
+
+                                row-menu := RowMenu {
+                                    command(name) => {
+                                        root.menu-command(name);
+                                    }
+
+                                    // It takes the right click itself, so the row is selected before its
+                                    // menu opens.
+                                    touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                                root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                                            }
+                                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                                root.row-menu(i);
+                                                ItemMenu.showing(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                                row-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                            }
+                                        }
+                                        // Not after a drag: the drag takes the pointer from the row.
+                                        clicked => {
+                                            root.row-released(i);
+                                        }
+                                        double-clicked => {
+                                            root.row-activated(i);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Hidden items show at half strength, cut ones fainter still. Its
+                            // least width is the row's (a ListView's content is as wide as its
+                            // rows' least width, which a row takes from such a child).
+                            Rectangle {
+                                min-width: head.content-width;
+                                opacity: row.cut ? 0.4 : row.hidden ? 0.5 : 1;
+
+                                Icon {
+                                    x: head.pad;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 18px;
+                                    height: 18px;
+                                    name: row.icon;
+                                    color: row.is-dir ? Theme.folder : Theme.muted;
+                                }
+                                Text {
+                                    x: head.pad + root.icon-room;
+                                    width: head.name-end - self.x;
+                                    height: parent.height;
+                                    text: row.name;
+                                    color: Theme.text;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                for column[c] in root.columns: Text {
+                                    x: head.col-x(c);
+                                    width: head.w(c);
+                                    height: parent.height;
+                                    text: Cells.text(row, column.id);
+                                    color: Theme.muted;
+                                    horizontal-alignment: column.align-end ? right : left;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+
+                            if root.active && i == root.cursor: Rectangle {
+                                x: 2px;
+                                width: parent.width - 4px;
+                                border-width: 1px;
+                                border-color: Theme.accent;
+                                border-radius: 4px;
+                            }
+                            // The folder a drag over this row would go into.
+                            if drop.has-drag && i == drop.target-row: Rectangle {
+                                x: 2px;
+                                width: parent.width - 4px;
+                                border-width: 2px;
+                                border-color: Theme.accent;
+                                border-radius: 4px;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The frame, the label of the drop, or why it cannot be made there.
+            DropHint {
+                width: parent.width;
+                height: parent.height;
+                dragging: drop.has-drag;
+                frame: drop.has-drag && drop.target-row < 0;
+                label: root.drag-label;
+                refusal: root.refusal;
+            }
+        }
+
+        // The sideways scroll bar, while the columns are wider than the list: under the rows, not
+        // over the last of them as the list's own would lie. Dragged, it scrolls the list; a
+        // press beside its thumb moves the thumb there.
+        if root.overflow > 0: Rectangle {
+            height: 10px;
+
+            bar := TouchArea {
+                // The list's scroll when the press came.
+                property <length> from;
+                function scroll-to(x: length) {
+                    list.content-x = max(-root.overflow, min(0px, x));
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        let thumb-x = thumb.x;
+                        if (self.mouse-x < thumb-x || self.mouse-x > thumb-x + thumb.width) {
+                            self.scroll-to(-(self.mouse-x - thumb.width / 2) / (self.width - thumb.width) * root.overflow);
+                        }
+                        self.from = list.content-x;
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        self.scroll-to(self.from - (self.mouse-x - self.pressed-x) / max(1px, self.width - thumb.width) * root.overflow);
+                    }
+                }
+            }
+
+            thumb := Rectangle {
+                width: max(32px, parent.width * list.visible-width / head.content-width);
+                x: (parent.width - self.width) * (-list.content-x / root.overflow);
+                y: 3px;
+                height: 4px;
+                border-radius: 2px;
+                background: bar.has-hover || bar.pressed ? Theme.muted : Theme.border;
+            }
+        }
+    }
+
+    key-menus := KeyMenus {
+        x: 0px;
+        y: 0px;
+        command(name) => {
+            root.menu-command(name);
+        }
+    }
+}

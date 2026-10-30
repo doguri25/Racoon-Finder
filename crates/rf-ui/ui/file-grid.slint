@@ -1,0 +1,388 @@
+// The rows of a folder listing in 목록 and the icon views (NAV-06); 자세히 is `file-list.slint`.
+//
+// Both are virtualized, as 자세히 is: the icon views are a ListView of rows of icons, as many
+// in a row as the width holds, and only the rows on screen exist; 목록 lays the names out top to
+// bottom and then in the next column, scrolls sideways (the wheel too), and makes only the
+// columns on screen. A folder of 100,000 items costs no more than one of ten.
+//
+// An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
+// same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
+// place to drop on, as in 자세히: an item of a folder takes the items into that folder, any other
+// place into the pane's folder.
+
+import { ListView, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { FileRow, RowWords } from "file-list.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+
+// What the pointer did to an item.
+enum TileEvent {
+    // A left press (with Ctrl and Shift as held).
+    press,
+    // Its release, when no drag came of the press.
+    release,
+    // A double click, or the screen reader's default action.
+    activate,
+    // A right press, just before the item's menu opens.
+    menu,
+    // An item of the item's menu (its name).
+    command,
+    // A drag of the items ended, dropped or not.
+    drag-end,
+}
+
+// One item: its icon, and its name beside a small icon or under a larger one.
+component Tile inherits Rectangle {
+    in property <FileRow> item;
+    // Its position in the rows.
+    in property <int> index;
+    // 1 목록, 2 small icons, 3 medium, 4 large.
+    in property <int> mode;
+    // The keyboard cursor is on it (in the pane with the keyboard), a drag would go into it.
+    in property <bool> cursor-here;
+    in property <bool> drop-here;
+    in property <data-transfer> drag-data;
+    // What the pointer did, with the modifiers of a press and the command of a menu item.
+    callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
+
+    private property <bool> big: root.mode >= 3;
+    private property <length> icon-size: root.mode == 4 ? 72px : root.mode == 3 ? 40px : 18px;
+
+    background: root.item.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+    border-radius: 6px;
+    accessible-role: list-item;
+    accessible-label: root.item.name;
+    accessible-item-index: root.index;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.item.selected;
+    accessible-description: RowWords.description(root.item);
+    accessible-action-default => {
+        root.event(TileEvent.activate, false, false, "");
+    }
+
+    // A press readies a drag of what it selects, or keeps selected.
+    DragArea {
+        data: root.drag-data;
+        allow-move: true;
+        allow-copy: true;
+        drag-finished(action) => {
+            root.event(TileEvent.drag-end, false, false, "");
+        }
+
+        item-menu := RowMenu {
+            command(name) => {
+                root.event(TileEvent.command, false, false, name);
+            }
+
+            // It takes the right click itself, so the item is selected before its menu opens.
+            touch := TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.event(TileEvent.press, event.modifiers.control, event.modifiers.shift, "");
+                    }
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        root.event(TileEvent.menu, false, false, "");
+                        ItemMenu.showing(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        item-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+                // Not after a drag: the drag takes the pointer from the item.
+                clicked => {
+                    root.event(TileEvent.release, false, false, "");
+                }
+                double-clicked => {
+                    root.event(TileEvent.activate, false, false, "");
+                }
+            }
+        }
+    }
+
+    // Hidden items show at half strength, cut ones fainter still.
+    Rectangle {
+        opacity: root.item.cut ? 0.4 : root.item.hidden ? 0.5 : 1;
+
+        Icon {
+            x: root.big ? (parent.width - self.width) / 2 : 8px;
+            y: root.big ? 8px : (parent.height - self.height) / 2;
+            width: root.icon-size;
+            height: root.icon-size;
+            stroke-width: root.mode == 4 ? 1.2px : 1.8px;
+            name: root.item.icon;
+            color: root.item.is-dir ? Theme.folder : Theme.muted;
+        }
+        if root.big: Text {
+            x: 4px;
+            y: 8px + root.icon-size + 6px;
+            width: parent.width - 8px;
+            height: parent.height - self.y - 4px;
+            text: root.item.name;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: top;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if !root.big: Text {
+            x: 8px + root.icon-size + 8px;
+            width: parent.width - self.x - 6px;
+            height: parent.height;
+            text: root.item.name;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    if root.cursor-here: Rectangle {
+        border-width: 1px;
+        border-color: Theme.accent;
+        border-radius: 6px;
+    }
+    if root.drop-here: Rectangle {
+        border-width: 2px;
+        border-color: Theme.accent;
+        border-radius: 6px;
+    }
+}
+
+export component FileGrid inherits Rectangle {
+    in property <[FileRow]> rows;
+    // 1 목록, 2 small icons, 3 medium, 4 large.
+    in property <int> mode: 3;
+    // The keyboard cursor's item, or -1.
+    in property <int> cursor: -1;
+    // Whether this list's pane has the keyboard; the cursor frame shows only then.
+    in property <bool> active;
+    // For the keys: how many items a line holds (a row of icons, a column of 목록), and how
+    // many lines a page key moves (the rows, or the columns, that fit on screen).
+    out property <int> line-items: root.columnar ? root.per-column : root.per-row;
+    out property <int> page-lines: root.columnar ? max(1, floor(columns-view.visible-width / root.tile-w)) : max(1, floor(icons.visible-height / root.tile-h));
+    // The payload of a drag, what a drop would do, and why the place under a drag does not take
+    // it (as `FileList` has them).
+    in property <data-transfer> drag-data;
+    in property <string> drag-label;
+    in property <string> refusal;
+
+    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-released(index: int);
+    callback row-activated(index: int);
+    callback row-menu(index: int);
+    callback menu-command(name: string);
+    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback drag-ended();
+
+    private property <bool> columnar: root.mode == 1;
+    private property <length> pad: 8px;
+    // The room of an item; an item takes all of it but a 4px gap.
+    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : 136px;
+    private property <length> tile-h: root.mode <= 2 ? 30px : root.mode == 3 ? 108px : 148px;
+    // The scroll bar's room, which the items leave free.
+    private property <length> bar: 14px;
+    // The icons: how many a row holds, and how many rows there are.
+    private property <int> per-row: max(1, floor((root.width - 2 * root.pad - root.bar) / root.tile-w));
+    private property <int> line-count: root.columnar ? 0 : ceil(root.rows.length / root.per-row);
+    // 목록: how many a column holds, how many columns there are, and the first one on screen.
+    private property <int> per-column: max(1, floor((root.height - 2 * root.pad - root.bar) / root.tile-h));
+    private property <int> column-count: !root.columnar ? 0 : ceil(root.rows.length / root.per-column);
+    private property <int> first-column: max(0, floor((-columns-view.content-x - root.pad) / root.tile-w));
+    private property <int> columns-shown: !root.columnar ? 0 : ceil(columns-view.visible-width / root.tile-w) + 1;
+
+    // What the pointer did to item `index`: told to the pane as a row of 자세히 tells it.
+    function tile-event(index: int, what: TileEvent, ctrl: bool, shift: bool, command: string) {
+        if (what == TileEvent.press) {
+            root.row-clicked(index, ctrl, shift);
+        } else if (what == TileEvent.release) {
+            root.row-released(index);
+        } else if (what == TileEvent.activate) {
+            root.row-activated(index);
+        } else if (what == TileEvent.menu) {
+            root.row-menu(index);
+        } else if (what == TileEvent.command) {
+            root.menu-command(command);
+        } else {
+            root.drag-ended();
+        }
+    }
+
+    // The item at (`x`, `y`) of the list, or -1 where there is none.
+    function index-at(x: length, y: length) -> int {
+        if (root.columnar) {
+            let column = floor((x - root.pad - columns-view.content-x) / root.tile-w);
+            let place = floor((y - root.pad) / root.tile-h);
+            let index = column * root.per-column + place;
+            return column >= 0 && place >= 0 && place < root.per-column && index < root.rows.length ? index : -1;
+        }
+        let line = floor((y - icons.content-y) / root.tile-h);
+        let place = floor((x - root.pad) / root.tile-w);
+        let index = line * root.per-row + place;
+        return line >= 0 && place >= 0 && place < root.per-row && index < root.rows.length ? index : -1;
+    }
+
+    // Scrolls as little as needed to show item `index` whole (the icons keep the place while
+    // their list settles after a long jump, `ListSettle`).
+    public function scroll-to(index: int) {
+        if (index < 0) {
+            return;
+        }
+        if (root.columnar) {
+            let x = ListScroll.into-view(root.pad + floor(index / root.per-column) * root.tile-w - root.pad, root.tile-w + 2 * root.pad, columns-view.content-x, columns-view.visible-width);
+            if (x <= 0) {
+                columns-view.content-x = max(-max(0px, columns-view.content-width - columns-view.visible-width), x);
+            }
+            return;
+        }
+        let y = ListScroll.into-view(floor(index / root.per-row) * root.tile-h, root.tile-h, icons.content-y, icons.visible-height);
+        if (y > 0) {
+            return;
+        }
+        settle.start(y);
+        icons.content-y = y;
+    }
+
+    // The item menu by item `index`, from the keyboard (Shift+F10, the menu key, macOS ⌃↩);
+    // Rust has scrolled the item into view. The menu shows over its lower part.
+    public function show-item-menu(index: int) {
+        let x = root.columnar ? root.pad + floor(index / root.per-column) * root.tile-w + columns-view.content-x + 24px : root.pad + Math.mod(index, root.per-row) * root.tile-w + 24px;
+        let y = root.columnar ? root.pad + (Math.mod(index, root.per-column) + 0.75) * root.tile-h : (floor(index / root.per-row) + 0.75) * root.tile-h + icons.content-y;
+        ItemMenu.showing(root.absolute-position.x + x, root.absolute-position.y + y);
+        key-menus.item(x, y);
+    }
+
+    // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
+    public function show-blank-menu() {
+        key-menus.blank(root.pad + 24px, root.pad + 16px);
+    }
+
+    settle := ListSettle { }
+
+    drop := DropArea {
+        // The folder item the drag would go into; -1 for the pane's folder.
+        property <int> target: -1;
+        can-drop(event) => {
+            let index = root.index-at(event.position.x, event.position.y);
+            self.target = index >= 0 && root.rows[index].is-dir ? index : -1;
+            return root.drop-check(event.data, index, event.proposed-action);
+        }
+        dropped(event) => {
+            return root.dropped(event.data, root.index-at(event.position.x, event.position.y), event.proposed-action);
+        }
+
+        // The menu of the part of the list without items.
+        blank-menu := BlankMenu {
+            width: parent.width;
+            height: parent.height;
+            command(name) => {
+                root.menu-command(name);
+            }
+
+            icons := ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.columnar;
+                accessible-label: "항목 목록";
+                changed content-y => {
+                    let y = settle.corrected(self.content-y);
+                    if (y != self.content-y) {
+                        self.content-y = y;
+                    }
+                }
+                scrolled => {
+                    settle.stop();
+                }
+
+                for line in root.line-count: Rectangle {
+                    height: root.tile-h;
+
+                    for place in root.per-row: Tile {
+                        index: line * root.per-row + place;
+                        x: root.pad + place * root.tile-w;
+                        y: 2px;
+                        width: root.tile-w - 4px;
+                        height: root.tile-h - 4px;
+                        visible: self.index < root.rows.length;
+                        item: root.rows[self.index];
+                        mode: root.mode;
+                        cursor-here: root.active && self.index == root.cursor;
+                        drop-here: drop.has-drag && self.index == drop.target;
+                        drag-data: root.drag-data;
+                        event(what, ctrl, shift, command) => {
+                            root.tile-event(self.index, what, ctrl, shift, command);
+                        }
+                    }
+                }
+            }
+
+            // 목록 scrolls sideways; the wheel's turn up and down scrolls it too. A right click
+            // where there is no item opens the list's menu, as on the empty part of 자세히.
+            wheel := TouchArea {
+                visible: root.columnar;
+                scroll-event(event) => {
+                    let most = max(0px, columns-view.content-width - columns-view.visible-width);
+                    let delta = event.delta-y != 0 ? event.delta-y : event.delta-x;
+                    columns-view.content-x = max(-most, min(0px, columns-view.content-x + delta));
+                    return accept;
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        blank-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+
+                columns-view := ScrollView {
+                    width: parent.width;
+                    height: parent.height;
+                    accessible-role: list;
+                    accessible-label: "항목 목록";
+                    content-width: root.column-count * root.tile-w + 2 * root.pad;
+                    content-height: self.visible-height;
+
+                    for slot in root.columns-shown: Rectangle {
+                        property <int> column: root.first-column + slot;
+                        x: root.pad + self.column * root.tile-w;
+                        y: 0px;
+                        width: root.tile-w;
+                        height: root.pad + root.per-column * root.tile-h;
+                        visible: self.column < root.column-count;
+
+                        for place in root.per-column: Tile {
+                            index: parent.column * root.per-column + place;
+                            x: 0px;
+                            y: root.pad + place * root.tile-h;
+                            width: root.tile-w - 4px;
+                            height: root.tile-h - 2px;
+                            visible: self.index < root.rows.length;
+                            item: root.rows[self.index];
+                            mode: root.mode;
+                            cursor-here: root.active && self.index == root.cursor;
+                            drop-here: drop.has-drag && self.index == drop.target;
+                            drag-data: root.drag-data;
+                            event(what, ctrl, shift, command) => {
+                                root.tile-event(self.index, what, ctrl, shift, command);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The frame, the label of the drop, or why it cannot be made there.
+    DropHint {
+        width: parent.width;
+        height: parent.height;
+        dragging: drop.has-drag;
+        frame: drop.has-drag && drop.target < 0;
+        label: root.drag-label;
+        refusal: root.refusal;
+    }
+
+    key-menus := KeyMenus {
+        x: 0px;
+        y: 0px;
+        command(name) => {
+            root.menu-command(name);
+        }
+    }
+}

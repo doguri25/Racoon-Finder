@@ -1,0 +1,1160 @@
+// The dialogs over the main window: a name, a confirmation, a list of failed items, the jobs
+// the last run left unfinished, the pre-flight check of a transfer, and the note that shows
+// while the app ends. Each one takes the keyboard when it opens and can be used with it alone
+// (KEY-02): Esc closes it (Cancel), Tab and Shift+Tab move among its buttons (and its field),
+// going round, Space or Enter presses the button the keys are on, which shows a ring, and
+// ↑↓ PageUp PageDown Home End scroll its list. With no button chosen yet, Enter does its main
+// action unless that action destroys something; a dialog whose main action destroys something
+// starts on 취소. `NoticeWindow` is a window of its own, for a message before or instead of the
+// main window.
+
+import { ListView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { PrimaryButton, OutlineButton, DialogFrame, CheckBox, Segment, SegmentTrack } from "widgets.slint";
+import { Icon } from "icons.slint";
+import { DialogKeys } from "shortcuts.slint";
+
+export struct NameView {
+    title: string,
+    // The text the field starts with, and where its first selection ends (a byte offset).
+    initial: string,
+    select-end: int,
+    // Why the name cannot be used, as it is typed; empty when it can.
+    warning: string,
+    ok-enabled: bool,
+}
+
+export struct PatternView {
+    // The text the field starts with: the last pattern chosen.
+    initial: string,
+    // A regular expression (정규식) rather than wildcards (와일드카드).
+    regex: bool,
+    ignore-case: bool,
+    // The rows join the selection (선택에 더하기) rather than replace it (선택 바꾸기).
+    add: bool,
+    // How many rows match ("맞는 항목 3개", "세는 중…"); empty while there is no pattern.
+    count: string,
+    // Why the text is no pattern; empty when it is one.
+    problem: string,
+    ok-enabled: bool,
+}
+
+export struct ConfirmView {
+    title: string,
+    message: string,
+    // The items it is about; empty for none.
+    detail: string,
+    // The items it is about, one whole path a line, in a list; empty for none. The first lines,
+    // which the window lays out out of sight to fit its list to them.
+    lines: [string],
+    head: [string],
+    // What it asks, under the list; empty when the message asks it.
+    question: string,
+    ok-text: string,
+    // Destroys something: Enter does not confirm.
+    danger: bool,
+    // A third answer that keeps things going (트레이에서 계속), the main button, which Enter takes;
+    // empty for none. The ok button is then an outline one beside it.
+    alt-text: string,
+}
+
+export struct MessageView {
+    title: string,
+    lines: [string],
+    // The first lines, which the window lays out out of sight to fit its list to them.
+    head: [string],
+}
+
+export struct RecoveryView {
+    title: string,
+    note: string,
+    rows: [string],
+}
+
+export struct PreflightView {
+    title: string,
+    lines: [string],
+    // The first lines, which the window lays out out of sight to fit its list to them.
+    head: [string],
+    has-blocked: bool,
+}
+
+component Heading inherits Text {
+    font-size: Theme.font-title;
+    font-weight: 700;
+    color: Theme.text;
+    wrap: word-wrap;
+}
+
+component Body inherits Text {
+    color: Theme.muted;
+    wrap: word-wrap;
+}
+
+// Asks for the name of a new folder or a rename. The field starts with `view.initial`, the
+// part before the extension selected; Rust checks each edit and sends the warning back. While
+// an input method composes a syllable, the field's text and Rust do not have it until it is
+// committed, so neither 확인 nor Enter takes the name meanwhile: either would leave the
+// syllable out, and Tab leaves the field only once it is committed. Tab goes from the field to
+// 취소, then to 확인, then back to the field.
+export component NameDialog inherits DialogFrame {
+    in property <NameView> view;
+    callback edited(text: string);
+    callback accepted(text: string);
+    callback cancelled();
+
+    property <bool> composing: input.preedit-text != "";
+    // Where the keys are: -1 the field, 0 취소, 1 확인.
+    property <int> on-button: -1;
+
+    width: 440px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    init => {
+        input.text = root.view.initial;
+        input.focus();
+        input.set-selection-offsets(0, root.view.select-end);
+    }
+
+    // The keys go `step` stops on from where they are (the field is the stop before 취소).
+    function go(step: int) {
+        root.on-button = DialogKeys.cycle(root.on-button + 1, step, 3) - 1;
+        if (root.on-button < 0) {
+            // Back in the field, the name is all selected, as in the system's dialogs: what is
+            // typed replaces it.
+            input.focus();
+            input.select-all();
+        } else {
+            keys.focus();
+        }
+    }
+
+    function press(button: int) {
+        if (button == 0) {
+            root.cancelled();
+        } else if (button == 1 && root.view.ok-enabled && !root.composing) {
+            root.accepted(input.text);
+        }
+    }
+
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            if (root.on-button >= 0 && DialogKeys.presses(event)) {
+                root.press(root.on-button);
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Rectangle {
+                height: 38px;
+                border-width: 1px;
+                border-color: root.view.warning != "" ? Theme.muted : input.has-focus ? Theme.accent : Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+
+                input := TextInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.text;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-role: text-input;
+                    accessible-label: root.view.title;
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    // Rust decides: a name that cannot be used keeps the dialog open.
+                    accepted => {
+                        if (!root.composing) {
+                            root.accepted(self.text);
+                        }
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.cancelled();
+                            return accept;
+                        }
+                        let step = DialogKeys.tab-step(event);
+                        if (step != 0) {
+                            if (!root.composing) {
+                                root.go(step);
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                    // A click into the field takes the keys back from the buttons.
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            root.on-button = -1;
+                        }
+                    }
+                }
+            }
+            if root.view.warning != "": Body {
+                text: root.view.warning;
+                font-size: Theme.font-small;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.on-button == 0;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    enabled: root.view.ok-enabled && !root.composing;
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.accepted(input.text);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Selects the rows whose names match a pattern (패턴으로 선택, NAV-15): wildcards (`*.jpg;*.png`) or
+// a regular expression, ignoring case or not, in place of the selection or with it. Rust counts
+// the rows that match as the pattern is typed, on a worker, and says why a text is no pattern
+// (`view.problem`), which turns 선택 off. While an input method composes a syllable the field's
+// text and Rust do not have it until it is committed, so neither 선택 nor Enter takes the
+// pattern meanwhile, and Tab leaves the field only once it is committed.
+//
+// The keys: the field first; Tab and Shift+Tab go round the field, 와일드카드/정규식 (← →), 대소문자
+// 무시 (Space), 선택 바꾸기/선택에 더하기 (← →), 취소 and 선택 (passed over while it is off); Space or
+// Enter presses the button the keys are on; Enter elsewhere selects; Esc cancels.
+export component PatternDialog inherits DialogFrame {
+    in property <PatternView> view;
+    callback edited(text: string);
+    callback syntax-chosen(regex: bool);
+    callback case-chosen(ignore: bool);
+    callback mode-chosen(add: bool);
+    callback accepted(text: string);
+    callback cancelled();
+
+    property <bool> composing: input.preedit-text != "";
+    // Where the keys are: -1 the field, 0 와일드카드/정규식, 1 대소문자 무시, 2 선택 바꾸기/더하기,
+    // 3 취소, 4 선택.
+    property <int> stop: -1;
+    property <bool> can-select: root.view.ok-enabled && !root.composing;
+
+    width: 480px;
+    height: layout.preferred-height;
+    accessible-label: "패턴으로 선택";
+
+    init => {
+        input.text = root.view.initial;
+        input.focus();
+        input.select-all();
+    }
+
+    // The keys go `step` stops on from where they are, past 선택 while it is off.
+    function go(step: int) {
+        let first = DialogKeys.cycle(root.stop + 1, step, 6) - 1;
+        let next = first == 4 && !root.can-select ? DialogKeys.cycle(first + 1, step, 6) - 1 : first;
+        root.stop = next;
+        if (next < 0) {
+            // Back in the field, the pattern is all selected: what is typed replaces it.
+            input.focus();
+            input.select-all();
+        } else {
+            keys.focus();
+        }
+    }
+
+    function select() {
+        if (root.can-select) {
+            root.accepted(input.text);
+        }
+    }
+
+    // A click on a choice: the keys go back to the field, to go on typing.
+    function back-to-field() {
+        root.stop = -1;
+        input.focus();
+    }
+
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            let sideways = event.text == Key.LeftArrow || event.text == Key.RightArrow;
+            if (root.stop == 0 && sideways) {
+                root.syntax-chosen(event.text == Key.RightArrow);
+                return accept;
+            }
+            if (root.stop == 2 && sideways) {
+                root.mode-chosen(event.text == Key.RightArrow);
+                return accept;
+            }
+            if (root.stop == 1 && event.text == " ") {
+                root.case-chosen(!root.view.ignore-case);
+                return accept;
+            }
+            if (root.stop == 3 && DialogKeys.presses(event)) {
+                root.cancelled();
+                return accept;
+            }
+            if ((root.stop == 4 && DialogKeys.presses(event)) || event.text == Key.Return) {
+                root.select();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: "패턴으로 선택";
+            }
+            Rectangle {
+                height: 38px;
+                border-width: 1px;
+                border-color: root.view.problem != "" ? Theme.warning : input.has-focus ? Theme.accent : Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+
+                if input.text == "" && !root.composing: Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    accessible-role: none;
+                    text: root.view.regex ? "예: ^IMG_\\d+\\.jpe?g$" : "예: *.jpg;*.png";
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                input := TextInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    color: Theme.text;
+                    selection-background-color: Theme.selection;
+                    selection-foreground-color: Theme.text;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accessible-role: text-input;
+                    accessible-label: "패턴";
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    accepted => {
+                        root.select();
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.cancelled();
+                            return accept;
+                        }
+                        let step = DialogKeys.tab-step(event);
+                        if (step != 0) {
+                            if (!root.composing) {
+                                root.go(step);
+                            }
+                            return accept;
+                        }
+                        reject
+                    }
+                    // A click into the field takes the keys back from the other stops.
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            root.stop = -1;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.gap-l;
+
+                SegmentTrack {
+                    label: "패턴 형식";
+                    focused: root.stop == 0;
+
+                    Segment {
+                        text: "와일드카드";
+                        chosen: !root.view.regex;
+                        clicked => {
+                            root.syntax-chosen(false);
+                            root.back-to-field();
+                        }
+                    }
+                    Segment {
+                        text: "정규식";
+                        chosen: root.view.regex;
+                        clicked => {
+                            root.syntax-chosen(true);
+                            root.back-to-field();
+                        }
+                    }
+                }
+                CheckBox {
+                    text: "대소문자 무시";
+                    checked: root.view.ignore-case;
+                    focused: root.stop == 1;
+                    toggled => {
+                        root.case-chosen(!root.view.ignore-case);
+                        root.back-to-field();
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: start;
+
+                SegmentTrack {
+                    label: "고른 항목";
+                    focused: root.stop == 2;
+
+                    Segment {
+                        text: "선택 바꾸기";
+                        chosen: !root.view.add;
+                        clicked => {
+                            root.mode-chosen(false);
+                            root.back-to-field();
+                        }
+                    }
+                    Segment {
+                        text: "선택에 더하기";
+                        chosen: root.view.add;
+                        clicked => {
+                            root.mode-chosen(true);
+                            root.back-to-field();
+                        }
+                    }
+                }
+            }
+            // How many rows match, or why the text is no pattern.
+            HorizontalLayout {
+                min-height: 20px;
+                spacing: Theme.gap-s;
+
+                if root.view.problem != "": Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 16px;
+                    height: 16px;
+                    name: "warning";
+                    color: Theme.warning;
+                }
+                Text {
+                    text: root.view.problem != "" ? root.view.problem : root.view.count;
+                    color: root.view.problem != "" ? Theme.text : Theme.muted;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.stop == 3;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "선택";
+                    enabled: root.can-select;
+                    focused: root.stop == 4;
+                    clicked => {
+                        root.select();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The keys that scroll a dialog's list of items.
+global LineListKeys {
+    public pure function scrolls(event: KeyEvent) -> bool {
+        let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta;
+        return plain && (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.PageUp || event.text == Key.PageDown || event.text == Key.Home || event.text == Key.End);
+    }
+}
+
+// One line of a list of items: an item's whole path or name and what about it, wrapped. A
+// line breaks between words, and inside a word too long for a line: a Windows path has no
+// place to break at its `\`, and would otherwise run past the list.
+component MessageLine inherits Rectangle {
+    in property <string> text;
+
+    HorizontalLayout {
+        padding-left: Theme.gap-m;
+        padding-right: Theme.gap-m;
+        padding-top: 6px;
+        padding-bottom: 6px;
+
+        Text {
+            text: root.text;
+            color: Theme.text;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+}
+
+// A framed list of `lines`, each wrapped, as tall as they are once wrapped, up to
+// `tallest`; it scrolls past that. The list makes only the rows it shows, so `head`, the
+// first lines, are laid out out of sight (hidden from screen readers too), as wide as the
+// list, to tell their height.
+component LineList inherits Rectangle {
+    in property <[string]> lines;
+    in property <[string]> head;
+    in property <length> tallest;
+    // For a list its dialog cannot reach (one shown only with items): it scrolls for the key
+    // `scroll-text` each time `scroll-serial` changes.
+    in property <string> scroll-text;
+    in property <int> scroll-serial;
+    changed scroll-serial => {
+        root.scroll-for(root.scroll-text);
+    }
+
+    // Scrolls the list for a key of `LineListKeys.scrolls`; `false` for any other key.
+    public function scroll-key(event: KeyEvent) -> bool {
+        if (!LineListKeys.scrolls(event)) {
+            return false;
+        }
+        root.scroll-for(event.text);
+        return true;
+    }
+
+    // ↑↓ scroll a line's height, PageUp PageDown the list's height, Home and End to its ends.
+    function scroll-for(key: string) {
+        let page = list.visible-height;
+        if (key == Key.UpArrow) {
+            root.scroll-to(list.content-y + 24px);
+        } else if (key == Key.DownArrow) {
+            root.scroll-to(list.content-y - 24px);
+        } else if (key == Key.PageUp) {
+            root.scroll-to(list.content-y + page);
+        } else if (key == Key.PageDown) {
+            root.scroll-to(list.content-y - page);
+        } else if (key == Key.Home) {
+            root.scroll-to(0px);
+        } else if (key == Key.End) {
+            root.scroll-to(-list.content-height);
+        }
+    }
+
+    function scroll-to(y: length) {
+        list.content-y = max(min(0px, list.visible-height - list.content-height), min(0px, y));
+    }
+
+    height: min(root.tallest, max(48px, measured.preferred-height + 2px));
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+
+    Rectangle {
+        visible: false;
+        width: list.visible-width;
+
+        measured := VerticalLayout {
+            for line in root.head: MessageLine {
+                text: line;
+            }
+        }
+    }
+
+    list := ListView {
+        for line in root.lines: MessageLine {
+            text: line;
+        }
+    }
+}
+
+// Asks before something happens that cannot be taken back. Its text says what will happen.
+export component ConfirmDialog inherits DialogFrame {
+    in property <ConfirmView> view;
+    callback accepted();
+    callback cancelled();
+    // The third answer (`alt-text`).
+    callback alternative();
+
+    width: 500px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+    accessible-description: root.view.message;
+
+    // The last key that scrolls the list, which is not there without items (a key for it each
+    // time the serial changes).
+    property <string> scroll-text;
+    property <int> scroll-serial;
+
+    // The button the keys are on: 0 취소, 1 the other, 2 the third answer, -1 none. A danger
+    // confirm starts on 취소, so Enter answers No until Tab moves to the button that deletes;
+    // any other starts on none, and Enter there is Yes (the third answer, where there is one).
+    // The keys stay with the dialog's FocusScope (the buttons take no focus), which answers for
+    // the button it is on.
+    property <int> on-button: -1;
+    property <int> buttons: root.view.alt-text != "" ? 3 : 2;
+
+    init => {
+        root.on-button = root.view.danger ? 0 : -1;
+        keys.focus();
+    }
+    // Another confirm in the same dialog starts again.
+    changed view => {
+        root.on-button = root.view.danger ? 0 : -1;
+    }
+
+    function press(button: int) {
+        if (button == 0) {
+            root.cancelled();
+        } else if (button == 1) {
+            root.accepted();
+        } else if (button == 2) {
+            root.alternative();
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step > 0 || event.text == Key.RightArrow) {
+                root.on-button = root.on-button + 1 >= root.buttons ? 0 : root.on-button + 1;
+                return accept;
+            }
+            if (step < 0 || event.text == Key.LeftArrow) {
+                root.on-button = root.on-button <= 0 ? root.buttons - 1 : root.on-button - 1;
+                return accept;
+            }
+            if (event.text == " " && root.on-button >= 0) {
+                root.press(root.on-button);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                if (root.on-button >= 0) {
+                    root.press(root.on-button);
+                } else if (root.view.alt-text != "") {
+                    root.alternative();
+                } else if (!root.view.danger) {
+                    root.accepted();
+                }
+                return accept;
+            }
+            if (root.view.lines.length > 0 && LineListKeys.scrolls(event)) {
+                root.scroll-text = event.text;
+                root.scroll-serial += 1;
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Text {
+                text: root.view.message;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.view.lines.length > 0: LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 200px;
+                scroll-text: root.scroll-text;
+                scroll-serial: root.scroll-serial;
+            }
+            if root.view.detail != "": Body {
+                text: root.view.detail;
+            }
+            if root.view.question != "": Text {
+                text: root.view.question;
+                color: Theme.text;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.on-button == 0;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+                if root.view.alt-text != "": OutlineButton {
+                    text: root.view.ok-text;
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.accepted();
+                    }
+                }
+                if root.view.alt-text != "": PrimaryButton {
+                    button-height: 36px;
+                    text: root.view.alt-text;
+                    focused: root.on-button == 2;
+                    clicked => {
+                        root.alternative();
+                    }
+                }
+                if root.view.alt-text == "": PrimaryButton {
+                    button-height: 36px;
+                    text: root.view.ok-text;
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.accepted();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The items a job could not process, and why. Enter or Esc closes it; Tab puts the keys on 확인.
+export component MessageDialog inherits DialogFrame {
+    in property <MessageView> view;
+    callback closed();
+
+    width: 600px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    // 0 while the keys are on 확인, its one button; -1 before Tab.
+    property <int> on-button: -1;
+
+    init => {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == Key.Return) {
+                root.closed();
+                return accept;
+            }
+            if (DialogKeys.tab-step(event) != 0) {
+                root.on-button = 0;
+                return accept;
+            }
+            if (event.text == " " && root.on-button == 0) {
+                root.closed();
+                return accept;
+            }
+            if (lines.scroll-key(event)) {
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            lines := LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 360px;
+            }
+            HorizontalLayout {
+                alignment: end;
+
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    focused: root.on-button == 0;
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The jobs the last run of the app left unfinished: each can be run again or dropped. One
+// that is neither stays for the next start. The keys start on 닫기, which drops nothing: Tab
+// goes from there to the first job's 버리기 and 다시 실행, the next job's, and back to 닫기.
+// Each answer takes its job off the list, and the keys go back to 닫기.
+export component RecoveryDialog inherits DialogFrame {
+    in property <RecoveryView> view;
+    callback chosen(index: int, run-again: bool);
+    callback closed();
+
+    width: 760px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    // The button the keys are on: 2 × job for its 버리기, one more for its 다시 실행, and the
+    // last one, 2 × the number of jobs, 닫기.
+    property <int> on-button: root.view.rows.length * 2;
+    // A job answered goes from the list: the keys start again on 닫기.
+    changed view => {
+        root.on-button = root.view.rows.length * 2;
+    }
+
+    init => {
+        keys.focus();
+    }
+
+    function press(button: int) {
+        if (button >= root.view.rows.length * 2) {
+            root.closed();
+        } else {
+            root.chosen(floor(button / 2), Math.mod(button, 2) == 1);
+        }
+    }
+
+    // Scrolls the list as little as needed to show the job the keys are on.
+    function show-row(row: int) {
+        let top = row * 56px;
+        if (top + jobs.content-y < 0) {
+            jobs.content-y = -top;
+        } else if (top + 56px + jobs.content-y > jobs.visible-height) {
+            jobs.content-y = jobs.visible-height - top - 56px;
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.closed();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.on-button = DialogKeys.cycle(root.on-button, step, root.view.rows.length * 2 + 1);
+                if (root.on-button < root.view.rows.length * 2) {
+                    root.show-row(floor(root.on-button / 2));
+                }
+                return accept;
+            }
+            if (DialogKeys.presses(event)) {
+                root.press(root.on-button);
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            Body {
+                text: root.view.note;
+            }
+            Rectangle {
+                height: min(320px, root.view.rows.length * 57px);
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+
+                jobs := ListView {
+                    for row[i] in root.view.rows: Rectangle {
+                        height: 56px;
+
+                        HorizontalLayout {
+                            padding-left: Theme.gap-m;
+                            padding-right: Theme.gap-s;
+                            spacing: Theme.gap-s;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: row;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+
+                                OutlineButton {
+                                    text: "버리기";
+                                    focused: root.on-button == i * 2;
+                                    clicked => {
+                                        root.chosen(i, false);
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+
+                                PrimaryButton {
+                                    button-height: 36px;
+                                    text: "다시 실행";
+                                    focused: root.on-button == i * 2 + 1;
+                                    clicked => {
+                                        root.chosen(i, true);
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            y: parent.height - self.height;
+                            height: 1px;
+                            background: Theme.border;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+
+                OutlineButton {
+                    text: "닫기";
+                    focused: root.on-button == root.view.rows.length * 2;
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The problems the pre-flight check of a transfer found on the target, before anything was
+// written: go on as it is, leave out the items that cannot be written, or cancel. The keys
+// start on 취소: going on despite the problems is chosen with Tab.
+export component PreflightDialog inherits DialogFrame {
+    in property <PreflightView> view;
+    // 0 go on, 1 leave out the blocked items, 2 cancel.
+    callback answered(choice: int);
+
+    width: 720px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+
+    // The button the keys are on, in their order on screen: 0 취소, 1 막힌 항목 건너뛰기 (only
+    // with blocked items), 2 계속.
+    property <int> on-button: 0;
+    changed view => {
+        root.on-button = 0;
+    }
+
+    init => {
+        keys.focus();
+    }
+
+    function go(step: int) {
+        let count = root.view.has-blocked ? 3 : 2;
+        let at = root.view.has-blocked || root.on-button == 0 ? root.on-button : 1;
+        let next = DialogKeys.cycle(at, step, count);
+        root.on-button = root.view.has-blocked || next == 0 ? next : 2;
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.answered(2);
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            if (DialogKeys.presses(event)) {
+                root.answered(root.on-button == 0 ? 2 : root.on-button == 1 ? 1 : 0);
+                return accept;
+            }
+            if (lines.scroll-key(event)) {
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            lines := LineList {
+                lines: root.view.lines;
+                head: root.view.head;
+                tallest: 320px;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+
+                OutlineButton {
+                    text: "취소";
+                    focused: root.on-button == 0;
+                    clicked => {
+                        root.answered(2);
+                    }
+                }
+                if root.view.has-blocked: OutlineButton {
+                    text: "막힌 항목 건너뛰기";
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.answered(1);
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "계속";
+                    focused: root.on-button == 2;
+                    clicked => {
+                        root.answered(0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// What shows while the jobs stop before the app ends.
+export component ClosingNote inherits DialogFrame {
+    in property <string> text;
+
+    width: 360px;
+    height: 88px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    Text {
+        text: root.text;
+        color: Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A small window of its own with one message and an OK button: for a second instance of the
+// app, or an app that could not start. The keys are on 확인, its one button, which shows a ring:
+// Space, Enter and Esc close it.
+export component NoticeWindow inherits Window {
+    in property <string> app-title;
+    in property <string> heading;
+    in property <string> message;
+    // The theme of the settings, numbered as the main window's `theme-choice`: 0 follows the
+    // system, 1 is light, 2 dark.
+    in property <int> theme-choice;
+    callback closed();
+
+    title: root.app-title;
+    preferred-width: 440px;
+    min-width: 320px;
+    background: Theme.panel;
+    default-font-size: Theme.font-body;
+
+    // As in the main window: the widgets' scheme, and the app's colors from it when the system's
+    // setting is followed.
+    private property <color> widget-background: Palette.background;
+    private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
+    function show-theme() {
+        Palette.color-scheme = root.theme-choice == 1 ? ColorScheme.light : root.theme-choice == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        Theme.dark = root.theme-choice == 2 || (root.theme-choice == 0 && root.system-dark);
+    }
+    changed system-dark => {
+        root.show-theme();
+    }
+    changed theme-choice => {
+        root.show-theme();
+    }
+
+    init => {
+        root.show-theme();
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || DialogKeys.presses(event)) {
+                root.closed();
+                return accept;
+            }
+            // One button: Tab keeps the keys on it.
+            if (DialogKeys.tab-step(event) != 0) {
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Text {
+                text: root.heading;
+                font-size: 16px;
+                font-weight: 700;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.message;
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                padding-top: Theme.gap-s;
+
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "확인";
+                    focused: true;
+                    clicked => {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+}

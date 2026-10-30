@@ -1,0 +1,329 @@
+// The sidebar: the shared folder tree. Its roots are the places, the user's folders under
+// "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
+// it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
+// scrolls as freely as one with a few. The main window's tree takes dragged rows into the
+// folder of the row under the pointer (`accepts-drops`); the picker's takes none.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+
+// The head above a row: the first favorite starts "즐겨찾기", the first drive "이 PC".
+export enum SectionHead {
+    none,
+    favorites,
+    drives,
+}
+
+// One row of the tree, as Rust makes it. A place (a root) is a favorite or a drive; a drive
+// has a space line (`info`) and a bar filled to its used share (`fill`, 0..1). A folder a
+// filter found shows the folder it is in beside its name (`info` too). In the destination
+// picker's tree a folder that cannot take the items is `dimmed`, says why in `info`, and takes
+// no click (its chevron still opens it).
+export struct TreeRow {
+    label: string,
+    // 0 for a place, one more for each folder below it.
+    depth: int,
+    head: SectionHead,
+    is-place: bool,
+    is-drive: bool,
+    info: string,
+    fill: float,
+    // The row has folders below it, or may have (not listed yet): it shows a chevron.
+    expandable: bool,
+    expanded: bool,
+    // The folder of the active pane.
+    selected: bool,
+    dimmed: bool,
+    // A hidden folder, which shows at half strength, as in the file list.
+    hidden: bool,
+}
+
+component TreeItem inherits Rectangle {
+    in property <TreeRow> item;
+    in property <int> index;
+    // Whether the row takes dragged rows into its folder.
+    in property <bool> accepts-drops;
+    // The keyboard cursor of the tree is on the row, while the tree has the keys.
+    in property <bool> cursor;
+    // A click on the row.
+    callback clicked();
+    // A click on the chevron.
+    callback toggled();
+    // A drag with the payload `data` over the row asks for `action`: what the row's folder
+    // takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, action: DragAction) -> DragAction;
+
+    // The head takes more room above the drives, which come after the favorites.
+    private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
+    // Deep folders stop moving right at the eighth level, so their names stay readable in a
+    // sidebar of 220 to 280px.
+    private property <length> indent: min(root.item.depth, 8) * 16px;
+
+    height: root.head-height + (root.item.is-drive ? 56px : Theme.row-height);
+
+    if root.item.head != SectionHead.none: Text {
+        x: 18px;
+        y: root.head-height - self.height - 4px;
+        text: root.item.head == SectionHead.favorites ? "즐겨찾기" : "이 PC";
+        font-size: Theme.font-small;
+        font-weight: 700;
+        color: Theme.muted;
+    }
+
+    Rectangle {
+        x: 8px;
+        y: root.head-height;
+        width: parent.width - 16px;
+        height: parent.height - root.head-height;
+        border-radius: Theme.radius;
+        background: root.item.selected ? Theme.selection : root.item.dimmed ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+        accessible-role: list-item;
+        accessible-label: root.item.label;
+        accessible-description: root.item.info;
+        // A dimmed folder of the picker's tree takes no click, as a quick target that cannot be
+        // chosen: it is not selectable. It stays enabled, so that a screen reader can still
+        // open it (its chevron does) to reach the folders below it.
+        accessible-item-index: root.index;
+        accessible-item-selectable: !root.item.dimmed;
+        accessible-item-selected: root.item.selected;
+        accessible-expandable: root.item.expandable;
+        accessible-expanded: root.item.expanded;
+        accessible-action-default => {
+            if (!root.item.dimmed) {
+                root.clicked();
+            }
+        }
+        // Opens the row, or closes it when it is open.
+        accessible-action-expand => {
+            root.toggled();
+        }
+
+        drop := DropArea {
+            enabled: root.accepts-drops;
+            can-drop(event) => {
+                return root.drop-check(event.data, event.proposed-action);
+            }
+            dropped(event) => {
+                return root.dropped(event.data, event.proposed-action);
+            }
+        }
+
+        touch := TouchArea {
+            clicked => {
+                if (!root.item.dimmed) {
+                    root.clicked();
+                }
+            }
+
+            // The chevron takes its own clicks: it only opens or closes the row. Inside the
+            // row's area, so that the row keeps its hover.
+            TouchArea {
+                x: root.indent;
+                width: 24px;
+                enabled: root.item.expandable;
+                clicked => {
+                    root.toggled();
+                }
+            }
+        }
+
+        // A hidden folder shows at half strength, as in the file list.
+        Rectangle {
+            opacity: root.item.hidden ? 0.5 : 1;
+
+            if root.item.expandable: Icon {
+                x: 4px + root.indent;
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 16px;
+                name: root.item.expanded ? "chevron-down" : "chevron-right";
+                color: Theme.muted;
+            }
+
+            HorizontalLayout {
+                x: 24px + root.indent;
+                width: parent.width - self.x;
+                padding-right: 10px;
+                spacing: 10px;
+
+                Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 18px;
+                    height: 18px;
+                    name: root.item.is-drive ? "drive" : "folder";
+                    color: root.item.dimmed ? Theme.faint : root.item.is-drive ? Theme.text : Theme.folder;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 4px;
+
+                    Text {
+                        accessible-role: none;
+                        text: root.item.label;
+                        color: root.item.dimmed ? Theme.faint : Theme.text;
+                        font-weight: root.item.selected ? 600 : 400;
+                        overflow: elide;
+                    }
+                    if root.item.is-drive: Rectangle {
+                        height: 4px;
+                        border-radius: 2px;
+                        background: Theme.border;
+
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * clamp(root.item.fill, 0, 1);
+                            border-radius: 2px;
+                            background: Theme.accent;
+                        }
+                    }
+                    if root.item.is-drive && root.item.info != "": Text {
+                        accessible-role: none;
+                        text: root.item.info;
+                        font-size: Theme.font-small;
+                        color: Theme.muted;
+                        overflow: elide;
+                    }
+                }
+                if !root.item.is-drive && root.item.info != "": Text {
+                    horizontal-stretch: 1;
+                    accessible-role: none;
+                    text: root.item.info;
+                    font-size: Theme.font-small;
+                    color: Theme.faint;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // The row's folder takes the drag; or the keyboard cursor is on it.
+        if drop.has-drag || root.cursor: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 2px;
+            border-color: Theme.accent;
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    // The places and the folders open below them, in order.
+    in property <[TreeRow]> rows;
+    // The list's name for screen readers.
+    in property <string> label: "폴더 트리";
+    // Whether the rows take dragged rows into their folders.
+    in property <bool> accepts-drops;
+    // Why the row under a drag does not take it ("여기에 놓을 수 없습니다: …"); empty otherwise.
+    in property <string> refusal;
+    // The row of the keyboard cursor, while the tree has the keys; -1 for none.
+    in property <int> cursor-row: -1;
+    // A click on row `index`: show its folder in the active pane.
+    callback row-clicked(index: int);
+    // A click on the chevron of row `index`: open or close it.
+    callback row-toggled(index: int);
+    // A drag over row `index`, and its drop (`accepts-drops` only): what its folder takes.
+    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+
+    // Scrolls row `index` to the middle of the list, unless it shows already.
+    //
+    // The rows differ in height (a place with a head or a space bar is taller), and the list
+    // places the rows it has not drawn by their average height, which it measures again each
+    // time it lays the rows out: right after rows came, it still has the old average. So the
+    // row stays the one to show until the list has settled (`settle`) or the user scrolls, and
+    // each new measure (`content-height`) brings it into view again. The middle, and a row's
+    // margin at the edges, leave room for the average to be off by a few rows.
+    public function scroll-to(index: int) {
+        root.scroll-target = index;
+        root.bring-into-view();
+        settle.restart();
+    }
+
+    // The row `scroll-to` brings into view while the list settles; -1 for none.
+    private property <int> scroll-target: -1;
+
+    function bring-into-view() {
+        if (root.scroll-target < 0 || root.scroll-target >= root.rows.length) {
+            return;
+        }
+        let row-height = list.content-height / root.rows.length;
+        let top = root.scroll-target * row-height + list.content-y;
+        if (top >= row-height && top + 2 * row-height <= list.visible-height) {
+            return;
+        }
+        let middle = list.visible-height / 2 - root.scroll-target * row-height - row-height / 2;
+        list.content-y = max(min(list.visible-height - list.content-height, 0), min(0, middle));
+    }
+
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-large;
+    clip: true;
+
+    list := ListView {
+        x: 1px;
+        y: 8px;
+        width: parent.width - 2px;
+        height: parent.height - 16px;
+        accessible-label: root.label;
+        changed content-height => {
+            root.bring-into-view();
+        }
+        scrolled => {
+            root.scroll-target = -1;
+        }
+
+        for row[i] in root.rows: TreeItem {
+            item: row;
+            index: i;
+            accepts-drops: root.accepts-drops;
+            cursor: i == root.cursor-row;
+            clicked => {
+                root.row-clicked(i);
+            }
+            toggled => {
+                root.row-toggled(i);
+            }
+            drop-check(data, action) => {
+                return root.drop-check(data, i, action);
+            }
+            dropped(data, action) => {
+                return root.dropped(data, i, action);
+            }
+        }
+    }
+
+    settle := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            root.scroll-target = -1;
+            self.stop();
+        }
+    }
+
+    if root.refusal != "": Rectangle {
+        x: 8px;
+        y: parent.height - self.height - 10px;
+        width: parent.width - 16px;
+        height: refused.preferred-height + 12px;
+        border-radius: 12px;
+        background: Theme.toast-bg;
+
+        refused := Text {
+            x: 12px;
+            width: parent.width - 24px;
+            text: root.refusal;
+            color: Theme.toast-text;
+            font-size: Theme.font-small;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}

@@ -1,0 +1,42 @@
+// Colors, spacing and type sizes of the demo UI (the mockup palette).
+// The main window sets `dark` from the theme chosen in its 보기 menu; every color below follows it.
+
+export global Theme {
+    in-out property <bool> dark;
+    in-out property <color> accent-base: #2F6FEB;
+
+    out property <color> bg: root.dark ? #15171A : #F6F7F9;
+    out property <color> panel: root.dark ? #1D2024 : #FFFFFF;
+    out property <color> raised: root.dark ? #24282D : #F0F2F5;
+    out property <color> text: root.dark ? #E7E9EC : #1C2024;
+    out property <color> muted: root.dark ? #A0A7B1 : #5C6370;
+    out property <color> faint: root.dark ? #7D848E : #8A919C;
+    out property <color> border: root.dark ? #2C3036 : #E1E4E8;
+    out property <color> folder: root.dark ? #E0A84A : #B7791F;
+    // What warns (an overwrite): the folder amber of the palette. For icons only: on the light
+    // panel it is 3.6:1, enough for a graphic (3:1) but not for text (4.5:1); a warning's text
+    // stays Theme.text (an amber that text could take is #9A6316).
+    out property <color> warning: root.folder;
+    // Dark mode lifts the accent toward white (35%) so it reads on dark panels.
+    out property <color> accent: root.dark ? root.accent-base.mix(#FFFFFF, 0.65) : root.accent-base;
+    out property <color> on-accent: root.dark ? #0E1A33 : #FFFFFF;
+    // Light: 12% accent over white. Dark: 22% accent over the panel color.
+    out property <color> selection: root.dark ? root.accent.mix(root.panel, 0.22) : root.accent-base.mix(#FFFFFF, 0.12);
+    out property <color> toast-bg: root.dark ? #2C3138 : #1C2024;
+    out property <color> toast-text: #F2F4F7;
+    out property <color> toast-link: #9DBBFF;
+
+    out property <length> gap-xs: 4px;
+    out property <length> gap-s: 8px;
+    out property <length> gap-m: 12px;
+    out property <length> gap-l: 16px;
+
+    out property <length> font-small: 12px;
+    out property <length> font-body: 14px;
+    out property <length> font-title: 20px;
+
+    out property <length> row-height: 32px;
+    out property <length> radius: 8px;
+    // Panes and the sidebar.
+    out property <length> radius-large: 12px;
+}

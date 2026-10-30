@@ -1,0 +1,1334 @@
+// One folder pane: the tab strip, the path row, the file list and the status bar. The list and
+// the tabs take dragged rows: the list into the folder of the row under the pointer or of the
+// pane, a tab into its folder. A tab can be dragged too, to another place in its strip or into
+// the other pane's strip; its menu (a right click) closes, copies, pins and moves tabs. The path
+// row is the address bar (NAV-03): the `›` after each piece asks for the list of that folder's
+// folders, which the window shows under it (`FolderMenu`), and the window shows the completions
+// Rust finds for the path field's text under the field (`field-x` and the others say where).
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { FileList, FileRow, ColumnView } from "file-list.slint";
+import { FileGrid } from "file-grid.slint";
+import { Shortcuts } from "shortcuts.slint";
+import { ScrollCue } from "widgets.slint";
+
+// A row of a list of folder names of the address bar: a folder, or a link that leads to one.
+export struct FolderMenuRow {
+    name: string,
+    link: bool,
+}
+
+// A list of folder names of the address bar, as Rust has it.
+export struct FolderMenuView {
+    // The list shows.
+    open: bool,
+    rows: [FolderMenuRow],
+    // The row of the keyboard's cursor, or -1.
+    cursor: int,
+    // A line under the rows: the listing is on its way, it failed, the folder has no folder,
+    // or how many more folders there are than the rows. Empty for none.
+    note: string,
+    // Rust waits for the list's first names (a Tab in the path field waits with it).
+    pending: bool,
+}
+
+// How a list of folder names is measured: rows of `row` height between `padding` above and
+// below, and a note line of `row` height when it has one. A list shows ten rows at most.
+export global MenuRoom {
+    out property <length> row: 30px;
+    out property <length> padding: 4px;
+
+    // The rows a list (with its note line when `note`) shows in `room`: as many as fit, one at
+    // least, ten at most.
+    public pure function rows(room: length, note: bool) -> int {
+        return clamp(floor((room - 2 * MenuRoom.padding - (note ? MenuRoom.row : 0px)) / MenuRoom.row), 1, 10);
+    }
+}
+
+// A drop-down list of folder names (the folders of a piece of the path row, or the completions
+// of the path field): `max-rows` rows show at most (the window gives it the room there is), and
+// it scrolls to the keyboard's row, which so always shows. A click on a row chooses it. It
+// takes no focus: its keys come from the field or the window that has them. A link to a folder
+// shows the link icon, as the file list shows it.
+export component FolderMenu inherits Rectangle {
+    in property <FolderMenuView> view;
+    // The list's name for screen readers.
+    in property <string> label;
+    in property <int> max-rows: 10;
+    callback chosen(index: int);
+
+    property <int> shown-rows: min(root.view.rows.length, root.max-rows);
+    property <int> cursor: root.view.cursor;
+    property <length> room: list.visible-height;
+    // Scrolls as little as needed to show the keyboard's row whole (once the list has its
+    // height: as it is made, with a cursor already on a row, and whenever its height changes).
+    function show-cursor() {
+        if (root.cursor < 0 || list.visible-height <= 0) {
+            return;
+        }
+        let top = root.cursor * MenuRoom.row;
+        if (top + list.content-y < 0) {
+            list.content-y = -top;
+        } else if (top + MenuRoom.row + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - top - MenuRoom.row;
+        }
+    }
+    changed cursor => {
+        root.show-cursor();
+    }
+    changed shown-rows => {
+        root.show-cursor();
+    }
+    changed room => {
+        root.show-cursor();
+    }
+    init => {
+        root.show-cursor();
+    }
+
+    height: layout.preferred-height;
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+    drop-shadow-blur: 16px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #00000033;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    // Takes the clicks between the rows, which are not the panes' behind it.
+    TouchArea { }
+
+    layout := VerticalLayout {
+        padding: MenuRoom.padding;
+
+        list := ListView {
+            height: root.shown-rows * MenuRoom.row;
+            visible: root.shown-rows > 0;
+            accessible-label: root.label;
+
+            for row[i] in root.view.rows: Rectangle {
+                height: MenuRoom.row;
+                border-radius: 4px;
+                background: i == root.view.cursor ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+                accessible-role: list-item;
+                accessible-label: row.name;
+                accessible-description: row.link ? "바로 가기" : "";
+                accessible-item-index: i;
+                accessible-item-selectable: true;
+                accessible-item-selected: i == root.view.cursor;
+                accessible-action-default => {
+                    root.chosen(i);
+                }
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        name: row.link ? "link" : "folder";
+                        color: Theme.folder;
+                    }
+                    Text {
+                        accessible-role: none;
+                        text: row.name;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                touch := TouchArea {
+                    clicked => {
+                        root.chosen(i);
+                    }
+                }
+            }
+        }
+
+        if root.view.note != "": HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            height: MenuRoom.row;
+
+            Text {
+                text: root.view.note;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// What a drag over a pane's tab strip would do at the place under the pointer: nothing, as no
+// tab of this app's goes into this strip (`refused`); keep the tab where it is, as that place is
+// on either side of it (`stays`); or move it there (`moves`).
+export enum TabDrop {
+    refused,
+    stays,
+    moves,
+}
+
+export struct TabItem {
+    title: string,
+    active: bool,
+    // A pinned tab stays at its folder (another folder opens in a new tab); it has no close
+    // button.
+    pinned: bool,
+    // The tab's menu can close other tabs, or tabs to its right: there are some that are not
+    // pinned.
+    can-close-others: bool,
+    can-close-right: bool,
+}
+
+// One piece of the path row; `index` counts from the root (0).
+export struct Crumb {
+    label: string,
+    index: int,
+}
+
+// Everything a pane shows. `rows` is a Rust model updated row by row; the rest is set as a
+// whole.
+export struct PaneView {
+    tabs: [TabItem],
+    // The position of the tab that shows.
+    active-tab: int,
+    crumbs: [Crumb],
+    path-text: string,
+    rows: [FileRow],
+    // The keyboard cursor's row, or -1.
+    cursor: int,
+    // How the rows show: 0 자세히, 1 목록, 2 small icons, 3 medium icons, 4 large icons.
+    mode: int,
+    // The columns of 자세히 after the name, in their order, and which columns show by number
+    // (0 name, 1 size, 2 modified, 3 kind, 4 created, 5 extension, 6 attributes).
+    columns: [ColumnView],
+    shows: [bool],
+    // The column the rows are sorted by first and its direction, the column of the second key
+    // (-1 for none) and its direction, and whether folders come first.
+    sort-key: int,
+    sort-ascending: bool,
+    then-key: int,
+    then-ascending: bool,
+    folders-first: bool,
+    // The folder has a view of its own (기본값으로 되돌리기 has something to undo).
+    own-view: bool,
+    status: string,
+    // A listing is on its way.
+    loading: bool,
+    // Why the folder could not be listed; empty when it could.
+    error: string,
+    // The pane has the keyboard.
+    active: bool,
+    // The pane has a closed tab to reopen.
+    can-reopen: bool,
+    // The completion list of the path field, while it is edited.
+    completion: FolderMenuView,
+    // The piece of the path row whose `›` has its list of folders open, or -1.
+    chevron: int,
+}
+
+// Small square icon button inside a tab or a strip: its name and the key of its command
+// (`keys`) show in a tooltip.
+component StripButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <string> keys;
+    in property <length> icon-size: 16px;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.keys;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Icon {
+        width: root.icon-size;
+        height: root.icon-size;
+        name: root.icon;
+        color: Theme.muted;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // In front of the touch area, which would take the pointer from it.
+    Tooltip {
+        text: @markdown("\{Shortcuts.tip(root.label, root.keys)}");
+    }
+}
+
+// One tab of the strip. A left press shows it, and readies a drag of it (`drag-data`, which Rust
+// sets to the tab's as the press shows it); a middle click closes it, but for a pinned one; a
+// right click opens its menu, whose items come back as `command` (close, close-others,
+// close-right, duplicate, pin, move-other, reopen).
+component TabButton inherits Rectangle {
+    in property <TabItem> tab;
+    // The pane has other tabs: this one can close and go to the other pane.
+    in property <bool> closable;
+    in property <bool> can-reopen;
+    in property <data-transfer> drag-data;
+    callback selected();
+    callback closed();
+    callback command(name: string);
+    // A drag with the payload `data` over the tab asks for `action`: what the tab's folder
+    // takes, or `none`. Then the drop itself, the same way, at `x` in the tab: a drop lands on
+    // the place under the pointer, so a dragged tab let go over this one comes here too, though
+    // the strip took its hover.
+    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
+    callback dropped(data: data-transfer, action: DragAction, x: length) -> DragAction;
+
+    height: 34px;
+    min-width: 72px;
+    max-width: 200px;
+    horizontal-stretch: 0;
+    border-top-left-radius: Theme.radius;
+    border-top-right-radius: Theme.radius;
+    background: root.tab.active ? Theme.panel : touch.has-hover ? Theme.border : transparent;
+    accessible-role: AccessibleRole.tab;
+    accessible-label: root.tab.title;
+    accessible-description: root.tab.pinned ? "고정된 탭" : "";
+    accessible-item-selected: root.tab.active;
+    accessible-action-default => {
+        root.selected();
+    }
+
+    // Under the close button, which takes its own clicks.
+    DragArea {
+        data: root.drag-data;
+        allow-move: true;
+
+        menu := ContextMenuArea {
+            Menu {
+                MenuItem {
+                    title: Shortcuts.titled("닫기", Shortcuts.close-tab);
+                    enabled: root.closable;
+                    activated => {
+                        root.command("close");
+                    }
+                }
+                MenuItem {
+                    title: "다른 탭 닫기";
+                    enabled: root.tab.can-close-others;
+                    activated => {
+                        root.command("close-others");
+                    }
+                }
+                MenuItem {
+                    title: "오른쪽 탭 닫기";
+                    enabled: root.tab.can-close-right;
+                    activated => {
+                        root.command("close-right");
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: "복제";
+                    activated => {
+                        root.command("duplicate");
+                    }
+                }
+                MenuItem {
+                    title: root.tab.pinned ? "고정 풀기" : "고정";
+                    activated => {
+                        root.command("pin");
+                    }
+                }
+                MenuItem {
+                    title: "반대 패널로 옮기기";
+                    enabled: root.closable;
+                    activated => {
+                        root.command("move-other");
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: Shortcuts.titled("닫은 탭 다시 열기", Shortcuts.reopen-tab);
+                    enabled: root.can-reopen;
+                    activated => {
+                        root.command("reopen");
+                    }
+                }
+            }
+
+            touch := TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.selected();
+                    }
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.middle && !root.tab.pinned) {
+                        root.closed();
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: root.closable && !root.tab.pinned ? 4px : 12px;
+        spacing: 6px;
+
+        Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            name: root.tab.pinned ? "pin" : "folder";
+            color: root.tab.pinned ? Theme.accent : Theme.folder;
+        }
+        Text {
+            accessible-role: none;
+            text: root.tab.title;
+            color: root.tab.active ? Theme.text : Theme.muted;
+            font-weight: root.tab.active ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.closable && !root.tab.pinned: VerticalLayout {
+            alignment: center;
+
+            StripButton {
+                width: 22px;
+                height: 22px;
+                icon: "close";
+                icon-size: 14px;
+                label: "탭 닫기";
+                keys: Shortcuts.close-tab;
+                clicked => {
+                    root.closed();
+                }
+            }
+        }
+    }
+
+    drop := DropArea {
+        can-drop(event) => {
+            return root.drop-check(event.data, event.proposed-action);
+        }
+        dropped(event) => {
+            return root.dropped(event.data, event.proposed-action, event.position.x);
+        }
+    }
+
+    // The tab's folder takes the drag.
+    if drop.has-drag: Rectangle {
+        border-top-left-radius: Theme.radius;
+        border-top-right-radius: Theme.radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+    }
+}
+
+// The `›` after a piece of the path row: it asks for the list of that piece's folders, and
+// points down while the list shows.
+component ChevronButton inherits Rectangle {
+    // The name for screen readers: "‘docs’ 하위 폴더".
+    in property <string> label;
+    in property <bool> open;
+    callback clicked();
+
+    width: 16px;
+    height: 24px;
+    border-radius: 4px;
+    background: root.open || touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Icon {
+        width: 12px;
+        height: 12px;
+        name: root.open ? "chevron-down" : "chevron-right";
+        color: Theme.muted;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // In front of the touch area, which would take the pointer from it.
+    Tooltip {
+        text: @markdown("하위 폴더 보기");
+    }
+}
+
+component CrumbButton inherits Rectangle {
+    in property <string> text;
+    // The name for screen readers, when it is not the text (the "…" piece's folder).
+    in property <string> label: root.text;
+    in property <bool> current;
+    callback clicked();
+
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+
+        Text {
+            accessible-role: none;
+            text: root.text;
+            color: Theme.text;
+            font-weight: root.current ? 700 : 400;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The bar between the two panes (LAY-02). Dragged, it shares the room between them, each pane
+// keeping `least` of it at least; double-clicked, it shares the room evenly. While it is
+// dragged it moves on its own (`dragging`, `live-share`), and tells the share once, as it is let
+// go.
+export component PaneDivider inherits Rectangle {
+    // Upright between panes side by side, lying between panes one above the other.
+    in property <bool> upright: true;
+    // The room the two panes share along the drag (the divider left out), and the first pane's
+    // share of it, as Rust last set it.
+    in property <length> room;
+    in property <float> share;
+    // The least room either pane keeps.
+    in property <length> least;
+    out property <bool> dragging;
+    out property <float> live-share;
+    // The divider was let go at `share`, or double-clicked (0.5).
+    callback changed(share: float);
+
+    touch := TouchArea {
+        mouse-cursor: root.upright ? MouseCursor.col-resize : MouseCursor.row-resize;
+        pointer-event(event) => {
+            if (event.button != PointerEventButton.left) {
+                return;
+            }
+            if (event.kind == PointerEventKind.down) {
+                root.live-share = root.share;
+            } else if (event.kind == PointerEventKind.up && root.dragging) {
+                root.changed(root.live-share);
+                root.dragging = false;
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+            }
+        }
+        // The first pane ends where the pointer is, less where the divider was pressed.
+        moved => {
+            if (root.room <= 0) {
+                return;
+            }
+            let first = root.upright ? root.x + self.mouse-x - self.pressed-x : root.y + self.mouse-y - self.pressed-y;
+            root.live-share = clamp(first, root.least, root.room - root.least) / root.room;
+            root.dragging = true;
+        }
+        double-clicked => {
+            root.dragging = false;
+            root.changed(0.5);
+        }
+    }
+
+    // The grip, which lights up under the pointer.
+    Rectangle {
+        width: root.upright ? 4px : 40px;
+        height: root.upright ? 40px : 4px;
+        border-radius: 2px;
+        background: touch.pressed || touch.has-hover ? Theme.accent : Theme.border;
+    }
+}
+
+export component Pane inherits Rectangle {
+    in property <PaneView> view;
+    // The pane's name for screen readers.
+    in property <string> label;
+    // The payload of a drag of the rows, and what a drop on the list would do (`FileList`).
+    in property <data-transfer> drag-data;
+    in property <string> drag-label;
+    // Why the place of the pane under a drag does not take it (`FileList.refusal`).
+    in property <string> refusal;
+    // The payload of a drag of a tab: the tab the last press showed, as Rust made it.
+    in property <data-transfer> tab-drag-data;
+    // The path row shows a text field instead of the crumbs.
+    out property <bool> editing;
+    // For the keys: how many lines (rows, or columns of 목록) a page key moves, and how many
+    // items a line holds.
+    out property <int> page-rows: root.view.mode == 0 ? files.page-rows : grid.page-lines;
+    out property <int> line-items: root.view.mode == 0 ? 1 : grid.line-items;
+
+    // Any click on the pane that nothing else takes.
+    callback activated();
+    // A left press on tab `index` (it shows, and a drag of it may follow).
+    callback tab-selected(index: int);
+    callback tab-closed(index: int);
+    callback tab-added();
+    // An item of tab `index`'s menu (`TabButton.command`).
+    callback tab-command(index: int, name: string);
+    // A drag with the payload `data` over the strip would put a tab at `slot` (0 before the
+    // first tab, the number of tabs after the last): what Rust makes of it. Then the drop
+    // itself, which says whether the tab moved.
+    callback tab-move-check(data: data-transfer, slot: int) -> TabDrop;
+    callback tab-move-dropped(data: data-transfer, slot: int) -> bool;
+    callback crumb-clicked(index: int);
+    // A click on the `›` after piece `index`, whose left edge is at `x` of the window and whose
+    // top and bottom are at `top` and `bottom`: the window shows the list of that piece's
+    // folders under it (or above it, when there is more room there).
+    callback subfolders-clicked(index: int, x: length, top: length, bottom: length);
+    // Enter in the path field.
+    callback path-entered(text: string);
+    // The text of the path field changed as it was typed (not by Tab's completion).
+    callback path-edited(text: string);
+    // ↑ (-1) or ↓ (1) in the path field while its completion list shows.
+    callback completion-step(delta: int);
+    // Tab in the path field, which holds `text`, while its completion list shows or Rust waits
+    // for its first names: the completed text, or an empty one for none (yet: a Tab that waits
+    // gets its text by `fill-path`).
+    callback path-completed(text: string) -> string;
+    // The completion list is to close: Esc while it shows, or the field closed.
+    callback completion-dismissed();
+    // Esc closed the path field. (A field that loses focus closes silently: the focus stays
+    // where the click put it.)
+    callback edit-ended();
+    // The column heads of 자세히 (`FileList`): a click (with Shift: `then`), the head's menu, a
+    // head dragged, a border dragged or double-clicked.
+    callback sort(column: int, then: bool);
+    callback column-toggled(column: int);
+    callback column-moved(from: int, slot: int);
+    callback column-resized(column: int, width: length);
+    callback column-texts(column: int, first: int, count: int) -> string;
+    // A left press on row `index`, and its release when no drag came of it.
+    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-released(index: int);
+    callback row-activated(index: int);
+    // A right click on row `index`, before its menu opens; a command of the list's menus.
+    callback row-menu(index: int);
+    callback menu-command(name: string);
+    callback retry();
+    // A drag over row `index` of the list (-1 below the rows) or over tab `index`, and its
+    // drop: what each takes (`FileList.drop-check`).
+    callback list-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback list-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback tab-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback tab-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag of the pane's rows ended.
+    callback drag-ended();
+
+    // Shows the path as text to edit (Ctrl+L, or a click beside the crumbs), all of it
+    // selected and the cursor at its end, which shows: that is where a path is edited.
+    public function edit-path() {
+        root.editing = true;
+        path-input.text = root.view.path-text;
+        path-input.focus();
+        path-input.set-selection-offsets(0, 2147483647);
+    }
+
+    public function scroll-to(index: int) {
+        if (root.view.mode == 0) {
+            files.scroll-to(index);
+        } else {
+            grid.scroll-to(index);
+        }
+    }
+
+    // The item menu by row `index` of the view (Shift+F10, the menu key, macOS ⌃↩).
+    public function show-item-menu(index: int) {
+        if (root.view.mode == 0) {
+            files.show-item-menu(index);
+        } else {
+            grid.show-item-menu(index);
+        }
+    }
+
+    // The menu of the pane's folder, by the top of its list (the same keys, nothing chosen).
+    public function show-blank-menu() {
+        if (root.view.mode == 0) {
+            files.show-blank-menu();
+        } else {
+            grid.show-blank-menu();
+        }
+    }
+
+    // 자세히 scrolls a step sideways (← and →), as far as its columns reach.
+    public function scroll-sideways(right: bool) {
+        files.scroll-sideways(right);
+    }
+
+    // 자세히's columns fit their texts on screen (모든 열 너비 맞추기).
+    public function fit-columns() {
+        files.fit-columns();
+    }
+
+    // The path field closes (a click on a row of the window's completion list).
+    public function end-edit() {
+        root.editing = false;
+    }
+
+    // The path field, while it is edited, holds `text` with the cursor at its end (a Tab that
+    // waited for the completion list's first names).
+    public function fill-path(text: string) {
+        if (root.editing) {
+            path-input.text = text;
+            path-input.set-selection-offsets(2147483647, 2147483647);
+        }
+    }
+
+    // Where the path field is in the window (its left edge, top, bottom and width), for the
+    // completion list the window shows under it.
+    out property <length> field-x: field-box.absolute-position.x;
+    out property <length> field-top: field-box.absolute-position.y;
+    out property <length> field-bottom: field-box.absolute-position.y + field-box.height;
+    out property <length> field-width: field-box.width;
+
+    // "불러오는 중…" shows only once a listing has taken 0.3 s, so a quick one never flashes it.
+    private property <bool> loading: root.view.loading;
+    private property <bool> loading-shown;
+    changed loading => {
+        root.loading-shown = false;
+    }
+
+    background: Theme.panel;
+    border-radius: Theme.radius-large;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    // The tabs share the strip, each between 120 and 168px wide; when they need more room
+    // than the pane has, the strip scrolls sideways and keeps the tab that shows in view. So
+    // the pane is as wide as the other one, however many tabs either has.
+    private property <int> tab-count: root.view.tabs.length;
+    private property <length> tab-gap: 2px;
+    private property <length> tab-room: tab-strip.width - 16px - 30px;
+    private property <length> tab-width: min(168px, max(120px, (root.tab-room - (root.tab-count - 1) * root.tab-gap) / max(1, root.tab-count)));
+    private property <length> tabs-width: root.tab-count * root.tab-width + max(0, root.tab-count - 1) * root.tab-gap;
+    private property <int> active-tab: root.view.active-tab;
+    changed active-tab => {
+        root.show-active-tab();
+    }
+    changed tabs-width => {
+        root.show-active-tab();
+    }
+    changed tab-room => {
+        root.show-active-tab();
+    }
+
+    // The place between the tabs nearest to `x`, a position in the strip: 0 before the first
+    // tab, the number of tabs after the last.
+    pure function slot-at(x: length) -> int {
+        let step = root.tab-width + root.tab-gap;
+        return clamp(floor((x - tabs-view.x - tabs-view.content-x + step / 2) / step), 0, root.tab-count);
+    }
+
+    // While a dragged tab is held within `edge` of an end of the strip that has tabs out of view
+    // beyond it, the strip scrolls that way (1 to the right, -1 to the left), a step at a time,
+    // so that every place can be reached; it stops when the drag leaves, ends, or the strip
+    // reaches that end.
+    private property <length> edge: 24px;
+    // Tabs are out of view left of the strip, or right of it.
+    private property <bool> more-left: tabs-view.content-x < 0;
+    private property <bool> more-right: tabs-view.content-x > tabs-view.width - root.tabs-width;
+    private property <int> scroll-way: !strip-drop.has-drag ? 0
+        : strip-drop.hover-x < tabs-view.x + root.edge && root.more-left ? 1
+        : strip-drop.hover-x > tabs-view.x + tabs-view.width - root.edge && root.more-right ? -1
+        : 0;
+
+    // Scrolls the strip as little as needed to show the tab that shows whole.
+    function show-active-tab() {
+        let shown = min(root.tab-room, root.tabs-width);
+        tabs-view.content-x = max(min(0px, shown - root.tabs-width), min(0px, tabs-view.content-x));
+        let left = root.active-tab * (root.tab-width + root.tab-gap);
+        if (left + tabs-view.content-x < 0) {
+            tabs-view.content-x = -left;
+        } else if (left + root.tab-width + tabs-view.content-x > shown) {
+            tabs-view.content-x = shown - left - root.tab-width;
+        }
+    }
+
+    Timer {
+        interval: 300ms;
+        running: root.loading && !root.loading-shown;
+        triggered => {
+            root.loading-shown = true;
+        }
+    }
+
+    // The steps of `scroll-way`; the place under the still pointer changes with each.
+    Timer {
+        interval: 30ms;
+        running: root.scroll-way != 0;
+        triggered => {
+            tabs-view.content-x = clamp(tabs-view.content-x + root.scroll-way * 12px, tabs-view.width - root.tabs-width, 0px);
+            strip-drop.slot = root.slot-at(strip-drop.hover-x);
+            strip-drop.answer = root.tab-move-check(strip-drop.hover-data, strip-drop.slot);
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+
+    VerticalLayout {
+        // Tab strip.
+        tab-strip := Rectangle {
+            height: 40px;
+            background: Theme.raised;
+
+            // Under the tabs, which pass a drag of a tab on (they take dragged rows): the place
+            // in the strip it would go to, and whether it goes there. A tab let go over another
+            // one lands on that one, which hands it the same place.
+            // A drag of a tab is taken wherever it hovers in the strip, so that the strip can
+            // scroll under it, though only some places move the tab.
+            strip-drop := DropArea {
+                property <int> slot: -1;
+                property <TabDrop> answer: TabDrop.refused;
+                // Where the pointer last was, and what it carries.
+                property <length> hover-x;
+                property <data-transfer> hover-data;
+                can-drop(event) => {
+                    self.hover-x = event.position.x;
+                    self.hover-data = event.data;
+                    self.slot = root.slot-at(event.position.x);
+                    self.answer = root.tab-move-check(event.data, self.slot);
+                    return self.answer == TabDrop.refused ? DragAction.none : DragAction.move;
+                }
+                dropped(event) => {
+                    return root.tab-move-dropped(event.data, root.slot-at(event.position.x)) ? DragAction.move : DragAction.none;
+                }
+            }
+
+            tabs-view := Flickable {
+                x: 8px;
+                y: 6px;
+                width: min(root.tab-room, root.tabs-width);
+                height: 34px;
+                content-width: root.tabs-width;
+                interactive: root.tabs-width > root.tab-room;
+                // A press and a move sideways drag a tab, not the strip; the wheel, a touchpad
+                // and a touch screen still scroll it.
+                mouse-drag-pan-enabled: false;
+
+                for tab[i] in root.view.tabs: TabButton {
+                    x: i * (root.tab-width + root.tab-gap);
+                    width: root.tab-width;
+                    tab: tab;
+                    closable: root.view.tabs.length > 1;
+                    can-reopen: root.view.can-reopen;
+                    drag-data: root.tab-drag-data;
+                    selected => {
+                        root.tab-selected(i);
+                    }
+                    closed => {
+                        root.tab-closed(i);
+                    }
+                    command(name) => {
+                        root.tab-command(i, name);
+                    }
+                    drop-check(data, action) => {
+                        return root.tab-drop-check(data, i, action);
+                    }
+                    // A dragged tab goes where the strip showed it would; dragged rows go into
+                    // the tab's folder.
+                    dropped(data, action, x) => {
+                        if (root.tab-move-dropped(data, root.slot-at(tabs-view.x + tabs-view.content-x + self.x + x))) {
+                            return DragAction.move;
+                        }
+                        return root.tab-dropped(data, i, action);
+                    }
+                }
+            }
+            StripButton {
+                x: tabs-view.x + tabs-view.width + 2px;
+                y: tabs-view.y + (tabs-view.height - self.height) / 2;
+                icon: "plus";
+                label: "새 탭";
+                keys: Shortcuts.new-tab;
+                clicked => {
+                    root.tab-added();
+                }
+            }
+
+            // Where the dragged tab would go: a bar between two tabs, in the part of the strip
+            // in view.
+            if strip-drop.has-drag && strip-drop.answer == TabDrop.moves: Rectangle {
+                x: clamp(tabs-view.x + tabs-view.content-x + strip-drop.slot * (root.tab-width + root.tab-gap) - root.tab-gap / 2 - 1px, tabs-view.x - 2px, tabs-view.x + tabs-view.width);
+                y: tabs-view.y + 4px;
+                width: 3px;
+                height: tabs-view.height - 8px;
+                border-radius: 1.5px;
+                background: Theme.accent;
+            }
+
+            // The end the strip scrolls toward under a held tab (`scroll-way`).
+            scroll-cue := ScrollCue {
+                x: root.scroll-way > 0 ? tabs-view.x : tabs-view.x + tabs-view.width - self.width;
+                y: tabs-view.y;
+                width: root.edge;
+                height: tabs-view.height;
+                way: root.scroll-way;
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // Path row: the crumbs, or the path as text while editing.
+        Rectangle {
+            height: 38px;
+            accessible-role: groupbox;
+            accessible-label: "경로";
+
+            // A click beside the crumbs makes the pane active and edits the path.
+            TouchArea {
+                visible: !root.editing;
+                clicked => {
+                    root.activated();
+                    root.edit-path();
+                }
+            }
+
+            crumb-view := Rectangle {
+                // Where the strip would start to end at the right edge of the row: before it
+                // when the path is too long. And how much further left the strip goes then, so
+                // that the first folder shown follows the "…" piece with no gap (the piece the
+                // "…" stands in sets it).
+                property <length> end-x: min(0px, self.width - crumb-strip.preferred-width);
+                property <length> lead;
+
+                x: 6px;
+                width: parent.width - 12px;
+                visible: !root.editing;
+                clip: true;
+
+                // Too long for the row, the path keeps its last folders in view. A folder that
+                // does not fit whole is not shown cut: the folders left of the first one that
+                // fits are hidden, and the last of them gives its place to a "…" piece that
+                // goes to it (the nearest folder out of view). The "…" piece starts the row,
+                // and the folders shown follow it.
+                crumb-strip := HorizontalLayout {
+                    x: crumb-view.end-x < 0 ? crumb-view.end-x - crumb-view.lead : 0px;
+                    width: self.preferred-width;
+                    alignment: start;
+                    spacing: 0px;
+
+                    for crumb[i] in root.view.crumbs: Rectangle {
+                        // Where the piece would be in the row ending at its right edge, and
+                        // whether the row is cut on the left.
+                        property <length> left: crumb-view.end-x + self.x;
+                        property <bool> cut: crumb-view.end-x < 0;
+                        property <length> room: 30px;
+                        property <bool> hidden: self.cut && self.left < self.room;
+                        property <bool> stands-for-hidden: self.hidden && self.left + self.width >= self.room;
+                        // For the piece the "…" stands in: how much further left the strip goes
+                        // for the folder after it to start right after the "…" (-1px for the
+                        // others).
+                        property <length> lead: self.stands-for-hidden ? self.left + self.width - self.room : -1px;
+
+                        init => {
+                            if (self.lead >= 0) {
+                                crumb-view.lead = self.lead;
+                            }
+                        }
+                        changed lead => {
+                            if (self.lead >= 0) {
+                                crumb-view.lead = self.lead;
+                            }
+                        }
+
+                        // Hidden, it keeps its place in the row, which tells where each
+                        // piece is.
+                        Rectangle {
+                            visible: !parent.hidden;
+
+                            HorizontalLayout {
+                                spacing: 0px;
+
+                                // The `›` of the piece before (its folder's folders).
+                                if i > 0: VerticalLayout {
+                                    alignment: center;
+
+                                    ChevronButton {
+                                        label: "‘\{root.view.crumbs[i - 1].label}’ 하위 폴더";
+                                        open: root.view.chevron == crumb.index - 1;
+                                        clicked => {
+                                            root.subfolders-clicked(crumb.index - 1, self.absolute-position.x, self.absolute-position.y, self.absolute-position.y + self.height);
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+
+                                    CrumbButton {
+                                        text: crumb.label;
+                                        current: i == root.view.crumbs.length - 1;
+                                        clicked => {
+                                            root.crumb-clicked(crumb.index);
+                                        }
+                                    }
+                                }
+                                // The pane's own folder's folders.
+                                if i == root.view.crumbs.length - 1: VerticalLayout {
+                                    alignment: center;
+
+                                    ChevronButton {
+                                        label: "‘\{crumb.label}’ 하위 폴더";
+                                        open: root.view.chevron == crumb.index;
+                                        clicked => {
+                                            root.subfolders-clicked(crumb.index, self.absolute-position.x, self.absolute-position.y, self.absolute-position.y + self.height);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if self.stands-for-hidden: CrumbButton {
+                            // At the start of the row.
+                            x: parent.width - parent.room;
+                            y: (parent.height - self.height) / 2;
+                            width: parent.room;
+                            text: "…";
+                            label: crumb.label;
+                            clicked => {
+                                root.crumb-clicked(crumb.index);
+                            }
+                        }
+                    }
+                }
+            }
+
+            field-box := Rectangle {
+                x: 8px;
+                y: 4px;
+                width: parent.width - 16px;
+                height: parent.height - 8px;
+                visible: root.editing;
+                border-width: 1px;
+                border-color: Theme.accent;
+                border-radius: 6px;
+                background: Theme.bg;
+
+                // A long path scrolls sideways inside, to keep the cursor in view.
+                Rectangle {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    clip: true;
+
+                    path-input := TextInput {
+                        property <length> computed-x;
+                        // An input method composing a syllable: it is not in the text until it is
+                        // committed, so Enter meanwhile does not take the path.
+                        property <bool> composing: self.preedit-text != "";
+
+                        x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+                        width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                        height: parent.height;
+                        color: Theme.text;
+                        selection-background-color: Theme.selection;
+                        selection-foreground-color: Theme.text;
+                        vertical-alignment: center;
+                        single-line: true;
+                        accessible-role: text-input;
+                        accessible-label: "경로";
+                        cursor-position-changed(cursor-position) => {
+                            if (cursor-position.x + self.computed-x < 0px) {
+                                self.computed-x = -cursor-position.x;
+                            } else if (cursor-position.x + self.computed-x > parent.width - self.text-cursor-width) {
+                                self.computed-x = parent.width - cursor-position.x - self.text-cursor-width;
+                            }
+                        }
+                        accepted => {
+                            if (self.composing) {
+                                return;
+                            }
+                            root.editing = false;
+                            root.path-entered(self.text);
+                        }
+                        edited => {
+                            root.path-edited(self.text);
+                        }
+                        // Esc closes the completion list first, then the field, composing or not;
+                        // it carries out nothing. The list's keys act only while no input method
+                        // composes: ↑↓ while the list shows, and Tab while it shows or Rust waits
+                        // for its first names (that Tab waits with it). Tab is kept from moving
+                        // the focus then, composing or not, as in the dialogs.
+                        key-pressed(event) => {
+                            let listing = root.view.completion.open;
+                            let waiting = root.view.completion.pending;
+                            if (event.text == Key.Escape) {
+                                if (listing) {
+                                    root.completion-dismissed();
+                                } else {
+                                    root.editing = false;
+                                    root.completion-dismissed();
+                                    root.edit-ended();
+                                }
+                                return accept;
+                            }
+                            let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                            // F6 leaves the field (the window's keys), but not while an input
+                            // method composes: the syllable would be lost with the focus.
+                            if (event.text == Key.F6 && self.composing) {
+                                return accept;
+                            }
+                            if (!(listing || waiting) || !plain) {
+                                return reject;
+                            }
+                            if (event.text == Key.Tab) {
+                                if (!self.composing) {
+                                    let completed = root.path-completed(self.text);
+                                    if (completed != "") {
+                                        self.text = completed;
+                                        self.set-selection-offsets(2147483647, 2147483647);
+                                    }
+                                }
+                                return accept;
+                            }
+                            if (listing && !self.composing && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                                root.completion-step(event.text == Key.UpArrow ? -1 : 1);
+                                return accept;
+                            }
+                            reject
+                        }
+                        // Focus went elsewhere (a click on the other pane's path, a row, a
+                        // tab): the field closes and leaves the focus where it went.
+                        changed has-focus => {
+                            if (!self.has-focus && root.editing) {
+                                root.editing = false;
+                                root.completion-dismissed();
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                y: parent.height - self.height;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The list, or why there is none.
+        Rectangle {
+            vertical-stretch: 1;
+
+            // The view that shows has the rows; the other has none, and makes no items.
+            files := FileList {
+                visible: root.view.error == "" && root.view.mode == 0;
+                rows: root.view.mode == 0 ? root.view.rows : [];
+                cursor: root.view.cursor;
+                columns: root.view.columns;
+                shows: root.view.shows;
+                sort-key: root.view.sort-key;
+                sort-ascending: root.view.sort-ascending;
+                then-key: root.view.then-key;
+                then-ascending: root.view.then-ascending;
+                active: root.view.active;
+                drag-data: root.drag-data;
+                drag-label: root.drag-label;
+                refusal: root.refusal;
+                drag-ended => {
+                    root.drag-ended();
+                }
+                sort(column, then) => {
+                    root.sort(column, then);
+                }
+                column-toggled(column) => {
+                    root.column-toggled(column);
+                }
+                column-moved(from, slot) => {
+                    root.column-moved(from, slot);
+                }
+                column-resized(column, width) => {
+                    root.column-resized(column, width);
+                }
+                column-texts(column, first, count) => {
+                    return root.column-texts(column, first, count);
+                }
+                row-clicked(index, ctrl, shift) => {
+                    root.row-clicked(index, ctrl, shift);
+                }
+                row-released(index) => {
+                    root.row-released(index);
+                }
+                drop-check(data, index, action) => {
+                    return root.list-drop-check(data, index, action);
+                }
+                dropped(data, index, action) => {
+                    return root.list-dropped(data, index, action);
+                }
+                row-activated(index) => {
+                    root.row-activated(index);
+                }
+                row-menu(index) => {
+                    root.row-menu(index);
+                }
+                menu-command(name) => {
+                    root.menu-command(name);
+                }
+            }
+
+            grid := FileGrid {
+                visible: root.view.error == "" && root.view.mode != 0;
+                mode: root.view.mode;
+                rows: root.view.mode != 0 ? root.view.rows : [];
+                cursor: root.view.cursor;
+                active: root.view.active;
+                drag-data: root.drag-data;
+                drag-label: root.drag-label;
+                refusal: root.refusal;
+                drag-ended => {
+                    root.drag-ended();
+                }
+                row-clicked(index, ctrl, shift) => {
+                    root.row-clicked(index, ctrl, shift);
+                }
+                row-released(index) => {
+                    root.row-released(index);
+                }
+                drop-check(data, index, action) => {
+                    return root.list-drop-check(data, index, action);
+                }
+                dropped(data, index, action) => {
+                    return root.list-dropped(data, index, action);
+                }
+                row-activated(index) => {
+                    root.row-activated(index);
+                }
+                row-menu(index) => {
+                    root.row-menu(index);
+                }
+                menu-command(name) => {
+                    root.menu-command(name);
+                }
+            }
+
+            if root.view.loading && root.loading-shown && root.view.rows.length == 0 && root.view.error == "": Text {
+                y: 64px;
+                height: 24px;
+                text: "불러오는 중…";
+                color: Theme.muted;
+                horizontal-alignment: center;
+            }
+
+            if root.view.error != "": VerticalLayout {
+                alignment: center;
+                padding: Theme.gap-l;
+                spacing: Theme.gap-s;
+
+                Text {
+                    text: "이 폴더를 열 수 없습니다";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.view.error;
+                    color: Theme.muted;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    padding-top: Theme.gap-s;
+
+                    retry-button := Rectangle {
+                        height: 32px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        border-radius: Theme.radius;
+                        background: retry-touch.pressed ? Theme.border : retry-touch.has-hover ? Theme.raised : transparent;
+                        accessible-role: button;
+                        accessible-label: "다시 시도";
+                        accessible-action-default => {
+                            root.retry();
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Theme.gap-l;
+                            padding-right: Theme.gap-l;
+
+                            Text {
+                                accessible-role: none;
+                                text: "다시 시도";
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        retry-touch := TouchArea {
+                            clicked => {
+                                root.retry();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Status bar.
+        Rectangle {
+            height: 32px;
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            Text {
+                x: 16px;
+                width: parent.width - 32px;
+                text: root.view.status;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // The frame goes over the content: 2px accent on the pane with the keyboard, else 1px.
+    Rectangle {
+        border-radius: Theme.radius-large;
+        border-width: root.view.active ? 2px : 1px;
+        border-color: root.view.active ? Theme.accent : Theme.border;
+    }
+}

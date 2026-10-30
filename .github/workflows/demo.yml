@@ -1,0 +1,119 @@
+# Builds the demo app for each OS and uploads one downloadable package per platform
+# (README.md "데모 실행" tells users how to get and run them).
+name: Demo build
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # File name of the guide inside every package; the text comes from installer/demo/<os>.txt.
+  GUIDE_NAME: "데모-안내.txt"
+
+jobs:
+  package:
+    name: package (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows-x64, ext: zip }
+          - { os: windows-11-arm, platform: windows-arm64, ext: zip }
+          - { os: macos-15, platform: macos-arm64, ext: zip }
+          - { os: ubuntu-latest, platform: linux-x64, ext: tar.gz }
+    env:
+      PACKAGE: RacoonFinder-demo-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux UI libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p racoon-finder
+        env:
+          # Windows: link the C runtime into the .exe so it runs without the Visual C++ redistributable.
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path dist $env:PACKAGE
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item target/release/racoon-finder.exe $dir
+          # Empty marker: the app keeps all its data in the `data` folder next to the .exe,
+          # so deleting the folder removes everything (PRD INST-06, identity::PORTABLE_MARKER).
+          New-Item -ItemType File -Path (Join-Path $dir portable) | Out-Null
+          Copy-Item installer/demo/windows.txt (Join-Path $dir $env:GUIDE_NAME)
+          # The files sit at the top of the zip: Explorer's "Extract All" already makes a folder.
+          Compress-Archive -Path (Join-Path $dir '*') -DestinationPath "dist/$($env:PACKAGE).zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The bundle's name and identifier come from crates/rf-core/src/identity.rs.
+          ident() { sed -n "s/^pub const $1: &str = \"\(.*\)\";\$/\1/p" crates/rf-core/src/identity.rs; }
+          app_name=$(ident DISPLAY_NAME)
+          bundle_id=$(ident BUNDLE_ID)
+          plist=installer/macos/Info.plist
+          check() {
+            local value
+            value=$(plutil -extract "$1" raw -o - "$plist")
+            if [ "$value" != "$2" ]; then
+              echo "::error file=$plist::$1 is '$value' but identity.rs says '$2'"
+              exit 1
+            fi
+          }
+          check CFBundleName "$app_name"
+          check CFBundleDisplayName "$app_name"
+          check CFBundleIdentifier "$bundle_id"
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "racoon-finder"))')
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CFBundleVersion needs a plain x.y.z version, got '$version'"
+            exit 1
+          fi
+          app="dist/$PACKAGE/$app_name.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp target/release/racoon-finder "$app/Contents/MacOS/"
+          sed "s/__VERSION__/$version/g" "$plist" > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          # Ad-hoc signature: not notarized, but Apple silicon refuses to run unsigned code.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          cp installer/demo/macos.txt "dist/$PACKAGE/$GUIDE_NAME"
+          ditto -c -k --keepParent "dist/$PACKAGE" "dist/$PACKAGE.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$PACKAGE"
+          cp target/release/racoon-finder "dist/$PACKAGE/"
+          cp installer/demo/linux.txt "dist/$PACKAGE/$GUIDE_NAME"
+          tar -czf "dist/$PACKAGE.tar.gz" -C dist "$PACKAGE"
+
+      # Uploaded as-is (not zipped again): a zipped artifact loses the executable bits that
+      # the macOS app and the Linux binary need, and users would get a zip inside a zip.
+      # The artifact is named after the file, e.g. RacoonFinder-demo-windows-x64.zip.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ env.PACKAGE }}.${{ matrix.ext }}
+          archive: false
+          retention-days: 30
+          if-no-files-found: error

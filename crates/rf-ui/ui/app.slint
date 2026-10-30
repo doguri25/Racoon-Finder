@@ -1,0 +1,1745 @@
+// Main window: toolbar on top, the sidebar, the panes and the preview panel's place below (one
+// pane or two, side by side or one above the other, with a divider to drag between them), the
+// job panel under them while a job runs, notices in the lower right corner, and a dialog over
+// all of it when one is open. Every key goes to Rust first (`key`, or `tree-key` while the
+// sidebar's tree has the keys), except while a text field or a dialog has focus; Rust's
+// shortcut table (`keys.rs`) decides what it does, and gives the keys the toolbar's tooltips
+// and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
+// other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
+// under it takes them (`drop-check`). A tab dragged along its strip, or into the other pane's,
+// moves there (`tab-move-check`). The `›` of a piece of a pane's path row opens the list of that
+// folder's folders under it (`subfolders`, NAV-03); its keys go to Rust with the window's. The
+// preview panel shows the item under the active pane's cursor (`preview`), and so does quick
+// look over the window (`quick-look`), which takes every key while it shows (`quick-look-key`).
+
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
+import { Shortcuts } from "shortcuts.slint";
+import { FileRow, ColumnView } from "file-list.slint";
+import {
+    Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
+    MenuRoom
+} from "pane.slint";
+import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
+import { JobPanel, JobRowView, RecentRowView } from "job-panel.slint";
+import { JobTray } from "tray.slint";
+import {
+    NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
+    RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow, PatternDialog,
+    PatternView
+} from "dialogs.slint";
+import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
+import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
+import { ViewMenu } from "view-menu.slint";
+import { SelectMenu } from "select-menu.slint";
+import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
+import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
+import { ItemMenu, OpenWithMenu } from "list-parts.slint";
+
+export {
+    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, RecentRowView, JobTray, NameView,
+    ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
+    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
+    PropertiesView, FactRow, HashRowView, ItemMenu
+}
+
+// What a drag is over: a pane's list, a pane's tab, or a row of the tree.
+export enum DropPlace {
+    list,
+    tab,
+    tree,
+}
+
+// Which dialog is open over the main window.
+export enum DialogKind {
+    none,
+    name,
+    confirm,
+    message,
+    recovery,
+    conflict,
+    preflight,
+    // Where to copy or move the items to.
+    pick,
+    // Which rows to select by a pattern of their names.
+    pattern,
+    // The properties of the chosen items and the checksums of their files.
+    properties,
+    // The jobs stop before the app ends.
+    closing,
+}
+
+export component MainWindow inherits Window {
+    // Window title and the name beside the logo; Rust passes the product name.
+    in property <string> app-title;
+    // Below 1400px the toolbar drops the name (the window's title bar has it), and below
+    // 1200px the button texts too. Handlers set them, not a binding: the window's width
+    // depends on the toolbar's layout. The full toolbar needs about 1230px with the name
+    // and 1115px without it (the filter box at its least, 120px); 1400px and 1200px only
+    // work while those stay below them, so a change that widens the toolbar must re-check
+    // these numbers.
+    private property <bool> compact;
+    private property <bool> titled;
+
+    // The two panes; side 0 is the left one, 1 the right one.
+    in property <PaneView> left-pane;
+    in property <PaneView> right-pane;
+    // The sidebar's folder tree: the places (the favorites, then the drives) and the folders
+    // open below them.
+    in property <[TreeRow]> tree;
+    // Whether the active pane can go back, forward and up.
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <bool> can-up;
+    // The rows of the job panel; the panel shows while there is one.
+    in property <[JobRowView]> job-rows;
+    // The line and the button of the job panel's keyboard cursor, which shows while the panel
+    // has the keys; -1 for none.
+    in property <int> panel-line: -1;
+    in property <int> panel-button: -1;
+    // The jobs that ended (최근 완료), and whether their lines show below its head.
+    in property <[RecentRowView]> recent-rows;
+    in property <bool> recent-open;
+    private property <bool> panel-shows: root.job-rows.length > 0 || root.recent-rows.length > 0;
+    // How many lines of 최근 완료 show at once: a window below 700px high (it can be 560px)
+    // keeps room for the panes with two. Set by the handlers of the height, as `compact` is:
+    // the window's height depends on the panel's.
+    private property <int> recent-lines: 3;
+    // The dialog that is open, and what each kind shows. Rust sets the view before the kind.
+    in property <DialogKind> dialog: DialogKind.none;
+    in property <NameView> name-view;
+    in property <ConfirmView> confirm-view;
+    in property <MessageView> message-view;
+    in property <RecoveryView> recovery-view;
+    in property <PreflightView> preflight-view;
+    in property <ConflictView> conflict-view;
+    in property <PickView> pick-view;
+    in property <PatternView> pattern-view;
+    in property <PropertiesView> properties-view;
+    // The titles of the menu of the apps that can open a file (연결 프로그램, macOS).
+    in property <[string]> open-with-apps;
+    // The picker shows under the dialog on top of it (the name of its new folder): it stays in
+    // view, and takes no click or key until it is on top again.
+    in property <bool> pick-behind;
+    in property <string> closing-text;
+    // Whether the toast's button still does what it says; it hides when it does not (an undo
+    // whose job is no longer the next one to undo, or while an undo runs).
+    in property <bool> notice-action-live: true;
+    // How many lines (rows, or columns of 목록) PageUp and PageDown move in the pane with the
+    // keyboard, and how many items a line of its view holds (1 in 자세히).
+    out property <int> page-rows: root.active-side == 1 ? right.page-rows : left.page-rows;
+    out property <int> line-items: root.active-side == 1 ? right.line-items : left.line-items;
+    // The pane with the keyboard, which the 보기 menu's 정렬 sorts, and what it shows (its tab
+    // is the one of the 보기 menu's 탭 items).
+    private property <int> active-side: root.right-pane.active ? 1 : 0;
+    private property <PaneView> active-view: root.active-side == 1 ? root.right-pane : root.left-pane;
+    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게), whether hidden
+    // items show and whether the names show their extensions, for the menu's check marks.
+    in property <int> theme-choice;
+    in-out property <bool> show-hidden;
+    in-out property <bool> show-extensions: true;
+    // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
+    // readied. And what a drop on the list under the pointer would do ("항목 3개 이동 → 백업").
+    in property <data-transfer> drag-data;
+    in property <string> drag-label;
+    // The payload of a drag of a tab, made by Rust as a left press shows the tab.
+    in property <data-transfer> tab-drag-data;
+    // The layout (Rust sets it from its state; the 보기 menu's marks are bound to it): two panes
+    // or one, one above the other or side by side, the first pane's share of the room (0.1 to
+    // 0.9), the sidebar, the preview panel's place; and whether navigation sync is on.
+    in-out property <bool> dual-pane: true;
+    in-out property <bool> stacked;
+    in property <float> split-share: 0.5;
+    in-out property <bool> show-tree: true;
+    in-out property <bool> show-preview;
+    in-out property <bool> sync-navigation;
+    // The row of the tree's keyboard cursor, which shows while the tree has the keys; -1 for
+    // none.
+    in property <int> tree-cursor: -1;
+    // What the preview panel and quick look show of the item under the active pane's cursor,
+    // and whether quick look shows (over everything but a dialog).
+    in property <PreviewView> preview;
+    in property <bool> quick-look;
+    // The preview panel's width, and whether the window has room for it (Rust sets both from
+    // the window's width: `state::preview_width`); without room it hides, and `show-preview`,
+    // the setting, stays.
+    in property <length> preview-width: 260px;
+    in property <bool> preview-fits: true;
+    // The size the window opens at: the one of the last run, from the settings.
+    in property <length> start-width: 1280px;
+    in property <length> start-height: 800px;
+    // The list of the folders in a piece of a path row's folder, under the `›` that asked for
+    // it (one at a time, in either pane), and where that `›` is.
+    in property <FolderMenuView> subfolders;
+    private property <length> subfolders-x;
+    private property <length> subfolders-top;
+    private property <length> subfolders-bottom;
+    // How many rows PageUp and PageDown move in that list: the rows it shows.
+    out property <int> subfolders-page: max(1, min(root.subfolders.rows.length, root.subfolders-rows));
+    // The list goes under the `›`, or above it as a system's drop-down list goes: when a full
+    // list (ten rows and a note) fits there and not under the `›`, or when not even three rows
+    // fit under it and there is more room above. The side is chosen at the click
+    // (`place-subfolders`), before the folder is listed, and kept while the list shows, so that
+    // the list does not jump when its names come after "불러오는 중…". It shows the rows that
+    // fit where it goes.
+    private property <bool> subfolders-up;
+    private property <length> subfolders-below: root.height - root.subfolders-bottom - 2px - 8px;
+    private property <length> subfolders-above: root.subfolders-top - 2px - 8px;
+    private property <int> subfolders-rows: MenuRoom.rows(root.subfolders-up ? root.subfolders-above : root.subfolders-below, root.subfolders.note != "");
+
+    // The `›` at `x` of the window, from `top` to `bottom`, was clicked: the list of its
+    // folders goes there, on the side that has room for it.
+    function place-subfolders(x: length, top: length, bottom: length) {
+        root.subfolders-x = x;
+        root.subfolders-top = top;
+        root.subfolders-bottom = bottom;
+        let below = MenuRoom.rows(root.subfolders-below, true);
+        let above = MenuRoom.rows(root.subfolders-above, true);
+        root.subfolders-up = below < 10 && (above >= 10 || (below < 3 && root.subfolders-above > root.subfolders-below));
+    }
+    // The completion list of the path field being edited: the pane whose list shows (0 or 1;
+    // -1 for none), the list, and where that pane's field is. It goes under the field, or above
+    // it when not even its first three rows fit under it and there is more room above.
+    private property <int> completing: left.editing && root.left-pane.completion.open ? 0 : right.editing && root.right-pane.completion.open ? 1 : -1;
+    private property <FolderMenuView> completion: root.completing == 1 ? root.right-pane.completion : root.left-pane.completion;
+    // The field's width and 6px more on either side, as far as the pane's frame: the file list's
+    // cursor outline under it does not show beside it.
+    private property <length> completion-x: (root.completing == 1 ? right.field-x : left.field-x) - 6px;
+    private property <length> completion-width: (root.completing == 1 ? right.field-width : left.field-width) + 12px;
+    private property <length> completion-top: root.completing == 1 ? right.field-top : left.field-top;
+    private property <length> completion-bottom: root.completing == 1 ? right.field-bottom : left.field-bottom;
+    private property <length> completion-below: root.height - root.completion-bottom - 2px - 8px;
+    private property <length> completion-above: root.completion-top - 2px - 8px;
+    private property <bool> completion-up: MenuRoom.rows(root.completion-below, root.completion.note != "") < min(root.completion.rows.length, 3) && root.completion-above > root.completion-below;
+    private property <int> completion-rows: MenuRoom.rows(root.completion-up ? root.completion-above : root.completion-below, root.completion.note != "");
+
+    // A key pressed while no text field has focus: the key's text (a character of
+    // `Key` for a special key), the modifiers (on macOS `ctrl` is Command and `meta`
+    // Control), and whether the system repeats a held key. `true` when Rust used it.
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool) -> bool;
+    // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
+    // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
+    // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
+    // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons,
+    // quick-look, properties, folder-properties (the properties of the pane's folder, whatever
+    // is chosen).
+    callback command(name: string);
+    // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
+    callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // A key while the job panel has the keys, as `key`; `true` when the panel used it.
+    callback panel-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // A key while quick look shows, as `key`: it goes nowhere else. Then a click on its close
+    // button or beside it.
+    callback quick-look-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool);
+    callback quick-look-closed();
+    // The divider was let go at `share` of the room, or double-clicked (0.5), or the 보기 menu
+    // asked for an even split or moved it.
+    callback split-changed(share: float);
+    // A theme was chosen in the 보기 menu (the numbers of `theme-choice`).
+    callback theme-chosen(choice: int);
+    // The window's size changed (the settings keep it).
+    callback window-resized();
+    callback pane-activated(side: int);
+    // A left press on tab `index` of pane `side`: it shows, and Rust readies `tab-drag-data`.
+    callback tab-selected(side: int, index: int);
+    callback tab-closed(side: int, index: int);
+    callback tab-added(side: int);
+    // An item of the menu of tab `index` of pane `side`, or of the 보기 menu's 탭 items for the
+    // tab the active pane shows: close, close-others, close-right, duplicate, pin, move-other,
+    // move-left, move-right, reopen.
+    callback tab-command(side: int, index: int, name: string);
+    // A drag with the payload `data` would put a tab at `slot` of pane `side`'s strip: what Rust
+    // makes of it (`TabDrop`). Then the drop itself, which says whether the tab moved.
+    callback tab-move-check(data: data-transfer, side: int, slot: int) -> TabDrop;
+    callback tab-move-dropped(data: data-transfer, side: int, slot: int) -> bool;
+    callback crumb-clicked(side: int, index: int);
+    // The `›` after piece `index` of pane `side`'s path row was clicked; a row of its list was
+    // chosen; the list is to close (a press elsewhere, or the keys left the panes).
+    callback subfolders-clicked(side: int, index: int);
+    callback subfolder-chosen(index: int);
+    callback subfolders-dismissed();
+    callback path-entered(side: int, text: string);
+    // The path field of pane `side`: its text was typed, ↑ (-1) or ↓ (1) while its completion
+    // list shows, Tab while it shows or Rust waits for its first names (Tab gives the completed
+    // text, or an empty one), a row of the list was clicked, the list is to close (Esc, or the
+    // field closed).
+    callback path-edited(side: int, text: string);
+    callback completion-step(side: int, delta: int);
+    callback path-completed(side: int, text: string) -> string;
+    callback completion-chosen(side: int, index: int);
+    callback completion-dismissed(side: int);
+    // The filter box changed: the active pane shows the rows whose names hold `text`.
+    callback filter-edited(text: string);
+    // The order and the columns of pane `side` (NAV-07, NAV-08): a click on the head of
+    // `column` (with Shift: `then`, the second key), the 보기 menu's 2차 정렬 (-1 for none), a
+    // column shown or hidden, a head dragged from `from` to `slot` among the columns after the
+    // name, a column's new width, and the texts a fit of `column` measures (`count` rows from row
+    // `first`, one a line).
+    callback sort(side: int, column: int, then: bool);
+    callback sort-then(side: int, column: int);
+    callback column-toggled(side: int, column: int);
+    callback column-moved(side: int, from: int, slot: int);
+    callback column-resized(side: int, column: int, width: length);
+    callback column-texts(side: int, column: int, first: int, count: int) -> string;
+    // The 보기 menu's commands for the view of pane `side`'s folder: folders-first,
+    // apply-below (하위 폴더에 적용), reset-view (기본값으로 되돌리기).
+    callback view-command(side: int, name: string);
+    // A left press on row `index` of pane `side`, and its release when no drag came of it.
+    callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
+    callback row-released(side: int, index: int);
+    callback row-activated(side: int, index: int);
+    // A right click on row `index` of pane `side`, before its menu opens.
+    callback row-menu(side: int, index: int);
+    callback retry(side: int);
+    // The dialogs: the name changed or was confirmed, the dialog closed without its main
+    // action (Esc, Cancel), the confirmation was accepted, a conflict was answered (`choice`:
+    // 0 overwrite, 1 skip, 2 keep both), the pre-flight check was answered (0 go on, 1 leave
+    // out the blocked items, 2 cancel), recovered job `index` was run again or dropped.
+    callback name-edited(text: string);
+    callback name-accepted(text: string);
+    callback dialog-cancelled();
+    callback confirm-accepted();
+    callback conflict-answered(choice: int, apply-all: bool);
+    callback preflight-answered(choice: int);
+    callback recovery-chosen(index: int, run-again: bool);
+    // The pattern window (패턴으로 선택): its field changed, 와일드카드 or 정규식 was chosen, 대소문자
+    // 무시 turned on or off, 선택 바꾸기 or 선택에 더하기 chosen, 선택 (or Enter) with the field's text.
+    callback pattern-edited(text: string);
+    callback pattern-syntax(regex: bool);
+    callback pattern-case(ignore: bool);
+    callback pattern-mode(add: bool);
+    callback pattern-accepted(text: string);
+    // The properties window: an algorithm was chosen (its number, `Algorithms.names`), 중지
+    // stopped the count of what its folders hold, 계산 중지 the checksums under way, 복사 of the
+    // checksum of row `row`, the field 비교 changed. Esc and 닫기 are `dialog-cancelled`.
+    callback properties-algorithm(number: int);
+    callback properties-stop();
+    callback properties-stop-hashes();
+    callback properties-copy(row: int);
+    callback properties-compare(text: string);
+    // OS 속성 창 열기 in the properties window: the system's own window of its item.
+    callback properties-system();
+    // App `index` of the menu of the apps that can open a file was chosen.
+    callback open-with-chosen(index: int);
+    // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
+    // button, the move/copy toggle, a conflict policy (0 ask, 1 overwrite, 2 skip, 3 rename),
+    // the filter changed, a path was typed or entered, a row of its tree or its chevron was
+    // clicked, and 새 폴더. Esc, 취소 and the close button are `dialog-cancelled`.
+    callback pick-target-clicked(index: int);
+    callback pick-step(delta: int);
+    callback pick-enter();
+    callback pick-confirmed();
+    callback pick-mode(is-move: bool);
+    callback pick-policy(policy: int);
+    callback pick-filter-edited(text: string);
+    callback pick-path-edited(text: string);
+    callback pick-path-entered(text: string);
+    callback pick-tree-clicked(index: int);
+    callback pick-tree-toggled(index: int);
+    callback pick-new-folder();
+    // The buttons of row `index` of the job panel.
+    callback job-pause(index: int);
+    callback job-resume(index: int);
+    callback job-cancel(index: int);
+    // The buttons of 최근 완료: 펼치기 or 접기, 지우기, and 자세히 and 로그 저장… of line `index`.
+    callback recent-toggled();
+    callback recent-cleared();
+    callback recent-details(index: int);
+    callback recent-save(index: int);
+    // The confirmation's third answer (트레이에서 계속).
+    callback confirm-alternative();
+    // The button of the toast `token`, and its end (closed, or its time ran out).
+    callback notice-action(token: int);
+    callback notice-closed(token: int);
+    // A click on row `index` of the tree, or on its chevron.
+    callback tree-clicked(index: int);
+    callback tree-toggled(index: int);
+    // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
+    // below the rows), tab `index` of pane `side`, or row `index` of the tree (`side` 0), and
+    // asks for `action` (Slint's rule: none or Shift moves, Ctrl copies). Rust gives the
+    // action the place takes, or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+    callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+
+    // The filter box takes the keys, all its text selected.
+    public function focus-filter() {
+        filter-box.take-focus-all();
+    }
+
+    // The sidebar's tree takes the keys.
+    public function focus-tree() {
+        tree-keys.focus();
+    }
+
+    // The panes take the keys again.
+    public function focus-panes() {
+        keys.focus();
+    }
+
+    // The job panel takes the keys, while it shows.
+    public function focus-panel() {
+        if (root.panel-shows) {
+            panel-keys.focus();
+        }
+    }
+
+    // The part of the window that had the keys last: 0 the panes (their list, the path field
+    // or the filter box), 1 the tree, 2 the job panel. A window, a menu or quick look over the
+    // main window takes the keys for a while and leaves this as it was.
+    private property <int> keys-region;
+    private property <bool> in-pane-fields: left.editing || right.editing || filter-box.has-focus;
+    changed in-pane-fields => {
+        if (root.in-pane-fields) {
+            root.keys-region = 0;
+        }
+    }
+    // The keys go back to the part that had them, as a window or a sub-menu of the 보기 menu
+    // closes: the tree or the job panel while it still shows, otherwise the panes.
+    function give-keys-back() {
+        if (root.keys-region == 1 && root.show-tree) {
+            tree-keys.focus();
+        } else if (root.keys-region == 2 && root.panel-shows) {
+            panel-keys.focus();
+        } else {
+            keys.focus();
+        }
+    }
+
+    // The 보기 menu's 분할선을 왼쪽으로/오른쪽으로 (위로/아래로): the divider moves by `step` of
+    // the room, as far as a drag could take it.
+    function move-divider(step: float) {
+        if (split.room > 0) {
+            root.split-changed(clamp(split.first + split.room * step, split.least, split.room - split.least) / split.room);
+        }
+    }
+
+    // Opens the 보기 menu under its button, for the keys to choose in.
+    public function show-view-menu() {
+        root.open-view-menu();
+    }
+
+    // The item menu of pane `side` by row `row` (Shift+F10, the menu key, macOS ⌃↩).
+    public function show-item-menu(side: int, row: int) {
+        if (side == 0) {
+            left.show-item-menu(row);
+        } else {
+            right.show-item-menu(row);
+        }
+    }
+
+    // The menu of pane `side`'s folder, by the top of its list (the same keys, nothing chosen).
+    public function show-blank-menu(side: int) {
+        if (side == 0) {
+            left.show-blank-menu();
+        } else {
+            right.show-blank-menu();
+        }
+    }
+
+    // The menu of the apps that can open a file (`open-with-apps`), where the item menu showed.
+    public function show-open-with() {
+        open-with-menu.show({ x: ItemMenu.at-x, y: ItemMenu.at-y });
+    }
+
+    // A sub-menu's choice gives the keys back where they were as the menu opened
+    // (`give-keys-back`).
+    function open-view-menu() {
+        view-menu.open(0, view-button.height + 4px);
+    }
+
+    // The filter box shows `text`, the filter of the active pane, when it does not already.
+    public function show-filter(text: string) {
+        if (filter-box.text != text) {
+            filter-box.text = text;
+        }
+    }
+
+    // Shows pane `side`'s path as text to edit.
+    public function edit-path(side: int) {
+        if (side == 0) {
+            left.edit-path();
+        } else {
+            right.edit-path();
+        }
+    }
+
+    // Puts `text` into pane `side`'s path field while it is edited: a Tab that waited for the
+    // completion list's first names has completed it.
+    public function fill-path(side: int, text: string) {
+        if (side == 0) {
+            left.fill-path(text);
+        } else {
+            right.fill-path(text);
+        }
+    }
+
+    // Scrolls pane `side` so that row `index` shows whole.
+    public function scroll-to(side: int, index: int) {
+        if (side == 0) {
+            left.scroll-to(index);
+        } else {
+            right.scroll-to(index);
+        }
+    }
+
+    // Scrolls 자세히 of pane `side` a step sideways (← and →).
+    public function scroll-sideways(side: int, right-ward: bool) {
+        if (side == 0) {
+            left.scroll-sideways(right-ward);
+        } else {
+            right.scroll-sideways(right-ward);
+        }
+    }
+
+    // Fits the columns of 자세히 of pane `side` to their texts on screen (모든 열 너비 맞추기).
+    public function fit-columns(side: int) {
+        if (side == 0) {
+            left.fit-columns();
+        } else {
+            right.fit-columns();
+        }
+    }
+
+    // The place under a drag (`place`, of pane `side`) does not take it, for the reason `text`;
+    // an empty one says it does. The reason shows by the place while the drag hovers there, the
+    // pointer moving or not, and goes when the drag moves where nothing takes drops (the
+    // `DropArea` under everything), or ends.
+    public function drop-refused(place: DropPlace, side: int, text: string) {
+        root.refusal = text;
+        root.refusal-place = place;
+        root.refusal-side = side;
+        root.refusal-told = text != "";
+    }
+
+    private property <string> refusal;
+    private property <DropPlace> refusal-place;
+    private property <int> refusal-side;
+    // A place has refused the drag in the move that is under way.
+    private property <bool> refusal-told;
+    private property <bool> refusal-in-tree: root.refusal-place == DropPlace.tree;
+
+    // Scrolls the tree so that row `index` shows.
+    public function tree-scroll-to(index: int) {
+        sidebar.scroll-to(index);
+    }
+
+    // Scrolls the picker's tree so that row `index` shows.
+    public function pick-tree-scroll-to(index: int) {
+        root.pick-scroll-row = index;
+        root.pick-scroll-serial += 1;
+    }
+
+    private property <int> pick-scroll-row;
+    private property <int> pick-scroll-serial;
+
+    // A notice in the lower right corner for 8 seconds, longer while the pointer is over it.
+    public function show-notice(text: string) {
+        root.show-toast(text, "", 0);
+    }
+
+    // A notice with the button `action` (empty for none), whose click and end come back with
+    // `token`.
+    public function show-toast(text: string, action: string, token: int) {
+        if (root.notice != "" && root.notice-token != token) {
+            root.notice-closed(root.notice-token);
+        }
+        root.notice = text;
+        root.notice-action-text = action;
+        root.notice-token = token;
+        root.notice-lasting = false;
+        notice-timer.start();
+        notice-timer.restart();
+    }
+
+    // A notice without a button that stays, its time not running, until `end-busy` with its
+    // `token` (or another notice takes its place): the app is at something the user waits for.
+    public function show-busy(text: string, token: int) {
+        root.show-toast(text, "", token);
+        notice-timer.stop();
+        root.notice-lasting = true;
+    }
+
+    // The work of the notice `token` of `show-busy` is over: it goes, unless another notice
+    // has taken its place.
+    public function end-busy(token: int) {
+        if (root.notice-lasting && root.notice-token == token) {
+            root.notice = "";
+            root.notice-lasting = false;
+        }
+    }
+
+    private property <string> notice;
+    private property <string> notice-action-text;
+    private property <int> notice-token;
+    private property <bool> notice-lasting;
+    // The keyboard goes back where it was when a dialog closes: to quick look, if it shows,
+    // else to the tree, the job panel or the panes (`give-keys-back`).
+    changed dialog => {
+        if (root.dialog == DialogKind.none) {
+            if (root.quick-look) {
+                quick-look.take-keys();
+            } else {
+                root.give-keys-back();
+            }
+        }
+    }
+    // Quick look takes the keys as it opens, and gives them back to the panes as it closes. A
+    // menu that opened it gives the keys back as it closes, after this: they come to quick look
+    // once the menu has closed (`quick-look-keys-later`).
+    changed quick-look => {
+        root.give-quick-look-keys();
+        quick-look-keys-later.running = true;
+    }
+    function give-quick-look-keys() {
+        if (root.dialog != DialogKind.none) {
+            return;
+        }
+        if (root.quick-look) {
+            quick-look.take-keys();
+        } else if (!left.editing && !right.editing && !filter-box.has-focus) {
+            root.give-keys-back();
+        }
+    }
+    // The theme. 밝게 and 어둡게 set the scheme of the standard widgets (scroll bars, menus) and
+    // the app's colors. 시스템 설정 따르기 leaves the widgets' scheme to the system (`unknown`),
+    // and the app's colors follow theirs: their background is dark exactly when the system asks
+    // for dark colors. That keeps following the system's setting as it changes, also after
+    // another theme was chosen, which `Palette.color-scheme` itself (a value once set) could not.
+    private property <color> widget-background: Palette.background;
+    private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
+    function show-theme() {
+        Palette.color-scheme = root.theme-choice == 1 ? ColorScheme.light : root.theme-choice == 2 ? ColorScheme.dark : ColorScheme.unknown;
+        Theme.dark = root.theme-choice == 2 || (root.theme-choice == 0 && root.system-dark);
+    }
+    changed system-dark => {
+        root.show-theme();
+    }
+
+    title: root.app-title;
+    preferred-width: root.start-width;
+    preferred-height: root.start-height;
+    min-width: 900px;
+    min-height: 560px;
+    background: Theme.bg;
+    default-font-size: Theme.font-body;
+
+    forward-focus: keys;
+
+    // Whoever adds a button to the toolbar checks these two widths again (see `compact`).
+    init => {
+        root.compact = root.width < 1200px;
+        root.titled = root.width >= 1400px;
+        root.recent-lines = root.height < 700px ? 2 : 3;
+        root.show-theme();
+    }
+    changed width => {
+        // The same widths as in `init`: a new toolbar button means checking them again.
+        root.compact = root.width < 1200px;
+        root.titled = root.width >= 1400px;
+        root.window-resized();
+    }
+    changed height => {
+        root.recent-lines = root.height < 700px ? 2 : 3;
+        root.window-resized();
+    }
+
+    changed theme-choice => {
+        root.show-theme();
+    }
+
+    // Under everything, so a move of a drag reaches it last, and only when no place above took
+    // the drag: a place that refuses it has said why (`drop-refused`) in the same move, and the
+    // reason stays; a move over nothing that takes drops (the toolbar, the gap between the
+    // panes) takes it away.
+    DropArea {
+        can-drop(event) => {
+            if (!root.refusal-told) {
+                root.refusal = "";
+            }
+            root.refusal-told = false;
+            return DragAction.none;
+        }
+        dropped(event) => {
+            return DragAction.none;
+        }
+    }
+
+    keys := FocusScope {
+        focus-gained => {
+            root.keys-region = 0;
+        }
+        // The keys leave the panes (a text field, the tree, a menu or a dialog takes them): the
+        // list of subfolders, whose keys came here, closes.
+        focus-lost => {
+            if (root.subfolders.open) {
+                root.subfolders-dismissed();
+            }
+        }
+        key-pressed(event) => {
+            // A text field that has focus passes up the keys it does not use; they are not
+            // shortcuts while it is open, nor while a dialog or quick look is. F6 alone leaves
+            // the path field and the filter box for the next part of the window, as in File
+            // Explorer (the fields keep it while an input method composes).
+            if (root.dialog != DialogKind.none || root.quick-look) {
+                return reject;
+            }
+            if (left.editing || right.editing || filter-box.has-focus) {
+                let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+                if (event.text == Key.F6 && plain && root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
+                    return accept;
+                }
+                return reject;
+            }
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            Rectangle {
+                background: Theme.panel;
+
+                HorizontalLayout {
+                    padding-left: Theme.gap-l;
+                    padding-right: Theme.gap-l;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: Theme.gap-s;
+
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        padding-right: Theme.gap-s;
+                        spacing: 10px;
+
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            width: 26px;
+                            height: 26px;
+                            name: "logo";
+                            color: Theme.accent;
+                        }
+                        if root.titled: Text {
+                            text: root.app-title;
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.gap-xs;
+
+                        ToolButton {
+                            icon: "back";
+                            keys: Shortcuts.back;
+                            label: "뒤로";
+                            enabled: root.can-back;
+                            clicked => {
+                                root.command("back");
+                            }
+                        }
+                        ToolButton {
+                            icon: "forward";
+                            keys: Shortcuts.forward;
+                            label: "앞으로";
+                            enabled: root.can-forward;
+                            clicked => {
+                                root.command("forward");
+                            }
+                        }
+                        ToolButton {
+                            icon: "up";
+                            keys: Shortcuts.up;
+                            label: "위로";
+                            enabled: root.can-up;
+                            clicked => {
+                                root.command("up");
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        Rectangle {
+                            width: 1px;
+                            height: 28px;
+                            background: Theme.border;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.gap-xs;
+
+                        TextButton {
+                            compact: root.compact;
+                            icon: "new-folder";
+                            keys: Shortcuts.new-folder;
+                            text: "새 폴더";
+                            clicked => {
+                                root.command("new-folder");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "copy";
+                            keys: Shortcuts.copy-to;
+                            text: "복사…";
+                            clicked => {
+                                root.command("copy");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "move";
+                            keys: Shortcuts.move-to;
+                            text: "이동…";
+                            clicked => {
+                                root.command("move");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "delete";
+                            keys: Shortcuts.trash;
+                            text: "삭제";
+                            clicked => {
+                                root.command("delete");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "rename";
+                            keys: Shortcuts.rename;
+                            text: "이름 바꾸기";
+                            clicked => {
+                                root.command("rename");
+                            }
+                        }
+                        TextButton {
+                            compact: root.compact;
+                            icon: "undo";
+                            keys: Shortcuts.undo;
+                            text: "되돌리기";
+                            enabled: ItemMenu.can-undo;
+                            clicked => {
+                                root.command("undo");
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    // The 선택 menu (`select-menu.slint`), under its button.
+                    Rectangle {
+                        select-menu := SelectMenu {
+                            command(name) => {
+                                root.command(name);
+                            }
+                        }
+
+                        select-button := TextButton {
+                            compact: root.compact;
+                            icon: "select";
+                            text: "선택";
+                            clicked => {
+                                select-menu.open(0, select-button.height + 4px);
+                            }
+                        }
+                    }
+
+                    // The 보기 menu (`view-menu.slint`), under its button.
+                    Rectangle {
+                        view-menu := ViewMenu {
+                            view: root.active-view;
+                            theme-choice: root.theme-choice;
+                            show-hidden <=> root.show-hidden;
+                            show-extensions <=> root.show-extensions;
+                            show-tree <=> root.show-tree;
+                            show-preview <=> root.show-preview;
+                            dual-pane <=> root.dual-pane;
+                            stacked <=> root.stacked;
+                            sync-navigation <=> root.sync-navigation;
+                            command(name) => {
+                                root.command(name);
+                                if (name == "focus-tree") {
+                                    tree-focus-later.running = true;
+                                }
+                            }
+                            theme-chosen(choice) => {
+                                root.theme-chosen(choice);
+                            }
+                            even-split => {
+                                root.split-changed(0.5);
+                            }
+                            divider-moved(step) => {
+                                root.move-divider(step);
+                            }
+                            sort(column, then) => {
+                                root.sort(root.active-side, column, then);
+                            }
+                            sort-then(column) => {
+                                root.sort-then(root.active-side, column);
+                            }
+                            column-toggled(column) => {
+                                root.column-toggled(root.active-side, column);
+                            }
+                            column-moved(from, slot) => {
+                                root.column-moved(root.active-side, from, slot);
+                            }
+                            view-command(name) => {
+                                root.view-command(root.active-side, name);
+                            }
+                            tab-command(name) => {
+                                root.tab-command(root.active-side, root.active-view.active-tab, name);
+                            }
+                            sub-menu-done => {
+                                panes-focus-later.running = true;
+                            }
+                        }
+
+                        view-button := TextButton {
+                            compact: root.compact;
+                            icon: "list-view";
+                            text: "보기";
+                            keys: Shortcuts.view-menu;
+                            clicked => {
+                                root.open-view-menu();
+                            }
+                        }
+                    }
+
+                    // The active pane shows only the rows whose names hold what is typed here.
+                    // Esc clears it, Enter and ↓ go back to the list.
+                    filter-box := Field {
+                        min-width: 120px;
+                        preferred-width: 260px;
+                        max-width: 260px;
+                        height: 32px;
+                        horizontal-stretch: 0;
+                        icon: "search";
+                        hint: Shortcuts.tip("이 폴더에서 거르기", Shortcuts.filter);
+                        label: "이 폴더에서 거르기";
+                        edited(text) => {
+                            root.filter-edited(text);
+                        }
+                        accepted => {
+                            keys.focus();
+                        }
+                        key(event) => {
+                            if (event.text == Key.Escape) {
+                                self.text = "";
+                                root.filter-edited("");
+                                keys.focus();
+                                return accept;
+                            }
+                            if (event.text == Key.DownArrow) {
+                                keys.focus();
+                                return accept;
+                            }
+                            // F6 leaves the field (the window's keys), but not while an input
+                            // method composes: the syllable would be lost with the focus.
+                            if (event.text == Key.F6 && self.composing) {
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+
+            HorizontalLayout {
+                padding: Theme.gap-m;
+                vertical-stretch: 1;
+
+                // The sidebar, while it shows. It takes the keys of its tree while it has them
+                // (F6), and passes the others on to the window's.
+                tree-keys := FocusScope {
+                    visible: root.show-tree;
+                    min-width: root.show-tree ? 220px : 0px;
+                    preferred-width: root.show-tree ? 220px : 0px;
+                    max-width: root.show-tree ? 280px : 0px;
+                    horizontal-stretch: root.show-tree ? 0.1 : 0;
+                    focus-on-click: false;
+                    focus-on-tab-navigation: false;
+                    focus-gained => {
+                        root.keys-region = 1;
+                    }
+                    key-pressed(event) => {
+                        if (root.dialog != DialogKind.none) {
+                            return reject;
+                        }
+                        if (root.tree-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                            return accept;
+                        }
+                        reject
+                    }
+
+                    sidebar := Sidebar {
+                        width: parent.width;
+                        height: parent.height;
+                        rows: root.tree;
+                        cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
+                        accepts-drops: true;
+                        refusal: root.refusal-in-tree ? root.refusal : "";
+                        row-clicked(index) => {
+                            root.tree-clicked(index);
+                            keys.focus();
+                        }
+                        drop-check(data, index, action) => {
+                            return root.drop-check(data, DropPlace.tree, 0, index, action);
+                        }
+                        dropped(data, index, action) => {
+                            return root.drop-items(data, DropPlace.tree, 0, index, action);
+                        }
+                        row-toggled(index) => {
+                            root.tree-toggled(index);
+                            keys.focus();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: root.show-tree ? Theme.gap-m : 0px;
+                }
+
+                // The panes: one, or two side by side or one above the other with the divider
+                // between them, the first one taking its share of the room. With one, both take
+                // the whole room and only the active one shows.
+                split := Rectangle {
+                    property <bool> two: root.dual-pane;
+                    property <bool> stacked: root.stacked;
+                    property <length> gap: Theme.gap-m;
+                    property <length> room: (self.stacked ? self.height : self.width) - self.gap;
+                    property <float> share: divider.dragging ? divider.live-share : root.split-share;
+                    // The least room either pane keeps: a tenth of it, and 200px while there is
+                    // room for two of those.
+                    property <length> least: max(self.room * 0.1, min(200px, self.room / 2));
+                    property <length> first: clamp(self.room * self.share, self.least, self.room - self.least);
+
+                    horizontal-stretch: 1;
+                    min-width: 300px;
+
+                    left := Pane {
+                        x: 0px;
+                        y: 0px;
+                        width: !split.two ? parent.width : split.stacked ? parent.width : split.first;
+                        height: !split.two ? parent.height : split.stacked ? split.first : parent.height;
+                        visible: split.two || root.active-side == 0;
+                        label: "왼쪽 패널";
+                        view: root.left-pane;
+                        drag-data: root.drag-data;
+                        tab-drag-data: root.tab-drag-data;
+                        drag-label: root.drag-label;
+                        refusal: !root.refusal-in-tree && root.refusal-side == 0 ? root.refusal : "";
+                        drag-ended => {
+                            root.refusal = "";
+                        }
+                        activated => {
+                            root.pane-activated(0);
+                            keys.focus();
+                        }
+                        tab-selected(index) => {
+                            root.tab-selected(0, index);
+                            keys.focus();
+                        }
+                        tab-closed(index) => {
+                            root.tab-closed(0, index);
+                            keys.focus();
+                        }
+                        tab-added => {
+                            root.tab-added(0);
+                            keys.focus();
+                        }
+                        tab-command(index, name) => {
+                            root.tab-command(0, index, name);
+                            keys.focus();
+                        }
+                        tab-move-check(data, slot) => {
+                            return root.tab-move-check(data, 0, slot);
+                        }
+                        tab-move-dropped(data, slot) => {
+                            return root.tab-move-dropped(data, 0, slot);
+                        }
+                        crumb-clicked(index) => {
+                            root.crumb-clicked(0, index);
+                            keys.focus();
+                        }
+                        subfolders-clicked(index, x, top, bottom) => {
+                            root.place-subfolders(x, top, bottom);
+                            keys.focus();
+                            root.subfolders-clicked(0, index);
+                        }
+                        path-entered(text) => {
+                            keys.focus();
+                            root.path-entered(0, text);
+                        }
+                        path-edited(text) => {
+                            root.path-edited(0, text);
+                        }
+                        completion-step(delta) => {
+                            root.completion-step(0, delta);
+                        }
+                        path-completed(text) => {
+                            return root.path-completed(0, text);
+                        }
+                        completion-dismissed => {
+                            root.completion-dismissed(0);
+                        }
+                        edit-ended => {
+                            keys.focus();
+                        }
+                        sort(column, then) => {
+                            root.sort(0, column, then);
+                            keys.focus();
+                        }
+                        column-toggled(column) => {
+                            root.column-toggled(0, column);
+                            keys.focus();
+                        }
+                        column-moved(from, slot) => {
+                            root.column-moved(0, from, slot);
+                            keys.focus();
+                        }
+                        column-resized(column, width) => {
+                            root.column-resized(0, column, width);
+                            keys.focus();
+                        }
+                        column-texts(column, first, count) => {
+                            return root.column-texts(0, column, first, count);
+                        }
+                        row-clicked(index, ctrl, shift) => {
+                            root.row-clicked(0, index, ctrl, shift);
+                            keys.focus();
+                        }
+                        row-released(index) => {
+                            root.row-released(0, index);
+                        }
+                        row-activated(index) => {
+                            root.row-activated(0, index);
+                        }
+                        row-menu(index) => {
+                            root.row-menu(0, index);
+                            keys.focus();
+                        }
+                        menu-command(name) => {
+                            root.pane-activated(0);
+                            root.command(name);
+                            root.give-quick-look-keys();
+                            // The keys are the panes' once the menu has closed.
+                            pane-menu-keys-later.running = true;
+                        }
+                        retry => {
+                            root.retry(0);
+                            keys.focus();
+                        }
+                        list-drop-check(data, index, action) => {
+                            return root.drop-check(data, DropPlace.list, 0, index, action);
+                        }
+                        list-dropped(data, index, action) => {
+                            return root.drop-items(data, DropPlace.list, 0, index, action);
+                        }
+                        tab-drop-check(data, index, action) => {
+                            return root.drop-check(data, DropPlace.tab, 0, index, action);
+                        }
+                        tab-dropped(data, index, action) => {
+                            return root.drop-items(data, DropPlace.tab, 0, index, action);
+                        }
+                    }
+
+                    divider := PaneDivider {
+                        x: split.stacked ? 0px : split.first;
+                        y: split.stacked ? split.first : 0px;
+                        width: split.stacked ? parent.width : split.gap;
+                        height: split.stacked ? split.gap : parent.height;
+                        visible: split.two;
+                        upright: !split.stacked;
+                        room: split.room;
+                        least: split.least;
+                        share: root.split-share;
+                        changed(share) => {
+                            root.split-changed(share);
+                        }
+                    }
+
+                    right := Pane {
+                        x: !split.two || split.stacked ? 0px : split.first + split.gap;
+                        y: split.two && split.stacked ? split.first + split.gap : 0px;
+                        width: !split.two || split.stacked ? parent.width : split.room - split.first;
+                        height: split.two && split.stacked ? split.room - split.first : parent.height;
+                        visible: split.two || root.active-side == 1;
+                        label: "오른쪽 패널";
+                        view: root.right-pane;
+                        drag-data: root.drag-data;
+                        tab-drag-data: root.tab-drag-data;
+                        drag-label: root.drag-label;
+                        refusal: !root.refusal-in-tree && root.refusal-side == 1 ? root.refusal : "";
+                        drag-ended => {
+                            root.refusal = "";
+                        }
+                        activated => {
+                            root.pane-activated(1);
+                            keys.focus();
+                        }
+                        tab-selected(index) => {
+                            root.tab-selected(1, index);
+                            keys.focus();
+                        }
+                        tab-closed(index) => {
+                            root.tab-closed(1, index);
+                            keys.focus();
+                        }
+                        tab-added => {
+                            root.tab-added(1);
+                            keys.focus();
+                        }
+                        tab-command(index, name) => {
+                            root.tab-command(1, index, name);
+                            keys.focus();
+                        }
+                        tab-move-check(data, slot) => {
+                            return root.tab-move-check(data, 1, slot);
+                        }
+                        tab-move-dropped(data, slot) => {
+                            return root.tab-move-dropped(data, 1, slot);
+                        }
+                        crumb-clicked(index) => {
+                            root.crumb-clicked(1, index);
+                            keys.focus();
+                        }
+                        subfolders-clicked(index, x, top, bottom) => {
+                            root.place-subfolders(x, top, bottom);
+                            keys.focus();
+                            root.subfolders-clicked(1, index);
+                        }
+                        path-entered(text) => {
+                            keys.focus();
+                            root.path-entered(1, text);
+                        }
+                        path-edited(text) => {
+                            root.path-edited(1, text);
+                        }
+                        completion-step(delta) => {
+                            root.completion-step(1, delta);
+                        }
+                        path-completed(text) => {
+                            return root.path-completed(1, text);
+                        }
+                        completion-dismissed => {
+                            root.completion-dismissed(1);
+                        }
+                        edit-ended => {
+                            keys.focus();
+                        }
+                        sort(column, then) => {
+                            root.sort(1, column, then);
+                            keys.focus();
+                        }
+                        column-toggled(column) => {
+                            root.column-toggled(1, column);
+                            keys.focus();
+                        }
+                        column-moved(from, slot) => {
+                            root.column-moved(1, from, slot);
+                            keys.focus();
+                        }
+                        column-resized(column, width) => {
+                            root.column-resized(1, column, width);
+                            keys.focus();
+                        }
+                        column-texts(column, first, count) => {
+                            return root.column-texts(1, column, first, count);
+                        }
+                        row-clicked(index, ctrl, shift) => {
+                            root.row-clicked(1, index, ctrl, shift);
+                            keys.focus();
+                        }
+                        row-released(index) => {
+                            root.row-released(1, index);
+                        }
+                        row-activated(index) => {
+                            root.row-activated(1, index);
+                        }
+                        row-menu(index) => {
+                            root.row-menu(1, index);
+                            keys.focus();
+                        }
+                        menu-command(name) => {
+                            root.pane-activated(1);
+                            root.command(name);
+                            root.give-quick-look-keys();
+                            // The keys are the panes' once the menu has closed.
+                            pane-menu-keys-later.running = true;
+                        }
+                        retry => {
+                            root.retry(1);
+                            keys.focus();
+                        }
+                        list-drop-check(data, index, action) => {
+                            return root.drop-check(data, DropPlace.list, 1, index, action);
+                        }
+                        list-dropped(data, index, action) => {
+                            return root.drop-items(data, DropPlace.list, 1, index, action);
+                        }
+                        tab-drop-check(data, index, action) => {
+                            return root.drop-check(data, DropPlace.tab, 1, index, action);
+                        }
+                        tab-dropped(data, index, action) => {
+                            return root.drop-items(data, DropPlace.tab, 1, index, action);
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: root.show-preview && root.preview-fits ? Theme.gap-m : 0px;
+                }
+
+                // The preview panel (LAY-06, VIEW-02), at the right end.
+                if root.show-preview && root.preview-fits: PreviewPanel {
+                    width: root.preview-width;
+                    view: root.preview;
+                }
+            }
+
+            // The job panel takes room only while a job runs. It takes the keys of its buttons
+            // while it has them (F6 after the tree), and passes the others on to the window's.
+            panel-keys := FocusScope {
+                height: root.panel-shows ? jobs.preferred-height : 0px;
+                visible: root.panel-shows;
+                focus-on-click: false;
+                focus-on-tab-navigation: false;
+                focus-gained => {
+                    root.keys-region = 2;
+                }
+                // The panel goes once its last job has ended, and the window takes its keys
+                // away: the panes take them, once the window has done so.
+                focus-lost(reason) => {
+                    if (!root.panel-shows) {
+                        panel-gone-later.running = true;
+                    }
+                }
+                key-pressed(event) => {
+                    if (root.dialog != DialogKind.none) {
+                        return reject;
+                    }
+                    if (root.panel-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                        return accept;
+                    }
+                    reject
+                }
+
+                jobs := JobPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    rows: root.job-rows;
+                    recent: root.recent-rows;
+                    recent-open: root.recent-open;
+                    recent-lines: root.recent-lines;
+                    focus-line: panel-keys.has-focus ? root.panel-line : -1;
+                    focus-button: panel-keys.has-focus ? root.panel-button : -1;
+                    pause(index) => {
+                        root.job-pause(index);
+                    }
+                    resume(index) => {
+                        root.job-resume(index);
+                    }
+                    cancel(index) => {
+                        root.job-cancel(index);
+                    }
+                    recent-toggled => {
+                        root.recent-toggled();
+                    }
+                    recent-cleared => {
+                        root.recent-cleared();
+                    }
+                    recent-details(index) => {
+                        root.recent-details(index);
+                    }
+                    recent-save(index) => {
+                        root.recent-save(index);
+                    }
+                }
+            }
+        }
+    }
+
+    // Above the job panel, when it shows, and above the panes' status lines. Its time stops
+    // while the pointer is over it, and starts again in full when the pointer leaves (a busy
+    // notice has no time).
+    if root.notice != "": Toast {
+        width: min(self.preferred-width, root.width - 48px);
+        height: self.preferred-height;
+        x: root.width - self.width - 24px;
+        y: root.height - self.height - jobs.height - Theme.gap-m - 32px - 12px;
+        message: root.notice;
+        changed hovered => {
+            if (self.hovered) {
+                notice-timer.stop();
+            } else if (!root.notice-lasting) {
+                notice-timer.restart();
+            }
+        }
+        action: root.notice-action-live ? root.notice-action-text : "";
+        action-clicked => {
+            root.notice = "";
+            notice-timer.stop();
+            root.notice-action(root.notice-token);
+        }
+        closed => {
+            root.notice = "";
+            notice-timer.stop();
+            root.notice-closed(root.notice-token);
+        }
+    }
+
+    // While the list of subfolders shows, a press anywhere but on it closes it and does nothing
+    // else (as a system's drop-down list), and the wheel scrolls nothing behind it.
+    if root.subfolders.open: TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.subfolders-dismissed();
+            }
+        }
+        scroll-event(event) => {
+            return accept;
+        }
+    }
+    if root.subfolders.open: FolderMenu {
+        width: 300px;
+        x: max(8px, min(root.subfolders-x - 4px, root.width - self.width - 8px));
+        y: root.subfolders-up ? max(8px, root.subfolders-top - 2px - self.height) : min(root.subfolders-bottom + 2px, max(8px, root.height - self.height - 8px));
+        max-rows: root.subfolders-rows;
+        view: root.subfolders;
+        label: "하위 폴더";
+        chosen(index) => {
+            root.subfolder-chosen(index);
+        }
+    }
+    // The completion list of the path field being edited. A click on a row closes the field and
+    // goes to that row's folder.
+    if root.completing >= 0: FolderMenu {
+        x: root.completion-x;
+        width: root.completion-width;
+        y: root.completion-up ? max(8px, root.completion-top - 2px - self.height) : min(root.completion-bottom + 2px, max(8px, root.height - self.height - 8px));
+        max-rows: root.completion-rows;
+        view: root.completion;
+        label: "경로 자동 완성";
+        chosen(index) => {
+            let side = root.completing;
+            if (side == 1) {
+                right.end-edit();
+            } else {
+                left.end-edit();
+            }
+            keys.focus();
+            root.completion-chosen(side, index);
+        }
+    }
+
+    // Quick look over the window (VIEW-01), under a dialog. It shows the item the preview panel
+    // shows, and takes every key.
+    quick-look := QuickLook {
+        visible: root.quick-look && root.dialog == DialogKind.none;
+        view: root.preview;
+        key(text, ctrl, shift, alt, meta) => {
+            root.quick-look-key(text, ctrl, shift, alt, meta);
+        }
+        closed => {
+            root.quick-look-closed();
+        }
+    }
+
+    // A menu that opened quick look gives the keys back, as it closes, to what had them before:
+    // they go to quick look once it has closed.
+    quick-look-keys-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.quick-look) {
+                root.give-quick-look-keys();
+            }
+        }
+    }
+
+    // The job panel had the keys as it went: the panes take them, unless another part of the
+    // window has meanwhile.
+    panel-gone-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.dialog == DialogKind.none && !root.quick-look && !panel-keys.has-focus && !tree-keys.has-focus && !left.editing && !right.editing && !filter-box.has-focus) {
+                keys.focus();
+            }
+        }
+    }
+
+    // A sub-menu of the 보기 menu gives the keys back, as it closes, to the menu it opened from,
+    // which has closed too: they go back where they were as the menu opened once both have (the
+    // tree or the job panel, while it shows, or the panes).
+    panes-focus-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.dialog == DialogKind.none && !left.editing && !right.editing && !filter-box.has-focus) {
+                root.give-keys-back();
+            }
+        }
+    }
+
+    // A choice in a pane's own menu (its items', its empty part's) is the panes' part of the
+    // window: the menu gives the keys back, as it closes, to what had them (the tree or the job
+    // panel, maybe), and once it has they go to the panes, now or as a window the choice opened
+    // closes. Quick look that the choice opened keeps them.
+    pane-menu-keys-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.keys-region = 0;
+            if (root.dialog == DialogKind.none && !root.quick-look && !left.editing && !right.editing && !filter-box.has-focus) {
+                keys.focus();
+            }
+        }
+    }
+
+    // A menu gives the keys back, as it closes, to what had them when it opened: after the
+    // 보기 menu's 폴더 트리로 가기, the tree takes them once the menu has closed.
+    tree-focus-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.show-tree) {
+                tree-keys.focus();
+            }
+        }
+    }
+
+    notice-timer := Timer {
+        interval: 8s;
+        running: false;
+        triggered => {
+            root.notice = "";
+            self.stop();
+            root.notice-closed(root.notice-token);
+        }
+    }
+
+    // A dialog over a dark scrim that takes every click: the window behind it is not to be
+    // used until it closes.
+    if root.dialog != DialogKind.none: Rectangle {
+        background: #00000059;
+
+        TouchArea { }
+
+        if root.dialog == DialogKind.pick || root.pick-behind: PickDialog {
+            width: min(1040px, parent.width - 48px);
+            height: min(700px, parent.height - 40px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.pick-view;
+            active: root.dialog == DialogKind.pick;
+            scroll-row: root.pick-scroll-row;
+            scroll-serial: root.pick-scroll-serial;
+            cancelled => {
+                root.dialog-cancelled();
+            }
+            confirmed => {
+                root.pick-confirmed();
+            }
+            enter => {
+                root.pick-enter();
+            }
+            step(delta) => {
+                root.pick-step(delta);
+            }
+            target-clicked(index) => {
+                root.pick-target-clicked(index);
+            }
+            tree-clicked(index) => {
+                root.pick-tree-clicked(index);
+            }
+            tree-toggled(index) => {
+                root.pick-tree-toggled(index);
+            }
+            filter-edited(text) => {
+                root.pick-filter-edited(text);
+            }
+            path-edited(text) => {
+                root.pick-path-edited(text);
+            }
+            path-entered(text) => {
+                root.pick-path-entered(text);
+            }
+            new-folder => {
+                root.pick-new-folder();
+            }
+            mode-chosen(is-move) => {
+                root.pick-mode(is-move);
+            }
+            policy-chosen(policy) => {
+                root.pick-policy(policy);
+            }
+        }
+        // Over the picker while a dialog shows on top of it.
+        if root.pick-behind: Rectangle {
+            background: #00000033;
+
+            TouchArea { }
+        }
+
+        if root.dialog == DialogKind.name: NameDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.name-view;
+            edited(text) => {
+                root.name-edited(text);
+            }
+            accepted(text) => {
+                root.name-accepted(text);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.confirm: ConfirmDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.confirm-view;
+            accepted => {
+                root.confirm-accepted();
+            }
+            alternative => {
+                root.confirm-alternative();
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.message: MessageDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.message-view;
+            closed => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.recovery: RecoveryDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.recovery-view;
+            chosen(index, run-again) => {
+                root.recovery-chosen(index, run-again);
+            }
+            closed => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.preflight: PreflightDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.preflight-view;
+            answered(choice) => {
+                root.preflight-answered(choice);
+            }
+        }
+        if root.dialog == DialogKind.conflict: ConflictDialog {
+            x: (parent.width - self.width) / 2;
+            y: max(0px, (parent.height - self.height) / 2);
+            view: root.conflict-view;
+            answered(choice, apply-all) => {
+                root.conflict-answered(choice, apply-all);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.pattern: PatternDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.pattern-view;
+            edited(text) => {
+                root.pattern-edited(text);
+            }
+            syntax-chosen(regex) => {
+                root.pattern-syntax(regex);
+            }
+            case-chosen(ignore) => {
+                root.pattern-case(ignore);
+            }
+            mode-chosen(add) => {
+                root.pattern-mode(add);
+            }
+            accepted(text) => {
+                root.pattern-accepted(text);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.properties: PropertiesDialog {
+            width: min(640px, parent.width - 48px);
+            room: parent.height - 40px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.properties-view;
+            algorithm-chosen(number) => {
+                root.properties-algorithm(number);
+            }
+            count-stopped => {
+                root.properties-stop();
+            }
+            hashes-stopped => {
+                root.properties-stop-hashes();
+            }
+            copy(row) => {
+                root.properties-copy(row);
+            }
+            compare-edited(text) => {
+                root.properties-compare(text);
+            }
+            system-properties => {
+                root.properties-system();
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.closing: ClosingNote {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: root.closing-text;
+        }
+    }
+
+    // At the window's top left corner and without room, so that it shows at the window's
+    // coordinates of the item menu that showed last, and takes no click itself.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+
+        open-with-menu := OpenWithMenu {
+            apps: root.open-with-apps;
+            chosen(index) => {
+                root.open-with-chosen(index);
+            }
+        }
+    }
+}
