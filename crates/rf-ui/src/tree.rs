@@ -24,14 +24,14 @@
 //! the way until a later listing of the parent has it.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rf_core::{Attributes, Entry, EntryKind, VPath};
+use rf_core::{Attributes, Entry, EntryKind, Os, VPath};
 use rf_vfs::{SortSpec, VisibilityFilter, sort_entries};
 
 use crate::loader::LoadRequest;
-use crate::pane::next_generation;
+use crate::pane::{next_generation, search_key};
 
 /// A node's place in its [`Tree`]; it stays the same until [`Tree::set_roots`] starts a new
 /// tree.
@@ -430,12 +430,13 @@ impl Tree {
     }
 
     /// The folders listed so far whose names hold `query` (its spaces at the ends left out),
-    /// ignoring letter case: what a filter of the tree shows, flat. They come in the order of
+    /// ignoring letter case, and on macOS the Unicode form ([`search_key`]): what a filter of the
+    /// tree shows, flat. They come in the order of
     /// the tree, below closed nodes too, and each folder once, at the first node that has it.
     /// A folder out of sight (hidden while hidden folders do not show, or below such a one)
     /// is left out, and so is one never listed. An empty `query` finds nothing.
     pub fn find(&self, query: &str) -> Vec<NodeId> {
-        let query = query.trim().to_lowercase();
+        let query = search_key(OsStr::new(query.trim()), Os::CURRENT);
         if query.is_empty() {
             return Vec::new();
         }
@@ -444,7 +445,9 @@ impl Tree {
         let mut stack: Vec<NodeId> = self.roots.iter().rev().copied().collect();
         while let Some(id) = stack.pop() {
             let node = &self.nodes[id];
-            if node.label.to_lowercase().contains(&query) && paths.insert(&node.path) {
+            if search_key(OsStr::new(&node.label), Os::CURRENT).contains(&query)
+                && paths.insert(&node.path)
+            {
                 found.push(id);
             }
             if let Some(children) = &node.children {
@@ -1480,6 +1483,25 @@ mod tests {
         assert_eq!(tree.target(), Some(&pictures));
         assert!(!tree.select(99));
         assert_eq!(tree.selected_row(), Some(3));
+    }
+
+    /// On macOS the tree's filter finds a folder named in decomposed Hangul (NFD) by the
+    /// composed text an input method types (NFC).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn find_ignores_the_unicode_form_on_macos() {
+        let home = folder("home");
+        let mut tree = Tree::new(VisibilityFilter::default());
+        tree.set_roots(roots(&[("홈", &home)]));
+        let request = tree.toggle(0).expect("listed");
+        let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af} 문서";
+        tree.apply_children(request.generation, vec![dir(decomposed), dir("other")]);
+        let found = tree.find("한글");
+        let labels: Vec<&str> = found
+            .iter()
+            .map(|&id| tree.node(id).expect("a node").label.as_str())
+            .collect();
+        assert_eq!(labels, [decomposed]);
     }
 
     #[test]

@@ -44,6 +44,17 @@ impl NameFolding {
     pub const fn ignores_form(self) -> bool {
         matches!(self, NameFolding::CaseAndForm)
     }
+
+    /// This rule with case not counting either: [`NameFolding::Case`] in place of
+    /// [`NameFolding::Exact`], the others as they are. For a comparison that ignores case on
+    /// every system, such as a search the user types, and the Unicode form where this rule does.
+    #[must_use]
+    pub const fn ignoring_case(self) -> NameFolding {
+        match self {
+            NameFolding::Exact => NameFolding::Case,
+            other => other,
+        }
+    }
 }
 
 /// The text of `name` in the one Unicode form `folding` compares it in: composed to NFC where
@@ -75,11 +86,7 @@ pub fn fold_name(name: &OsStr, folding: NameFolding) -> String {
 /// The rule the local provider's own guards compare two spellings by: case everywhere, as a
 /// volume that ignores case may be mounted on any system (a file identity decides then), and
 /// the Unicode form too on macOS, whose volumes ignore it.
-pub(crate) const LOCAL_GUARD: NameFolding = if cfg!(target_os = "macos") {
-    NameFolding::CaseAndForm
-} else {
-    NameFolding::Case
-};
+pub(crate) const LOCAL_GUARD: NameFolding = NameFolding::of(Os::CURRENT).ignoring_case();
 
 #[cfg(test)]
 mod tests {
@@ -137,6 +144,12 @@ mod tests {
         assert_eq!(NameFolding::of(Os::Windows), NameFolding::Case);
         assert_eq!(NameFolding::of(Os::MacOs), NameFolding::CaseAndForm);
         assert_eq!(NameFolding::of(Os::Other), NameFolding::Exact);
+        assert_eq!(NameFolding::Exact.ignoring_case(), NameFolding::Case);
+        assert_eq!(NameFolding::Case.ignoring_case(), NameFolding::Case);
+        assert_eq!(
+            NameFolding::CaseAndForm.ignoring_case(),
+            NameFolding::CaseAndForm
+        );
         // The local guards fold case everywhere, and the form on macOS.
         assert!(LOCAL_GUARD.ignores_case());
         assert_eq!(LOCAL_GUARD.ignores_form(), cfg!(target_os = "macos"));

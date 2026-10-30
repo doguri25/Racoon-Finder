@@ -20,12 +20,15 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
-use rf_core::{Entry, EntryKind, ErrorKind, VPath};
-use rf_vfs::{Change, SortKey, SortSpec, VisibilityFilter, compare_entries, sort_entries};
+use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
+use rf_vfs::{
+    Change, NameFolding, SortKey, SortSpec, VisibilityFilter, compare_entries, fold_name,
+    sort_entries,
+};
 
 use crate::history::History;
 use crate::loader::{LoadEvent, LoadRequest};
@@ -444,8 +447,8 @@ impl Tab {
         &self.name_filter
     }
 
-    /// Shows only the rows whose names hold `text`, ignoring case, or every row for an empty
-    /// one. The selection keeps the rows that still show.
+    /// Shows only the rows whose names hold `text`, ignoring case, and on macOS the Unicode form
+    /// ([`search_key`]), or every row for an empty one. The selection keeps the rows that still show.
     pub fn set_name_filter(&mut self, text: &str) {
         if self.name_filter != text {
             text.clone_into(&mut self.name_filter);
@@ -534,7 +537,7 @@ impl Tab {
     /// came from is selected, with the cursor, once it shows ([`Tab::select_name`]).
     pub fn go_up(&mut self) -> Option<LoadRequest> {
         let parent = self.location.parent()?;
-        let came_from = self.location.file_name().map(std::ffi::OsStr::to_os_string);
+        let came_from = self.location.file_name().map(OsStr::to_os_string);
         let request = self.navigate(parent);
         self.pending_select = came_from;
         Some(request)
@@ -678,7 +681,8 @@ impl Tab {
     }
 
     /// Moves the cursor to the first row whose name starts with what was typed, ignoring
-    /// case, and selects that row alone (NAV-14). Keys typed within
+    /// case, and on macOS the Unicode form ([`search_key`]), and selects that row alone
+    /// (NAV-14). Keys typed within
     /// [`TYPE_TO_SELECT_WINDOW`] of the last one add to the prefix; after a pause `text`
     /// starts a new one, and a prefix of spaces alone does nothing. Returns the row moved
     /// to, or `None` (and the selection stays) when no name matches. The user chooses here: a
@@ -696,14 +700,11 @@ impl Tab {
             prefix.clear();
             return None;
         }
-        let wanted = prefix.to_lowercase();
-        let row = self.visible.iter().position(|entry| {
-            entry
-                .name
-                .to_string_lossy()
-                .to_lowercase()
-                .starts_with(&wanted)
-        })?;
+        let wanted = search_key(OsStr::new(prefix.as_str()), Os::CURRENT);
+        let row = self
+            .visible
+            .iter()
+            .position(|entry| search_key(&entry.name, Os::CURRENT).starts_with(&wanted))?;
         self.selection.click(row, &self.visible);
         Some(row)
     }
@@ -818,7 +819,7 @@ impl Tab {
     /// Filters `all` into `visible` again and carries the selection over.
     fn refresh_visible(&mut self) {
         let filter = self.filter;
-        let wanted = self.name_filter.to_lowercase();
+        let wanted = search_key(OsStr::new(&self.name_filter), Os::CURRENT);
         let old = std::mem::take(&mut self.visible);
         let mut unfiltered = 0;
         self.visible = self
@@ -827,12 +828,7 @@ impl Tab {
             .filter(|entry| filter.is_visible(entry))
             .inspect(|_| unfiltered += 1)
             .filter(|entry| {
-                wanted.is_empty()
-                    || entry
-                        .name
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .contains(&wanted)
+                wanted.is_empty() || search_key(&entry.name, Os::CURRENT).contains(&wanted)
             })
             .cloned()
             .collect();
@@ -1194,6 +1190,14 @@ pub fn ancestors(path: &VPath) -> Vec<VPath> {
     }
     chain.reverse();
     chain
+}
+
+/// The key a name is found by when the user types to find it, on `os`: type to select
+/// (NAV-14), the name filter, and the folder tree's filter. Case never counts, on any system;
+/// where `os` takes the two Unicode forms of a name for one (macOS), they fold alike too, so the
+/// composed text an input method types finds a decomposed name. See `rf_vfs::fold_name`.
+pub fn search_key(text: &OsStr, os: Os) -> String {
+    fold_name(text, NameFolding::of(os).ignoring_case())
 }
 
 #[cfg(test)]
@@ -1768,6 +1772,36 @@ mod tests {
         tab.set_name_filter("txt");
         tab.navigate(folder("b"));
         assert_eq!(tab.name_filter(), "");
+    }
+
+    /// 한글 composed (NFC) and decomposed (NFD).
+    const NFC: &str = "한글";
+    const NFD: &str = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+
+    #[test]
+    fn a_name_searched_for_ignores_case_everywhere_and_the_unicode_form_on_macos() {
+        let key = |text: &str, os| search_key(OsStr::new(text), os);
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            assert_eq!(key("Notes.TXT", os), key("notes.txt", os), "{os:?}");
+        }
+        assert_eq!(key(NFD, Os::MacOs), key(NFC, Os::MacOs));
+        assert_eq!(key(&format!("{NFD} 문서"), Os::MacOs), "한글 문서");
+        for os in [Os::Windows, Os::Other] {
+            assert_ne!(key(NFD, os), key(NFC, os), "{os:?}");
+        }
+    }
+
+    /// On macOS the composed name an input method types finds a decomposed one, by its start
+    /// and in the name filter; elsewhere the two forms stay apart, as their names do.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn typing_and_the_filter_find_a_decomposed_name_on_macos() {
+        let at = |ms| Instant::now() + Duration::from_millis(ms);
+        let decomposed = format!("{NFD}.txt");
+        let mut tab = ready_tab("a", vec![file("a.txt", 1), file(&decomposed, 1)]);
+        assert_eq!(tab.type_to_select(NFC, at(0)), Some(1));
+        tab.set_name_filter(NFC);
+        assert_eq!(names(tab.visible()), [decomposed.as_str()]);
     }
 
     #[test]
