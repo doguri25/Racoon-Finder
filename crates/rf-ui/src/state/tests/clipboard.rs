@@ -691,6 +691,79 @@ fn a_cancelled_cut_the_clipboard_will_not_drop_is_tried_again_and_then_told() {
 }
 
 #[test]
+fn a_failed_put_after_a_cancelled_cut_keeps_the_cut_guarded() {
+    let busy = || Err(ClipboardFailure::Unavailable);
+    let cut = || Ok(Some(files(&[in_a("x.txt")], Some(DropEffect::Move), 100)));
+    let no_move = |effects: &[Effect]| {
+        !effects.iter().any(|effect| {
+            matches!(effect, Effect::Job(JobEffect::Submit { spec, .. })
+                if transfer_mode(spec) == TransferMode::Move)
+        })
+    };
+    // Ctrl+X, Esc, Esc (the emptying fails), Ctrl+C (the put fails too): the clipboard still
+    // holds the cut.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(100));
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(state.clipboard_cleared(100, busy()), []);
+    let copy = put(&mut state, 2, false);
+    assert_eq!(
+        state.clipboard_put(copy, Err(ClipboardFailure::Unavailable)),
+        [Effect::Notice(
+            words::clipboard_failed(ClipboardFailure::Unavailable).to_owned()
+        )]
+    );
+    // A paste of it moves nothing, and asks for the emptying again.
+    let read = paste(&mut state, RIGHT);
+    let effects = state.clipboard_read(read, cut());
+    assert!(no_move(&effects), "{effects:?}");
+    assert!(effects.contains(&Effect::Clipboard(ClipboardWork::ClearIf(100))));
+    // The emptying is still tried, and the warning still comes once it keeps failing.
+    assert!(state.clipboard_watched());
+    for _ in 2..CLEAR_TRIES {
+        assert_eq!(
+            state.clipboard_polled(Some(100)),
+            Some(vec![Effect::Clipboard(ClipboardWork::ClearIf(100))])
+        );
+        assert_eq!(state.clipboard_cleared(100, busy()), []);
+    }
+    assert_eq!(
+        state.clipboard_cleared(100, busy()),
+        [Effect::Notice(words::clipboard_not_emptied().to_owned())]
+    );
+
+    // The same with the cut's put still on its way when Esc came: its count is guarded once
+    // it is told, whatever the later put does.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    esc(&mut state);
+    esc(&mut state);
+    let copy = put(&mut state, 2, false);
+    assert_eq!(
+        state.clipboard_put(token, Ok(100)),
+        [Effect::Clipboard(ClipboardWork::ClearIf(100))]
+    );
+    state.clipboard_put(copy, Err(ClipboardFailure::Unavailable));
+    let read = paste(&mut state, RIGHT);
+    assert!(no_move(&state.clipboard_read(read, cut())));
+    assert!(state.clipboard_watched());
+
+    // A later put that works replaces the cut: nothing is left to empty or to warn about.
+    let mut state = two_panes();
+    let token = put(&mut state, 1, true);
+    state.clipboard_put(token, Ok(100));
+    esc(&mut state);
+    esc(&mut state);
+    assert_eq!(state.clipboard_cleared(100, busy()), []);
+    let copy = put(&mut state, 2, false);
+    assert_eq!(state.clipboard_put(copy, Ok(101)), []);
+    assert!(!state.clipboard_watched());
+    assert_eq!(state.clipboard_cleared(100, busy()), []);
+}
+
+#[test]
 fn a_device_path_on_the_clipboard_is_left_out_and_told() {
     // On Windows a volume shadow copy's path stays a verbatim one; elsewhere it is not even an
     // absolute path. Either way it is no place to paste from.

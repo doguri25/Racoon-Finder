@@ -1020,7 +1020,8 @@ impl Controller {
                 page: usize::try_from(window.get_page_rows()).unwrap_or(1),
             });
         // Esc alone may cancel a cut too; the other keys to clear the selection do not.
-        let escape = keys::cancels_cut(text, mods);
+        // Only while the table still makes Esc its key to clear the selection.
+        let escape = keys::cancels_cut(text, mods) && command == Command::ClearSelection;
         let mut used = false;
         self.update(|state| {
             let effects = if escape {

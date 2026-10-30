@@ -279,12 +279,15 @@ pub(super) struct ClipWork {
     /// The token of the last request.
     token: u64,
     /// A cut cancelled (Esc) while its put was on its way: the clipboard is emptied once the
-    /// put has told its count, if nothing came since.
+    /// put has told its count, if nothing came since. A later put does not reset it: that put
+    /// may fail and leave the cut on the clipboard, and the token matches its own put alone.
     cancelled: Option<u64>,
     /// The change count of the last cut cancelled with Esc: what the clipboard holds with it is
-    /// never pasted (unless ⌥⌘V asks for a move), until the window puts something else there.
+    /// never pasted (unless ⌥⌘V asks for a move). It is never reset: it matches that cut's
+    /// count alone, which nothing else on the clipboard has.
     cancelled_change: Option<u64>,
-    /// The emptying of that cut, until it worked.
+    /// The emptying of that cut, until it worked, or until a later put of the window worked and
+    /// so replaced the cut on the clipboard. A put that fails leaves it, and its warning, alive.
     clearing: Option<Clearing>,
     /// The pastes whose read is on its way, by token.
     pastes: HashMap<u64, PasteTo>,
@@ -341,10 +344,7 @@ impl AppState {
             return Vec::new();
         }
         let token = self.clipboard.next_token();
-        // What the clipboard held is replaced, a cancelled cut too.
-        self.clipboard.cancelled = None;
-        self.clipboard.cancelled_change = None;
-        self.clipboard.clearing = None;
+        // A cut cancelled before is still guarded: this put may fail and leave it there.
         self.clipboard.own = Some(Own {
             token,
             paths: paths.clone(),
@@ -380,6 +380,9 @@ impl AppState {
         match result {
             Ok(change) => {
                 own.change = Some(change);
+                // The put replaced a cancelled cut the clipboard still held: nothing is left
+                // to empty.
+                self.clipboard.clearing = None;
                 Vec::new()
             }
             Err(failure) => {

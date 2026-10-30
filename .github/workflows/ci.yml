@@ -42,6 +42,8 @@ jobs:
       - name: real clipboard round trips (informational)
         if: runner.os != 'Linux'
         continue-on-error: true
+        # A clipboard owner that hangs cannot take the job's time.
+        timeout-minutes: 5
         run: cargo test -p rf-platform --test clipboard --locked -- --ignored --test-threads=1
 
   deny:
