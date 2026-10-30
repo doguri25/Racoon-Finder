@@ -213,7 +213,13 @@ pub enum HashFailure {
 /// (into one buffer for all of them), and tells `tell` how far it is and what the files gave: at
 /// most every `gap`, with the checksums made since the news before together, and the last ones
 /// at the end. Blocks: call it on a worker thread. `None` once `cancel` stopped it, which it
-/// looks at before each file and each chunk; what it had not told by then is dropped.
+/// looks at before each file and each chunk; the checksums it made by then and had not told are
+/// told first (the window's 중지 keeps them), and the file under way gives nothing.
+///
+/// A checksum made before news is due waits for the next news, which only the work on the next
+/// file brings (once it has opened, and after each chunk), or the end. When opening a file takes
+/// long (a network share, a file another program holds, a cloud drive that fetches it), the
+/// checksums held from the files before it show that much later.
 pub fn hash_files(
     request: &HashRequest,
     vfs: &Vfs,
@@ -233,6 +239,7 @@ pub fn hash_files(
     for (row, path) in &request.files {
         let row = *row;
         if cancel.is_cancelled() {
+            news.flush();
             return None;
         }
         let mut stream = match vfs
@@ -279,7 +286,10 @@ pub fn hash_files(
         );
         match digest {
             Ok(digest) => news.hashed(row, Ok(digest)),
-            Err(Stopped::Cancelled) => return None,
+            Err(Stopped::Cancelled) => {
+                news.flush();
+                return None;
+            }
             Err(Stopped::Failed(error)) => {
                 let kind = Error::io("read", path.clone(), error).kind();
                 news.hashed(row, Err(HashFailure::Unreadable(kind)));
@@ -344,7 +354,7 @@ impl Teller<'_> {
         }
     }
 
-    /// Tells what is left: the end of the request.
+    /// Tells what is left: at the end of the request, or once it is stopped.
     fn flush(&mut self) {
         self.send_hashed();
     }
@@ -570,8 +580,9 @@ mod tests {
             // The BSD form (`shasum --tag`, `xxhsum --tag`, macOS's `md5`).
             "SHA256 (abc.txt) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "SHA256 (a = b.txt) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            // The first of several lines.
+            // The first of several lines, in either form.
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  a\nffff  b\n",
+            "SHA256 (a) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\nSHA256 (b) = ffff\n",
         ] {
             assert_eq!(same_digest(pasted, sha256), Some(true), "{pasted:?}");
         }
@@ -588,6 +599,10 @@ mod tests {
             // The hash of another line, a part of the hash, no hash after the tool's words.
             (
                 "ffff  a\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  b",
+                sha256,
+            ),
+            (
+                "SHA256 (b) = ffff\nSHA256 (a) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                 sha256,
             ),
             ("ba7816bf8f01cfea  abc.txt", sha256),
@@ -663,6 +678,19 @@ mod tests {
             })
             .collect();
         assert_eq!(reading, [(0, 3), (2, 3), (3, 3)]);
+        // In turn: the checksum of row 2 is told before the file of row 9 is read.
+        let row_2_hashed = news
+            .iter()
+            .position(|item| match item {
+                HashNews::Hashed { results, .. } => results.iter().any(|(row, _)| *row == 2),
+                HashNews::Reading { .. } => false,
+            })
+            .expect("told");
+        let row_9_read = news
+            .iter()
+            .position(|item| matches!(item, HashNews::Reading { row: 9, .. }))
+            .expect("told");
+        assert!(row_2_hashed < row_9_read, "{news:?}");
     }
 
     #[test]
@@ -705,6 +733,52 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_stop_tells_the_checksums_made_before_it() {
+        // Within a long gap, the checksum of the first file is held to be told with others;
+        // 중지 comes as the second file opens.
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let (first, second) = (dir.path().join("a.txt"), dir.path().join("b.bin"));
+        std::fs::write(&first, b"abc").expect("a file");
+        std::fs::write(&second, [7; 64]).expect("a file");
+        let cancel = CancelToken::new();
+        let stop = cancel.clone();
+        let vfs = crate::test_provider::Hooked::vfs(
+            |_, _| {},
+            move |path| {
+                if path.file_name() == Some(std::ffi::OsStr::new("b.bin")) {
+                    stop.cancel();
+                }
+            },
+        );
+        let request = HashRequest {
+            generation: 5,
+            algorithm: Algorithm::Sha1,
+            files: vec![
+                (0, VPath::local(&first).expect("a local path")),
+                (1, VPath::local(&second).expect("a local path")),
+            ],
+        };
+        let mut news = Vec::new();
+        let done = hash_files(
+            &request,
+            &vfs,
+            &cancel,
+            HASH_CHUNK,
+            Duration::from_secs(3600),
+            &mut |item| news.push(item),
+        );
+        assert_eq!(done, None);
+        // The first file's checksum is told; the second one's is not made.
+        assert_eq!(
+            news,
+            [HashNews::Hashed {
+                generation: 5,
+                results: vec![(0, Ok("a9993e364706816aba3e25717850c26c9cd0d89d".to_owned()))],
+            }]
+        );
     }
 
     #[test]

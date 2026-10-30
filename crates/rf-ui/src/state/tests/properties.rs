@@ -471,29 +471,49 @@ fn stopping_the_checksums_keeps_those_made_and_the_same_algorithm_makes_the_rest
         ]
     );
     assert!(!state.properties().expect("the window").hashing.under_way());
-    // Late news of the stopped request is dropped, and closing now stops nothing more.
-    assert!(!state.hash_news(HashNews::Hashed {
+    // Late news of reading the stopped request is dropped, but a checksum the worker had made
+    // before it stopped (it holds some, to send them together) is kept.
+    assert!(!state.hash_news(HashNews::Reading {
         generation: first.generation,
-        results: vec![(1, Ok("bb".to_owned()))],
+        row: 1,
+        done: 1 << 31,
+        total: 1 << 32,
     }));
+    assert!(state.hash_news(HashNews::Hashed {
+        generation: first.generation,
+        results: vec![(2, Ok("cc".to_owned()))],
+    }));
+    assert_eq!(
+        statuses(&state),
+        [
+            HashStatus::Done("aa".to_owned()),
+            HashStatus::Stopped,
+            HashStatus::Done("cc".to_owned())
+        ]
+    );
+    // Closing now stops nothing more.
     assert_eq!(state.stop_hashes(), []);
     // The same algorithm again: the stopped rows alone, under a new generation.
     let rest = the_hash(&state.choose_algorithm(2));
     assert!(rest.generation > first.generation);
     let rows: Vec<usize> = rest.files.iter().map(|(row, _)| *row).collect();
-    assert_eq!(rows, [1, 2]);
+    assert_eq!(rows, [1]);
     assert_eq!(
         statuses(&state),
         [
             HashStatus::Done("aa".to_owned()),
             HashStatus::Waiting,
-            HashStatus::Waiting
+            HashStatus::Done("cc".to_owned())
         ]
     );
-    // Several rows in one piece of news.
+    // The stopped request's news is the old generation's now: dropped.
+    assert!(!state.hash_news(HashNews::Hashed {
+        generation: first.generation,
+        results: vec![(1, Ok("old".to_owned()))],
+    }));
     assert!(state.hash_news(HashNews::Hashed {
         generation: rest.generation,
-        results: vec![(1, Ok("bb".to_owned())), (2, Ok("cc".to_owned()))],
+        results: vec![(1, Ok("bb".to_owned()))],
     }));
     assert_eq!(
         statuses(&state),

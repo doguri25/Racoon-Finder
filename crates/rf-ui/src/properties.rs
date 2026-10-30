@@ -422,7 +422,9 @@ pub enum HashStatus {
 }
 
 impl HashStatus {
-    /// Whether nothing more comes for it.
+    /// Whether no request is under way for it: it waits for none (`Idle`: no algorithm is
+    /// chosen yet, and choosing one makes it `Waiting`), or its request made it, failed, left it
+    /// out or stopped. Only `Waiting` and `Reading` wait for the worker.
     pub fn finished(&self) -> bool {
         !matches!(self, HashStatus::Waiting | HashStatus::Reading { .. })
     }

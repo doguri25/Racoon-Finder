@@ -5,8 +5,9 @@
 //! ([`Modal::Properties`]) for the items a command acts on in the active pane (the selected
 //! rows, or the row the user put the cursor on), or, with none, for the folder the pane shows
 //! ([`crate::properties`]); 속성 in the menu of the part of a list without rows opens it for that
-//! folder whatever is chosen ([`AppState::folder_properties`]). It only reads: nothing in it changes a file. While it shows, the
-//! panes take no keys or clicks, so the items it shows stay the ones chosen.
+//! folder whatever is chosen ([`AppState::folder_properties`]). It only reads: nothing in it
+//! changes a file. While it shows, the panes take no keys or clicks, so the items it shows stay
+//! the ones chosen.
 //!
 //! Two workers add what the listing does not tell, each request under a generation of its own:
 //! the measure ([`Effect::Measure`]: the entry of the folder the pane shows, where a lone link
@@ -17,8 +18,9 @@
 //! - when the window closes, whichever way (Esc, 닫기, the app's end): the controller calls
 //!   [`AppState::follow_properties`] after every change, which then stops both workers;
 //! - the count, on its 중지 ([`AppState::stop_count`]), which keeps what it found;
-//! - the checksums, on their 중지 ([`AppState::stop_hashes`]), which keeps the checksums made
-//!   (the same algorithm chosen again makes the rest), and when another algorithm is chosen:
+//! - the checksums, on their 중지 ([`AppState::stop_hashes`]), which keeps the checksums made,
+//!   those the worker made and sends after it too (the same algorithm chosen again makes the
+//!   rest from the start of each file), and when another algorithm is chosen:
 //!   the new request replaces the old one on the worker, which stops it, and the old one's late
 //!   news has the old generation.
 //!
@@ -351,11 +353,15 @@ impl AppState {
     }
 
     /// What the worker of the checksums told: taken when it is for the window's request, and
-    /// for the rows still to finish. `true` when the window changed.
+    /// for the rows still to finish, a checksum also for a row 중지 stopped. `true` when the
+    /// window changed.
     pub fn hash_news(&mut self, news: HashNews) -> bool {
         let Some(properties) = self.properties.shown.as_mut() else {
             return false;
         };
+        // A checksum the worker made before 중지 reached it may come after it (the worker holds a
+        // few to send together): a row 중지 stopped takes it. Its reading does not.
+        let made = matches!(news, HashNews::Hashed { .. });
         let (generation, statuses) = match news {
             HashNews::Reading {
                 generation,
@@ -386,7 +392,7 @@ impl AppState {
         let mut changed = false;
         for (row, status) in statuses {
             if let Some(shown) = properties.hashing.rows.get_mut(row)
-                && !shown.status.finished()
+                && (!shown.status.finished() || (made && shown.status == HashStatus::Stopped))
             {
                 shown.status = status;
                 changed = true;
