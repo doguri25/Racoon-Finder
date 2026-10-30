@@ -504,6 +504,20 @@ impl AppState {
         Vec::new()
     }
 
+    /// The worker could not do the sort number `serial` of the listing `generation` (it
+    /// panicked, or no thread could be started for it): the tab that waits for it shows its rows
+    /// in the order they are in, and a notice says the folder could not be sorted.
+    pub fn sort_failed(&mut self, generation: u64, serial: u64) -> Vec<Effect> {
+        let failed = self
+            .tab_by_generation(generation)
+            .is_some_and(|tab| tab.sort_failed(generation, serial));
+        if failed {
+            vec![Effect::Notice(words::sort_failed().to_owned())]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Changes the view of the folder the tab of pane `side` shows with `change`, remembers it
     /// for the folder, and shows it in every tab at that folder; the pane gets the keyboard.
     /// The change goes on top of the view the folder has now, not of what the tab shows: another

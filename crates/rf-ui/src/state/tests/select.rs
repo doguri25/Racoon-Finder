@@ -2,7 +2,7 @@
 //! (NAV-11), from the keys and the pattern window as the controller drives them.
 
 use super::*;
-use crate::dialogs::PatternDialog;
+use crate::dialogs::{Counting, PatternDialog};
 use crate::pane::INLINE_SORT_ROWS;
 use crate::selection::{PatternError, PatternSyntax};
 
@@ -187,7 +187,7 @@ fn the_pattern_window_counts_on_a_worker_and_drops_late_answers() {
         names(&first),
         ["사진", "a.jpg", "b.PNG", "c.JPG", "d.txt", "README"]
     );
-    assert!(pattern_dialog(&state).counting);
+    assert_eq!(pattern_dialog(&state).counting, Counting::Running);
     let second = the_match(&state.pattern_edited("*.jpg;*.png"));
     assert_ne!(first.generation, second.generation);
     // The rows are taken once: the second request has the same ones.
@@ -200,7 +200,7 @@ fn the_pattern_window_counts_on_a_worker_and_drops_late_answers() {
     let answer = second.run(&|| true).expect("not stopped");
     assert_eq!(state.pattern_matched(answer.clone()), []);
     let dialog = pattern_dialog(&state);
-    assert_eq!((dialog.count, dialog.counting), (Some(3), false));
+    assert_eq!((dialog.count, dialog.counting), (Some(3), Counting::Idle));
     // The same answer twice changes nothing.
     assert_eq!(state.pattern_matched(answer), []);
 
@@ -215,7 +215,7 @@ fn the_pattern_window_counts_on_a_worker_and_drops_late_answers() {
     assert_eq!(pattern_dialog(&state).count, Some(1));
     // The mode is no change of the pattern.
     state.pattern_mode(true);
-    assert!(!pattern_dialog(&state).counting);
+    assert_eq!(pattern_dialog(&state).counting, Counting::Idle);
 }
 
 #[test]
@@ -229,7 +229,8 @@ fn a_text_that_is_no_pattern_says_why_and_selects_nothing() {
     let dialog = pattern_dialog(&state);
     assert_eq!(dialog.choice.syntax, PatternSyntax::Regex);
     assert_eq!(dialog.problem, Some(PatternError::Invalid));
-    assert!(!dialog.can_confirm() && !dialog.counting);
+    assert!(!dialog.can_confirm());
+    assert_eq!(dialog.counting, Counting::Idle);
     assert_eq!(state.pattern_confirmed("(jpg"), []);
     assert!(matches!(state.modal(), Some(Modal::Pattern(_))));
     // Mended, it counts again.
@@ -450,4 +451,71 @@ fn hidden_extensions_are_kept_and_rename_edits_the_whole_name() {
     assert!(!restored.show_extensions());
     toggle(&mut state);
     assert!(state.show_extensions() && !state.session().hide_extensions);
+}
+
+#[test]
+fn a_count_the_worker_could_not_make_is_matched_here_when_choose_is_pressed() {
+    let mut state = ready(photos(), vec![]);
+    press(&mut state, "s", CTRL);
+    let request = the_match(&state.pattern_edited("*.jpg"));
+    // The worker panicked, or no thread could be started for it: the window says so, and
+    // waits no more.
+    assert_eq!(state.pattern_failed(request.generation), []);
+    let dialog = pattern_dialog(&state);
+    assert_eq!(dialog.counting, Counting::Failed);
+    assert!(dialog.can_confirm());
+    assert_eq!(
+        crate::ui_bridge::pattern_view(dialog).count,
+        words::pattern_uncounted()
+    );
+    // 선택 matches them here, and selects them.
+    assert_eq!(state.pattern_confirmed("*.jpg"), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(selected_names(&state, LEFT), ["a.jpg", "c.JPG"]);
+
+    // Pressed while the worker counted, the failure selects at once; a failure of a pattern
+    // typed over changes nothing.
+    press(&mut state, "s", CTRL);
+    let old = the_match(&state.pattern_edited("*.png"));
+    let new = the_match(&state.pattern_edited("*.txt"));
+    assert_eq!(state.pattern_failed(old.generation), []);
+    assert_eq!(pattern_dialog(&state).counting, Counting::Running);
+    assert_eq!(state.pattern_confirmed("*.txt"), []);
+    assert!(pattern_dialog(&state).confirming);
+    assert_eq!(state.pattern_failed(new.generation), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(selected_names(&state, LEFT), ["d.txt"]);
+}
+
+#[test]
+fn a_sort_the_worker_could_not_make_leaves_the_rows_in_their_order() {
+    let many: Vec<Entry> = (0..=INLINE_SORT_ROWS)
+        .map(|i| file(&format!("f{i:04}")))
+        .collect();
+    let mut state = ready(many, vec![]);
+    let mut settled = Vec::new();
+    state.settle_views(&mut settled);
+    let mut effects = state.sort_by(LEFT, SortKey::Name, false);
+    state.settle_views(&mut effects);
+    let [Effect::Sort(sort)] = effects.as_slice() else {
+        panic!("a sort on a worker: {effects:?}");
+    };
+    let sort = sort.clone();
+    // A failure of another sort changes nothing.
+    assert_eq!(state.sort_failed(sort.generation, sort.serial + 1), []);
+    // The tab stops waiting: its rows keep their order, which the header shows again, and no
+    // worker is asked for the same sort.
+    assert_eq!(
+        state.sort_failed(sort.generation, sort.serial),
+        [Effect::Notice(words::sort_failed().to_owned())]
+    );
+    let tab = state.panes()[LEFT].active_tab();
+    assert_eq!(tab.sort().primary.order, SortOrder::Ascending);
+    assert_eq!(rows(&state, LEFT)[0], "f0000");
+    let mut effects = Vec::new();
+    state.settle_views(&mut effects);
+    assert_eq!(effects, []);
+    // A late answer of that sort is dropped.
+    assert_eq!(state.sorted(sort.run()), []);
+    assert_eq!(rows(&state, LEFT)[0], "f0000");
 }

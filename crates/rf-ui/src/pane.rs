@@ -393,6 +393,22 @@ impl Tab {
         true
     }
 
+    /// The sort the tab waits for, of its listing `generation` and number `serial`, could not be
+    /// done (the worker panicked, or no thread could be started for it): the tab stops waiting,
+    /// and shows its rows in the order they are in, which its view takes again, so that no other
+    /// worker is asked for the same sort. `false`, and no change, for a sort it no longer waits
+    /// for.
+    pub fn sort_failed(&mut self, generation: u64, serial: u64) -> bool {
+        let waits = self.sorting.is_some_and(|(waited, _)| waited == serial);
+        if generation != self.generation || !waits {
+            return false;
+        }
+        self.sorting = None;
+        self.since_sort.clear();
+        self.view.sort = self.shown_sort;
+        true
+    }
+
     /// Puts the rows in the order of the view: at once when they are few, or else later, by a
     /// worker ([`Tab::take_sort_request`]). While a listing is on its way, the listing brings the
     /// order.

@@ -40,11 +40,13 @@ use crate::ui_bridge::{self, PaneModels, PickModels, PreviewModels, TreeRows, po
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
 mod matcher;
+mod newest;
 mod persist;
 mod previewer;
 mod sorter;
 
 use matcher::Matcher;
+use newest::Outcome;
 pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
@@ -736,9 +738,23 @@ impl Controller {
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
             checks: RefCell::new(CopyChecks::default()),
-            sorter: Sorter::new(|sorted| post(move |c| c.update(|state| state.sorted(sorted)))),
-            matcher: Matcher::new(|matched| {
-                post(move |c| c.update(|state| state.pattern_matched(matched)));
+            sorter: sorter::sorter(|outcome| {
+                post(move |c| {
+                    c.update(|state| match outcome {
+                        Outcome::Done(sorted) => state.sorted(sorted),
+                        Outcome::Failed((generation, serial)) => {
+                            state.sort_failed(generation, serial)
+                        }
+                    });
+                });
+            }),
+            matcher: matcher::matcher(|outcome| {
+                post(move |c| {
+                    c.update(|state| match outcome {
+                        Outcome::Done(matched) => state.pattern_matched(matched),
+                        Outcome::Failed(generation) => state.pattern_failed(generation),
+                    });
+                });
             }),
             previewer: {
                 let vfs = rf_vfs::Vfs::with_local();
@@ -1205,14 +1221,13 @@ impl Controller {
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
                 Effect::Sort(request) => {
-                    if self.sorter.sort(request).is_err() {
-                        self.notice(words::background_failed());
-                    }
+                    // A sort no thread can be started for comes back failed, and the state
+                    // says so.
+                    let _ = self.sorter.submit(request);
                 }
                 Effect::MatchNames(request) => {
-                    if self.matcher.match_names(request).is_err() {
-                        self.notice(words::background_failed());
-                    }
+                    // As a sort; the pattern window says so.
+                    let _ = self.matcher.submit(request);
                 }
                 Effect::Preview(request) => self.preview_on_worker(request),
                 Effect::StopPreview => self.previewer.stop(),

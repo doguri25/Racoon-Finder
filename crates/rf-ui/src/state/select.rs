@@ -17,7 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
 use super::{AppState, Effect};
-use crate::dialogs::{Modal, PatternChoice, PatternDialog};
+use crate::dialogs::{Counting, Modal, PatternChoice, PatternDialog};
 use crate::keys::Command;
 use crate::pane::next_generation;
 use crate::selection::{NamePattern, PatternSyntax};
@@ -221,10 +221,31 @@ impl AppState {
             .is_some_and(|found| found.generation == dialog.generation);
         if ready {
             effects.extend(self.select_matched());
+        } else if dialog.counting == Counting::Failed {
+            effects.extend(self.match_here());
         } else {
             dialog.confirming = true;
         }
         effects
+    }
+
+    /// The worker could not match the names for request `generation` (it panicked, or no thread
+    /// could be started for it): the window says it could not count them, and 선택 matches them
+    /// on this thread when it is pressed (at once, when it was pressed already). An answer for a
+    /// pattern typed over is dropped.
+    pub fn pattern_failed(&mut self, generation: u64) -> Vec<Effect> {
+        let Some(Modal::Pattern(dialog)) = &mut self.modal else {
+            return Vec::new();
+        };
+        if generation != dialog.generation || dialog.counting != Counting::Running {
+            return Vec::new();
+        }
+        dialog.counting = Counting::Failed;
+        if dialog.confirming {
+            self.match_here()
+        } else {
+            Vec::new()
+        }
     }
 
     /// What the worker found for a [`MatchRequest`]: the window shows how many rows match, when
@@ -234,11 +255,11 @@ impl AppState {
         let Some(Modal::Pattern(dialog)) = &mut self.modal else {
             return Vec::new();
         };
-        if matched.generation != dialog.generation || !dialog.counting {
+        if matched.generation != dialog.generation || dialog.counting != Counting::Running {
             return Vec::new();
         }
         dialog.count = Some(matched.hits.len());
-        dialog.counting = false;
+        dialog.counting = Counting::Idle;
         let confirming = dialog.confirming;
         self.pattern.found = Some(matched);
         if confirming {
@@ -320,7 +341,11 @@ impl AppState {
         };
         dialog.problem = problem;
         dialog.empty = problem.is_none() && pattern.is_none();
-        dialog.counting = pattern.is_some();
+        dialog.counting = if pattern.is_some() {
+            Counting::Running
+        } else {
+            Counting::Idle
+        };
         if pattern.is_none() {
             dialog.count = None;
         }
@@ -334,6 +359,24 @@ impl AppState {
             })
             .into_iter()
             .collect()
+    }
+
+    /// Matches the names of the pattern window's rows on this thread, which the worker could not
+    /// do, and selects the rows that match ([`AppState::select_matched`]).
+    fn match_here(&mut self) -> Vec<Effect> {
+        let Some(Modal::Pattern(dialog)) = &self.modal else {
+            return Vec::new();
+        };
+        let Ok(Some(pattern)) = dialog.choice.pattern() else {
+            return Vec::new();
+        };
+        let request = MatchRequest {
+            generation: dialog.generation,
+            rows: self.pattern.rows.clone().unwrap_or_default(),
+            pattern,
+        };
+        self.pattern.found = request.run(&|| true);
+        self.select_matched()
     }
 
     /// Selects the rows the worker matched, in the tab the pattern window was opened for (if it

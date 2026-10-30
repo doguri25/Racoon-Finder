@@ -21,7 +21,7 @@ use slint::{
 
 use crate::controller::{self, Controller};
 use crate::dialogs::{
-    Confirm, ConflictQuestion, Failures, Modal, NameCheck, NameDialog, PatternDialog,
+    Confirm, ConflictQuestion, Counting, Failures, Modal, NameCheck, NameDialog, PatternDialog,
     PreflightQuestion, Recovery,
 };
 use crate::format::{
@@ -1196,13 +1196,15 @@ pub fn name_view(dialog: &NameDialog) -> NameView {
 }
 
 /// The pattern window (패턴으로 선택): its choices, how many rows match (the last count while a
-/// worker matches again, "세는 중…" before the first), or why the text is no pattern.
+/// worker matches again, "세는 중…" before the first, or that the worker could not count them),
+/// or why the text is no pattern.
 pub fn pattern_view(dialog: &PatternDialog) -> PatternView {
     let count = match (dialog.problem, dialog.count) {
         (Some(_), _) => SharedString::new(),
         _ if dialog.empty => SharedString::new(),
+        _ if dialog.counting == Counting::Failed => words::pattern_uncounted().into(),
         (None, Some(count)) => words::pattern_count(count).into(),
-        (None, None) if dialog.counting => words::pattern_counting().into(),
+        (None, None) if dialog.counting == Counting::Running => words::pattern_counting().into(),
         (None, None) => SharedString::new(),
     };
     PatternView {

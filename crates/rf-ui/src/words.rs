@@ -258,6 +258,18 @@ pub fn no_extension(name: &str) -> String {
     format!("‘{name}’에는 확장자가 없습니다")
 }
 
+/// The notice when a long folder could not be put in its new order: the rows keep the one they
+/// had.
+pub fn sort_failed() -> &'static str {
+    "이 폴더를 정렬하지 못해 이전 순서로 둡니다"
+}
+
+/// What the pattern window shows when its worker could not count the rows: 선택 matches them
+/// when it is pressed.
+pub fn pattern_uncounted() -> &'static str {
+    "항목 수를 세지 못했습니다. 선택을 누르면 바로 맞춰 고릅니다"
+}
+
 /// How many rows the pattern window's pattern matches.
 pub fn pattern_count(count: usize) -> String {
     format!("맞는 항목 {count}개")

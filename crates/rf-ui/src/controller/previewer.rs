@@ -1,53 +1,39 @@
-//! The worker that makes the previews ([`Effect::Preview`]): one thread, which keeps only the
-//! newest request. A request waits [`PREVIEW_DELAY`] before it starts, and a newer one that comes
-//! meanwhile takes its place, so the keys that run down a list start no work until the cursor
-//! rests; one that comes while a preview is made stops it (its [`CancelToken`], which the
-//! folder count looks at between batches) and drops what it finds. [`Previewer::stop`] does the
-//! same when nothing is to show.
+//! The worker that makes the previews ([`Effect::Preview`]): a [`Newest`] worker with one slot.
+//! A request waits [`PREVIEW_DELAY`] before it starts, and a newer one that comes meanwhile
+//! takes its place, so the keys that run down a list start no work until the cursor rests; one
+//! that comes while a preview is made stops it (its [`CancelToken`], which the folder count looks
+//! at between batches) and drops what it finds. [`Previewer::stop`] does the same when nothing is
+//! to show. A preview that panics (the decoders run guarded already), or that no thread can be
+//! started for, shows that the item cannot be previewed.
 //!
 //! [`Effect::Preview`]: crate::state::Effect::Preview
 //! [`PREVIEW_DELAY`]: crate::preview::PREVIEW_DELAY
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rf_vfs::CancelToken;
 
+use super::newest::{Job, Newest, NoWorker, Outcome};
 use crate::preview::{PreviewContent, PreviewRequest, Previewed};
 
-/// What the worker does with a request: the preview, or `None` when the token stopped it.
-type Work = dyn Fn(&PreviewRequest, &CancelToken) -> Option<PreviewContent> + Send + Sync;
+impl Job for PreviewRequest {
+    /// The generation of the request.
+    type Ticket = u64;
+
+    fn slot(&self) -> u64 {
+        0
+    }
+
+    fn ticket(&self) -> u64 {
+        self.generation
+    }
+}
 
 /// Hands the requests to the worker, which gives what it made to `deliver` on its own thread.
 /// The worker starts with the first request and ends when the previewer goes.
 pub struct Previewer {
-    shared: Arc<Shared>,
-    delay: Duration,
-    work: Arc<Work>,
-    deliver: Arc<dyn Fn(Previewed) + Send + Sync>,
+    worker: Newest<PreviewRequest, Previewed>,
 }
-
-struct Shared {
-    slot: Mutex<Slot>,
-    wake: Condvar,
-}
-
-#[derive(Default)]
-struct Slot {
-    /// The request that waits for the worker, and when it may start.
-    waiting: Option<(PreviewRequest, Instant)>,
-    /// The generation and the token of the preview being made.
-    running: Option<(u64, CancelToken)>,
-    /// The worker runs.
-    started: bool,
-    /// The previewer is gone: the worker ends.
-    closed: bool,
-}
-
-/// The worker could not be started (the system has no thread to give).
-#[derive(Debug)]
-pub struct NoWorker;
 
 impl Previewer {
     /// A previewer whose requests wait `delay`, made by `work` and handed to `deliver`.
@@ -57,141 +43,54 @@ impl Previewer {
         deliver: impl Fn(Previewed) + Send + Sync + 'static,
     ) -> Previewer {
         Previewer {
-            shared: Arc::new(Shared {
-                slot: Mutex::new(Slot::default()),
-                wake: Condvar::new(),
-            }),
-            delay,
-            work: Arc::new(work),
-            deliver: Arc::new(deliver),
+            worker: Newest::new(
+                "rf-ui-preview",
+                delay,
+                move |request: PreviewRequest, token| {
+                    let content = work(&request, token)?;
+                    Some(Previewed {
+                        generation: request.generation,
+                        content,
+                    })
+                },
+                move |outcome| {
+                    deliver(match outcome {
+                        Outcome::Done(previewed) => previewed,
+                        Outcome::Failed(generation) => Previewed {
+                            generation,
+                            content: PreviewContent::Unavailable,
+                        },
+                    });
+                },
+            ),
         }
     }
 
     /// Hands `request` to the worker, in the place of the one that waits; a preview being made
     /// stops.
     pub fn preview(&self, request: PreviewRequest) -> Result<(), NoWorker> {
-        let mut slot = self.lock();
-        stop_running(&mut slot);
-        slot.waiting = Some((request, Instant::now() + self.delay));
-        if !slot.started {
-            let shared = Arc::clone(&self.shared);
-            let work = Arc::clone(&self.work);
-            let deliver = Arc::clone(&self.deliver);
-            let spawned = std::thread::Builder::new()
-                .name("rf-ui-preview".to_owned())
-                .spawn(move || run(&shared, &*work, &*deliver));
-            if spawned.is_err() {
-                slot.waiting = None;
-                return Err(NoWorker);
-            }
-            slot.started = true;
-        }
-        drop(slot);
-        self.shared.wake.notify_one();
-        Ok(())
+        self.worker.submit(request)
     }
 
     /// Drops the request that waits and stops the preview being made: nothing it would show
     /// shows any more.
     pub fn stop(&self) {
-        let mut slot = self.lock();
-        stop_running(&mut slot);
-        slot.waiting = None;
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Slot> {
-        self.shared
-            .slot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-impl Drop for Previewer {
-    fn drop(&mut self) {
-        let mut slot = self.lock();
-        slot.closed = true;
-        slot.waiting = None;
-        stop_running(&mut slot);
-        drop(slot);
-        self.shared.wake.notify_one();
+        self.worker.stop();
     }
 }
 
 impl std::fmt::Debug for Previewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Previewer")
-            .field("delay", &self.delay)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Stops the preview being made, if one is: what it finds is dropped.
-fn stop_running(slot: &mut Slot) {
-    if let Some((_, token)) = slot.running.take() {
-        token.cancel();
-    }
-}
-
-/// The worker: the newest request each time, once its time has come, until the previewer goes.
-fn run(shared: &Shared, work: &Work, deliver: &(dyn Fn(Previewed) + Send + Sync)) {
-    loop {
-        let (request, token) = {
-            let mut slot = shared.slot.lock().unwrap_or_else(PoisonError::into_inner);
-            loop {
-                if slot.closed {
-                    return;
-                }
-                let now = Instant::now();
-                match slot.waiting.as_ref().map(|(_, due)| *due) {
-                    None => {
-                        slot = shared
-                            .wake
-                            .wait(slot)
-                            .unwrap_or_else(PoisonError::into_inner);
-                    }
-                    Some(due) if due > now => {
-                        slot = shared
-                            .wake
-                            .wait_timeout(slot, due - now)
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .0;
-                    }
-                    Some(_) => {
-                        let Some((request, _)) = slot.waiting.take() else {
-                            continue;
-                        };
-                        let token = CancelToken::new();
-                        slot.running = Some((request.generation, token.clone()));
-                        break (request, token);
-                    }
-                }
-            }
-        };
-        // A panic in the work (the decoders run guarded already) does not end the worker.
-        let made = catch_unwind(AssertUnwindSafe(|| work(&request, &token)))
-            .unwrap_or(Some(PreviewContent::Unavailable));
-        let current = {
-            let mut slot = shared.slot.lock().unwrap_or_else(PoisonError::into_inner);
-            let current =
-                matches!(&slot.running, Some((generation, _)) if *generation == request.generation);
-            if current {
-                slot.running = None;
-            }
-            current && !token.is_cancelled()
-        };
-        if let (true, Some(content)) = (current, made) {
-            deliver(Previewed {
-                generation: request.generation,
-                content,
-            });
-        }
+            .field("worker", &self.worker)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Instant;
 
     use rf_core::{EntryKind, VPath};
     use rf_vfs::VisibilityFilter;

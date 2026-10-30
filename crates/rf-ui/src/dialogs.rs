@@ -235,10 +235,22 @@ pub struct PatternDialog {
     /// How many rows the pattern matches: for `generation` once the worker is done, the last
     /// count meanwhile.
     pub count: Option<usize>,
-    /// A worker matches the names for `generation`.
-    pub counting: bool,
+    /// Where the worker's match for `generation` stands.
+    pub counting: Counting,
     /// 선택 was chosen while the worker matched: the rows are selected once it is done.
     pub confirming: bool,
+}
+
+/// Where the pattern window's worker stands with the pattern as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Counting {
+    /// It is not asked: the text is no pattern, or its count is in.
+    Idle,
+    /// It matches the names.
+    Running,
+    /// It could not match them (it panicked, or no thread could be started for it): 선택
+    /// matches them on the UI thread when it is pressed.
+    Failed,
 }
 
 impl PatternDialog {
@@ -253,7 +265,7 @@ impl PatternDialog {
             empty: true,
             generation: 0,
             count: None,
-            counting: false,
+            counting: Counting::Idle,
             confirming: false,
         }
     }
