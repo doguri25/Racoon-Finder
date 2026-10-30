@@ -1,6 +1,6 @@
 [package]
 name = "rf-platform"
-description = "OS integration: natural sort, trash, file ids, attributes, known folders, volumes, rename, directory watching."
+description = "OS integration: natural sort, trash, file ids, attributes, known folders, volumes, rename, directory watching, notifications."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,13 +24,17 @@ block2 = "0.6.2"
 libc = "0.2.191"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "block2"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray", "NSBundle"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2"] }
 
 [target."cfg(unix)".dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }
 
 [target."cfg(not(windows))".dependencies]
 notify = "8.2.0"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4.18.2"
 
 [dev-dependencies]
 proptest = "1.11.0"

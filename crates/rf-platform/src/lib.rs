@@ -2,6 +2,7 @@
 
 pub mod attrs;
 pub mod clipboard;
+pub mod desktop;
 pub mod fileid;
 pub mod fsops;
 pub mod known;
