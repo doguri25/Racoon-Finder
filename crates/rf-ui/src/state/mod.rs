@@ -10,8 +10,9 @@
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
 //! tools, listing a folder again and the extensions shown or not (module `select`), the
-//! item the preview panel and quick look show (module `preview`), and what it put on the
-//! system's clipboard and pastes from there (module `clipboard`). Its methods
+//! item the preview panel and quick look show (module `preview`), what it put on the
+//! system's clipboard and pastes from there (module `clipboard`), and the properties window
+//! with the checksums of its files (module `properties`). Its methods
 //! change it and return the [`Effect`]s that need a worker
 //! thread, the job engine or the screen, which the
 //! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
@@ -31,12 +32,14 @@ use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
 use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
+use crate::hashing::HashRequest;
 use crate::jobs::{History, JobEffect, JobRows};
 use crate::keys::{Command, Mods};
 use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
 use crate::pane::{Handled, LoadStatus, OpenAction, Pane, SortRequest, Tab, ancestors};
 use crate::places::Place;
 use crate::preview::PreviewRequest;
+use crate::properties::MeasureRequest;
 use crate::selection::Pick;
 use crate::settings::{Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
@@ -50,6 +53,7 @@ mod jobs;
 mod layout;
 mod pick;
 mod preview;
+mod properties;
 mod select;
 mod sidebar;
 mod tabs;
@@ -101,6 +105,19 @@ pub enum Effect {
     Preview(PreviewRequest),
     /// Stop the preview asked for last: nothing it would show shows any more.
     StopPreview,
+    /// Find out on the measure worker what the properties window's listing does not tell
+    /// ([`measure`](crate::properties::measure)), in the place of (stopping) the request before,
+    /// and hand its news to [`AppState::measure_news`] and its end to [`AppState::measured`].
+    Measure(MeasureRequest),
+    /// Stop the measure worker's request: the window closed, or 중지 stopped its count.
+    StopMeasure,
+    /// Hash the properties window's files on the worker of the checksums
+    /// ([`hash_files`](crate::hashing::hash_files)), in the place of (stopping) the request
+    /// before, and hand its news to [`AppState::hash_news`] (a failure to
+    /// [`AppState::hashes_failed`]).
+    Hash(HashRequest),
+    /// Stop the checksums under way: the window closed.
+    StopHashes,
     /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
     /// gone: find on a worker thread where to go
     /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
@@ -297,6 +314,8 @@ pub struct AppState {
     preview: preview::PreviewWork,
     /// What the window put on the clipboard and the pastes on their way (module `clipboard`).
     clipboard: clipboard::ClipWork,
+    /// The properties window (module `properties`).
+    properties: properties::PropertiesWork,
 }
 
 impl AppState {
@@ -385,6 +404,7 @@ impl AppState {
             pattern: select::PatternWork::default(),
             preview: preview::PreviewWork::default(),
             clipboard: clipboard::ClipWork::default(),
+            properties: properties::PropertiesWork::default(),
         };
         (state, effects)
     }
@@ -588,7 +608,8 @@ impl AppState {
             Command::Paste => self.paste(side, false),
             Command::PasteMove => self.paste(side, true),
             Command::CopyPath => self.copy_paths(side, PathForm::of_key(Os::CURRENT)),
-            Command::Properties | Command::ContextMenu => return None,
+            Command::Properties => self.open_properties(side),
+            Command::ContextMenu => return None,
         };
         Some(effects)
     }

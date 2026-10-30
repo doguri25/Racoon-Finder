@@ -48,7 +48,7 @@ export struct PreviewView {
 }
 
 // The fixed width font of a text, each system's own.
-global PreviewFont {
+export global PreviewFont {
     out property <string> mono: Platform.os == OperatingSystemType.windows ? "Consolas" : Platform.os == OperatingSystemType.macos ? "Menlo" : "DejaVu Sans Mono";
 }
 

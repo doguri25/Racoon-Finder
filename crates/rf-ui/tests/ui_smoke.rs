@@ -16,9 +16,10 @@ use rf_ui::state::{Column, FolderView, ShownColumn, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, FolderMenuRow, FolderMenuView, JobRowView,
-    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
-    PreflightView, PreviewKind, PreviewView, RecoveryView, Theme,
+    ConfirmView, ConflictView, DialogKind, DropPlace, FactRow, FolderMenuRow, FolderMenuView,
+    HashRowView, JobRowView, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
+    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
+    RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -4392,6 +4393,188 @@ fn the_pattern_window_s_choices_take_the_keys_in_turn() {
     press_shifted(&window, Key::Tab);
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["cancelled"]);
+}
+
+/// The properties window of one file, `a.txt`, its count of a folder under way when
+/// `counting`, and its SHA-256 made when `algorithm` is 2.
+fn properties_view(counting: bool, algorithm: i32) -> PropertiesView {
+    let facts = [
+        ("종류", "텍스트 문서"),
+        ("크기", "3 바이트"),
+        ("속성", "읽기 전용"),
+    ]
+    .map(|(label, value)| FactRow {
+        label: label.into(),
+        value: value.into(),
+    });
+    let hash = HashRowView {
+        name: "a.txt".into(),
+        value: if algorithm == 2 {
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()
+        } else {
+            SharedString::new()
+        },
+        progress: -1.0,
+        done: algorithm == 2,
+        copied: false,
+        matched: false,
+    };
+    PropertiesView {
+        title: "a.txt".into(),
+        icon: "document".into(),
+        folder: false,
+        facts: ModelRc::new(slint::VecModel::from(facts.to_vec())),
+        counting,
+        count_note: if counting {
+            "세는 중…".into()
+        } else {
+            SharedString::new()
+        },
+        hashable: true,
+        algorithm,
+        hash_note: SharedString::new(),
+        several: false,
+        hashes: ModelRc::new(slint::VecModel::from(vec![hash])),
+        verdict: SharedString::new(),
+        matched: false,
+        mismatched: false,
+    }
+}
+
+/// A window that shows `view` in the properties window and notes each of its calls.
+fn properties_window(view: PropertiesView) -> (MainWindow, Calls) {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_properties_algorithm(move |number| record.note(format!("algorithm {number}")));
+    let record = calls.clone();
+    window.on_properties_stop(move || record.note("stop"));
+    let record = calls.clone();
+    window.on_properties_copy(move |row| record.note(format!("copy {row}")));
+    let record = calls.clone();
+    window.on_properties_compare(move |text| record.note(format!("compare {text}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    let record = calls.clone();
+    window.on_key(move |text, _, _, _, _| {
+        record.note(format!("key {text}"));
+        true
+    });
+    window.set_properties_view(view);
+    window.set_dialog(DialogKind::Properties);
+    slint::platform::update_timers_and_animations();
+    (window, calls)
+}
+
+#[test]
+fn the_properties_window_shows_its_facts_and_hands_the_choices_over() {
+    let (window, calls) = properties_window(properties_view(false, -1));
+    for text in ["a.txt", "텍스트 문서", "3 바이트", "읽기 전용"] {
+        assert_eq!(
+            labelled(&window, text, AccessibleRole::Text).len(),
+            1,
+            "{text}"
+        );
+    }
+    // No checksum before an algorithm is chosen, and nothing to copy.
+    assert!(labelled(&window, "복사", AccessibleRole::Button).is_empty());
+    labelled(&window, "SHA-256", AccessibleRole::RadioButton)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["algorithm 2"]);
+    // The checksum came: 복사 copies it.
+    window.set_properties_view(properties_view(false, 2));
+    slint::platform::update_timers_and_animations();
+    labelled(&window, "복사", AccessibleRole::Button)
+        .pop()
+        .expect("the row's 복사")
+        .invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["copy 0"]);
+    // Enter, with no button chosen, closes it; no key reached the panes.
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["cancelled"]);
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["cancelled"]);
+}
+
+#[test]
+fn the_properties_window_s_stops_take_the_keys_in_turn() {
+    let (window, calls) = properties_window(properties_view(true, 2));
+    // Tab: 중지, which Space presses.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["stop"]);
+    // Tab: the algorithms, where ← → choose.
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    press(&window, Key::LeftArrow);
+    assert_eq!(calls.take(), ["algorithm 3", "algorithm 1"]);
+    // Tab: the checksum, which Enter copies.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["copy 0"]);
+    // Tab: 비교, which takes what is typed.
+    press(&window, Key::Tab);
+    chord(&window, &["F"]);
+    assert_eq!(calls.take(), ["compare F"]);
+    // Tab: 닫기, which Space presses; Shift+Tab goes back to 비교.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+    press_shifted(&window, Key::Tab);
+    chord(&window, &["0"]);
+    assert_eq!(calls.take(), ["compare 0"]);
+    // The count ended: Tab from 닫기 passes 중지 over, to the algorithms.
+    window.set_properties_view(properties_view(false, 2));
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take(), ["algorithm 3"]);
+}
+
+#[test]
+fn a_hash_being_composed_holds_the_compare_field() {
+    let (window, calls) = properties_window(properties_view(false, 2));
+    let field = || labelled(&window, "비교", AccessibleRole::TextInput).remove(0);
+    field().mock_single_click(slint::platform::PointerEventButton::Left);
+    chord(&window, &["a"]);
+    assert_eq!(calls.take(), ["compare a"]);
+    // While a syllable is composed, Rust compares the text before it, and neither Tab nor
+    // Enter goes anywhere with the syllable left behind.
+    compose(&window, "ㅂ");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(field().accessible_value().as_deref(), Some("a"));
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    commit_composition(&window, "비");
+    slint::platform::update_timers_and_animations();
+    assert_eq!(calls.take(), ["compare a비"]);
+    // Enter in the field closes nothing: the verdict shows as it is typed.
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    // Committed, Tab leaves it for 닫기.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["cancelled"]);
+}
+
+#[test]
+fn the_row_menu_ends_with_the_properties_and_their_key() {
+    use slint::platform::PointerEventButton;
+    let (window, _calls, _models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    for (os, item) in [
+        (Os::Windows, "속성  (Alt+Enter)"),
+        (Os::MacOs, "속성  (⌘I)"),
+    ] {
+        ui_bridge::show_shortcuts(&window, os);
+        labelled(&window, "x.txt", AccessibleRole::ListItem)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+        choose_item(&window, item);
+        assert_eq!(commands.take(), ["properties"], "{os:?}");
+    }
 }
 
 #[test]

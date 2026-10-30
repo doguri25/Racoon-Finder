@@ -13,6 +13,10 @@
 //! state's requests in order; while items the window cut are on the clipboard, the controller
 //! asks it for the clipboard's change count every [`CLIPBOARD_POLL`], so that the dimming goes
 //! once another app has put something else there.
+//!
+//! The properties window has two workers (module `properties`): the measure and the checksums.
+//! Their news changes only the window, so it redraws the window alone, as the progress of a job
+//! redraws the job panel alone.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -31,19 +35,23 @@ use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecMod
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
+use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
 use crate::jobs::{Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
 use crate::pick::POLICIES;
 use crate::places::{self, Place};
 use crate::preview::{self, PREVIEW_DELAY};
+use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
     AppState, Column, DropSpot, Effect, LEFT, Layout, Paging, PathForm, RIGHT, Subfolders,
     preview_width, start_folders,
 };
-use crate::ui_bridge::{self, PaneModels, PickModels, PreviewModels, TreeRows, post};
+use crate::ui_bridge::{
+    self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
+};
 use crate::{DialogKind, DropPlace, FolderMenuRow, JobRowView, MainWindow, TabDrop, open, words};
 
 pub mod clipboard;
@@ -51,6 +59,7 @@ mod matcher;
 mod newest;
 mod persist;
 mod previewer;
+mod properties;
 mod sorter;
 
 use clipboard::{Clipper, Done, OsClipboard};
@@ -60,6 +69,7 @@ pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
 pub use previewer::Previewer;
+use properties::{Hasher, Measurer};
 use sorter::Sorter;
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
@@ -300,6 +310,29 @@ fn connect(window: &MainWindow) {
     connect_tabs(window);
     connect_jobs(window);
     connect_pick(window);
+    connect_properties(window);
+}
+
+/// The callbacks of the properties window: an algorithm chosen, 중지, 복사 of a row's
+/// checksum, and the field 비교.
+fn connect_properties(window: &MainWindow) {
+    window.on_properties_algorithm(|number| {
+        with(|c| c.update(|state| state.choose_algorithm(number)));
+    });
+    window.on_properties_stop(|| {
+        with(|c| c.update(AppState::stop_count));
+    });
+    window.on_properties_copy(|row| {
+        with(|c| c.update_at(row, AppState::copy_checksum));
+    });
+    window.on_properties_compare(|text| {
+        with(|c| {
+            c.update(|state| {
+                state.compare_edited(&text);
+                Vec::new()
+            });
+        });
+    });
 }
 
 /// The callbacks of quick look (VIEW-01): its keys, which go nowhere else, and its close button
@@ -693,6 +726,12 @@ pub struct Controller {
     previewer: Previewer,
     /// The models of the preview's view.
     preview: PreviewModels,
+    /// The workers of the properties window: what the listing does not tell and the count of
+    /// what its folders hold, and the checksums of its files.
+    measurer: Measurer,
+    hasher: Hasher,
+    /// The models of the properties window's view.
+    properties: PropertiesModels,
     /// The worker of the system clipboard.
     clipper: Clipper,
     /// Asks the clipboard's change count while items the window cut are on it.
@@ -781,6 +820,9 @@ impl Controller {
                 )
             },
             preview: PreviewModels::default(),
+            measurer: measurer(),
+            hasher: hasher(),
+            properties: PropertiesModels::default(),
             clipper: Clipper::start(Arc::new(OsClipboard), Os::CURRENT, |done| {
                 post(move |c| c.clipboard_done(done));
             }),
@@ -1227,6 +1269,7 @@ impl Controller {
             "copy-files" => Command::Copy,
             "paste" => Command::Paste,
             "paste-move" => Command::PasteMove,
+            "properties" => Command::Properties,
             _ => return,
         };
         self.update(|state| {
@@ -1251,6 +1294,7 @@ impl Controller {
             effects.extend(state.follow_active());
             state.settle_views(&mut effects);
             effects.extend(state.follow_preview());
+            effects.extend(state.follow_properties());
             effects
         };
         self.apply(effects);
@@ -1286,17 +1330,14 @@ impl Controller {
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::Quit => self.quit(),
-                Effect::Sort(request) => {
-                    // A sort no thread can be started for comes back failed, and the state
-                    // says so.
-                    let _ = self.sorter.submit(request);
-                }
-                Effect::MatchNames(request) => {
-                    // As a sort; the pattern window says so.
-                    let _ = self.matcher.submit(request);
-                }
-                Effect::Preview(request) => self.preview_on_worker(request),
-                Effect::StopPreview => self.previewer.stop(),
+                Effect::Sort(_)
+                | Effect::MatchNames(_)
+                | Effect::Preview(_)
+                | Effect::StopPreview
+                | Effect::Measure(_)
+                | Effect::StopMeasure
+                | Effect::Hash(_)
+                | Effect::StopHashes => self.to_newest(effect),
                 Effect::Clipboard(work) => {
                     if !self.clipper.submit(work) {
                         on_screen.push(Effect::Notice(words::background_failed().to_owned()));
@@ -1384,6 +1425,9 @@ impl Controller {
                 self.update(|state| state.clipboard_read(token, result));
             }
             Done::Paths(result) => self.update(|state| state.paths_copied(result)),
+            Done::Text { token, result } => {
+                self.update(|state| state.checksum_copied(token, result));
+            }
             // Most polls find the clipboard as it was: the window is drawn again only for one
             // that ends the dimming.
             Done::Polled(change) => {
@@ -1499,6 +1543,10 @@ impl Controller {
             | Effect::MatchNames(_)
             | Effect::Preview(_)
             | Effect::StopPreview
+            | Effect::Measure(_)
+            | Effect::StopMeasure
+            | Effect::Hash(_)
+            | Effect::StopHashes
             | Effect::Clipboard(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
@@ -1607,6 +1655,10 @@ impl Controller {
             | Effect::MatchNames(_)
             | Effect::Preview(_)
             | Effect::StopPreview
+            | Effect::Measure(_)
+            | Effect::StopMeasure
+            | Effect::Hash(_)
+            | Effect::StopHashes
             | Effect::Clipboard(_)
             | Effect::LoadChildren(_)
             | Effect::ListNames(_)
@@ -1729,6 +1781,77 @@ impl Controller {
         }
     }
 
+    /// What the measure worker found for the properties window: the window alone is drawn
+    /// again, when it took it.
+    fn measure_news(&self, news: MeasureNews) {
+        self.properties_changed(|state| state.measure_news(news));
+    }
+
+    /// The measure worker ended the request with `generation` (`None`: it failed).
+    fn measured(&self, generation: u64, tally: Option<Tally>) {
+        self.properties_changed(|state| state.measured(generation, tally));
+    }
+
+    /// What the worker of the checksums told.
+    fn hash_news(&self, news: HashNews) {
+        self.properties_changed(|state| state.hash_news(news));
+    }
+
+    /// The worker of the checksums failed the request with `generation`.
+    fn hashes_failed(&self, generation: u64) {
+        self.properties_changed(|state| state.hashes_failed(generation));
+    }
+
+    /// Changes the state with `f`, a change of the properties window alone, and draws the
+    /// window again when `f` says it changed.
+    fn properties_changed(&self, f: impl FnOnce(&mut AppState) -> bool) {
+        let changed = self.state.borrow_mut().as_mut().is_some_and(f);
+        if changed
+            && let Some(window) = self.window.upgrade()
+            && let Some(state) = self.state.borrow().as_ref()
+        {
+            self.show_properties(&window, state);
+        }
+    }
+
+    /// Hands a request to the newest-request worker it is for (the sorts, the pattern window's
+    /// matches, the previews, the properties window's measure and checksums), or stops that
+    /// worker's request.
+    fn to_newest(&self, effect: Effect) {
+        match effect {
+            // A sort no thread can be started for comes back failed, and the state says so.
+            Effect::Sort(request) => {
+                let _ = self.sorter.submit(request);
+            }
+            // As a sort; the pattern window says so.
+            Effect::MatchNames(request) => {
+                let _ = self.matcher.submit(request);
+            }
+            Effect::Preview(request) => self.preview_on_worker(request),
+            Effect::StopPreview => self.previewer.stop(),
+            // As a sort; the properties window says so.
+            Effect::Measure(request) => {
+                let _ = self.measurer.submit(request);
+            }
+            Effect::StopMeasure => self.measurer.stop(),
+            Effect::Hash(request) => {
+                let _ = self.hasher.submit(request);
+            }
+            Effect::StopHashes => self.hasher.stop(),
+            _ => {}
+        }
+    }
+
+    /// Sets the view of the properties window, while there is one, when it changed since the
+    /// last one set.
+    fn show_properties(&self, window: &MainWindow, state: &AppState) {
+        if let Some(properties) = state.properties()
+            && let Some(view) = self.properties.view(properties, &self.tz.borrow())
+        {
+            window.set_properties_view(view);
+        }
+    }
+
     /// Shows the job panel and the toolbar's Undo, after a job's progress or state changed.
     fn redraw_jobs(&self) {
         let Some(window) = self.window.upgrade() else {
@@ -1755,6 +1878,8 @@ impl Controller {
     /// worker found at its target change without a change of the dialog.
     fn show_dialog(&self, window: &MainWindow, state: &AppState) {
         let kind = ui_bridge::dialog_kind(state.modal(), state.quitting());
+        // Its view changes without a change of the dialog, and is set before it shows.
+        self.show_properties(window, state);
         let picker = state.shown_picker();
         if let Some(picker) = picker {
             let found = state.pick_found();
@@ -1803,7 +1928,7 @@ impl Controller {
                 window.set_pattern_view(ui_bridge::pattern_view(dialog));
             }
             // Set above.
-            Some(Modal::Pick(_)) | None => {}
+            Some(Modal::Pick(_) | Modal::Properties) | None => {}
         }
         window.set_dialog(kind);
         if !behind {
@@ -1811,6 +1936,50 @@ impl Controller {
         }
         *self.shown_modal.borrow_mut() = Some(now);
     }
+}
+
+/// The measure worker of the properties window: it reads through the local provider and hands
+/// what it finds to the controller, from its thread.
+fn measurer() -> Measurer {
+    let vfs = rf_vfs::Vfs::with_local();
+    properties::measurer(
+        move |request, cancel| {
+            crate::properties::measure(request, &vfs, cancel, PROGRESS_GAP, &mut |news| {
+                post(move |c| c.measure_news(news));
+            })
+        },
+        |outcome| {
+            post(move |c| match outcome {
+                Outcome::Done((generation, tally)) => c.measured(generation, Some(tally)),
+                Outcome::Failed(generation) => c.measured(generation, None),
+            });
+        },
+    )
+}
+
+/// The worker of the checksums of the properties window, as [`measurer`].
+fn hasher() -> Hasher {
+    let vfs = rf_vfs::Vfs::with_local();
+    properties::hasher(
+        move |request, cancel| {
+            hashing::hash_files(
+                request,
+                &vfs,
+                cancel,
+                HASH_CHUNK,
+                PROGRESS_GAP,
+                &mut |news| {
+                    post(move |c| c.hash_news(news));
+                },
+            )
+        },
+        |outcome| {
+            // A request that ended has told of every file already.
+            if let Outcome::Failed(generation) = outcome {
+                post(move |c| c.hashes_failed(generation));
+            }
+        },
+    )
 }
 
 /// Shows `layout` in the window, and whether navigation sync is on (`sync`, for the 보기

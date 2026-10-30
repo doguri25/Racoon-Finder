@@ -1,7 +1,8 @@
 //! What the Slint screens are given: the row models of a file list and of the folder trees,
-//! the conversions from the panes' state, the address bar's lists, the dialogs and the
-//! destination picker to Slint structs, the payload of a drag of rows, the keys the toolbar and
-//! the menus show, and [`post`], which brings a worker thread's result back to the UI thread.
+//! the conversions from the panes' state, the address bar's lists, the dialogs, the
+//! destination picker and the properties window to Slint structs, the payload of a drag of
+//! rows, the keys the toolbar and the menus show, and [`post`], which brings a worker thread's
+//! result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -29,21 +30,23 @@ use crate::format::{
     attribute_letters, file_icon, folder_label, format_size, format_time_in, kind_label,
     short_path, shown_name,
 };
+use crate::hashing::Algorithm;
 use crate::jobs::JobRow;
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickRequest, Picker, validate};
 use crate::places::{Place, PlaceKind};
 use crate::preview::PreviewContent;
+use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
 use crate::state::{Column, Completion, Names, PathForm, PreviewShown};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FileRow, FolderMenuRow,
-    FolderMenuView, JobRowView, MainWindow, MessageView, NameView, PaneView, PatternView,
-    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, RecoveryView, SectionHead,
-    Shortcuts, TabItem, TreeRow,
+    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FactRow, FileRow, FolderMenuRow,
+    FolderMenuView, HashRowView, JobRowView, MainWindow, MessageView, NameView, PaneView,
+    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
+    RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -879,6 +882,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_paste_move(key(Command::PasteMove));
     shown.set_copy_path(key(Command::CopyPath));
     shown.set_copy_path_form(PathForm::of_key(os).number());
+    shown.set_properties(key(Command::Properties));
 }
 
 /// The models the view of the preview panel and quick look keeps between redraws: the lines of
@@ -1004,6 +1008,98 @@ pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
         Some(Modal::Preflight(_)) => DialogKind::Preflight,
         Some(Modal::Pick(_)) => DialogKind::Pick,
         Some(Modal::Pattern(_)) => DialogKind::Pattern,
+        Some(Modal::Properties) => DialogKind::Properties,
+    }
+}
+
+/// The models the view of the properties window keeps between its views, and which window and
+/// revision of it they show: a view is made only when the window changed (a worker's news, a
+/// choice), not at each redraw of the main window.
+#[derive(Default)]
+pub struct PropertiesModels {
+    facts: Rc<VecModel<FactRow>>,
+    hashes: Rc<VecModel<HashRowView>>,
+    /// The id and revision of the window the models show.
+    shown: Cell<Option<(u64, u64)>>,
+}
+
+impl fmt::Debug for PropertiesModels {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PropertiesModels")
+            .field("hashes", &self.hashes.row_count())
+            .field("shown", &self.shown.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PropertiesModels {
+    /// The view of `properties`, with its times in `tz`, when it is another window or another
+    /// revision of it than the one shown last; `None` when the screen shows it already.
+    pub fn view(&self, properties: &Properties, tz: &TimeZone) -> Option<PropertiesView> {
+        let now = Some((properties.id, properties.revision));
+        if self.shown.replace(now) == now {
+            return None;
+        }
+        set_rows(
+            &self.facts,
+            properties::facts(properties, tz)
+                .into_iter()
+                .map(|fact| FactRow {
+                    label: fact.label.into(),
+                    value: fact.value.into(),
+                })
+                .collect(),
+        );
+        set_rows(
+            &self.hashes,
+            properties::hash_lines(properties)
+                .into_iter()
+                .map(|line| HashRowView {
+                    name: line.name.into(),
+                    value: line.value.into(),
+                    progress: line.progress.unwrap_or(-1.0),
+                    done: line.done,
+                    copied: line.copied,
+                    matched: line.matched,
+                })
+                .collect(),
+        );
+        let (title, icon, folder) = match properties.single() {
+            Some(item) => {
+                let (icon, folder) = item.entry.as_ref().map_or(("folder", true), |entry| {
+                    (file_icon(entry), entry.kind == EntryKind::Dir)
+                });
+                (properties.name(0), icon, folder)
+            }
+            None if properties.chosen.files == 0 => {
+                (words::item_count(properties.items.len()), "folder", true)
+            }
+            None => (words::item_count(properties.items.len()), "file", false),
+        };
+        let verdict = properties::verdict(properties);
+        let verdict_text = match &verdict {
+            Verdict::None => String::new(),
+            Verdict::Match(name, count) => words::verdict_match(name.as_deref(), *count),
+            Verdict::Mismatch => words::verdict_mismatch().to_owned(),
+            Verdict::Waiting => words::verdict_waiting().to_owned(),
+        };
+        let hashing = &properties.hashing;
+        Some(PropertiesView {
+            title: title.into(),
+            icon: icon.into(),
+            folder,
+            facts: ModelRc::from(Rc::clone(&self.facts)),
+            counting: properties.count.status == properties::CountStatus::Counting,
+            count_note: properties::count_note(properties).into(),
+            hashable: !hashing.rows.is_empty(),
+            algorithm: hashing.algorithm.map_or(-1, Algorithm::number),
+            hash_note: properties::hash_note(properties).into(),
+            several: hashing.rows.len() > 1,
+            hashes: ModelRc::from(Rc::clone(&self.hashes)),
+            verdict: verdict_text.into(),
+            matched: matches!(verdict, Verdict::Match(..)),
+            mismatched: verdict == Verdict::Mismatch,
+        })
     }
 }
 

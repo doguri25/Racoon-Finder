@@ -34,11 +34,13 @@ import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
 import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
+import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
-    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind
+    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
+    PropertiesView, FactRow, HashRowView
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -61,6 +63,8 @@ export enum DialogKind {
     pick,
     // Which rows to select by a pattern of their names.
     pattern,
+    // The properties of the chosen items and the checksums of their files.
+    properties,
     // The jobs stop before the app ends.
     closing,
 }
@@ -101,6 +105,7 @@ export component MainWindow inherits Window {
     in property <ConflictView> conflict-view;
     in property <PickView> pick-view;
     in property <PatternView> pattern-view;
+    in property <PropertiesView> properties-view;
     // The picker shows under the dialog on top of it (the name of its new folder): it stays in
     // view, and takes no click or key until it is on top again.
     in property <bool> pick-behind;
@@ -191,7 +196,7 @@ export component MainWindow inherits Window {
     // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
     // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
     // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons,
-    // quick-look.
+    // quick-look, properties.
     callback command(name: string);
     // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
     callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
@@ -276,6 +281,13 @@ export component MainWindow inherits Window {
     callback pattern-case(ignore: bool);
     callback pattern-mode(add: bool);
     callback pattern-accepted(text: string);
+    // The properties window: an algorithm was chosen (its number, `Algorithms.names`), 중지
+    // stopped the count of what its folders hold, 복사 of the checksum of row `row`, the field
+    // 비교 changed. Esc and 닫기 are `dialog-cancelled`.
+    callback properties-algorithm(number: int);
+    callback properties-stop();
+    callback properties-copy(row: int);
+    callback properties-compare(text: string);
     // The destination picker: a quick target was clicked, ↑ (-1) or ↓ (1), Enter, the confirm
     // button, the move/copy toggle, a conflict policy (0 ask, 1 overwrite, 2 skip, 3 rename),
     // the filter changed, a path was typed or entered, a row of its tree or its chevron was
@@ -1488,6 +1500,28 @@ export component MainWindow inherits Window {
             }
             accepted(text) => {
                 root.pattern-accepted(text);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.properties: PropertiesDialog {
+            width: min(640px, parent.width - 48px);
+            room: parent.height - 40px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.properties-view;
+            algorithm-chosen(number) => {
+                root.properties-algorithm(number);
+            }
+            count-stopped => {
+                root.properties-stop();
+            }
+            copy(row) => {
+                root.properties-copy(row);
+            }
+            compare-edited(text) => {
+                root.properties-compare(text);
             }
             cancelled => {
                 root.dialog-cancelled();

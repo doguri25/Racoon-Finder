@@ -207,6 +207,9 @@ pub enum ClipboardWork {
     /// Put the paths of `paths` on the clipboard as text in `form` ([`path_text`]); tell
     /// [`AppState::paths_copied`] how it went.
     PutPaths { paths: Vec<VPath>, form: PathForm },
+    /// Put `text` on the clipboard (a checksum of the properties window); tell
+    /// [`AppState::checksum_copied`] with `token` how it went.
+    PutText { token: u64, text: String },
     /// Empty the clipboard if its change count is still this one (nothing came since).
     ClearIf(u64),
 }

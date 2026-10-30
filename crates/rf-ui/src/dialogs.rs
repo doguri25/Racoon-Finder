@@ -1,8 +1,9 @@
 //! The windows that open over the main window, as plain data: the name of a new folder or of a
 //! rename, a confirmation, the failed items of a job, the jobs the last run left unfinished,
-//! the questions of the jobs, and the destination picker ([`Picker`]).
+//! the questions of the jobs, the destination picker ([`Picker`]) and the properties window.
 //! [`AppState`](crate::state::AppState) keeps the one that shows and the ones waiting behind
-//! it; `dialogs.slint`, `conflict-dialog.slint` and `pick-dialog.slint` draw them.
+//! it; `dialogs.slint`, `conflict-dialog.slint`, `pick-dialog.slint` and `properties.slint`
+//! draw them.
 //!
 //! Nothing here touches a file: a dialog that is answered gives the job to submit, and the
 //! state hands it to the engine.
@@ -35,6 +36,10 @@ pub enum Modal {
     Pick(Box<Picker>),
     /// Which rows to select by a pattern of their names (NAV-15).
     Pattern(PatternDialog),
+    /// The properties of the chosen items and the checksums of their files (OPS-06, OPS-10).
+    /// What it shows is the state's (`AppState::properties`): it changes as workers report,
+    /// which this window's place among the others does not.
+    Properties,
 }
 
 impl Modal {
@@ -48,7 +53,8 @@ impl Modal {
             | Modal::Failures(_)
             | Modal::Recovery(_)
             | Modal::Pick(_)
-            | Modal::Pattern(_) => None,
+            | Modal::Pattern(_)
+            | Modal::Properties => None,
         }
     }
 }

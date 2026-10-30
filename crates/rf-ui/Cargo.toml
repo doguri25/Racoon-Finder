@@ -12,10 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+blake3 = { version = "1.8.7", features = ["pure"] }
 chardetng = "1.0.0"
 encoding_rs = "0.8.42"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 jiff = "0.2.38"
+md-5 = { version = "0.11.0", default-features = false }
 opener = "0.9.0"
 regex = "1.13.1"
 rf-core = { version = "0.1.0", path = "../rf-core" }
@@ -23,9 +25,12 @@ rf-jobs = { version = "0.1.0", path = "../rf-jobs" }
 rf-platform = { version = "0.1.0", path = "../rf-platform" }
 rf-vfs = { version = "0.1.0", path = "../rf-vfs" }
 serde = { version = "1.0.229", features = ["derive"] }
+sha1 = { version = "0.11.0", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
 slint = "1.18.1"
 thiserror = "2.0.21"
 toml = "1.1.8"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

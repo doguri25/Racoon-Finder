@@ -75,6 +75,12 @@ pub enum Done {
     /// The paths are on the clipboard as text, or why not
     /// ([`AppState::paths_copied`](crate::state::AppState::paths_copied)).
     Paths(Result<(), ClipboardFailure>),
+    /// The text of request `token` is on the clipboard, or why not
+    /// ([`AppState::checksum_copied`](crate::state::AppState::checksum_copied)).
+    Text {
+        token: u64,
+        result: Result<(), ClipboardFailure>,
+    },
     /// The clipboard's change count now
     /// ([`AppState::clipboard_polled`](crate::state::AppState::clipboard_polled)).
     Polled(Option<u64>),
@@ -119,6 +125,10 @@ pub fn carry_out(work: ClipboardWork, clipboard: &dyn SystemClipboard, os: Os) -
             let text = path_text(&shown, form, os);
             let result = clipboard.put_text(&text).map(drop).map_err(failure);
             Some(Done::Paths(result))
+        }
+        ClipboardWork::PutText { token, text } => {
+            let result = clipboard.put_text(&text).map(drop).map_err(failure);
+            Some(Done::Text { token, result })
         }
         ClipboardWork::ClearIf(change) => {
             // A clipboard that cannot be emptied now keeps what it holds, which the next paste

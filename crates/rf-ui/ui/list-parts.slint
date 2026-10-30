@@ -6,15 +6,15 @@
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
 
-// The menu of an item: move and copy first (OPS-05), then the clipboard, each command with its
-// key (KEY-03). It wraps what is right-clicked; the press selects the item first, then calls
+// The menu of an item: move and copy first (OPS-05), then the clipboard, and 속성 last, as in
+// File Explorer, each command with its key (KEY-03). It wraps what is right-clicked; the press selects the item first, then calls
 // `show`. The clipboard's items are the system's: 잘라내기 where File Explorer has it (not on
 // macOS), 여기로 이동 where Finder has it (macOS only); 붙여넣기 and 여기로 이동 paste into the
 // item when it is a folder, as File Explorer does, and else into the pane's folder.
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
     // copy-files, paste-into, paste-move-into, copy-path-<form>, open, quick-look, rename,
-    // delete, delete-permanently).
+    // delete, delete-permanently, properties).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -99,6 +99,15 @@ export component RowMenu inherits ContextMenuArea {
             title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
             activated => {
                 root.command("delete-permanently");
+            }
+        }
+        MenuSeparator { }
+        // The app's own window (OPS-06); the system's own one ("OS 속성 창 열기") comes after it
+        // with M1-06 Task 10.
+        MenuItem {
+            title: Shortcuts.titled("속성", Shortcuts.properties);
+            activated => {
+                root.command("properties");
             }
         }
     }

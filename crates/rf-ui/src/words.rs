@@ -16,6 +16,7 @@ use rf_jobs::{
 use rf_platform::KnownFolder;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
+use crate::hashing::HashFailure;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
 use crate::state::{ClipboardFailure, Column};
@@ -1158,7 +1159,12 @@ pub fn exact_size(bytes: u64) -> String {
     if bytes < 1024 {
         return rounded;
     }
-    let digits = bytes.to_string();
+    format!("{rounded} ({} 바이트)", grouped(bytes))
+}
+
+/// `number` with a comma between each three digits: `1,258,291`.
+pub fn grouped(number: u64) -> String {
+    let digits = number.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, digit) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i).is_multiple_of(3) {
@@ -1166,7 +1172,7 @@ pub fn exact_size(bytes: u64) -> String {
         }
         grouped.push(digit);
     }
-    format!("{rounded} ({grouped} 바이트)")
+    grouped
 }
 
 /// The hint of the overwrite choice, the file that would come named by what `work` does with
@@ -1462,6 +1468,210 @@ fn subject_particle(word: &str) -> &'static str {
         _ => false,
     };
     if final_consonant { "이" } else { "가" }
+}
+
+/// The labels of the facts of the properties window (OPS-06), in their order.
+pub fn fact_kind() -> &'static str {
+    "종류"
+}
+
+pub fn fact_place() -> &'static str {
+    "위치"
+}
+
+pub fn fact_size() -> &'static str {
+    "크기"
+}
+
+/// What a folder holds, everything under it.
+pub fn fact_contents() -> &'static str {
+    "내용"
+}
+
+pub fn fact_link_target() -> &'static str {
+    "링크 대상"
+}
+
+pub fn fact_created() -> &'static str {
+    "만든 날짜"
+}
+
+pub fn fact_modified() -> &'static str {
+    "수정한 날짜"
+}
+
+pub fn fact_accessed() -> &'static str {
+    "접근한 날짜"
+}
+
+pub fn fact_attributes() -> &'static str {
+    "속성"
+}
+
+/// What a fact of the properties window says while a worker reads it.
+pub fn reading() -> &'static str {
+    "읽는 중…"
+}
+
+/// A time the system does not keep for the item (the creation time on some Linux file
+/// systems).
+pub fn unknown_time() -> &'static str {
+    "알 수 없음"
+}
+
+/// The kinds of several items in the properties window, as File Explorer counts them: `파일 2개,
+/// 폴더 1개` (a link or a special file is a file there).
+pub fn chosen_kinds(files: u64, folders: u64) -> String {
+    match (files, folders) {
+        (files, 0) => format!("파일 {}개", grouped(files)),
+        (0, folders) => format!("폴더 {}개", grouped(folders)),
+        (files, folders) => format!("파일 {}개, 폴더 {}개", grouped(files), grouped(folders)),
+    }
+}
+
+/// What the folders of the properties window hold: `파일 12,345개, 폴더 678개`.
+pub fn contents(files: u64, folders: u64) -> String {
+    format!("파일 {}개, 폴더 {}개", grouped(files), grouped(folders))
+}
+
+/// The size of the properties window: `1.2 MB (1,258,291 바이트)`, and `이상` after it while it
+/// is not the whole size (`whole` off: the count goes on, stopped or failed).
+pub fn size_fact(bytes: u64, whole: bool) -> String {
+    let size = exact_size(bytes);
+    if whole {
+        size
+    } else {
+        format!("{size} 이상")
+    }
+}
+
+/// The read-only, hidden, system and archive attributes of the properties window: the names
+/// of those that `flagged` (how many of `count` items have each) has, `(일부)` after one that
+/// only some of them have, or `없음`.
+pub fn attribute_names(flagged: &[usize; 4], count: usize) -> String {
+    const NAMES: [&str; 4] = ["읽기 전용", "숨김", "시스템", "보관"];
+    let names: Vec<String> = NAMES
+        .iter()
+        .zip(flagged)
+        .filter(|(_, flagged)| **flagged > 0)
+        .map(|(name, flagged)| {
+            if *flagged < count {
+                format!("{name} (일부)")
+            } else {
+                (*name).to_owned()
+            }
+        })
+        .collect();
+    if names.is_empty() {
+        "없음".to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// The count of the properties window's folders goes on.
+pub fn counting() -> &'static str {
+    "세는 중…"
+}
+
+/// 중지 stopped the count: the size is what it had found.
+pub fn count_stopped() -> &'static str {
+    "세다가 멈췄습니다"
+}
+
+/// The count failed (its worker did).
+pub fn count_failed() -> &'static str {
+    "크기를 끝까지 세지 못했습니다"
+}
+
+/// The folders under the properties window's that could not be listed.
+pub fn unreadable_folders(count: u64) -> String {
+    format!("읽을 수 없는 폴더 {}개는 세지 못했습니다", grouped(count))
+}
+
+/// The folders under the properties window's that are on another file system (a drive mounted
+/// in a folder), which the count does not enter.
+pub fn folders_elsewhere(count: u64) -> String {
+    format!(
+        "다른 드라이브의 폴더 {}개는 세지 않았습니다",
+        grouped(count)
+    )
+}
+
+/// A file whose checksum waits for the files before it.
+pub fn hash_waiting() -> &'static str {
+    "대기 중"
+}
+
+/// How far a file's checksum is: `42%`.
+pub fn hash_percent(fraction: f32) -> String {
+    // A whole percentage: the cast takes what the clamp left.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "0 to 100"
+    )]
+    let percent = (fraction.clamp(0.0, 1.0) * 100.0).floor() as u32;
+    format!("{percent}%")
+}
+
+/// Why a file has no checksum.
+pub fn hash_failure(failure: HashFailure) -> String {
+    match failure {
+        HashFailure::NotAFile => "일반 파일이 아니라 계산하지 않았습니다".to_owned(),
+        HashFailure::Unreadable(kind) => format!("계산하지 못했습니다: {}", error_kind(kind)),
+    }
+}
+
+/// A file stored online only, which reading would download, has no checksum.
+pub fn hash_online_only() -> &'static str {
+    "온라인 전용 파일이라 내려받지 않았습니다"
+}
+
+/// The properties window shows no file to hash (folders, links, special files).
+pub fn only_files_hashed() -> &'static str {
+    "체크섬은 파일만 계산합니다"
+}
+
+/// Before an algorithm is chosen.
+pub fn choose_algorithm() -> &'static str {
+    "알고리즘을 고르면 계산합니다"
+}
+
+/// How far the checksums of several files are: `계산 중… 파일 3/10`.
+pub fn hashing_files(finished: usize, total: usize) -> String {
+    format!("계산 중… 파일 {finished}/{total}")
+}
+
+/// The files past the first `count` have no checksum.
+pub fn hashed_first(count: usize) -> String {
+    format!(
+        "체크섬은 처음 파일 {}개만 계산합니다",
+        grouped(u64::try_from(count).unwrap_or(u64::MAX))
+    )
+}
+
+/// What the comparison with a pasted hash says when a checksum is it: `일치`, with the name of
+/// its file among several (`일치: a.txt`) or how many are (`일치: 파일 2개`).
+pub fn verdict_match(name: Option<&str>, count: usize) -> String {
+    match name {
+        Some(name) => format!("일치: {name}"),
+        None if count > 1 => format!(
+            "일치: 파일 {}개",
+            grouped(u64::try_from(count).unwrap_or(u64::MAX))
+        ),
+        None => "일치".to_owned(),
+    }
+}
+
+/// No checksum is the pasted hash.
+pub fn verdict_mismatch() -> &'static str {
+    "불일치"
+}
+
+/// No checksum is the pasted hash so far, and some are still to come.
+pub fn verdict_waiting() -> &'static str {
+    "계산이 끝나면 비교합니다"
 }
 
 #[cfg(test)]
