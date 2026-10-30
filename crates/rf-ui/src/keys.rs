@@ -173,6 +173,19 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether the command starts a program of the system or opens one of its windows (a
+    /// terminal, 연결 프로그램, a program run as administrator, the system's properties window):
+    /// a held key does it once, and its repeats nothing.
+    pub fn launches(&self) -> bool {
+        matches!(
+            self,
+            Command::OpenTerminal
+                | Command::OpenWith
+                | Command::RunAsAdmin
+                | Command::SystemProperties
+        )
+    }
+
     /// Whether the command acts on the rows of the active pane: its items, its cursor or its
     /// selection, or the pane with the keyboard. While the sidebar's tree has the keys, such a
     /// key does nothing (the tree's rows are not the pane's); the window's other commands work
@@ -1699,6 +1712,29 @@ mod tests {
             C::ViewLargeIcons,
         ] {
             assert!(!command.acts_on_rows(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn a_held_key_starts_one_program() {
+        for command in [
+            C::OpenTerminal,
+            C::OpenWith,
+            C::RunAsAdmin,
+            C::SystemProperties,
+        ] {
+            assert!(command.launches(), "{command:?}");
+        }
+        // A held arrow, Delete or Space keeps doing its work.
+        for command in [
+            C::CursorDown,
+            C::Trash,
+            C::QuickLook,
+            C::ContextMenu,
+            C::Properties,
+            C::Open,
+        ] {
+            assert!(!command.launches(), "{command:?}");
         }
     }
 

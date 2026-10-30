@@ -205,9 +205,9 @@ export component MainWindow inherits Window {
     private property <int> completion-rows: MenuRoom.rows(root.completion-up ? root.completion-above : root.completion-below, root.completion.note != "");
 
     // A key pressed while no text field has focus: the key's text (a character of
-    // `Key` for a special key) and the modifiers (on macOS `ctrl` is Command and `meta`
-    // Control). `true` when Rust used it.
-    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // `Key` for a special key), the modifiers (on macOS `ctrl` is Command and `meta`
+    // Control), and whether the system repeats a held key. `true` when Rust used it.
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool) -> bool;
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
     // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
     // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
@@ -649,7 +649,7 @@ export component MainWindow inherits Window {
             if (left.editing || right.editing || filter-box.has-focus || root.dialog != DialogKind.none || root.quick-look) {
                 return reject;
             }
-            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
                 return accept;
             }
             reject

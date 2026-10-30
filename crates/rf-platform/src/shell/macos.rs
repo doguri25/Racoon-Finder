@@ -25,7 +25,9 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
 use objc2_foundation::{NSArray, NSError, NSFileManager, NSString, NSURL};
 
-use super::{App, Launch, OpenWith, arrange_apps, info_window_launch, osascript_failure};
+use super::{
+    App, Launch, OpenWith, Owner, arrange_apps, info_window_launch, open_failure, osascript_failure,
+};
 
 pub const OPEN_WITH: OpenWith = OpenWith::Apps;
 pub const RUNS_AS_ADMIN: bool = false;
@@ -53,19 +55,19 @@ fn run(launch: &Launch, failure: impl Fn(&str) -> io::ErrorKind) -> io::Result<(
     Err(io::Error::new(failure(&said), said.trim().to_owned()))
 }
 
-pub fn start_terminal(launches: &[Launch]) -> io::Result<()> {
+pub fn start_terminal(launches: &[Launch], _owner: Owner) -> io::Result<()> {
     let Some(launch) = launches.first() else {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "no terminal program",
         ));
     };
-    // `open` ends with a status of 1 when it finds no app named Terminal (the folder is there:
-    // `open_terminal` looked).
-    run(launch, |_| io::ErrorKind::Unsupported)
+    // `open` says why it ends with a status of 1: no app named Terminal (`Unsupported`, as when
+    // no terminal is there), or anything else, whose kind the notice says.
+    run(launch, open_failure)
 }
 
-pub fn show_properties(path: &Path) -> io::Result<()> {
+pub fn show_properties(path: &Path, _owner: Owner) -> io::Result<()> {
     run(&info_window_launch(path)?, osascript_failure)
 }
 
@@ -132,14 +134,14 @@ pub fn open_with_app(path: &Path, app: &Path) -> io::Result<()> {
     }
 }
 
-pub fn open_with_dialog(_path: &Path) -> io::Result<()> {
+pub fn open_with_dialog(_path: &Path, _owner: Owner) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "macOS lists the apps instead (apps_for)",
     ))
 }
 
-pub fn run_as_admin(_path: &Path) -> io::Result<()> {
+pub fn run_as_admin(_path: &Path, _owner: Owner) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "no program runs as administrator on macOS",

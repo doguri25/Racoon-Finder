@@ -14,6 +14,7 @@ use std::rc::Rc;
 use jiff::tz::TimeZone;
 use rf_core::{Attributes, Entry, EntryKind, Os, VPath};
 use rf_jobs::TransferMode;
+use rf_platform::shell::Owner;
 use rf_vfs::{SortKey, SortOrder};
 use slint::language::DragAction;
 use slint::{
@@ -884,6 +885,23 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_copy_path_form(PathForm::of_key(os).number());
     shown.set_properties(key(Command::Properties));
     shown.set_open_terminal(key(Command::OpenTerminal));
+}
+
+/// The app's window as the owner of a dialog of the system: its Windows `HWND`, so that the
+/// dialogs and the consent prompt come in front of it. [`Owner::NONE`] on other systems, and
+/// for a window of another backend than winit's (the tests').
+pub fn owner_of(window: &MainWindow) -> Owner {
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    window
+        .window()
+        .with_winit_window(
+            |winit| match winit.window_handle().map(|handle| handle.as_raw()) {
+                Ok(RawWindowHandle::Win32(win32)) => Owner::hwnd(win32.hwnd),
+                _ => Owner::NONE,
+            },
+        )
+        .unwrap_or(Owner::NONE)
 }
 
 /// Gives the item menu what it offers for the items it opens for ([`MenuFacts`]).

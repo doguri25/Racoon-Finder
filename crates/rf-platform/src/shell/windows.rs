@@ -9,9 +9,12 @@
 //!
 //! Each call runs on a thread of its own that initializes COM as a single-threaded apartment,
 //! as the shell wants, and ends it: the caller's thread keeps whatever apartment it has. The
-//! shell is given no owner window. A dialog then belongs to no window of the app, so the app's
-//! window stays usable while it shows and the dialog's thread never waits on the UI thread's
-//! messages (an owner on another thread would tie the two threads' input together).
+//! shell gets the app's window as the owner ([`Owner`]), so that the dialogs and the consent
+//! prompt come in front of it: 연결 프로그램's dialog is modal to it (the window takes no input
+//! until the dialog closes), and while a dialog of this thread is owned by the window of the UI
+//! thread, the system ties the two threads' input together. Neither waits for the other: the
+//! dialog's thread runs the dialog's own message loop, and the UI thread never waits for a
+//! thread of this module.
 //!
 //! `ShellExecuteExW` gets `SEE_MASK_FLAG_NO_UI` (a failure comes back as an error rather than
 //! as the shell's message box), `SEE_MASK_NOASYNC` (the call is over when it returns, as the
@@ -20,11 +23,11 @@
 //! app. A program is given by its absolute path, found in the folders of `PATH`
 //! ([`find_program`]): the shell would look in the app's current folder first.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, c_void};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::ERROR_CANCELLED;
+use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
@@ -34,7 +37,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{HRESULT, PCWSTR};
 
-use super::{App, Launch, OpenWith, find_program, parameters};
+use super::{App, Launch, OpenWith, Owner, find_program, parameters};
 use crate::win_util::{to_io, wide};
 
 pub const OPEN_WITH: OpenWith = OpenWith::Dialog;
@@ -76,6 +79,16 @@ fn on_shell_thread<T: Send + 'static>(
         .unwrap_or_else(|_| Err(io::Error::other("the shell thread panicked")))
 }
 
+/// The window handle of `owner`, on the thread that passes it to the shell; `None` for none.
+fn owner_window(owner: Owner) -> Option<HWND> {
+    owner.raw().map(|hwnd| {
+        // A handle is a number that names a window, not memory to read.
+        HWND(std::ptr::without_provenance_mut::<c_void>(
+            hwnd.get().cast_unsigned(),
+        ))
+    })
+}
+
 /// Whether the user cancelled what the shell asked (the dialog of 연결 프로그램, the consent
 /// prompt of `runas`): no failure.
 fn cancelled(error: &windows::core::Error) -> bool {
@@ -90,6 +103,7 @@ struct Execute {
     parameters: Option<Vec<u16>>,
     directory: Option<Vec<u16>>,
     mask: u32,
+    owner: Owner,
 }
 
 fn shell_execute(execute: Execute) -> io::Result<()> {
@@ -107,11 +121,13 @@ fn shell_execute(execute: Execute) -> io::Result<()> {
             lpParameters: text(&execute.parameters),
             lpDirectory: text(&execute.directory),
             nShow: SW_SHOWNORMAL,
+            hwnd: owner_window(execute.owner).unwrap_or_default(),
             ..Default::default()
         };
         // SAFETY: `info` is a whole `SHELLEXECUTEINFOW` with its size set; every string in it
-        // is NUL-terminated and owned by `execute`, which outlives the call; no window and no
-        // item ID list is passed, and the mask asks for no process handle back.
+        // is NUL-terminated and owned by `execute`, which outlives the call; the window, if
+        // any, is the app's, which outlives the app's calls; no item ID list is passed, and the
+        // mask asks for no process handle back.
         match unsafe { ShellExecuteExW(&raw mut info) } {
             Ok(()) => Ok(()),
             Err(error) if cancelled(&error) => Ok(()),
@@ -133,8 +149,10 @@ fn present(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-pub fn start_terminal(launches: &[Launch]) -> io::Result<()> {
+pub fn start_terminal(launches: &[Launch], owner: Owner) -> io::Result<()> {
     let dirs = path_dirs();
+    // The failure of the last program found, if one would not start: the next one is tried.
+    let mut failed = None;
     for launch in launches {
         let Some(program) = find_program(&launch.program, dirs.iter().cloned(), present) else {
             continue;
@@ -151,20 +169,22 @@ pub fn start_terminal(launches: &[Launch]) -> io::Result<()> {
             parameters: (!parameters.is_empty()).then(|| wide(&parameters)),
             directory: launch.cwd.as_deref().map(|cwd| wide(cwd.as_os_str())),
             mask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NO_CONSOLE,
+            owner,
         };
         match shell_execute(execute) {
-            // Found on `PATH` and gone since: the next one.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            other => return other,
+            Ok(()) => return Ok(()),
+            Err(error) => failed = Some(error),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "neither Windows Terminal nor PowerShell was found",
-    ))
+    Err(failed.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "neither Windows Terminal nor PowerShell was found",
+        )
+    }))
 }
 
-pub fn run_as_admin(path: &Path) -> io::Result<()> {
+pub fn run_as_admin(path: &Path, owner: Owner) -> io::Result<()> {
     // The program starts in its own folder, as File Explorer starts it.
     let directory = path.parent().map(|folder| wide(folder.as_os_str()));
     shell_execute(Execute {
@@ -173,10 +193,11 @@ pub fn run_as_admin(path: &Path) -> io::Result<()> {
         parameters: None,
         directory,
         mask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        owner,
     })
 }
 
-pub fn open_with_dialog(path: &Path) -> io::Result<()> {
+pub fn open_with_dialog(path: &Path, owner: Owner) -> io::Result<()> {
     let file = wide(path.as_os_str());
     on_shell_thread(move || {
         let info = OPENASINFO {
@@ -186,8 +207,8 @@ pub fn open_with_dialog(path: &Path) -> io::Result<()> {
             oaifInFlags: OAIF_EXEC,
         };
         // SAFETY: `info` and the NUL-terminated `file` it points to outlive the call, which
-        // returns once the dialog is closed; no owner window is passed.
-        match unsafe { SHOpenWithDialog(None, &raw const info) } {
+        // returns once the dialog is closed; the owner, if any, is the app's window.
+        match unsafe { SHOpenWithDialog(owner_window(owner), &raw const info) } {
             Ok(()) => Ok(()),
             Err(error) if cancelled(&error) => Ok(()),
             Err(error) => Err(to_io(&error)),
@@ -195,13 +216,19 @@ pub fn open_with_dialog(path: &Path) -> io::Result<()> {
     })
 }
 
-pub fn show_properties(path: &Path) -> io::Result<()> {
+pub fn show_properties(path: &Path, owner: Owner) -> io::Result<()> {
     let name = wide(path.as_os_str());
     on_shell_thread(move || {
-        // SAFETY: `name` is NUL-terminated and outlives the call; no owner window and no page
-        // name are passed. The shell shows the window on a thread of its own and returns.
+        // SAFETY: `name` is NUL-terminated and outlives the call; the owner, if any, is the
+        // app's window, and no page name is passed. The shell shows the window on a thread of
+        // its own and returns.
         let shown = unsafe {
-            SHObjectProperties(None, SHOP_FILEPATH, PCWSTR(name.as_ptr()), PCWSTR::null())
+            SHObjectProperties(
+                owner_window(owner),
+                SHOP_FILEPATH,
+                PCWSTR(name.as_ptr()),
+                PCWSTR::null(),
+            )
         };
         if shown.as_bool() {
             Ok(())
@@ -242,13 +269,21 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_is_the_window_handle_as_it_was_given() {
+        assert_eq!(owner_window(Owner::NONE), None);
+        let hwnd = std::num::NonZeroIsize::new(0x0012_3456).expect("not zero");
+        let window = owner_window(Owner::hwnd(hwnd)).expect("a window");
+        assert_eq!(window.0.addr(), 0x0012_3456);
+    }
+
+    #[test]
     fn a_missing_program_starts_nothing() {
         let launch = Launch {
             program: OsStr::new("rf-no-such-terminal.exe").to_owned(),
             args: Vec::new(),
             cwd: Some(std::env::temp_dir()),
         };
-        let error = start_terminal(&[launch]).expect_err("no such program");
+        let error = start_terminal(&[launch], Owner::NONE).expect_err("no such program");
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 }

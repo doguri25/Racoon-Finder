@@ -6,10 +6,12 @@
 //!   with the app chosen, `OAIF_EXEC`, and leaves "always use this app" off: a change of the
 //!   system's file associations goes through rf-ledger, PRD INST-02); a program runs as
 //!   administrator by the shell's `runas` verb (`ShellExecuteExW`; the consent prompt is the
-//!   system's); the terminal is Windows Terminal (`wt.exe -d .`), or else PowerShell
+//!   system's), but for a batch file at a path that `cmd.exe` would read as a command
+//!   ([`elevation`]); the terminal is Windows Terminal (`wt.exe -d .`), or else PowerShell
 //!   (`powershell.exe -NoExit`), each started in the folder; the properties window is the
 //!   shell's (`SHObjectProperties`). Every call runs on a thread of its own that initializes
-//!   COM, as the trash does, so the caller's apartment is left alone.
+//!   COM, as the trash does, so the caller's apartment is left alone, and gives the shell the
+//!   app's window ([`Owner`]), so that the dialogs and the consent prompt come in front of it.
 //! - **macOS:** the apps that can open a file come from `NSWorkspace`
 //!   (`URLsForApplicationsToOpenURL:`, the default one first), for the app to show in a menu of
 //!   its own, and the one chosen opens it (`openURLs:withApplicationAtURL:…`); the terminal is
@@ -36,6 +38,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::num::NonZeroIsize;
 use std::path::{Path, PathBuf};
 
 use rf_core::Os;
@@ -94,22 +97,82 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
 }
 
+/// The app's window that a dialog of the system belongs to: on Windows its `HWND`, so that the
+/// dialog, and the consent prompt of a program run as administrator, come in front of it.
+/// [`Owner::NONE`] for none; other systems do not use it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Owner(Option<NonZeroIsize>);
+
+impl Owner {
+    /// No window: a dialog stands on its own.
+    pub const NONE: Owner = Owner(None);
+
+    /// The window whose Windows handle (`HWND`) is `hwnd`.
+    pub fn hwnd(hwnd: NonZeroIsize) -> Owner {
+        Owner(Some(hwnd))
+    }
+
+    /// The Windows handle of the window, if there is one.
+    pub fn raw(self) -> Option<NonZeroIsize> {
+        self.0
+    }
+}
+
 /// The extensions of the files Windows runs as administrator, as File Explorer offers it on
 /// them: programs (`exe`, `com`), batch files (`bat`, `cmd`) and management consoles (`msc`).
 /// An installer (`msi`) asks for the rights it needs itself, so File Explorer has no "run as
 /// administrator" on it.
 pub const RUNNABLE: [&str; 5] = ["exe", "com", "bat", "cmd", "msc"];
 
-/// Whether `path` names a file that Windows runs as administrator: one of [`RUNNABLE`], in any
-/// case. Only the name is looked at.
+/// The extensions of the batch files among [`RUNNABLE`]: the system runs them as administrator
+/// through `cmd.exe /C "%1" %*`, which reads the path again.
+pub const BATCH: [&str; 2] = ["bat", "cmd"];
+
+/// The characters `cmd.exe` gives a meaning in a command line, quotes or not: it expands
+/// `%VAR%` and `!VAR!`, and it drops the quotes around a path with `&`, `(`, `)`, `@`, `^` and
+/// the separators `;`, `,`, `=` in it (`cmd /?`), which then run what follows them, elevated.
+/// Windows names cannot hold `<`, `>`, `|` or `"`, which are here all the same.
+pub const BATCH_UNSAFE: [char; 14] = [
+    '%', '!', '^', '&', '(', ')', '@', ';', ',', '=', '<', '>', '|', '"',
+];
+
+/// Whether, and why not, Windows may run a file as administrator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Elevation {
+    /// One of [`RUNNABLE`], at a path the system takes as it is.
+    Runs,
+    /// A batch file ([`BATCH`]) at a path that `cmd.exe` would read as more than its path: it
+    /// holds one of [`BATCH_UNSAFE`], or a white space other than a plain space.
+    UnsafeBatch,
+    /// Not one of [`RUNNABLE`].
+    NotAProgram,
+}
+
+/// Whether Windows may run the file at `path` as administrator. Only the path is looked at: the
+/// extension, and for a batch file the whole path, folders too, which `cmd.exe` reads again.
+/// Programs and consoles start without such a reading (`CreateProcess`, `mmc`).
+pub fn elevation(path: &Path) -> Elevation {
+    let is = |list: &[&str], extension: &str| {
+        list.iter()
+            .any(|known| known.eq_ignore_ascii_case(extension))
+    };
+    let Some(extension) = path.extension().and_then(OsStr::to_str) else {
+        return Elevation::NotAProgram;
+    };
+    if !is(&RUNNABLE, extension) {
+        return Elevation::NotAProgram;
+    }
+    let unsafe_char =
+        |c: char| BATCH_UNSAFE.contains(&c) || (c.is_whitespace() && c != ' ') || c.is_control();
+    if is(&BATCH, extension) && path.to_string_lossy().chars().any(unsafe_char) {
+        return Elevation::UnsafeBatch;
+    }
+    Elevation::Runs
+}
+
+/// Whether `path` names a file that Windows runs as administrator ([`elevation`]).
 pub fn can_run_as_admin(path: &Path) -> bool {
-    path.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            RUNNABLE
-                .iter()
-                .any(|runnable| runnable.eq_ignore_ascii_case(extension))
-        })
+    elevation(path) == Elevation::Runs
 }
 
 /// The programs that open a terminal in `folder` on `os`, the first one that the system has
@@ -163,12 +226,16 @@ pub fn terminal_launches(
 /// The lines of the `AppleScript` that opens Finder's 정보 가져오기 window of the item whose path is
 /// its one argument. The path is never part of the script: `osascript` hands it to the script's
 /// `run` handler as `item 1 of argv`.
+///
+/// Inside `tell application "Finder"` a name of Finder's dictionary means Finder's own term
+/// (`target` is the folder of Finder's front window), so the script's own variable has a name
+/// Finder does not have.
 pub const INFO_WINDOW_SCRIPT: [&str; 7] = [
     "on run argv",
-    "set target to (POSIX file (item 1 of argv)) as alias",
+    "set theItem to (POSIX file (item 1 of argv)) as alias",
     "tell application \"Finder\"",
     "activate",
-    "open information window of target",
+    "open information window of theItem",
     "end tell",
     "end run",
 ];
@@ -199,6 +266,19 @@ pub fn osascript_failure(stderr: &str) -> io::ErrorKind {
     if stderr.contains("(-1743)") || stderr.contains("(-1744)") {
         io::ErrorKind::PermissionDenied
     } else if stderr.contains("(-43)") {
+        io::ErrorKind::NotFound
+    } else {
+        io::ErrorKind::Other
+    }
+}
+
+/// What a failure of `open -a Terminal` was, from what it wrote: no app named Terminal
+/// (`Unsupported`, as when no terminal program is there), a folder that is gone, or anything
+/// else.
+pub fn open_failure(stderr: &str) -> io::ErrorKind {
+    if stderr.contains("Unable to find application") {
+        io::ErrorKind::Unsupported
+    } else if stderr.contains("does not exist") {
         io::ErrorKind::NotFound
     } else {
         io::ErrorKind::Other
@@ -283,9 +363,10 @@ pub fn find_program(
 }
 
 /// Opens a terminal in `folder` (OPS-11): the first program of [`terminal_launches`] that the
-/// system has. `NotADirectory` when `folder` is not a folder (`NotFound` when it is gone), and
-/// `Unsupported` when no terminal program is there.
-pub fn open_terminal(folder: &Path) -> io::Result<()> {
+/// system has and starts. `NotADirectory` when `folder` is not a folder (`NotFound` when it is
+/// gone), `Unsupported` when no terminal program is there, and the last failure when the ones
+/// there would not start. A link to a folder is that folder.
+pub fn open_terminal(folder: &Path, owner: Owner) -> io::Result<()> {
     if !std::fs::metadata(folder)?.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -294,23 +375,24 @@ pub fn open_terminal(folder: &Path) -> io::Result<()> {
     }
     let terminal = std::env::var_os("TERMINAL");
     let launches = terminal_launches(Os::CURRENT, folder, terminal.as_deref())?;
-    imp::start_terminal(&launches)
+    imp::start_terminal(&launches, owner)
 }
 
 /// Shows the system's properties window of the item at `path` (OPS-06): File Explorer's on
-/// Windows, Finder's 정보 가져오기 on macOS. It returns once the window is asked for; the window
-/// stays until the user closes it. `Unsupported` elsewhere.
-pub fn show_properties(path: &Path) -> io::Result<()> {
+/// Windows (in front of `owner`), Finder's 정보 가져오기 on macOS. It returns once the window is
+/// asked for; the window stays until the user closes it. `Unsupported` elsewhere.
+pub fn show_properties(path: &Path, owner: Owner) -> io::Result<()> {
     check_path(Os::CURRENT, path)?;
-    imp::show_properties(path)
+    imp::show_properties(path, owner)
 }
 
 /// Shows the system's dialog to choose the app that opens the file at `path`, which opens it
-/// with the one chosen (Windows), and returns once the dialog closes. `Unsupported` where
-/// [`OPEN_WITH`] is not [`OpenWith::Dialog`].
-pub fn open_with_dialog(path: &Path) -> io::Result<()> {
+/// with the one chosen (Windows), and returns once the dialog closes. The dialog belongs to
+/// `owner`, which takes no input until it closes. `Unsupported` where [`OPEN_WITH`] is not
+/// [`OpenWith::Dialog`].
+pub fn open_with_dialog(path: &Path, owner: Owner) -> io::Result<()> {
     check_path(Os::CURRENT, path)?;
-    imp::open_with_dialog(path)
+    imp::open_with_dialog(path, owner)
 }
 
 /// The apps that can open the file at `path`, the default one first ([`arrange_apps`]).
@@ -330,17 +412,22 @@ pub fn open_with_app(path: &Path, app: &Path) -> io::Result<()> {
 }
 
 /// Runs the program at `path` as administrator (Windows): the system asks the user for
-/// consent first. `InvalidInput` for a file that is not one of [`RUNNABLE`], and
+/// consent first, in front of `owner`. `InvalidInput` for a file that is not one of
+/// [`RUNNABLE`], or a batch file at a path `cmd.exe` would read again ([`elevation`]), and
 /// `Unsupported` where [`RUNS_AS_ADMIN`] is false.
-pub fn run_as_admin(path: &Path) -> io::Result<()> {
+pub fn run_as_admin(path: &Path, owner: Owner) -> io::Result<()> {
     check_path(Os::CURRENT, path)?;
-    if !can_run_as_admin(path) {
-        return Err(io::Error::new(
+    match elevation(path) {
+        Elevation::Runs => imp::run_as_admin(path, owner),
+        Elevation::UnsafeBatch => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cmd.exe would read this batch file's path as a command",
+        )),
+        Elevation::NotAProgram => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "only a program runs as administrator",
-        ));
+        )),
     }
-    imp::run_as_admin(path)
 }
 
 /// `InvalidInput` unless `path` is an absolute path of `os` without a NUL.
@@ -606,6 +693,89 @@ mod tests {
         ] {
             assert!(!can_run_as_admin(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn batch_files_run_as_administrator_only_at_paths_cmd_takes_as_they_are() {
+        // `cmd.exe /C "%1"` reads these as more than a path: `&` ends the command (`x&calc&.bat`
+        // would start calc elevated), `%` and `!` expand, parentheses and the separators let it
+        // drop the quotes.
+        for path in [
+            r"C:\R&D\build.bat",
+            r"C:\설치 (최종).bat",
+            r"C:\Program Files (x86)\x.bat",
+            r"C:\%TEMP%.cmd",
+            r"C:\a!b.cmd",
+            r"C:\x&calc&.bat",
+            r"C:\a^b.bat",
+            r"C:\a@b.cmd",
+            r"C:\a;b\x.bat",
+            r"C:\a,b.bat",
+            r"C:\a=b.BAT",
+            "C:\\tab\there.cmd",
+            "C:\\no\u{a0}break.bat",
+        ] {
+            let path = Path::new(path);
+            assert_eq!(elevation(path), Elevation::UnsafeBatch, "{path:?}");
+            assert!(!can_run_as_admin(path), "{path:?}");
+        }
+        for path in [
+            r"C:\tools\build.bat",
+            r"C:\내 도구\빌드.CMD",
+            "/home/me/run.bat",
+        ] {
+            assert_eq!(elevation(Path::new(path)), Elevation::Runs, "{path}");
+        }
+        // A program or a console starts without such a reading: its path may hold them.
+        for path in [
+            r"C:\Program Files (x86)\App\setup.exe",
+            r"C:\R&D\tool.com",
+            r"C:\100%\devmgmt.msc",
+        ] {
+            assert_eq!(elevation(Path::new(path)), Elevation::Runs, "{path}");
+        }
+        assert_eq!(elevation(Path::new(r"C:\a&b.txt")), Elevation::NotAProgram);
+    }
+
+    #[test]
+    fn the_script_names_no_variable_after_a_term_of_finder() {
+        // Inside `tell application "Finder"` these are Finder's own: `target` is the folder of
+        // its front window, and `open information window of target` would open that.
+        const FINDER_TERMS: [&str; 6] = ["target", "item", "file", "folder", "window", "name"];
+        let mut names = Vec::new();
+        for line in INFO_WINDOW_SCRIPT {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            match words.as_slice() {
+                ["on", "run", parameter] => names.push(*parameter),
+                ["set", name, "to", ..] => names.push(*name),
+                _ => {}
+            }
+        }
+        assert_eq!(names, ["argv", "theItem"]);
+        for name in names {
+            assert!(
+                !FINDER_TERMS
+                    .iter()
+                    .any(|term| term.eq_ignore_ascii_case(name)),
+                "{name} is a term of Finder"
+            );
+        }
+        // The window opens for the item the path names, which comes from `argv` alone.
+        assert!(INFO_WINDOW_SCRIPT.contains(&"open information window of theItem"));
+        assert!(INFO_WINDOW_SCRIPT[1].contains("(item 1 of argv)"));
+    }
+
+    #[test]
+    fn open_errors_say_what_went_wrong() {
+        let missing = "Unable to find application named 'Terminal'";
+        assert_eq!(open_failure(missing), io::ErrorKind::Unsupported);
+        let gone = "The file /Users/me/x does not exist.";
+        assert_eq!(open_failure(gone), io::ErrorKind::NotFound);
+        assert_eq!(
+            open_failure("LSOpenURLsWithRole() failed"),
+            io::ErrorKind::Other
+        );
+        assert_eq!(open_failure(""), io::ErrorKind::Other);
     }
 
     #[test]

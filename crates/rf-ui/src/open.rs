@@ -7,11 +7,11 @@
 //! of them needs the main thread, so the UI thread never waits for one.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rf_core::{Error, ErrorKind, VPath};
-use rf_platform::shell::{self as system, App, OpenWith};
+use rf_platform::shell::{self as system, App, OpenWith, Owner};
 
 use crate::state::ShellWork;
 use crate::words::ShellAction;
@@ -66,15 +66,16 @@ pub enum ShellNews {
 
 /// Asks the system for `work` on a worker thread of its own and returns at once; `on_news` is
 /// called there with what the UI thread is to know, if anything (or here, when no thread could
-/// be started). A choice the user cancels is no news.
-pub fn shell(work: ShellWork, on_news: impl Fn(ShellNews) + Send + Sync + 'static) {
+/// be started). A choice the user cancels is no news. A dialog of the system, and the consent
+/// prompt, belong to `owner`, the app's window, which the UI thread gave.
+pub fn shell(work: ShellWork, owner: Owner, on_news: impl Fn(ShellNews) + Send + Sync + 'static) {
     let action = work.action();
     let on_news = Arc::new(on_news);
     let worker_news = Arc::clone(&on_news);
     let spawned = std::thread::Builder::new()
         .name("rf-ui-shell".into())
         .spawn(move || {
-            if let Some(news) = ask_system(work) {
+            if let Some(news) = ask_system(work, owner) {
                 worker_news(news);
             }
         });
@@ -84,7 +85,7 @@ pub fn shell(work: ShellWork, on_news: impl Fn(ShellNews) + Send + Sync + 'stati
 }
 
 /// Does `work` and waits for the system: what the UI thread is to know of it, if anything.
-fn ask_system(work: ShellWork) -> Option<ShellNews> {
+fn ask_system(work: ShellWork, owner: Owner) -> Option<ShellNews> {
     let action = work.action();
     // The plain local path, which the system's calls want; none for another location.
     let local = |path: &VPath| path.as_local().map(Path::to_path_buf);
@@ -100,6 +101,7 @@ fn ask_system(work: ShellWork) -> Option<ShellNews> {
         ShellWork::RunAsAdmin(path)
         | ShellWork::Terminal(path)
         | ShellWork::SystemProperties(path) => local(path),
+        ShellWork::LinkTerminal { link, .. } => local(link),
     }) else {
         return Some(ShellNews::Failed(action, ErrorKind::Unsupported));
     };
@@ -110,13 +112,31 @@ fn ask_system(work: ShellWork) -> Option<ShellNews> {
                 found: system::apps_for(&path)
                     .map_err(|error| Error::io("list the apps", file.clone(), error).kind()),
             }),
-            OpenWith::Dialog => done(system::open_with_dialog(&path), &file),
+            OpenWith::Dialog => done(system::open_with_dialog(&path, owner), &file),
             OpenWith::Unsupported => Some(ShellNews::Failed(action, ErrorKind::Unsupported)),
         },
         ShellWork::OpenWithApp { file, app } => done(system::open_with_app(&path, &app), &file),
-        ShellWork::RunAsAdmin(file) => done(system::run_as_admin(&path), &file),
-        ShellWork::Terminal(folder) => done(system::open_terminal(&path), &folder),
-        ShellWork::SystemProperties(item) => done(system::show_properties(&path), &item),
+        ShellWork::RunAsAdmin(file) => done(system::run_as_admin(&path, owner), &file),
+        ShellWork::Terminal(folder) => done(system::open_terminal(&path, owner), &folder),
+        ShellWork::LinkTerminal { otherwise, .. } => {
+            let Some(otherwise_path) = local(&otherwise) else {
+                return Some(ShellNews::Failed(action, ErrorKind::Unsupported));
+            };
+            let folder = link_terminal_folder(&path, &otherwise_path);
+            done(system::open_terminal(&folder, owner), &otherwise)
+        }
+        ShellWork::SystemProperties(item) => done(system::show_properties(&path, owner), &item),
+    }
+}
+
+/// Where a terminal for the link at `link` opens: at the link itself when it leads to a folder
+/// (the terminal is in the folder it leads to, by the link's path), else at `otherwise`, as for
+/// a file. It reads the file system: call it on a worker thread.
+fn link_terminal_folder(link: &Path, otherwise: &Path) -> PathBuf {
+    if std::fs::metadata(link).is_ok_and(|found| found.is_dir()) {
+        link.to_path_buf()
+    } else {
+        otherwise.to_path_buf()
     }
 }
 
@@ -146,7 +166,7 @@ mod tests {
     /// What `work` comes back with on Linux.
     fn news_of(work: ShellWork) -> ShellNews {
         let (tx, rx) = mpsc::channel();
-        shell(work, move |news| {
+        shell(work, Owner::NONE, move |news| {
             let _ = tx.send(news);
         });
         rx.recv_timeout(Duration::from_secs(10))
@@ -187,5 +207,31 @@ mod tests {
             ShellNews::Failed(ShellAction::Terminal, ErrorKind::NotFound) => {}
             other => panic!("{other:?}"),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod link_tests {
+    use super::*;
+
+    // A link is a folder for a terminal when it leads to one; to a file, or to nothing, it opens
+    // where a file would (the pane's folder).
+    #[test]
+    fn a_terminal_for_a_link_opens_where_it_leads_to_a_folder() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let folder = dir.path().join("작업");
+        std::fs::create_dir(&folder).expect("a folder");
+        let file = dir.path().join("메모.txt");
+        std::fs::write(&file, "x").expect("a file");
+        let to_folder = dir.path().join("작업 링크");
+        let to_file = dir.path().join("메모 링크");
+        let dangling = dir.path().join("없는 곳 링크");
+        std::os::unix::fs::symlink(&folder, &to_folder).expect("a link to the folder");
+        std::os::unix::fs::symlink(&file, &to_file).expect("a link to the file");
+        std::os::unix::fs::symlink(dir.path().join("없음"), &dangling).expect("a dangling link");
+        let pane = dir.path();
+        assert_eq!(link_terminal_folder(&to_folder, pane), to_folder);
+        assert_eq!(link_terminal_folder(&to_file, pane), pane);
+        assert_eq!(link_terminal_folder(&dangling, pane), pane);
     }
 }

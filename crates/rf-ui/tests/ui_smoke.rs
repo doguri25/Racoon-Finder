@@ -162,18 +162,53 @@ fn pane_view_shows_rows_from_the_model() {
 }
 
 #[test]
+fn a_held_key_reaches_rust_as_repeated() {
+    let window = window();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&seen);
+    window.on_key(move |text, _, shift, _, _, repeat| {
+        record.borrow_mut().push((text.to_string(), shift, repeat));
+        true
+    });
+    let f4 = SharedString::from(char::from(Key::F4));
+    let shift = SharedString::from(char::from(Key::Shift));
+    let send = |event| window.window().dispatch_event(event);
+    send(WindowEvent::KeyPressed {
+        text: shift.clone(),
+    });
+    send(WindowEvent::KeyPressed { text: f4.clone() });
+    send(WindowEvent::KeyPressRepeated { text: f4.clone() });
+    send(WindowEvent::KeyPressRepeated { text: f4.clone() });
+    send(WindowEvent::KeyReleased { text: f4.clone() });
+    send(WindowEvent::KeyReleased { text: shift });
+    let f4 = f4.to_string();
+    assert_eq!(
+        seen.borrow()
+            .iter()
+            .filter(|(text, _, _)| *text == f4)
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            (f4.clone(), true, false),
+            (f4.clone(), true, true),
+            (f4, true, true),
+        ]
+    );
+}
+
+#[test]
 fn key_callback_reaches_rust() {
     let window = window();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&seen);
-    window.on_key(move |text, ctrl, shift, alt, meta| {
+    window.on_key(move |text, ctrl, shift, alt, meta, _| {
         record
             .borrow_mut()
             .push((text.to_string(), ctrl, shift, alt, meta));
         true
     });
 
-    assert!(window.invoke_key("a".into(), true, false, false, false));
+    assert!(window.invoke_key("a".into(), true, false, false, false, false));
     assert_eq!(
         seen.borrow().as_slice(),
         [("a".to_owned(), true, false, false, false)]
@@ -213,7 +248,7 @@ fn keys_go_to_the_path_field_while_it_is_open() {
     let window = window();
     let seen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&seen);
-    window.on_key(move |text, ctrl, _, _, _| {
+    window.on_key(move |text, ctrl, _, _, _, _| {
         record.borrow_mut().push((text.to_string(), ctrl));
         true
     });
@@ -433,7 +468,7 @@ fn the_path_field_asks_for_completions_and_takes_the_lists_keys() {
         record.borrow_mut().push(format!("entered {side} {text}"));
     });
     let record = Rc::clone(&calls);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(format!("key {text}"));
         true
     });
@@ -535,7 +570,7 @@ fn a_tab_before_the_first_completions_keeps_the_field_and_waits() {
         record.borrow_mut().push(format!("step {side} {delta}"));
     });
     let record = Rc::clone(&calls);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(format!("key {text}"));
         true
     });
@@ -590,7 +625,7 @@ fn esc_while_a_syllable_is_composed_closes_and_carries_out_nothing() {
         SharedString::new()
     });
     let record = Rc::clone(&calls);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(format!("key {text}"));
         true
     });
@@ -1639,7 +1674,7 @@ fn a_dialog_takes_the_keys_until_it_closes() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -2230,7 +2265,7 @@ fn the_picker_takes_the_keys_until_it_closes() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -3474,7 +3509,7 @@ fn the_filter_box_hands_over_what_is_typed_and_esc_clears_it() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -3603,7 +3638,7 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     let record = calls.clone();
     window.on_theme_chosen(move |choice| record.note(format!("theme {choice}")));
     let record = calls.clone();
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.note(format!("key {text}"));
         false
     });
@@ -4285,7 +4320,7 @@ fn the_tree_takes_the_keys_until_it_gives_them_back() {
         used
     });
     let record = calls.clone();
-    window.on_key(move |_, _, _, _, _| {
+    window.on_key(move |_, _, _, _, _, _| {
         record.note("key");
         true
     });
@@ -4330,7 +4365,7 @@ fn the_job_panel_takes_the_keys_while_it_shows() {
         used
     });
     let record = calls.clone();
-    window.on_key(move |_, _, _, _, _| {
+    window.on_key(move |_, _, _, _, _, _| {
         record.note("key");
         true
     });
@@ -4379,7 +4414,7 @@ fn the_view_menu_gives_the_tree_the_keys() {
         true
     });
     let record = calls.clone();
-    window.on_key(move |_, _, _, _, _| {
+    window.on_key(move |_, _, _, _, _, _| {
         record.note("key");
         true
     });
@@ -4515,7 +4550,7 @@ fn pattern_window(view: PatternView) -> (MainWindow, Calls) {
     let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("cancelled"));
     let record = calls.clone();
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.note(format!("key {text}"));
         true
     });
@@ -4706,7 +4741,7 @@ fn properties_window(view: PropertiesView) -> (MainWindow, Calls) {
     let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("cancelled"));
     let record = calls.clone();
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.note(format!("key {text}"));
         true
     });
@@ -5314,7 +5349,7 @@ fn the_preview_panel_never_takes_the_keys() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -5339,7 +5374,7 @@ fn quick_look_takes_every_key_while_it_shows() {
     let window = window();
     let keys = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&keys);
-    window.on_key(move |text, _, _, _, _| {
+    window.on_key(move |text, _, _, _, _, _| {
         record.borrow_mut().push(text.to_string());
         true
     });
@@ -5539,7 +5574,7 @@ fn the_text_fields_keep_their_own_clipboard_keys() {
     let control = special(Key::Control);
     let shift = special(Key::Shift);
     let modifier = [control.clone(), shift.clone()];
-    window.on_key(move |text, ctrl, shift, _, _| {
+    window.on_key(move |text, ctrl, shift, _, _, _| {
         if !modifier.contains(&text.to_string()) {
             record.note(format!("{text} {ctrl} {shift}"));
         }

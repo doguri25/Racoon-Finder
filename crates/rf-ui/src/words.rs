@@ -993,6 +993,13 @@ pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
     }
 }
 
+/// 관리자 권한으로 실행 refused for a batch file whose path `cmd.exe` would read as a command
+/// (`rf_platform::shell::elevation`).
+pub fn batch_path_refused() -> &'static str {
+    "이 경로의 배치 파일은 관리자 권한으로 실행할 수 없습니다. 경로에 % ! ^ & ( ) @ ; , = 같은 \
+     글자가 있으면 명령 프롬프트가 경로를 명령으로 읽습니다"
+}
+
 /// The system knows no app that opens the file (연결 프로그램, macOS).
 pub fn no_apps() -> &'static str {
     "이 파일을 열 수 있는 앱이 없습니다"
@@ -2867,5 +2874,6 @@ mod tests {
         assert_eq!(app_title(&app(true)), "미리보기 (기본)");
         assert_eq!(app_title(&app(false)), "미리보기");
         assert!(is_korean(no_apps()));
+        assert!(batch_path_refused().starts_with("이 경로의 배치 파일은"));
     }
 }

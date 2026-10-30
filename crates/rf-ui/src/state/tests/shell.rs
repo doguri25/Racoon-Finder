@@ -290,3 +290,76 @@ fn the_keys_open_the_item_menu_by_the_cursor_or_the_folder_s_menu() {
     run(&mut state, Command::Properties);
     assert_eq!(run(&mut state, Command::ContextMenu), []);
 }
+
+/// The left pane lists a folder, a link, and three batch files (one at a path `cmd.exe` would
+/// read as a command); the row of each name.
+fn with_links_and_scripts() -> (AppState, impl Fn(&AppState, &str) -> usize) {
+    let state = ready(
+        vec![
+            dir("docs"),
+            Entry::new("링크", EntryKind::Symlink),
+            file("build.bat"),
+            file("R&D.bat"),
+            file("메모.txt"),
+        ],
+        vec![],
+    );
+    let row = |state: &AppState, name: &str| {
+        rows(state, LEFT)
+            .iter()
+            .position(|row| *row == name)
+            .expect("listed")
+    };
+    (state, row)
+}
+
+#[test]
+fn a_link_is_a_folder_for_the_terminal_and_has_no_app_to_open_with() {
+    let (mut state, row) = with_links_and_scripts();
+    let link = row(&state, "링크");
+    // The listing does not tell where a link leads: the menu offers what a folder has.
+    state.row_menu(LEFT, link);
+    assert_eq!(
+        state.item_menu(),
+        MenuFacts {
+            one_folder: true,
+            one_item: true,
+            ..MenuFacts::default()
+        }
+    );
+    choose(&mut state, &[link]);
+    assert_eq!(run(&mut state, Command::OpenWith), []);
+    // The worker finds where it leads as the terminal starts (`open::link_terminal_folder`).
+    let wanted = [Effect::Shell(ShellWork::LinkTerminal {
+        link: in_a("링크"),
+        otherwise: folder("a"),
+    })];
+    assert_eq!(run(&mut state, Command::OpenTerminal), wanted);
+    assert_eq!(
+        press(&mut state, &special(Key::F4), SHIFT).expect("the terminal key"),
+        wanted
+    );
+}
+
+#[test]
+fn a_batch_file_runs_as_administrator_only_at_a_path_cmd_takes_as_it_is() {
+    let (mut state, row) = with_links_and_scripts();
+    let build = row(&state, "build.bat");
+    let unsafe_one = row(&state, "R&D.bat");
+    // The menu offers it where the system runs a program as administrator (Windows).
+    let entry = file("build.bat");
+    assert!(menu_facts(&[(in_a("build.bat"), &entry)], true).runnable);
+    let entry = file("R&D.bat");
+    assert!(!menu_facts(&[(in_a("R&D.bat"), &entry)], true).runnable);
+    choose(&mut state, &[build]);
+    assert_eq!(
+        run(&mut state, Command::RunAsAdmin),
+        [Effect::Shell(ShellWork::RunAsAdmin(in_a("build.bat")))]
+    );
+    // `cmd.exe /C` would run what follows the `&`, elevated: refused, and said why.
+    choose(&mut state, &[unsafe_one]);
+    assert_eq!(
+        run(&mut state, Command::RunAsAdmin),
+        [Effect::Notice(words::batch_path_refused().to_owned())]
+    );
+}

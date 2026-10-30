@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rf_platform::shell;
+use rf_platform::shell::{self, Owner};
 
 /// A folder (and a file in it) under a name a command line would read otherwise: a terminal
 /// must open in it, and a window must show it, whole.
@@ -25,7 +25,7 @@ fn tricky() -> (tempfile::TempDir, PathBuf, PathBuf) {
 #[ignore = "needs an interactive session"]
 fn a_terminal_opens_in_the_folder() {
     let (_dir, folder, _) = tricky();
-    shell::open_terminal(&folder).expect("a terminal");
+    shell::open_terminal(&folder, Owner::NONE).expect("a terminal");
     // By hand: the terminal's prompt is in the folder (`pwd`, `Get-Location`).
 }
 
@@ -33,7 +33,7 @@ fn a_terminal_opens_in_the_folder() {
 #[ignore = "needs an interactive session"]
 fn the_properties_window_shows_the_file() {
     let (_dir, _, file) = tricky();
-    shell::show_properties(&file).expect("the window");
+    shell::show_properties(&file, Owner::NONE).expect("the window");
     // By hand: File Explorer's properties or Finder's 정보 가져오기 of `메모 (최종);1.txt`.
     // Windows shows it on a thread of the shell's, which ends with the process: look before
     // the test ends.
@@ -46,7 +46,7 @@ fn the_properties_window_shows_the_file() {
 fn the_dialog_chooses_the_app() {
     let (_dir, _, file) = tricky();
     // Blocks until the dialog closes: choose an app (the file opens in it), or cancel.
-    shell::open_with_dialog(&file).expect("the dialog");
+    shell::open_with_dialog(&file, Owner::NONE).expect("the dialog");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn a_program_runs_as_administrator() {
     let system = std::env::var_os("SystemRoot").expect("SystemRoot");
     let notepad = Path::new(&system).join("System32").join("notepad.exe");
     // By hand: the consent prompt shows; allowed, Notepad runs elevated; refused, nothing fails.
-    shell::run_as_admin(&notepad).expect("run as administrator");
+    shell::run_as_admin(&notepad, Owner::NONE).expect("run as administrator");
 }
 
 #[test]
@@ -82,14 +82,19 @@ fn only_the_terminal_is_supported_here() {
             std::io::ErrorKind::Unsupported
         );
     };
-    unsupported(shell::show_properties(&file));
-    unsupported(shell::open_with_dialog(&file));
+    unsupported(shell::show_properties(&file, Owner::NONE));
+    unsupported(shell::open_with_dialog(&file, Owner::NONE));
     unsupported(shell::apps_for(&file).map(|_| ()));
     unsupported(shell::open_with_app(&file, Path::new("/usr/bin/true")));
-    unsupported(shell::run_as_admin(&file.with_extension("exe")));
+    unsupported(shell::run_as_admin(
+        &file.with_extension("exe"),
+        Owner::NONE,
+    ));
     // Not a folder: no terminal is looked for.
     assert_eq!(
-        shell::open_terminal(&file).expect_err("a file").kind(),
+        shell::open_terminal(&file, Owner::NONE)
+            .expect_err("a file")
+            .kind(),
         std::io::ErrorKind::NotADirectory
     );
 }
@@ -98,9 +103,9 @@ fn only_the_terminal_is_supported_here() {
 fn a_relative_path_is_refused_everywhere() {
     let relative = Path::new("relative.txt");
     for result in [
-        shell::show_properties(relative),
-        shell::open_with_dialog(relative),
-        shell::run_as_admin(Path::new("setup.exe")),
+        shell::show_properties(relative, Owner::NONE),
+        shell::open_with_dialog(relative, Owner::NONE),
+        shell::run_as_admin(Path::new("setup.exe"), Owner::NONE),
     ] {
         assert_eq!(
             result.expect_err("refused").kind(),

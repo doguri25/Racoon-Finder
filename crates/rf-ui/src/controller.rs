@@ -41,6 +41,7 @@ use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
+use rf_platform::shell::Owner;
 use slint::language::DragAction;
 use slint::winit_030::WinitWindowAccessor;
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
@@ -132,10 +133,10 @@ fn open_file(file: VPath) {
     });
 }
 
-/// Asks the system for `work` on a worker thread ([`open::shell`]); what it has for the window
-/// comes back to [`Controller::shell_news`].
-fn ask_system(work: ShellWork) {
-    open::shell(work, |news| {
+/// Asks the system for `work` on a worker thread ([`open::shell`]), with the app's window
+/// `owner` for its dialogs; what it has for the window comes back to [`Controller::shell_news`].
+fn ask_system(work: ShellWork, owner: Owner) {
+    open::shell(work, owner, |news| {
         post(move |c| c.shell_news(news));
     });
 }
@@ -267,14 +268,14 @@ fn number(value: usize) -> i32 {
 }
 
 fn connect(window: &MainWindow) {
-    window.on_key(|text, ctrl, shift, alt, meta| {
+    window.on_key(|text, ctrl, shift, alt, meta, repeat| {
         let mods = Mods {
             ctrl,
             shift,
             alt,
             meta,
         };
-        with(|c| c.key(&text, mods)).unwrap_or(false)
+        with(|c| c.key(&text, mods, repeat)).unwrap_or(false)
     });
     window.on_command(|name| {
         with(|c| c.command(&name));
@@ -1104,9 +1105,10 @@ impl Controller {
         });
     }
 
-    /// A key; `true` when the window used it. While the list of subfolders under a `›` shows,
-    /// its keys (`keys::list_key`) go to it; any other command closes it as it does its work.
-    fn key(&self, text: &str, mods: Mods) -> bool {
+    /// A key (`repeat`: the system repeats a held one); `true` when the window used it. While
+    /// the list of subfolders under a `›` shows, its keys (`keys::list_key`) go to it; any other
+    /// command closes it as it does its work.
+    fn key(&self, text: &str, mods: Mods, repeat: bool) -> bool {
         let listing = self
             .state
             .borrow()
@@ -1131,6 +1133,10 @@ impl Controller {
         let Some(command) = keys::pane_command(text, mods, Os::CURRENT, typing) else {
             return false;
         };
+        // A held key starts one terminal, not one for each repeat; the repeats go nowhere.
+        if repeat && command.launches() {
+            return true;
+        }
         // How the active pane's view lays its rows out.
         let paging = self
             .window
@@ -1500,7 +1506,7 @@ impl Controller {
                     });
                 }
                 Effect::OpenFile(file) => open_file(file),
-                Effect::Shell(work) => ask_system(work),
+                Effect::Shell(work) => ask_system(work, self.owner()),
                 Effect::ReloadLater {
                     generation,
                     path,
@@ -2052,6 +2058,13 @@ impl Controller {
         window.set_panel_button(button);
         self.tray
             .follow(state.tray_view(rf_core::identity::DISPLAY_NAME));
+    }
+
+    /// The app's window, for the dialogs of the system to belong to ([`ui_bridge::owner_of`]).
+    fn owner(&self) -> Owner {
+        self.window
+            .upgrade()
+            .map_or(Owner::NONE, |window| ui_bridge::owner_of(&window))
     }
 
     /// Whether the window is the one in front, with the keyboard: not while it is hidden or
