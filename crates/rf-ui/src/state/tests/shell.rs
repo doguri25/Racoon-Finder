@@ -291,19 +291,39 @@ fn the_keys_open_the_item_menu_by_the_cursor_or_the_folder_s_menu() {
     assert_eq!(run(&mut state, Command::ContextMenu), []);
 }
 
-/// The left pane lists a folder, a link, and three batch files (one at a path `cmd.exe` would
-/// read as a command); the row of each name.
+/// A folder that is absolute on every system, and whose path `cmd.exe` takes as it is: a
+/// temporary folder could hold `(`, `&` or `%` (a user named "Kim (Dev)"), which would change
+/// what runs as administrator. Nothing reads it: the state only names it.
+fn tools() -> VPath {
+    let path = if cfg!(windows) { r"C:\tools" } else { "/tools" };
+    VPath::local(path).expect("an absolute path")
+}
+
+fn in_tools(name: &str) -> VPath {
+    tools().join(name).expect("a plain name")
+}
+
+/// The left pane at [`tools`] lists a folder, links (one with a program's name), and batch
+/// files (one at a path `cmd.exe` would read as a command); the row of each name.
 fn with_links_and_scripts() -> (AppState, impl Fn(&AppState, &str) -> usize) {
-    let state = ready(
+    let (mut state, effects) = AppState::new(tools(), folder("b"), Some(folder("home")));
+    for (request, entries) in loads(&effects).into_iter().zip([
         vec![
             dir("docs"),
             Entry::new("링크", EntryKind::Symlink),
+            Entry::new("setup.exe", EntryKind::Symlink),
             file("build.bat"),
             file("R&D.bat"),
             file("메모.txt"),
         ],
         vec![],
-    );
+    ]) {
+        let generation = request.generation;
+        state.loaded(LoadEvent::Listed {
+            generation,
+            entries,
+        });
+    }
     let row = |state: &AppState, name: &str| {
         rows(state, LEFT)
             .iter()
@@ -314,30 +334,45 @@ fn with_links_and_scripts() -> (AppState, impl Fn(&AppState, &str) -> usize) {
 }
 
 #[test]
-fn a_link_is_a_folder_for_the_terminal_and_has_no_app_to_open_with() {
+fn a_link_gets_what_a_file_and_a_folder_get_and_the_worker_finds_which() {
     let (mut state, row) = with_links_and_scripts();
     let link = row(&state, "링크");
-    // The listing does not tell where a link leads: the menu offers what a folder has.
+    // The listing does not tell where a link leads, and the UI thread does not look: the menu
+    // offers what a file and a folder have, and the worker checks where it leads
+    // (`open::link_leads`), with a notice when it leads elsewhere.
     state.row_menu(LEFT, link);
     assert_eq!(
         state.item_menu(),
         MenuFacts {
+            one_file: true,
+            runnable: false,
             one_folder: true,
             one_item: true,
-            ..MenuFacts::default()
         }
     );
     choose(&mut state, &[link]);
-    assert_eq!(run(&mut state, Command::OpenWith), []);
-    // The worker finds where it leads as the terminal starts (`open::link_terminal_folder`).
-    let wanted = [Effect::Shell(ShellWork::LinkTerminal {
-        link: in_a("링크"),
-        otherwise: folder("a"),
-    })];
-    assert_eq!(run(&mut state, Command::OpenTerminal), wanted);
+    assert_eq!(
+        run(&mut state, Command::OpenWith),
+        [Effect::Shell(ShellWork::OpenWith {
+            token: 1,
+            file: in_tools("링크"),
+        })]
+    );
+    let terminal = [Effect::Shell(ShellWork::Terminal(in_tools("링크")))];
+    assert_eq!(run(&mut state, Command::OpenTerminal), terminal);
     assert_eq!(
         press(&mut state, &special(Key::F4), SHIFT).expect("the terminal key"),
-        wanted
+        terminal
+    );
+    // A link with a program's name runs as administrator by that name, which the system gets.
+    let program = row(&state, "setup.exe");
+    let entry = Entry::new("setup.exe", EntryKind::Symlink);
+    assert!(menu_facts(&[(in_tools("setup.exe"), &entry)], true).runnable);
+    assert!(!menu_facts(&[(in_tools("setup.exe"), &entry)], false).runnable);
+    choose(&mut state, &[program]);
+    assert_eq!(
+        run(&mut state, Command::RunAsAdmin),
+        [Effect::Shell(ShellWork::RunAsAdmin(in_tools("setup.exe")))]
     );
 }
 
@@ -348,13 +383,13 @@ fn a_batch_file_runs_as_administrator_only_at_a_path_cmd_takes_as_it_is() {
     let unsafe_one = row(&state, "R&D.bat");
     // The menu offers it where the system runs a program as administrator (Windows).
     let entry = file("build.bat");
-    assert!(menu_facts(&[(in_a("build.bat"), &entry)], true).runnable);
+    assert!(menu_facts(&[(in_tools("build.bat"), &entry)], true).runnable);
     let entry = file("R&D.bat");
-    assert!(!menu_facts(&[(in_a("R&D.bat"), &entry)], true).runnable);
+    assert!(!menu_facts(&[(in_tools("R&D.bat"), &entry)], true).runnable);
     choose(&mut state, &[build]);
     assert_eq!(
         run(&mut state, Command::RunAsAdmin),
-        [Effect::Shell(ShellWork::RunAsAdmin(in_a("build.bat")))]
+        [Effect::Shell(ShellWork::RunAsAdmin(in_tools("build.bat")))]
     );
     // `cmd.exe /C` would run what follows the `&`, elevated: refused, and said why.
     choose(&mut state, &[unsafe_one]);

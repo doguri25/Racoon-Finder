@@ -1011,6 +1011,17 @@ pub fn batch_path_refused() -> &'static str {
      글자가 있으면 명령 프롬프트가 경로를 명령으로 읽습니다"
 }
 
+/// The link chosen leads elsewhere than the command wants: to no folder, for a terminal
+/// (`folder`), or to no file, for 연결 프로그램 and 관리자 권한으로 실행. A dangling link leads to
+/// neither.
+pub fn link_elsewhere(folder: bool) -> &'static str {
+    if folder {
+        "링크가 폴더를 가리키지 않습니다"
+    } else {
+        "링크가 파일을 가리키지 않습니다"
+    }
+}
+
 /// The system knows no app that opens the file (연결 프로그램, macOS).
 pub fn no_apps() -> &'static str {
     "이 파일을 열 수 있는 앱이 없습니다"
@@ -2886,5 +2897,7 @@ mod tests {
         assert_eq!(app_title(&app(false)), "미리보기");
         assert!(is_korean(no_apps()));
         assert!(batch_path_refused().starts_with("이 경로의 배치 파일은"));
+        assert_eq!(link_elsewhere(true), "링크가 폴더를 가리키지 않습니다");
+        assert_eq!(link_elsewhere(false), "링크가 파일을 가리키지 않습니다");
     }
 }

@@ -1572,6 +1572,7 @@ impl Controller {
             ShellNews::Failed(action, kind) => {
                 self.notice(&words::shell_failed(action, kind, Os::CURRENT));
             }
+            ShellNews::LinkElsewhere { folder } => self.notice(words::link_elsewhere(folder)),
         }
     }
 

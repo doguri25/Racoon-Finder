@@ -5,7 +5,8 @@
 //! The item menu (a right click on a row, or Shift+F10, the menu key and macOS ⌃↩) offers
 //! 연결 프로그램으로 열기… for one file, 관리자 권한으로 실행 for one program where the system
 //! runs one as administrator (not for a batch file at a path `cmd.exe` would read as a
-//! command), 터미널에서 열기 for one folder or link, and OS 속성 창 열기 for one item
+//! command), 터미널에서 열기 for one folder, all three for one link (the worker finds where it
+//! leads), and OS 속성 창 열기 for one item
 //! ([`MenuFacts`], which the state keeps for the menu that opens last). The part of a list
 //! without rows has 터미널에서 열기 too, for the pane's folder ([`AppState::folder_terminal`]),
 //! and the properties window a button for the system's window of its one item
@@ -40,11 +41,8 @@ pub enum ShellWork {
     OpenWithApp { file: VPath, app: PathBuf },
     /// Run the program as administrator.
     RunAsAdmin(VPath),
-    /// Open a terminal in the folder.
+    /// Open a terminal in the folder, or the folder a link there leads to.
     Terminal(VPath),
-    /// Open a terminal in the folder the link `link` leads to, found on the worker as it
-    /// starts; in `otherwise` (the pane's folder) when it leads to no folder.
-    LinkTerminal { link: VPath, otherwise: VPath },
     /// Show the system's properties window of the item.
     SystemProperties(VPath),
 }
@@ -55,7 +53,7 @@ impl ShellWork {
         match self {
             ShellWork::OpenWith { .. } | ShellWork::OpenWithApp { .. } => ShellAction::OpenWith,
             ShellWork::RunAsAdmin(_) => ShellAction::RunAsAdmin,
-            ShellWork::Terminal(_) | ShellWork::LinkTerminal { .. } => ShellAction::Terminal,
+            ShellWork::Terminal(_) => ShellAction::Terminal,
             ShellWork::SystemProperties(_) => ShellAction::SystemProperties,
         }
     }
@@ -95,14 +93,17 @@ pub struct MenuFacts {
 /// What the item menu offers for `items`, on a system that runs a program as administrator or
 /// not (`runs_as_admin`).
 ///
-/// A link (a symlink, a junction) counts as a folder: the listing does not tell where it leads,
-/// and 터미널에서 열기 opens the folder it leads to, or the pane's folder when it leads to a file
-/// ([`ShellWork::LinkTerminal`]). It gets no 연결 프로그램, which is for a file.
+/// A link (a symlink, a junction) gets what a file and what a folder get: the listing does not
+/// tell where it leads, and the UI thread does not look. The worker does, as the command
+/// starts (`crate::open`): 연결 프로그램 and 관리자 권한으로 실행 go ahead for a link to a file,
+/// 터미널에서 열기 for a link to a folder, and the other way round a notice says where the link
+/// leads. Whether a link runs as administrator is told by its own name and path, which are what
+/// the system, and `cmd.exe`, are given.
 pub fn menu_facts(items: &[(VPath, &Entry)], runs_as_admin: bool) -> MenuFacts {
     let [(path, entry)] = items else {
         return MenuFacts::default();
     };
-    let file = entry.kind == EntryKind::File;
+    let file = matches!(entry.kind, EntryKind::File | EntryKind::Symlink);
     MenuFacts {
         one_file: file,
         runnable: file && runs_as_admin && path.as_local().is_some_and(can_run_as_admin),
@@ -176,10 +177,11 @@ impl AppState {
         }
     }
 
-    /// 연결 프로그램으로 열기…: the system's choice of the app for the one file chosen in pane
-    /// `side`. Nothing for a folder, a link, or several items.
+    /// 연결 프로그램으로 열기…: the system's choice of the app for the one file (or link, which
+    /// the worker finds leads to a file) chosen in pane `side`. Nothing for a folder, or for
+    /// several items.
     pub(super) fn open_with(&mut self, side: usize) -> Vec<Effect> {
-        let Some((file, EntryKind::File)) = self.single_target(side) else {
+        let Some((file, EntryKind::File | EntryKind::Symlink)) = self.single_target(side) else {
             return Vec::new();
         };
         self.shell.token += 1;
@@ -229,11 +231,11 @@ impl AppState {
             .collect()
     }
 
-    /// 관리자 권한으로 실행: the one program chosen in pane `side`, run as administrator.
-    /// A batch file at a path that `cmd.exe` would read as a command is refused with a notice
-    /// (the menu does not offer it: [`menu_facts`]).
+    /// 관리자 권한으로 실행: the one program (or link to one, which the worker checks) chosen in
+    /// pane `side`, run as administrator. A batch file at a path that `cmd.exe` would read as a
+    /// command is refused with a notice (the menu does not offer it: [`menu_facts`]).
     pub(super) fn run_as_admin(&mut self, side: usize) -> Vec<Effect> {
-        let Some((file, EntryKind::File)) = self.single_target(side) else {
+        let Some((file, EntryKind::File | EntryKind::Symlink)) = self.single_target(side) else {
             return Vec::new();
         };
         match file.as_local().map(elevation) {
@@ -245,20 +247,15 @@ impl AppState {
         }
     }
 
-    /// 터미널에서 열기 (Shift+F4): a terminal in the one folder chosen in pane `side` (for a
-    /// link, the folder it leads to, found on the worker), or else in the folder the pane
+    /// 터미널에서 열기 (Shift+F4): a terminal in the one folder chosen in pane `side` (or the
+    /// folder a link chosen leads to, which the worker checks), or else in the folder the pane
     /// shows.
     pub(super) fn open_terminal(&mut self, side: usize) -> Vec<Effect> {
-        let here = self.tab(side).location().clone();
-        let work = match self.single_target(side) {
-            Some((folder, EntryKind::Dir)) => ShellWork::Terminal(folder),
-            Some((link, EntryKind::Symlink)) => ShellWork::LinkTerminal {
-                link,
-                otherwise: here,
-            },
-            _ => ShellWork::Terminal(here),
+        let folder = match self.single_target(side) {
+            Some((folder, EntryKind::Dir | EntryKind::Symlink)) => folder,
+            _ => self.tab(side).location().clone(),
         };
-        vec![Effect::Shell(work)]
+        vec![Effect::Shell(ShellWork::Terminal(folder))]
     }
 
     /// 터미널에서 열기 in the menu of the part of a list without rows: a terminal in the
