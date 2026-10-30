@@ -3432,8 +3432,11 @@ fn a_tab_held_at_an_end_of_a_full_strip_scrolls_it_that_way() {
         }
     };
 
+    assert!(!scroll_cue_shows(&window));
     drag_to(&window, from, left_end);
     let at_first = *slots_checked(&calls.take()).last().expect("asked");
+    // The end it scrolls toward shows, which also has the window draw again.
+    assert!(scroll_cue_shows(&window));
     tick();
 
     // The tabs before came into view under the pointer, and Rust was asked about each place.
@@ -3445,6 +3448,16 @@ fn a_tab_held_at_an_end_of_a_full_strip_scrolls_it_that_way() {
     calls.take();
     tick();
     assert_eq!(slots_checked(&calls.take()), Vec::<i32>::new());
+    assert!(!scroll_cue_shows(&window));
+}
+
+/// Whether a strip of the window (of tabs or of column heads) shows the end it scrolls toward
+/// under a drag held there.
+fn scroll_cue_shows(window: &MainWindow) -> bool {
+    ["Pane::scroll-cue", "FileHead::scroll-cue"]
+        .into_iter()
+        .flat_map(|id| ElementHandle::find_by_element_id(window, id))
+        .any(|cue| cue.computed_opacity() > 0.5)
 }
 
 #[test]
@@ -5556,6 +5569,38 @@ fn the_menus_have_the_clipboard_with_the_keys_of_the_system() {
     blank_menu();
     choose_item(&window, "여기로 이동  (⌥⌘V)");
     assert_eq!(commands.take(), ["paste-move"]);
+}
+
+#[test]
+fn a_right_click_on_the_other_pane_s_empty_part_makes_it_active_before_its_menu_acts() {
+    use slint::platform::PointerEventButton;
+    // The left pane has the keys; the right one lists two rows, and the rest of its list has
+    // no item.
+    let (window, _calls, _models, _tree) = drag_window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_pane_activated(move |side| record.note(format!("activate {side}")));
+    let record = calls.clone();
+    window.on_command(move |name| record.note(format!("command {name}")));
+    let right = labelled(&window, "오른쪽 패널", AccessibleRole::Groupbox).remove(0);
+    let list = right
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .match_predicate(|list| list.accessible_label().as_deref() == Some("항목 목록"))
+        .find_first()
+        .expect("the right pane's list");
+    list.mock_single_click(PointerEventButton::Right);
+    choose_item(&window, "붙여넣기  (Ctrl+V)");
+    // The pane the menu belongs to has the keys first; then the command acts on it.
+    let noted = calls.take();
+    let activated = noted.iter().rposition(|call| call == "activate 1");
+    let commanded = noted.iter().position(|call| call == "command paste");
+    assert!(
+        activated.is_some() && commanded.is_some() && activated < commanded,
+        "{noted:?}"
+    );
+    assert!(!noted.contains(&"activate 0".to_owned()), "{noted:?}");
 }
 
 #[test]

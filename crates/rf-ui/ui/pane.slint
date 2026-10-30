@@ -12,6 +12,7 @@ import { Icon } from "icons.slint";
 import { FileList, FileRow, ColumnView } from "file-list.slint";
 import { FileGrid } from "file-grid.slint";
 import { Shortcuts } from "shortcuts.slint";
+import { ScrollCue } from "widgets.slint";
 
 // A row of a list of folder names of the address bar: a folder, or a link that leads to one.
 export struct FolderMenuRow {
@@ -755,7 +756,13 @@ export component Pane inherits Rectangle {
     // so that every place can be reached; it stops when the drag leaves, ends, or the strip
     // reaches that end.
     private property <length> edge: 24px;
-    private property <int> scroll-way: !strip-drop.has-drag ? 0 : strip-drop.hover-x < tabs-view.x + root.edge && tabs-view.content-x < 0 ? 1 : strip-drop.hover-x > tabs-view.x + tabs-view.width - root.edge && tabs-view.content-x > tabs-view.width - root.tabs-width ? -1 : 0;
+    // Tabs are out of view left of the strip, or right of it.
+    private property <bool> more-left: tabs-view.content-x < 0;
+    private property <bool> more-right: tabs-view.content-x > tabs-view.width - root.tabs-width;
+    private property <int> scroll-way: !strip-drop.has-drag ? 0
+        : strip-drop.hover-x < tabs-view.x + root.edge && root.more-left ? 1
+        : strip-drop.hover-x > tabs-view.x + tabs-view.width - root.edge && root.more-right ? -1
+        : 0;
 
     // Scrolls the strip as little as needed to show the tab that shows whole.
     function show-active-tab() {
@@ -883,6 +890,15 @@ export component Pane inherits Rectangle {
                 height: tabs-view.height - 8px;
                 border-radius: 1.5px;
                 background: Theme.accent;
+            }
+
+            // The end the strip scrolls toward under a held tab (`scroll-way`).
+            scroll-cue := ScrollCue {
+                x: root.scroll-way > 0 ? tabs-view.x : tabs-view.x + tabs-view.width - self.width;
+                y: tabs-view.y;
+                width: root.edge;
+                height: tabs-view.height;
+                way: root.scroll-way;
             }
 
             Rectangle {

@@ -185,6 +185,21 @@ export component ProgressBar inherits Rectangle {
     }
 }
 
+// The end of a strip that scrolls under a drag held there (the tab strip, the column heads):
+// the accent colour fading in toward that end. `way` is 1 for the left end (the strip scrolls
+// right, to show what is left of it), -1 for the right end, 0 for none. It shows why the strip
+// moves, and it makes the window draw again as the drag comes into the end. Slint starts the
+// timer that scrolls the strip only as the window takes in an event or draws, so a pointer held
+// perfectly still that changed nothing on screen would wait for the next event.
+export component ScrollCue inherits Rectangle {
+    in property <int> way;
+
+    opacity: root.way == 0 ? 0 : 1;
+    background: root.way > 0
+        ? @linear-gradient(90deg, Theme.accent.with-alpha(0.35) 0%, Theme.accent.with-alpha(0) 100%)
+        : @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.35) 100%);
+}
+
 // Text-only button on the dark toast background.
 component ToastButton inherits Rectangle {
     in property <string> text;
