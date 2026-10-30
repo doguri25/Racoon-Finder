@@ -15,14 +15,25 @@ fn hold() -> MutexGuard<'static, ()> {
     CLIPBOARD.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Paths in the temporary folder, under names a clipboard must keep as they are.
+/// Paths in the temporary folder, under names a clipboard must keep as they are: Korean
+/// names composed (NFC) and one decomposed (NFD), which must each come back in their own form.
 fn paths() -> Vec<PathBuf> {
     let dir = std::env::temp_dir();
     vec![
         dir.join("보고서 (최종).txt"),
         dir.join("a b%20#?.txt"),
         dir.join("폴더").join("안쪽"),
+        // `보고서` decomposed.
+        dir.join("\u{1107}\u{1169}\u{1100}\u{1169}\u{1109}\u{1165}.txt"),
     ]
+}
+
+/// The bytes of each path, which the clipboard must give back exactly.
+fn bytes(paths: &[PathBuf]) -> Vec<&[u8]> {
+    paths
+        .iter()
+        .map(|path| path.as_os_str().as_encoded_bytes())
+        .collect()
 }
 
 #[test]
@@ -36,6 +47,8 @@ fn files_put_on_the_clipboard_read_back_with_their_count() {
     let change = clipboard::put_files(&paths, DropEffect::Move).expect("put");
     assert_eq!(clipboard::change_count(), Some(change));
     let read = clipboard::get_files().expect("read").expect("files");
+    // Byte for byte: no name changes its Unicode form on the way.
+    assert_eq!(bytes(&read.paths), bytes(&paths));
     // macOS keeps no effect: a move there is Finder's ⌥⌘V, or the app's own mark.
     let effect = if cfg!(target_os = "macos") {
         None

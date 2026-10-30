@@ -4,13 +4,22 @@
 )]
 
 //! The macOS general pasteboard, as Finder reads and writes it: one item for each file with its
-//! file URL, the first one with the paths as text too. Finder writes file reference URLs
-//! (`file:///.file/id=…`), which are read through their path URLs.
+//! file URL, the first one with the paths as text too.
+//!
+//! The file URLs are this module's own (`file_url_of`) and are read back by its own decoding
+//! (`path_of_file_url`), byte for byte: `NSURL` hands a path back with its names decomposed
+//! (NFD; `fileURLWithPath` and `path` go through the file system representation), so a name
+//! written composed (NFC) would come back as other bytes. A URL this decoding does not take, as
+//! Finder's file reference URLs (`file:///.file/id=…`), is read through `NSURL`'s path URL, in
+//! the form the system gives: APFS finds a file whatever the form of its name, and nothing here
+//! normalizes a name another app wrote.
 //!
 //! The pasteboard does not say whether files are to be moved: Finder moves what was copied with
 //! ⌥⌘V. So the [`DropEffect`] of [`put_files`] is not kept, and [`get_files`] gives none.
 
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use objc2::rc::{Retained, autoreleasepool};
@@ -21,7 +30,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSString, NSURL};
 
-use super::{ClipboardFiles, DropEffect};
+use super::{ClipboardFiles, DropEffect, file_url_of, path_of_file_url};
 
 /// `public.file-url`.
 fn file_url_type() -> &'static NSPasteboardType {
@@ -46,12 +55,7 @@ fn count(change: isize) -> u64 {
 
 /// The pasteboard item of the file at `path`, with its file URL; and `text` as text, if any.
 fn item(path: &Path, text: Option<&str>) -> io::Result<Retained<NSPasteboardItem>> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a path that is not UTF-8"))?;
-    let url = NSURL::fileURLWithPath(&NSString::from_str(path))
-        .absoluteString()
-        .ok_or_else(|| failed("a file URL"))?;
+    let url = NSString::from_str(&file_url_of(path.as_os_str().as_bytes()));
     let item = NSPasteboardItem::new();
     if !item.setString_forType(&url, file_url_type()) {
         return Err(failed("a file URL"));
@@ -124,6 +128,13 @@ fn file_paths(board: &NSPasteboard) -> Vec<PathBuf> {
         .iter()
         .filter_map(|item| {
             let text = item.stringForType(file_url_type())?;
+            // A path URL as it was written, byte for byte; not a file reference URL, whose
+            // path names no item.
+            if let Some(bytes) = path_of_file_url(&text.to_string())
+                .filter(|bytes| !bytes.starts_with(b"/.file/id="))
+            {
+                return Some(PathBuf::from(OsString::from_vec(bytes)));
+            }
             // A file reference URL (Finder's) becomes the path URL of its item.
             let url = NSURL::URLWithString(&text)?;
             let url = url.filePathURL()?;

@@ -7,9 +7,11 @@
 //!   `DROPEFFECT_MOVE`), which tells a paste whether they were copied or cut, and with the
 //!   paths as text (`CF_UNICODETEXT`, one a line). Text alone goes as `CF_UNICODETEXT`.
 //! - **macOS:** one pasteboard item for each file with its file URL (`public.file-url`), the
-//!   first one with the paths as text too (`public.utf8-plain-text`, one a line). The
-//!   pasteboard has no way to say "move": Finder moves what was copied with ⌥⌘V, and a cut is
-//!   the app's own mark. So [`get_files`] gives no [`DropEffect`] there.
+//!   first one with the paths as text too (`public.utf8-plain-text`, one a line). The URLs are
+//!   written and read by this module's own percent-encoding, byte for byte, so a name keeps its
+//!   Unicode form (NFC or NFD) through the pasteboard; `NSURL` would hand it back decomposed.
+//!   The pasteboard has no way to say "move": Finder moves what was copied with ⌥⌘V, and a cut
+//!   is the app's own mark. So [`get_files`] gives no [`DropEffect`] there.
 //! - **Elsewhere** (Linux, which is for development): the files stay in this process, where
 //!   [`get_files`] finds them again; text gives `io::ErrorKind::Unsupported`.
 //!
@@ -23,12 +25,13 @@
 //! `io::ErrorKind::ResourceBusy` (about 100 ms at most); another app's delayed data may take
 //! longer to come. On macOS the pasteboard server answers. Call them from a worker thread, one
 //! at a time, rather than from the UI thread; [`change_count`] alone is cheap. Nothing here
-//! changes a file, though the system may look at one: macOS's `fileURLWithPath` asks whether
-//! a path is a folder, and reading Finder's file reference URLs finds their items.
+//! changes a file, though the system may look at one: reading Finder's file reference URLs
+//! finds their items.
 //!
-//! The buffers of the Windows formats are made and read by pure functions of this module,
-//! which the tests check on every system.
+//! The buffers of the Windows formats, and the file URLs of macOS, are made and read by pure
+//! functions of this module, which the tests check on every system.
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -69,9 +72,9 @@ pub struct ClipboardFiles {
 
 /// Puts `paths` on the clipboard in the place of what it held, to be copied or moved
 /// (`effect`) by a paste, and gives the clipboard's change count after it. Fails with
-/// `io::ErrorKind::InvalidInput` for no paths, an empty path or a path with a NUL (or, on
-/// macOS, one that is not UTF-8), and with `ResourceBusy` while another app keeps the
-/// clipboard open (Windows). On macOS `effect` is not kept: see the module.
+/// `io::ErrorKind::InvalidInput` for no paths, an empty path or a path with a NUL, and with
+/// `ResourceBusy` while another app keeps the clipboard open (Windows). On macOS `effect` is
+/// not kept: see the module.
 pub fn put_files(paths: &[PathBuf], effect: DropEffect) -> io::Result<u64> {
     if paths.is_empty() || paths.iter().any(|path| path.as_os_str().is_empty()) {
         return Err(io::Error::new(
@@ -360,6 +363,72 @@ fn unc_path(local: &[u16], remote: &[u16]) -> Option<Vec<u16>> {
     Some(path)
 }
 
+/// The bytes of a URL's path that stay as they are: the letters and digits of ASCII and the
+/// other characters RFC 3986 lets a path segment hold (`pchar`), and `/` between segments.
+fn url_plain(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte)
+}
+
+/// The `file:` URL of the absolute Unix path whose bytes are `path`: `file://`, then the path
+/// with every other byte as `%XX`. It keeps the bytes exactly, whatever their Unicode form and
+/// whether or not they are UTF-8, so that [`path_of_file_url`] gives them back.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn file_url_of(path: &[u8]) -> String {
+    let mut url = String::from("file://");
+    for &byte in path {
+        if url_plain(byte) {
+            url.push(char::from(byte));
+        } else {
+            let _ = write!(url, "%{byte:02X}");
+        }
+    }
+    url
+}
+
+/// The bytes of the absolute path that the `file:` URL `url` names on this computer (no
+/// computer, or `localhost`), each `%XX` turned back into its byte and nothing normalized:
+/// a name comes back in the Unicode form it was written in. `None` for anything else, which
+/// the system's own reading is left to: another computer, a query or a fragment, a `%` not
+/// followed by two hexadecimal digits, an encoded `/` or NUL (which would change the names),
+/// and a path that is not absolute.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn path_of_file_url(url: &str) -> Option<Vec<u8>> {
+    let scheme = url.get(..7)?;
+    if !scheme.eq_ignore_ascii_case("file://") {
+        return None;
+    }
+    let rest = &url[7..];
+    let at = rest.find('/')?;
+    let (host, path) = rest.split_at(at);
+    if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) || path.contains(['?', '#']) {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            let byte = u8::from_str_radix(hex, 16).ok()?;
+            if byte == b'/' || byte == 0 {
+                return None;
+            }
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(decoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +551,58 @@ mod tests {
         assert_eq!(narrow(b""), None);
         // No path at all.
         assert_eq!(narrow(b"\0\0"), None);
+    }
+
+    /// `보고서` composed (NFC, three syllables) and decomposed (NFD, eight jamo): two spellings
+    /// of one name that APFS takes for the same file.
+    const NFC: &str = "/Users/me/\u{BCF4}\u{ACE0}\u{C11C} (최종).txt";
+    const NFD: &str = "/Users/me/\u{1107}\u{1169}\u{1100}\u{1169}\u{1109}\u{1165} (최종).txt";
+
+    #[test]
+    fn a_file_url_gives_back_the_bytes_it_was_made_of() {
+        assert_ne!(NFC.as_bytes(), NFD.as_bytes());
+        let paths: [&[u8]; 6] = [
+            NFC.as_bytes(),
+            NFD.as_bytes(),
+            b"/",
+            b"/tmp/a b%20#?.txt",
+            b"/x/a\\b \"q\" <>{}|^`.txt",
+            // Bytes that are no text at all.
+            b"/x/\xFF\xFE.bin",
+        ];
+        for path in paths {
+            let url = file_url_of(path);
+            assert!(url.is_ascii(), "{url}");
+            assert!(!url.contains(['?', '#', ' ', '\\', '"']), "{url}");
+            assert_eq!(path_of_file_url(&url).as_deref(), Some(path), "{url}");
+        }
+        // Each form stays its own.
+        assert_ne!(file_url_of(NFC.as_bytes()), file_url_of(NFD.as_bytes()));
+        assert_eq!(file_url_of(b"/a b/c"), "file:///a%20b/c");
+    }
+
+    #[test]
+    fn a_file_url_of_another_kind_is_left_to_the_system() {
+        // Another app's URL in NFD stays NFD: nothing is normalized.
+        let finder = format!("file://localhost{}", &file_url_of(NFD.as_bytes())[7..]);
+        assert_eq!(path_of_file_url(&finder).as_deref(), Some(NFD.as_bytes()));
+        assert_eq!(path_of_file_url("FILE:///a").as_deref(), Some(&b"/a"[..]));
+        for url in [
+            "file://server/share/a",
+            "file:///a?b",
+            "file:///a#b",
+            "file:///a%2Fb",
+            "file:///a%2fb",
+            "file:///a%00b",
+            "file:///a%zz",
+            "file:///a%4",
+            "file:a",
+            "file:/a",
+            "http://example.com/a",
+            "file://",
+        ] {
+            assert_eq!(path_of_file_url(url), None, "{url}");
+        }
     }
 
     #[test]

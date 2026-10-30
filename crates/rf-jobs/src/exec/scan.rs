@@ -618,6 +618,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn into_itself_folds_the_unicode_form_where_the_target_does() {
+        // `폴더` decomposed (NFD, as another app may hand a path over) and composed (NFC, as
+        // the folder may be listed): one folder on APFS and HFS+, which ignore the form.
+        let base = std::env::temp_dir();
+        let nfd = v(base.join("\u{1111}\u{1169}\u{11af}\u{1103}\u{1165}"));
+        let nfc_sub = v(base.join("\u{D3F4}\u{B354}").join("sub"));
+        for fs in [FsKind::Apfs, FsKind::HfsPlus] {
+            assert!(lands_inside(&nfd, &nfc_sub, fs), "{fs:?}");
+        }
+        // A file system that keeps the forms apart has two folders there.
+        assert!(!lands_inside(&nfd, &nfc_sub, FsKind::Other));
+    }
+
     #[cfg(unix)]
     #[test]
     fn links_resolve_from_the_folder_they_are_really_in() {
