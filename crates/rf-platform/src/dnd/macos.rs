@@ -50,7 +50,8 @@
 //! - **A drag out** ([`drag_out`]) is a dragging session that the window's view (winit's) begins
 //!   (`beginDraggingSessionWithItems:event:source:`), with a dragging item for each path: its
 //!   file URL, written byte for byte as the clipboard writes it, and its icon
-//!   (`NSWorkspace iconForFile:`), stacked under the pointer. The event it begins with is the
+//!   (`NSWorkspace iconForFile:`), stacked under the pointer; the items past the fifth lie under
+//!   it and show its icon ([`icon_place`]). The event it begins with is the
 //!   app's current one when it is a drag of the left button in the window, else one made for
 //!   where the mouse is now. Its source ([`DragSource`]) allows what [`source_mask`] says: out of
 //!   the app all that Finder's own drags allow, within it a move (with the generic operation, so
@@ -74,7 +75,7 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSDragOperation, NSDraggingContext,
     NSDraggingDestination, NSDraggingInfo, NSDraggingItem, NSDraggingSession, NSDraggingSource,
-    NSEvent, NSEventType, NSResponder, NSView, NSWindow, NSWorkspace,
+    NSEvent, NSEventType, NSImage, NSResponder, NSView, NSWindow, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
@@ -82,7 +83,7 @@ use objc2_foundation::{
 
 use super::{
     DragMods, DropEffect, DropHandler, DroppedItems, Effects, answer_for, drop_taken, ended_effect,
-    flag_mods, flipped_point, mask_effects, source_mask,
+    flag_mods, flipped_point, icon_place, mask_effects, source_mask,
 };
 use crate::clipboard::{file_item, file_paths, file_url_type};
 use crate::shell::{Owner, WindowPoint};
@@ -366,22 +367,32 @@ fn drag_event(mtm: MainThreadMarker, window: &NSWindow) -> Option<Retained<NSEve
 }
 
 /// A dragging item for each of `paths`: its file URL, byte for byte, as the clipboard writes it,
-/// and its icon, stacked around `at`, the pointer in the view's coordinates.
+/// and its icon, stacked around `at`, the pointer in the view's coordinates ([`icon_place`]):
+/// the items that lie under the one at the last step show its icon, which `NSWorkspace` is not
+/// asked for again, so that a drag of thousands of items starts at once.
 fn dragging_items(paths: &[PathBuf], at: NSPoint) -> io::Result<Vec<Retained<NSDraggingItem>>> {
     let workspace = NSWorkspace::sharedWorkspace();
-    let mut step = 0;
+    let mut last: Option<Retained<NSImage>> = None;
     paths
         .iter()
-        .map(|path| {
+        .enumerate()
+        .map(|(index, path)| {
             let writer = file_item(path, None)?;
             let item = NSDraggingItem::initWithPasteboardWriter(
                 NSDraggingItem::alloc(),
                 ProtocolObject::from_ref(&*writer),
             );
-            // The icon only shows: a name that is not UTF-8 gets the icon of what its text names.
-            let icon = workspace.iconForFile(&NSString::from_str(&path.to_string_lossy()));
+            let (step, own) = icon_place(index, STEPS);
+            let icon = if let Some(shared) = last.as_ref().filter(|_| !own) {
+                shared.clone()
+            } else {
+                // The icon only shows: a name that is not UTF-8 gets the icon of what its text
+                // names.
+                let icon = workspace.iconForFile(&NSString::from_str(&path.to_string_lossy()));
+                last = Some(icon.clone());
+                icon
+            };
             let aside = ICON_STEP * f64::from(step);
-            step = (step + 1).min(STEPS);
             let frame = NSRect::new(
                 NSPoint::new(at.x - ICON / 2.0 + aside, at.y - ICON / 2.0 + aside),
                 NSSize::new(ICON, ICON),

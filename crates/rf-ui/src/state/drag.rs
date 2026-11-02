@@ -621,8 +621,10 @@ impl AppState {
     }
 
     /// The system's drag that a drag of rows went on as ([`AppState::drag_leaves_window`]) is
-    /// over, and the app that took it did `done` (`None`: nothing, or the drop was the window's
-    /// own, which made its job then). The app does nothing of it, whatever it was (a move
+    /// over, and the app that took it did `done` (`None`: nothing). A drop back on the window,
+    /// which made its own job then, is what that drop answered (`None` for a move on Windows; a
+    /// copy, or on macOS the move its generic operation reads as). The app does nothing of it,
+    /// whatever it was (a move
     /// included): it deletes nothing, since a move is the other app's to finish, and an app that
     /// only copied leaves a copy; the watch of a folder shows what changed. The drag is over.
     /// Nothing for a drag that never went out.

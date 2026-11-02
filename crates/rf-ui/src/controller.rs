@@ -847,7 +847,9 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// modifier keys, which Slint's drop events do not tell and a drop's action follows
 /// ([`Controller::modifiers_changed`]); the end of a drag over the window, which Slint does
 /// not tell when the row the drag started on is gone (a folder that opened under it, DND-08) or
-/// when the pointer is past the window's edges ([`Controller::drag_gone`]); a drag of rows that
+/// when the pointer is past the window's edges ([`Controller::drag_gone`]); the pointer that
+/// left the window, which Slint is told of itself when it would not hear it
+/// ([`Controller::pointer_left`]); a drag of rows that
 /// goes past the window's edges, which goes on as the system's drag (DND-05 보내기,
 /// [`Controller::pointer_outside`]), and the left button it needs held; the files another
 /// app dropped on the window, where winit's own drop target takes them (X11, macOS's title bar:
@@ -870,7 +872,7 @@ fn watch_winit_events(window: &MainWindow) {
                 with(|c| c.modifiers_changed(mods));
             }
             WinitEvent::CursorLeft { .. } => {
-                with(Controller::drag_maybe_gone);
+                with(Controller::pointer_left);
             }
             WinitEvent::CursorMoved { position, .. }
                 if ui_bridge::outside_window(*position, window.size()) =>
@@ -1909,6 +1911,24 @@ impl Controller {
         if over {
             self.drag_gone();
         }
+    }
+
+    /// The pointer left the window, as winit told: a drag over the window is gone from it
+    /// ([`Controller::drag_maybe_gone`]). With the left button up, Slint hears it too
+    /// (`PointerExited`): its adapter passes no `CursorLeft` on while it thinks a button is
+    /// pressed, as after a drag of rows that went on as the system's drag, whose release it never
+    /// heard, and a row would stay shown as under the pointer. A second exit, after the
+    /// adapter's own, finds nothing under the pointer. With the button down, the pointer that
+    /// left is a drag's, which goes on.
+    fn pointer_left(&self) {
+        if !self.left_down.get()
+            && let Some(window) = self.window.upgrade()
+        {
+            window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerExited);
+        }
+        self.drag_maybe_gone();
     }
 
     /// The left button was let go, and Slint has taken the release: a drag of rows is over (its
@@ -3246,6 +3266,50 @@ mod tests {
         });
         assert!(refused.is_none());
         assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_pointer_that_leaves_with_the_button_up_leaves_no_hover_behind() {
+        i_slint_backend_testing::init_no_event_loop();
+        let window = MainWindow::new().expect("the window");
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        window.show().expect("it shows");
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
+        let saver = Saver::new(dir.path().join("config"), true);
+        let controller = Controller::new(&window, jobs.clone(), Settings::default(), saver);
+        // A toast keeps its time while the pointer is over it: what Slint thinks is under the
+        // pointer shows there.
+        let text = "항목 1개를 복사했습니다";
+        let shown = || {
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&window, text).next()
+        };
+        window.invoke_show_toast(text.into(), "되돌리기".into(), 3);
+        slint::platform::update_timers_and_animations();
+        let toast = shown().expect("the toast shows");
+        let (at, size) = (toast.absolute_position(), toast.size());
+        let position = slint::LogicalPosition::new(at.x + 8.0, at.y + size.height / 2.0);
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        slint::platform::update_timers_and_animations();
+        // With the button down (a drag that went out of the window), the pointer that left is
+        // the drag's: nothing is told.
+        controller.left_down.set(true);
+        controller.pointer_left();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(20));
+        assert!(shown().is_some(), "still under the pointer");
+        // With it up, Slint hears that the pointer left (its adapter would not, while it thinks a
+        // button is pressed): nothing stays under it, and the toast's time runs again.
+        controller.left_down.set(false);
+        controller.pointer_left();
+        slint::platform::update_timers_and_animations();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(9));
+        assert!(shown().is_none(), "no hover left behind");
+        drop(controller);
+        assert!(jobs.close_down(Duration::from_secs(10)));
     }
 
     #[test]

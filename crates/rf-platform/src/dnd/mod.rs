@@ -213,8 +213,10 @@ pub const DRAGS_OUT: bool = imp::DRAGS_OUT;
 /// drag allows `allowed`, and carries the tag of the app's drag `ours` ([`ours_tag`], or on
 /// macOS the app's own source object), so that the window's own drop target knows it as this
 /// drag of rows should it come back over the window ([`DroppedItems::ours`]). `done` hears what
-/// the app that took it did, once, when the drag ends: `None` for nothing (and for a drop back
-/// on the window, whose own job the window made as it took it).
+/// the app that took it did, once, when the drag ends: `None` for nothing. A drop back on the
+/// window is the window's own drop, whose job it made as it took it: `done` hears what that drop
+/// answered (`None` for a move on Windows, whose drop answers no effect for a move; a copy, and
+/// on macOS the generic operation of a move, which reads as a move).
 ///
 /// The app deletes nothing after a drag out, whatever `done` hears (a move included): a move is
 /// the taker's to finish; a taker that only copied leaves a copy.
@@ -620,6 +622,20 @@ fn ended_effect(operation: usize) -> Option<DropEffect> {
     ]
     .into_iter()
     .find_map(|(bits, effect)| (operation & bits != 0).then_some(effect))
+}
+
+/// Where the icon of item `index` of a drag out lies under the pointer (macOS), as steps aside
+/// from the first item's, `steps` at most: every item after the one at the last step lies on it.
+/// And whether the item needs an icon of its own, which only the items up to that one do: the
+/// ones under it show its icon, which the system is not asked for again (a selection of
+/// thousands of items starts its drag at once).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn icon_place(index: usize, steps: u8) -> (u8, bool) {
+    let step = u8::try_from(index).unwrap_or(u8::MAX).min(steps);
+    (step, index <= usize::from(steps))
 }
 
 /// `DROPIMAGE_INVALID`, `DROPIMAGE_NONE`, `DROPIMAGE_COPY`, `DROPIMAGE_MOVE`.
@@ -1147,6 +1163,25 @@ mod tests {
             ended_effect(NS_DRAG_COPY | NS_DRAG_LINK),
             Some(DropEffect::Copy)
         );
+    }
+
+    #[test]
+    fn a_drag_out_s_icons_lie_aside_up_to_the_last_step_and_the_rest_share_its_icon() {
+        // Four steps: the first five items lie aside of each other, each with its own icon.
+        for index in 0..=4 {
+            assert_eq!(
+                icon_place(index, 4),
+                (u8::try_from(index).expect("small"), true),
+                "{index}"
+            );
+        }
+        // The rest lie on the fifth, with its icon.
+        for index in [5, 6, 100, 10_000, usize::MAX] {
+            assert_eq!(icon_place(index, 4), (4, false), "{index}");
+        }
+        // No steps: every item on the first, whose icon is theirs.
+        assert_eq!(icon_place(0, 0), (0, true));
+        assert_eq!(icon_place(1, 0), (0, false));
     }
 
     #[test]
