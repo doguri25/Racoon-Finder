@@ -114,8 +114,9 @@ pub(crate) fn content_view(owner: Owner) -> io::Result<(MainThreadMarker, Retain
         .ns_view()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no window view"))?;
     // SAFETY: `ns_view` is the `NSView` of the app's window's content, as raw-window-handle names
-    // it (`owner_of`), alive while the window is; this is the main thread, where the window
-    // lives, and the view is retained for as long as it is used here.
+    // it, alive while the window is, and an owner is used only while its window lives
+    // (`Owner::view`'s contract; `Owner::of` makes it from the live window); this is the main
+    // thread, where the window lives, and the view is retained for as long as it is used here.
     let content = unsafe { Retained::retain(content.as_ptr().cast::<NSView>()) }
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no window view"))?;
     Ok((mtm, content))

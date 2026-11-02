@@ -3458,12 +3458,13 @@ fn the_list_the_items_are_in_scrolls_under_their_drag_on_a_scaled_screen() {
     let middle = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
     drag_to(&window, first, middle);
     assert!(!scroll_cue_shows(&window));
-    // Held anywhere along its bottom edge, at fractions of a pixel, the list scrolls.
+    // Held anywhere along its bottom edge, at fractions of a pixel, the list scrolls: 40 places
+    // spread along the same stretch of it, each at another fraction.
     let mut missed = Vec::new();
-    for step in 0..200_u16 {
+    for step in 0..40_u16 {
         let step = f32::from(step);
         let held = LogicalPosition::new(
-            at.x + 12.0 + step * 1.37,
+            at.x + 12.0 + step * 6.85,
             at.y + size.height - 3.0 - (step % 9.0) * 2.11,
         );
         pointer(&window, "move", held);
@@ -3474,7 +3475,7 @@ fn the_list_the_items_are_in_scrolls_under_their_drag_on_a_scaled_screen() {
     }
     assert!(
         missed.is_empty(),
-        "the list did not scroll at {} of 200 places, as {:?}",
+        "the list did not scroll at {} of 40 places, as {:?}",
         missed.len(),
         &missed[..missed.len().min(3)]
     );

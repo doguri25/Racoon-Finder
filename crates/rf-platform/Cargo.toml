@@ -13,6 +13,9 @@ workspace = true
 
 [dependencies]
 dirs = "7.0.0"
+# The window's handle as winit gives it, borrowed from the live window (`shell::Owner::of`): the
+# same 0.6 that winit 0.30 and Slint use, already in the lock file.
+raw-window-handle = "0.6.2"
 rf-core = { version = "0.3.0", path = "../rf-core" }
 
 [target."cfg(windows)".dependencies]

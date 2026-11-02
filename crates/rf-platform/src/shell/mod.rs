@@ -42,6 +42,7 @@ use std::num::{NonZeroIsize, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use rf_core::Os;
 
 use crate::natural_cmp;
@@ -151,10 +152,12 @@ pub struct Launch {
 /// The app's window: on Windows its `HWND`, so that a dialog of the system, and the consent
 /// prompt of a program run as administrator, come in front of it, and the window's drop target
 /// is registered on it ([`crate::dnd::register_drop_target`]); on macOS the `NSView` of its
-/// content, which the drop target covers. [`Owner::NONE`] for none.
+/// content, which the drop target covers. [`Owner::NONE`] for none. Made from the live window
+/// ([`Owner::of`]).
 ///
-/// It holds the handle as a number, so that it can go to the worker thread of a dialog; only
-/// the thread of the window may use the view it names.
+/// It holds the handle as a number, so that it can go to the worker thread of a dialog, and does
+/// not keep the window alive: it is for use while the window lives, and only the thread of the
+/// window may use the view it names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Owner(Option<Handle>);
 
@@ -162,7 +165,11 @@ pub struct Owner(Option<Handle>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Handle {
     Hwnd(NonZeroIsize),
-    /// The address of an `NSView`, its provenance exposed ([`Owner::view`]).
+    /// The address of an `NSView`, its provenance exposed (`Owner::view`, macOS).
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "made by macOS code alone")
+    )]
     View(NonZeroUsize),
 }
 
@@ -175,9 +182,20 @@ impl Owner {
         Owner(Some(Handle::Hwnd(hwnd)))
     }
 
-    /// The window whose content is the macOS `NSView` at `view`.
-    pub fn view(view: NonNull<c_void>) -> Owner {
-        Owner(Some(Handle::View(view.expose_provenance())))
+    /// The window `window`, by the handle its system gives it (raw-window-handle's, borrowed
+    /// from the live window): its `HWND` on Windows, the `NSView` of its content on macOS;
+    /// [`Owner::NONE`] for a window without one of those (another system, a window not made
+    /// yet). As every owner, it is for use while the window lives.
+    pub fn of(window: &impl HasWindowHandle) -> Owner {
+        let Ok(handle) = window.window_handle() else {
+            return Owner::NONE;
+        };
+        match handle.as_raw() {
+            RawWindowHandle::Win32(win32) => Owner::hwnd(win32.hwnd),
+            #[cfg(target_os = "macos")]
+            RawWindowHandle::AppKit(_) => imp::view_owner(handle),
+            _ => Owner::NONE,
+        }
     }
 
     /// The Windows handle of the window, if it has one.
@@ -1182,18 +1200,26 @@ mod tests {
 
     #[test]
     fn a_window_is_named_by_the_handle_of_its_system() {
+        /// A window without a handle (not made yet).
+        struct NotMade;
+
+        impl HasWindowHandle for NotMade {
+            fn window_handle(
+                &self,
+            ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+            {
+                Err(raw_window_handle::HandleError::Unavailable)
+            }
+        }
+
         let hwnd = NonZeroIsize::new(0x1234).expect("not zero");
         let windows = Owner::hwnd(hwnd);
         assert_eq!(windows.raw(), Some(hwnd));
         assert_eq!(windows.ns_view(), None);
-        let mut content = 0u8;
-        let view = NonNull::from(&mut content).cast::<c_void>();
-        let macos = Owner::view(view);
-        assert_eq!(macos.ns_view(), Some(view));
-        assert_eq!(macos.raw(), None);
-        assert_ne!(macos, windows);
         assert_eq!(Owner::NONE.raw(), None);
         assert_eq!(Owner::NONE.ns_view(), None);
         assert_eq!(Owner::default(), Owner::NONE);
+        // A window without a handle has no owner.
+        assert_eq!(Owner::of(&NotMade), Owner::NONE);
     }
 }

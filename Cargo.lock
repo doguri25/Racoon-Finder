@@ -4363,6 +4363,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-user-notifications 0.3.2",
  "proptest",
+ "raw-window-handle",
  "rf-core",
  "rustix 1.1.5",
  "tempfile",

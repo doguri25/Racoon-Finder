@@ -1042,16 +1042,9 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
 /// than winit's (the tests'), and before the window is made.
 pub fn owner_of(window: &MainWindow) -> Owner {
     use slint::winit_030::WinitWindowAccessor;
-    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     window
         .window()
-        .with_winit_window(
-            |winit| match winit.window_handle().map(|handle| handle.as_raw()) {
-                Ok(RawWindowHandle::Win32(win32)) => Owner::hwnd(win32.hwnd),
-                Ok(RawWindowHandle::AppKit(appkit)) => Owner::view(appkit.ns_view),
-                _ => Owner::NONE,
-            },
-        )
+        .with_winit_window(Owner::of)
         .unwrap_or(Owner::NONE)
 }
 

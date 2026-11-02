@@ -424,7 +424,8 @@ fn context_menu(hwnd: HWND, folder: &Path, names: &[OsString]) -> io::Result<ICo
         )
     }
     .map_err(|e| to_io(&e))?;
-    let folder_id = Pidl::new(id)?;
+    // SAFETY: the id list the call gave, the caller's to free, and used nowhere else.
+    let folder_id = unsafe { Pidl::new(id) }?;
     // SAFETY: the folder's absolute id list, which `folder_id` keeps alive through the call,
     // bound from the desktop without a bind context.
     let shell_folder: IShellFolder =
@@ -462,7 +463,8 @@ fn item_id(folder: &IShellFolder, hwnd: HWND, name: &OsStr) -> io::Result<Pidl> 
         )
     }
     .map_err(|e| to_io(&e))?;
-    Pidl::new(id)
+    // SAFETY: as in `context_menu`: the id list the call gave, the caller's to free.
+    unsafe { Pidl::new(id) }
 }
 
 /// An item id list (PIDL) the shell allocated, freed as this goes.
@@ -470,7 +472,12 @@ struct Pidl(NonNull<ITEMIDLIST>);
 
 impl Pidl {
     /// The id list `id` the shell gave; `NotFound` for none.
-    fn new(id: *mut ITEMIDLIST) -> io::Result<Pidl> {
+    ///
+    /// # Safety
+    ///
+    /// `id` is null, or an id list the shell allocated with the task allocator that nothing else
+    /// frees or uses after this: the `Pidl` frees it (`ILFree`) as it goes.
+    unsafe fn new(id: *mut ITEMIDLIST) -> io::Result<Pidl> {
         NonNull::new(id)
             .map(Pidl)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the shell named no item"))
@@ -582,12 +589,19 @@ impl Handler {
 
     /// Hands the menu's `message` to it: what the window answers, or `None` for a message it
     /// does not take (`IContextMenu2` takes no `WM_MENUCHAR`).
-    fn handle(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    ///
+    /// # Safety
+    ///
+    /// `message`, `wparam` and `lparam` are a message of the menu's (`WM_INITMENUPOPUP`,
+    /// `WM_DRAWITEM`, `WM_MEASUREITEM`, `WM_MENUCHAR`) as the system gave it to the window's
+    /// procedure, during that call: `lparam` of the last three points at a structure the system
+    /// keeps alive until the procedure returns, and the menu reads and writes it.
+    unsafe fn handle(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match self {
             Handler::Three(menu) => {
                 let mut answer = LRESULT(0);
-                // SAFETY: a message of the menu with its parameters as the system gave them,
-                // and a live place for the answer.
+                // SAFETY: a message of the menu with its parameters as the system gave them
+                // (this function's contract), and a live place for the answer.
                 unsafe { menu.HandleMenuMsg2(message, wparam, lparam, Some(&raw mut answer)) }
                     .ok()?;
                 Some(answer)
@@ -650,7 +664,10 @@ unsafe extern "system" fn helper_proc(
             .try_with(|hosted| hosted.try_borrow().ok().and_then(|held| held.clone()))
             .ok()
             .flatten();
-        if let Some(answer) = handler.and_then(|handler| handler.handle(message, wparam, lparam)) {
+        // SAFETY: one of the menu's messages, with its parameters as the system gave them to
+        // this procedure, which has not returned.
+        let answer = handler.and_then(|handler| unsafe { handler.handle(message, wparam, lparam) });
+        if let Some(answer) = answer {
             return answer;
         }
     }
@@ -758,10 +775,28 @@ mod tests {
 
     #[test]
     fn the_owner_is_the_window_handle_as_it_was_given() {
+        use raw_window_handle::{
+            HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
+        };
+
+        /// A window whose handle is the number it holds.
+        struct Window(std::num::NonZeroIsize);
+
+        impl HasWindowHandle for Window {
+            fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+                let raw = RawWindowHandle::Win32(Win32WindowHandle::new(self.0));
+                // SAFETY: the handle lives no longer than this window, and the test only reads
+                // the number back.
+                Ok(unsafe { WindowHandle::borrow_raw(raw) })
+            }
+        }
+
         assert_eq!(owner_window(Owner::NONE), None);
         let hwnd = std::num::NonZeroIsize::new(0x0012_3456).expect("not zero");
         let window = owner_window(Owner::hwnd(hwnd)).expect("a window");
         assert_eq!(window.0.addr(), 0x0012_3456);
+        // The owner of a window, made from the handle winit gives it.
+        assert_eq!(Owner::of(&Window(hwnd)), Owner::hwnd(hwnd));
     }
 
     /// The verbs of the menu's commands, each with its id, as the shell fills `popup`, through
@@ -815,8 +850,42 @@ mod tests {
         verbs(&menu, popup.0)
     }
 
+    /// How long the shell's menu may take to fill on the CI's runner: its shell extensions load
+    /// in the process and may hang.
+    const MENU_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[test]
     fn the_shell_s_menu_of_a_file_has_the_commands_the_app_does_itself() {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        // On a thread of its own, in its own apartment, so that an extension that hangs in the
+        // menu fails this test within a minute instead of holding the whole job until its time
+        // runs out.
+        let (finished, done) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("shell-menu-test".into())
+            .spawn(move || {
+                menu_of_a_file_and_a_folder();
+                let _ = finished.send(());
+            })
+            .expect("a thread");
+        match done.recv_timeout(MENU_WATCHDOG) {
+            Ok(()) => {}
+            // It panicked: its own message.
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Err(panic) = worker.join() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("the shell's menu did not fill within {MENU_WATCHDOG:?}: an extension hangs")
+            }
+        }
+    }
+
+    /// The checks of [`the_shell_s_menu_of_a_file_has_the_commands_the_app_does_itself`], on the
+    /// thread that runs them, which enters a single-threaded apartment of its own.
+    fn menu_of_a_file_and_a_folder() {
         let _com = enter_apartment().expect("COM on the test's thread");
         let folder = tempfile::tempdir().expect("a folder");
         std::fs::write(folder.path().join("메뉴 (1).txt"), b"x").expect("a file");

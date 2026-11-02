@@ -4,8 +4,9 @@
 // the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the undo of a
 // dragged move, and on Windows the menu of a right click). It is short enough for a 560px window,
 // with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
-// their own, and no sub-menu has one of its own to open over it. Every item says its key
-// (KEY-03), and the keys reach every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
+// their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
+// 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach every item:
+// F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
 // items are two-way bound to properties set from the state: the view's marks as the menu opens and
