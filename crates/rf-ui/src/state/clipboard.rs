@@ -777,7 +777,7 @@ impl AppState {
 /// or with a name the system cannot have), and a Windows device or volume path that stays one
 /// once normalized (`\\?\GLOBALROOT\…`, `\\?\Volume{…}\…`), which names no folder of a drive
 /// or a share.
-fn local_paths(paths: &[PathBuf]) -> (Vec<VPath>, usize) {
+pub(super) fn local_paths(paths: &[PathBuf]) -> (Vec<VPath>, usize) {
     let local: Vec<VPath> = paths
         .iter()
         .filter(|path| path.is_absolute())

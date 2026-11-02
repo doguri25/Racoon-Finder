@@ -16,7 +16,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
-import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
 
 // What the pointer did to an item.
 enum TileEvent {
@@ -162,6 +162,8 @@ export component FileGrid inherits Rectangle {
     out property <int> page-lines: root.columnar ? max(1, floor(columns-view.visible-width / root.tile-w)) : max(1, floor(icons.visible-height / root.tile-h));
     // The payload of a drag of the items (as `FileList` has it).
     in property <data-transfer> drag-data;
+    // The item a drag of another app is over and that takes it, as `FileList` has it.
+    in property <int> outside-row: -2;
 
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
@@ -205,8 +207,25 @@ export component FileGrid inherits Rectangle {
         }
     }
 
+    // The place of the list under the point (`x`, `y`) of the window, as a drag of items there
+    // names it (`FileList.spot-at`): the item under it by the reckoning of the drop area
+    // (`index-at`), or -1 where there is none.
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        let dx = x - drop.absolute-position.x;
+        let dy = y - drop.absolute-position.y;
+        return {
+            found: dx >= 0 && dy >= 0 && dx < drop.width && dy < drop.height,
+            place: DropPlace.list,
+            side: 0,
+            index: root.index-at(dx, dy),
+        };
+    }
+
+    // The folder item a drag of another app would go into (`FileList`).
+    private property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
+
     // The item at (`x`, `y`) of the list, or -1 where there is none.
-    function index-at(x: length, y: length) -> int {
+    pure function index-at(x: length, y: length) -> int {
         if (root.columnar) {
             let column = floor((x - root.pad - columns-view.content-x) / root.tile-w);
             let place = floor((y - root.pad) / root.tile-h);
@@ -331,7 +350,7 @@ export component FileGrid inherits Rectangle {
                         item: root.rows[self.index];
                         mode: root.mode;
                         cursor-here: root.active && self.index == root.cursor;
-                        drop-here: drop.has-drag && self.index == drop.target;
+                        drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                         drag-data: root.drag-data;
                         event(what, ctrl, shift, command) => {
                             root.tile-event(self.index, what, ctrl, shift, command);
@@ -382,7 +401,7 @@ export component FileGrid inherits Rectangle {
                             item: root.rows[self.index];
                             mode: root.mode;
                             cursor-here: root.active && self.index == root.cursor;
-                            drop-here: drop.has-drag && self.index == drop.target;
+                            drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                             drag-data: root.drag-data;
                             event(what, ctrl, shift, command) => {
                                 root.tile-event(self.index, what, ctrl, shift, command);
@@ -398,7 +417,7 @@ export component FileGrid inherits Rectangle {
     DropFrame {
         width: parent.width;
         height: parent.height;
-        frame: drop.has-drag && drop.target < 0;
+        frame: (drop.has-drag && drop.target < 0) || root.outside-target == -1;
     }
 
     // The end the list scrolls toward under a drag held there (`scroll-way`).

@@ -38,20 +38,13 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
-import { ItemMenu, OpenWithMenu, DropMenu, DragPointer } from "list-parts.slint";
+import { ItemMenu, OpenWithMenu, DropMenu, DragPointer, DropPlace, DropAt } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView, ItemMenu, DragPointer
-}
-
-// What a drag is over: a pane's list, a pane's tab, or a row of the tree.
-export enum DropPlace {
-    list,
-    tab,
-    tree,
+    PropertiesView, FactRow, HashRowView, ItemMenu, DragPointer, DropPlace, DropAt
 }
 
 // Which dialog is open over the main window.
@@ -375,6 +368,48 @@ export component MainWindow inherits Window {
     callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
     // The menu of 놓을 때 묻기 chose `name`: `move`, `copy` or `cancel`.
     callback drop-menu-chosen(name: string);
+    // The place a drag of another app hovers over and takes, as Rust found it (`spot-at`): it
+    // shows as the place a drag of rows takes does. Not `found` while it takes none; the drag's
+    // end (`drag-gone`) clears it.
+    in-out property <DropAt> outside-drop;
+
+    // The place under the point (`x`, `y`) of the window's content (logical pixels from its top
+    // left corner), as a drag of rows there names it (`drop-check`), for a drag of another app:
+    // a row of a pane's list (-1 below the rows), a tab, a row of the tree, each found by the
+    // reckoning of its own drop area. Not `found` where nothing takes drops (the toolbar, the
+    // path row, the column heads, between the panes), on the pane that one-pane layout hides or
+    // the tree put away, and while a dialog, quick look or a list of the window shows over it
+    // (the menu of 놓을 때 묻기, a folder's subfolders, the path's completions). The tree's rows
+    // tell which of them the pointer is over themselves (`Sidebar.pointed-row`).
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        if (root.dialog != DialogKind.none || root.quick-look || root.drop-asking || root.subfolders.open || root.completing >= 0) {
+            return { found: false, place: DropPlace.list, side: 0, index: -1 };
+        }
+        if (root.show-tree) {
+            let at = sidebar.spot-at(x, y);
+            if (at.found) {
+                return at;
+            }
+        }
+        if (left.visible) {
+            let at = left.spot-at(x, y);
+            if (at.found) {
+                return at;
+            }
+        }
+        if (right.visible) {
+            let at = right.spot-at(x, y);
+            if (at.found) {
+                return { found: true, place: at.place, side: 1, index: at.index };
+            }
+        }
+        return { found: false, place: DropPlace.list, side: 0, index: -1 };
+    }
+
+    // The tree's rows forget which one the pointer moved over last (`spot-at`).
+    public function forget-tree-pointer() {
+        sidebar.pointed-row = -1;
+    }
     // A drag moved where nothing takes drops (the toolbar, the gap between the panes), or a
     // place refused it: nothing it rested on opens (DND-08).
     callback drag-hovers-nothing();
@@ -531,11 +566,12 @@ export component MainWindow inherits Window {
         root.hint-told = refused && text != "";
     }
 
-    // The drag is over, or gone from the window: nothing shows beside its pointer, and the
-    // lists stop scrolling under it.
+    // The drag is over, or gone from the window: nothing shows beside its pointer or around a
+    // place, and the lists stop scrolling under it.
     public function drag-gone() {
         root.hint = "";
         root.hint-told = false;
+        root.outside-drop = { found: false, place: DropPlace.list, side: 0, index: -1 };
         DragPointer.gone();
     }
 
@@ -1051,6 +1087,7 @@ export component MainWindow inherits Window {
                         rows: root.tree;
                         cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
                         accepts-drops: true;
+                        outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.tree ? root.outside-drop.index : -1;
                         row-clicked(index) => {
                             root.tree-clicked(index);
                             keys.focus();
@@ -1099,6 +1136,8 @@ export component MainWindow inherits Window {
                         view: root.left-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
+                        outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 0 ? root.outside-drop.index : -2;
+                        outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 0 ? root.outside-drop.index : -1;
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();
@@ -1240,6 +1279,8 @@ export component MainWindow inherits Window {
                         view: root.right-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
+                        outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 1 ? root.outside-drop.index : -2;
+                        outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 1 ? root.outside-drop.index : -1;
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();

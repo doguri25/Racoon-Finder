@@ -22,6 +22,7 @@ mod drop_rule;
 mod jobs;
 mod layout;
 mod nav;
+mod outside;
 mod panel;
 mod pick;
 mod preview;

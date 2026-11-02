@@ -13,6 +13,7 @@ use rf_jobs::{
     JobEngine, JobEvent, JobId, JobSpec, Outcome, Resolver, TransferMode, TransferOptions,
     TransferSpec,
 };
+use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
 use rf_ui::dialogs::{ConfirmPurpose, ConflictChoice, Modal};
 use rf_ui::jobs::{JobEffect, Jobs};
 use rf_ui::loader::{LoadEvent, LoadTicket, Loader};
@@ -632,6 +633,65 @@ fn a_dragged_move_offers_its_undo_for_a_moment() {
     harness.run(&mut state, effects);
     assert_eq!(read(&left.join("m.txt")), "M");
     assert!(!right.join("m.txt").exists());
+}
+
+#[test]
+fn files_another_app_drops_are_copied_or_moved_by_the_apps_own_job() {
+    let (dir, left, right) = folders();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    write(&elsewhere.join("a.txt"), "A");
+    write(&elsewhere.join("b.txt"), "B");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    let dropped = |name: &str| DroppedItems {
+        paths: vec![elsewhere.join(name)],
+        ours: None,
+    };
+
+    // As winit tells a drop (X11): the files alone, into the folder the active pane shows, which
+    // the drag allows only to copy.
+    let active = DropSpot::Pane {
+        side: state.active(),
+        row: None,
+    };
+    let (done, effects) = state.outside_drop(
+        Some(active),
+        dropped("a.txt"),
+        DragMods::default(),
+        Effects::COPY,
+        false,
+    );
+    assert_eq!(done, Some(DropEffect::Copy));
+    harness.run(&mut state, effects);
+    assert_eq!(read(&left.join("a.txt")), "A");
+    assert_eq!(read(&elsewhere.join("a.txt")), "A");
+
+    // A move the drag allows (File Explorer's, Finder's): the app's own job moves it, so the
+    // original goes only once its copy is made, and the move offers its undo (DND-07).
+    let list = DropSpot::Pane {
+        side: RIGHT,
+        row: None,
+    };
+    let (done, effects) = state.outside_drop(
+        Some(list),
+        dropped("b.txt"),
+        DragMods::default(),
+        Effects::COPY | Effects::MOVE,
+        false,
+    );
+    assert_eq!(done, Some(DropEffect::Move));
+    let seen = harness.run(&mut state, effects);
+    assert!(!elsewhere.join("b.txt").exists());
+    assert_eq!(read(&right.join("b.txt")), "B");
+    assert!(
+        seen.iter().any(|effect| matches!(
+            effect,
+            Effect::Toast { text, time, .. }
+                if text == "항목 1개를 옮겼습니다" && *time == Some(MOVE_TOAST_TIME)
+        )),
+        "{seen:?}"
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@ use jiff::tz::TimeZone;
 use rf_core::{Attributes, Entry, EntryKind, Os, VPath};
 use rf_jobs::TransferMode;
 use rf_platform::dnd::{DragMods, DropEffect};
-use rf_platform::shell::Owner;
+use rf_platform::shell::{Owner, WindowPoint};
 use rf_vfs::{SortKey, SortOrder};
 use slint::language::DragAction;
 use slint::winit_030::winit::dpi::PhysicalPosition;
@@ -45,14 +45,16 @@ use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
 use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
-use crate::state::{Column, Completion, MenuFacts, Names, PathForm, PreviewShown};
+use crate::state::{
+    Column, Completion, DropSpot, LEFT, MenuFacts, Names, PathForm, PreviewShown, RIGHT,
+};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, FactRow, FileRow, FolderMenuRow,
-    FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow, MessageView, NameView, PaneView,
-    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DropAt, DropPlace, FactRow, FileRow,
+    FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow, MessageView,
+    NameView, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView,
+    PropertiesView, RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -787,6 +789,67 @@ pub fn sort_column(key: SortKey) -> i32 {
 /// attributes, which sort nothing.
 pub fn sort_key(column: i32) -> Option<SortKey> {
     Column::from_number(column)?.sort_key()
+}
+
+/// The place of the state that a drag over `place` names, with the pane `side` and the row or
+/// tab `index` of the window (`drop-check`, `spot-at`); `None` for a negative tab or tree row.
+pub fn spot_of(place: DropPlace, side: i32, index: i32) -> Option<DropSpot> {
+    let side = if side == 1 { RIGHT } else { LEFT };
+    let index = usize::try_from(index).ok();
+    Some(match place {
+        DropPlace::List => DropSpot::Pane { side, row: index },
+        DropPlace::Tab => DropSpot::Tab {
+            side,
+            index: index?,
+        },
+        DropPlace::Tree => DropSpot::Tree(index?),
+    })
+}
+
+/// The place under the point `at` of the window's content, for a drag of another app: the
+/// window's `spot-at`, which finds it by the reckoning of each place's own drop area (the rows
+/// and the items of a list, the tabs of a strip). `None` where nothing takes drops, and while a
+/// dialog, quick look or a menu of the window shows over it.
+///
+/// The rows of the tree differ in height (a head above the first favorite and the first drive,
+/// a drive's space bar), and its list places the rows it has not drawn by their average
+/// height, so no reckoning from outside them finds the one under a point: over the tree, the
+/// pointer moves there first (a `PointerMoved` of the window, which no drag of Slint's is under
+/// way to take), and the row under it says it is the one (`pointed-row`), by Slint's own hit
+/// test. That changes only which row shows the pointer over it, as a move of the mouse there
+/// would.
+pub fn drop_spot(window: &MainWindow, at: WindowPoint) -> Option<DropSpot> {
+    let mut found = window.invoke_spot_at(at.x, at.y);
+    if found.found && found.place == DropPlace::Tree {
+        window.invoke_forget_tree_pointer();
+        let position = slint::LogicalPosition::new(at.x, at.y);
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        found = window.invoke_spot_at(at.x, at.y);
+    }
+    found
+        .found
+        .then(|| spot_of(found.place, found.side, found.index))
+        .flatten()
+}
+
+/// `spot` as the window names it ([`spot_of`] the other way round), for the frame of the place
+/// a drag of another app takes; not `found` for none.
+pub fn drop_at(spot: Option<DropSpot>) -> DropAt {
+    let number = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+    let (place, side, index) = match spot {
+        None => return DropAt::default(),
+        Some(DropSpot::Pane { side, row }) => (DropPlace::List, side, row.map_or(-1, number)),
+        Some(DropSpot::Tab { side, index }) => (DropPlace::Tab, side, number(index)),
+        Some(DropSpot::Tree(row)) => (DropPlace::Tree, LEFT, number(row)),
+    };
+    DropAt {
+        found: true,
+        place,
+        side: number(side),
+        index,
+    }
 }
 
 /// What the payload of a drag of rows holds: the id under which the state noted the items
@@ -2367,6 +2430,41 @@ mod tests {
         ] {
             assert!(outside(x, y), "({x}, {y})");
         }
+    }
+
+    #[test]
+    fn a_place_of_a_drag_is_named_the_same_both_ways() {
+        let spots = [
+            DropSpot::Pane {
+                side: LEFT,
+                row: Some(3),
+            },
+            DropSpot::Pane {
+                side: RIGHT,
+                row: None,
+            },
+            DropSpot::Tab {
+                side: RIGHT,
+                index: 2,
+            },
+            DropSpot::Tree(5),
+        ];
+        for spot in spots {
+            let at = drop_at(Some(spot));
+            assert!(at.found, "{spot:?}");
+            assert_eq!(spot_of(at.place, at.side, at.index), Some(spot));
+        }
+        assert!(!drop_at(None).found);
+        // Below the rows is a place of the list; a tab or a row of the tree is not.
+        assert_eq!(
+            spot_of(DropPlace::List, 0, -1),
+            Some(DropSpot::Pane {
+                side: LEFT,
+                row: None
+            })
+        );
+        assert_eq!(spot_of(DropPlace::Tab, 1, -1), None);
+        assert_eq!(spot_of(DropPlace::Tree, 0, -1), None);
     }
 
     #[test]

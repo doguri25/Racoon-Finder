@@ -17,7 +17,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
-import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
 
 export { ColumnView }
 
@@ -96,6 +96,9 @@ export component FileList inherits Rectangle {
     out property <int> first-row: max(0, floor(-list.content-y / Theme.row-height));
     // The payload of a drag of the rows: the id of the items the last press readied.
     in property <data-transfer> drag-data;
+    // The row a drag of another app is over and that takes it, as Rust found it: -1 for the list
+    // below the rows, -2 for none. It shows as a drag of rows there shows.
+    in property <int> outside-row: -2;
 
     // A click on the head of column `column` (with Shift: `then`).
     callback sort(column: int, then: bool);
@@ -172,10 +175,29 @@ export component FileList inherits Rectangle {
     private property <length> icon-room: 26px;
 
     // The row at `y` in the list (the rows are all `Theme.row-height` tall), or -1 below them.
-    function row-at(y: length) -> int {
+    pure function row-at(y: length) -> int {
         let row = floor((y - list.content-y) / Theme.row-height);
         return row >= 0 && row < root.rows.length ? row : -1;
     }
+
+    // The place of the list under the point (`x`, `y`) of the window, as a drag of rows there
+    // names it: the row under it by the reckoning of the rows' drop area (`row-at`), or -1 below
+    // the rows; not `found` off the rows' area (the column heads, the bar under the rows). The
+    // pane sets its `side`.
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        let dx = x - drop.absolute-position.x;
+        let dy = y - drop.absolute-position.y;
+        return {
+            found: dx >= 0 && dy >= 0 && dx < drop.width && dy < drop.height,
+            place: DropPlace.list,
+            side: 0,
+            index: root.row-at(dy),
+        };
+    }
+
+    // The folder row a drag of another app would go into, as `drop.target-row` is a drag of
+    // rows': -1 for the pane's folder, -2 for none.
+    private property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
 
     // The rows scroll under a drag held near their top or bottom (DND-08), as the tab strip and
     // the column heads do (`EdgeScroll`), while its pointer stays where this list last saw it
@@ -366,7 +388,7 @@ export component FileList inherits Rectangle {
                                 border-radius: 4px;
                             }
                             // The folder a drag over this row would go into.
-                            if drop.has-drag && i == drop.target-row: Rectangle {
+                            if (drop.has-drag && i == drop.target-row) || i == root.outside-target: Rectangle {
                                 x: 2px;
                                 width: parent.width - 4px;
                                 border-width: 2px;
@@ -382,7 +404,7 @@ export component FileList inherits Rectangle {
             DropFrame {
                 width: parent.width;
                 height: parent.height;
-                frame: drop.has-drag && drop.target-row < 0;
+                frame: (drop.has-drag && drop.target-row < 0) || root.outside-target == -1;
             }
 
             // The end the rows scroll toward under a drag held there (`scroll-way`).

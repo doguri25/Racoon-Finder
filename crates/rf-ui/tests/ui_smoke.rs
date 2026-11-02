@@ -7,12 +7,13 @@ use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
 // The input method's composition has no public event; Slint's own backends send it this way.
 use i_slint_core::input::{InternalKeyEvent, KeyEventType};
 use rf_core::{Entry, EntryKind, Os, VPath};
+use rf_platform::shell::WindowPoint;
 use rf_platform::{DiskSpace, KnownFolder};
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::state::{Column, FolderView, MenuFacts, ShownColumn, ViewMode};
+use rf_ui::state::{Column, DropSpot, FolderView, MenuFacts, ShownColumn, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
@@ -6507,4 +6508,207 @@ fn the_text_fields_keep_their_own_clipboard_keys() {
     compose(&window, "ㄱ");
     clipboard_keys(&window);
     assert_eq!(keys.take(), Vec::<String>::new());
+}
+
+/// The place that a drag of rows names at `to`, after a press at `from` and a drag past the
+/// threshold, as the window's own drop areas name it (`drop-check`); `None` where no place
+/// takes drops. The drag is let go there.
+fn named_by_a_drag(
+    window: &MainWindow,
+    calls: &DragCalls,
+    from: LogicalPosition,
+    to: LogicalPosition,
+) -> Option<DropSpot> {
+    pointer(window, "press", from);
+    for step in [10.0, 20.0, 30.0] {
+        pointer(window, "move", LogicalPosition::new(from.x + step, from.y));
+    }
+    let before = calls.checks.borrow().len();
+    pointer(window, "move", to);
+    let named = calls.checks.borrow()[before..].last().copied();
+    pointer(window, "release", to);
+    calls.drops.borrow_mut().clear();
+    named.and_then(|(_, place, side, index)| ui_bridge::spot_of(place, side, index))
+}
+
+/// What the window finds at `at` for a drag of another app (`spot-at`, through the bridge).
+fn found_at(window: &MainWindow, at: LogicalPosition) -> Option<DropSpot> {
+    ui_bridge::drop_spot(window, WindowPoint { x: at.x, y: at.y })
+}
+
+/// The window of [`drag_window`], whose tree has two favorites and two drives: rows of three
+/// heights (a head over the first of each, a drive's space bar).
+fn drop_window() -> (MainWindow, Rc<DragCalls>, Rc<TreeRows>) {
+    let (window, calls, _models, tree_rows) = drag_window();
+    let base = std::env::temp_dir();
+    let place = |label: &str, kind: PlaceKind| Place {
+        label: label.to_owned(),
+        path: VPath::local(base.join(label)).expect("a local path"),
+        kind,
+        space: None,
+    };
+    let places = [
+        place("홈", PlaceKind::Favorite(KnownFolder::Home)),
+        place("문서", PlaceKind::Favorite(KnownFolder::Documents)),
+        place("디스크", PlaceKind::Drive),
+        place("USB", PlaceKind::Drive),
+    ];
+    let mut tree = Tree::new(VisibilityFilter::default());
+    tree.set_roots(
+        places
+            .iter()
+            .map(|place| (place.label.clone(), place.path.clone())),
+    );
+    tree_rows.sync(&tree, &places);
+    (window, calls, tree_rows)
+}
+
+#[test]
+fn spot_at_finds_where_a_drag_of_rows_would_drop() {
+    let (window, calls, _tree) = drop_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let y_txt = centre_of(&window, "y.txt", AccessibleRole::ListItem);
+    let tabs: Vec<LogicalPosition> = labelled(&window, "listed", AccessibleRole::Tab)
+        .iter()
+        .map(centre)
+        .collect();
+    assert_eq!(tabs.len(), 2, "a tab in each pane");
+    let tree: Vec<LogicalPosition> = ["홈", "문서", "디스크", "USB"]
+        .into_iter()
+        .map(|label| centre_of(&window, label, AccessibleRole::ListItem))
+        .collect();
+    let toolbar = centre_of(&window, "새 폴더", AccessibleRole::Button);
+    let below = |at: LogicalPosition| LogicalPosition::new(at.x, at.y + 200.0);
+    let head = |at: LogicalPosition| LogicalPosition::new(at.x, at.y - 40.0);
+    let points = [
+        docs,
+        x_txt,
+        below(x_txt),
+        head(docs),
+        backup,
+        y_txt,
+        below(y_txt),
+        // The right edge of the second row, and the top of the first.
+        LogicalPosition::new(y_txt.x + 150.0, y_txt.y + 15.0),
+        LogicalPosition::new(backup.x, backup.y - 15.0),
+        tabs[0],
+        tabs[1],
+        tree[0],
+        tree[1],
+        tree[2],
+        tree[3],
+        // A drive's head and the margin of the tree, which take nothing.
+        LogicalPosition::new(tree[2].x, tree[2].y - 40.0),
+        LogicalPosition::new(tree[0].x - 100.0, tree[0].y),
+        toolbar,
+    ];
+    let compare = |what: &str| {
+        for at in points {
+            let named = named_by_a_drag(&window, &calls, x_txt, at);
+            assert_eq!(found_at(&window, at), named, "{what}: {at:?}");
+        }
+    };
+    compare("two panes and the tree");
+    // It names what a drag names, which is not nothing everywhere.
+    let spot = |at| found_at(&window, at);
+    assert_eq!(
+        spot(backup),
+        Some(DropSpot::Pane {
+            side: 1,
+            row: Some(0)
+        })
+    );
+    assert_eq!(
+        spot(below(y_txt)),
+        Some(DropSpot::Pane { side: 1, row: None })
+    );
+    assert_eq!(spot(tabs[1]), Some(DropSpot::Tab { side: 1, index: 0 }));
+    assert_eq!(spot(tree[0]), Some(DropSpot::Tree(0)));
+    assert_eq!(spot(tree[3]), Some(DropSpot::Tree(3)));
+    assert_eq!(spot(toolbar), None);
+
+    // One pane: the hidden one takes nothing, the one that shows takes its whole room. The tree
+    // put away: its room is the panes'.
+    window.set_dual_pane(false);
+    compare("one pane");
+    window.set_show_tree(false);
+    compare("one pane, no tree");
+    assert_ne!(spot(tree[0]), Some(DropSpot::Tree(0)));
+    window.set_dual_pane(true);
+    window.set_show_tree(true);
+    assert_eq!(spot(tree[1]), Some(DropSpot::Tree(1)));
+
+    // Nothing takes a drop while a dialog, quick look or a menu of the window shows over it.
+    window.set_dialog(DialogKind::Confirm);
+    for at in points {
+        assert_eq!(spot(at), None, "{at:?}");
+    }
+    window.set_dialog(DialogKind::None);
+    window.set_quick_look(true);
+    assert_eq!(spot(backup), None);
+    window.set_quick_look(false);
+    window.invoke_show_drop_menu();
+    assert_eq!(spot(backup), None);
+    press(&window, Key::Escape);
+    assert_eq!(
+        spot(backup),
+        Some(DropSpot::Pane {
+            side: 1,
+            row: Some(0)
+        })
+    );
+}
+
+#[test]
+fn spot_at_finds_the_items_of_the_icon_views_as_their_drag_does() {
+    let (window, calls, _tree) = drop_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    for mode in [ViewMode::List, ViewMode::LargeIcons] {
+        // The right pane in the mode, its two items where its view puts them.
+        let mut view = window.get_right_pane();
+        view.mode = mode.number();
+        window.set_right_pane(view);
+        let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+        let y_txt = centre_of(&window, "y.txt", AccessibleRole::ListItem);
+        for at in [
+            backup,
+            y_txt,
+            LogicalPosition::new(y_txt.x + 400.0, y_txt.y + 300.0),
+        ] {
+            let named = named_by_a_drag(&window, &calls, x_txt, at);
+            assert_eq!(found_at(&window, at), named, "{mode:?}: {at:?}");
+        }
+        assert_eq!(
+            found_at(&window, backup),
+            Some(DropSpot::Pane {
+                side: 1,
+                row: Some(0)
+            })
+        );
+    }
+}
+
+#[test]
+fn the_place_a_drag_of_another_app_takes_shows_as_a_drag_of_rows_does() {
+    let (window, _calls, _tree) = drop_window();
+    // Rust names the place, or none; the window keeps it until the drag is gone.
+    let spot = DropSpot::Pane {
+        side: 1,
+        row: Some(0),
+    };
+    window.set_outside_drop(ui_bridge::drop_at(Some(spot)));
+    let shown = window.get_outside_drop();
+    assert_eq!(
+        (shown.found, shown.place, shown.side, shown.index),
+        (true, DropPlace::List, 1, 0)
+    );
+    assert_eq!(
+        ui_bridge::spot_of(shown.place, shown.side, shown.index),
+        Some(spot)
+    );
+    window.invoke_drag_gone();
+    assert!(!window.get_outside_drop().found);
+    assert!(!ui_bridge::drop_at(None).found);
 }

@@ -12,16 +12,16 @@ use crate::settings::DragDefault;
 use crate::state::drop_rule::{DropChoice, Refusal};
 use crate::words::JobWork;
 
-fn in_a(name: &str) -> VPath {
+pub(super) fn in_a(name: &str) -> VPath {
     folder("a").join(name).expect("a plain name")
 }
 
-fn in_b(name: &str) -> VPath {
+pub(super) fn in_b(name: &str) -> VPath {
     folder("b").join(name).expect("a plain name")
 }
 
 /// The one job `effects` submit, and the pane that asked for it.
-fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
+pub(super) fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
     let submits: Vec<(JobSpec, Option<usize>)> = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -37,7 +37,7 @@ fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
 
 /// A window whose left pane at `a` holds the folders `docs` and `src` and the file `x.txt`,
 /// and whose right pane at `b` holds the folder `백업` and the file `y.txt`.
-fn two_panes() -> AppState {
+pub(super) fn two_panes() -> AppState {
     ready(
         vec![dir("docs"), dir("src"), file("x.txt")],
         vec![dir("백업"), file("y.txt")],
@@ -51,11 +51,11 @@ fn offer(state: &mut AppState, spot: DropSpot) -> Option<VPath> {
     state.drop_offer(id, spot).map(|offer| offer.folder)
 }
 
-const LEFT_LIST: DropSpot = DropSpot::Pane {
+pub(super) const LEFT_LIST: DropSpot = DropSpot::Pane {
     side: LEFT,
     row: None,
 };
-const RIGHT_LIST: DropSpot = DropSpot::Pane {
+pub(super) const RIGHT_LIST: DropSpot = DropSpot::Pane {
     side: RIGHT,
     row: None,
 };
@@ -433,7 +433,7 @@ fn moved_x() -> UndoRecord {
 /// The engine starts the job `effects` submit as job `id`, which ends as `finish` leaves its
 /// report (it moved `x.txt` from `a` into `b`, and its record is the next one to undo): the
 /// effects of its end.
-fn run_move(
+pub(super) fn run_move(
     state: &mut AppState,
     effects: &[Effect],
     id: JobId,
@@ -461,7 +461,7 @@ fn run_move(
 }
 
 /// The toasts among `effects`: their tokens, texts, buttons and times.
-fn toasts(effects: &[Effect]) -> Vec<(u64, String, String, Option<Duration>)> {
+pub(super) fn toasts(effects: &[Effect]) -> Vec<(u64, String, String, Option<Duration>)> {
     effects
         .iter()
         .filter_map(|effect| match effect {
@@ -811,7 +811,7 @@ fn a_place_that_refuses_the_items_says_why() {
 }
 
 /// The keys that ask a drop for a copy on this system: Ctrl, or ⌥ on macOS.
-fn copy_keys() -> DragMods {
+pub(super) fn copy_keys() -> DragMods {
     if Os::CURRENT == Os::MacOs {
         DragMods {
             alt: true,
@@ -826,7 +826,7 @@ fn copy_keys() -> DragMods {
 }
 
 /// The keys that ask a drop for a link on this system: Ctrl+Shift, or ⌥⌘ on macOS.
-fn link_keys() -> DragMods {
+pub(super) fn link_keys() -> DragMods {
     if Os::CURRENT == Os::MacOs {
         DragMods {
             alt: true,
@@ -843,7 +843,7 @@ fn link_keys() -> DragMods {
 }
 
 /// The mode of the transfer `effects` submit.
-fn submitted_mode(effects: &[Effect]) -> TransferMode {
+pub(super) fn submitted_mode(effects: &[Effect]) -> TransferMode {
     match the_submit(effects).0 {
         JobSpec::Transfer(transfer) => transfer.mode,
         spec => panic!("a transfer: {spec:?}"),

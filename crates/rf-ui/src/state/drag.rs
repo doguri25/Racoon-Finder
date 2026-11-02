@@ -42,6 +42,7 @@ use rf_platform::dnd::{DragMods, DropEffect, Effects};
 use super::drop_rule::{self, DropChoice};
 use super::jobs::submit;
 use super::{AppState, Effect, MenuShown, load};
+use crate::jobs::JobEffect;
 use crate::pane::next_generation;
 use crate::pick::{PickRequest, Validity, validate};
 use crate::places::PlaceKind;
@@ -68,7 +69,7 @@ pub struct Drag {
     takes: HashMap<VPath, Validity>,
     /// The folder the last hover showed the items would go into; `None` after a hover where
     /// nothing takes them.
-    shown: Option<VPath>,
+    pub(super) shown: Option<VPath>,
 }
 
 /// A place a drag is over.
@@ -94,12 +95,76 @@ pub struct DropOffer {
 }
 
 /// A drop that waits for the menu of 놓을 때 묻기: the items the drag carried, the folder they
-/// go into, and the pane they came from.
+/// go into, the pane they came from (or that took them, for a drag of another app), and what
+/// the drag allows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct AskedDrop {
-    sources: Vec<VPath>,
-    folder: VPath,
-    side: usize,
+    pub(super) sources: Vec<VPath>,
+    pub(super) folder: VPath,
+    pub(super) side: usize,
+    pub(super) allowed: Effects,
+}
+
+/// What a place a drag hovers over makes of it, for the window to show beside the pointer
+/// (DND-03) and around the place, and for a rest there (DND-08): the same for a drag of rows and
+/// for a drag of another app (module `outside`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hover {
+    /// The place takes the items: a drop there does what the offer says, which is nothing for
+    /// keys that ask for a link or for what the drag does not allow.
+    Takes(DropOffer),
+    /// The place does not take them, for this reason.
+    Refused(Validity),
+    /// The drag of another app carries paths, none of which is one to take (a device's, a
+    /// relative one).
+    NoPaths,
+    /// Nothing here takes drops; or the drag is none the window knows, or a window shows over
+    /// the main one.
+    Nothing,
+}
+
+impl Hover {
+    /// What a drop there would do, for the pointer of a drag that `allowed` these: `None` where it
+    /// does nothing. The menu of 놓을 때 묻기 shows as a move where the drag allows one, else as a
+    /// copy.
+    pub fn effect(&self, allowed: Effects) -> Option<DropEffect> {
+        let Hover::Takes(offer) = self else {
+            return None;
+        };
+        match offer.choice {
+            DropChoice::Do(effect @ (DropEffect::Copy | DropEffect::Move)) => Some(effect),
+            DropChoice::Ask if allowed.contains(DropEffect::Move) => Some(DropEffect::Move),
+            DropChoice::Ask => Some(DropEffect::Copy),
+            DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => None,
+        }
+    }
+}
+
+/// What the effects of a drop did: the mode of the transfer they submit, or `None` (a notice,
+/// the menu of 놓을 때 묻기, nothing).
+pub fn dropped_effect(effects: &[Effect]) -> Option<DropEffect> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Job(JobEffect::Submit {
+            spec: JobSpec::Transfer(transfer),
+            ..
+        }) => Some(match transfer.mode {
+            TransferMode::Copy => DropEffect::Copy,
+            TransferMode::Move => DropEffect::Move,
+        }),
+        _ => None,
+    })
+}
+
+/// What a drop with the right button, or another drop that asks whatever the keys, does where
+/// the drag `allowed` these: the menu of 놓을 때 묻기, where a copy or a move is allowed.
+pub(super) fn asked(allowed: Effects) -> DropChoice {
+    drop_rule::choose(
+        Os::CURRENT,
+        DragDefault::Ask,
+        DragMods::default(),
+        allowed,
+        || false,
+    )
 }
 
 /// A press on a selected row, whose click waits for the release: no drag came of it then.
@@ -120,8 +185,10 @@ impl AppState {
     pub fn press_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
         self.activate(side);
         self.pending_click = None;
-        // A drop that waited for the menu of 놓을 때 묻기 is not made after another drag starts.
+        // A drop that waited for the menu of 놓을 때 묻기 is not made after another drag starts,
+        // and no drag of another app is over the window while the button is down in it.
         self.asked_drop = None;
+        self.outside = None;
         // A row the window drew and the state no longer has readies no drag, rather than
         // leaving the last press's.
         self.drag = None;
@@ -208,6 +275,30 @@ impl AppState {
     /// from the paths alone, so that it can answer at every move of the pointer. The drag notes
     /// the folder, which the window shows, unless the keys refuse the drop there.
     pub fn drop_offer(&mut self, id: u64, spot: DropSpot) -> Option<DropOffer> {
+        self.offer_with(id, spot, self.drag_mods, Effects::COPY | Effects::MOVE)
+    }
+
+    /// What the place `spot` makes of the drag readied last, whose payload carries `id`, for the
+    /// window to show ([`AppState::drop_offer`], else [`AppState::drop_refused`]).
+    pub fn drop_hover(&mut self, id: u64, spot: DropSpot) -> Hover {
+        match self.drop_offer(id, spot) {
+            Some(offer) => Hover::Takes(offer),
+            None => self
+                .drop_refused(id, spot)
+                .map_or(Hover::Nothing, Hover::Refused),
+        }
+    }
+
+    /// [`AppState::drop_offer`] with the keys `mods` and a drag that `allowed` these: a drag of
+    /// rows that went out of the window and came back through the system's drag tells its own
+    /// (module `outside`).
+    pub(super) fn offer_with(
+        &mut self,
+        id: u64,
+        spot: DropSpot,
+        mods: DragMods,
+        allowed: Effects,
+    ) -> Option<DropOffer> {
         if self.modal.is_some() || self.quitting {
             return None;
         }
@@ -222,7 +313,12 @@ impl AppState {
         if takes != Validity::Ok {
             return None;
         }
-        let choice = self.drop_choice(&self.drag.as_ref()?.request.from_dir, &folder);
+        let choice = self.drop_choice(
+            &self.drag.as_ref()?.request.from_dir,
+            &folder,
+            mods,
+            allowed,
+        );
         if !matches!(choice, DropChoice::Refuse(_))
             && let Some(drag) = self.drag.as_mut()
         {
@@ -231,11 +327,17 @@ impl AppState {
         Some(DropOffer { folder, choice })
     }
 
-    /// What a drop of items from the folder `from` into `folder` does, with the keys held now
-    /// and the setting. A drag of this window's allows a copy and a move; the drives are those
-    /// of the sidebar, which a worker found (none known yet: another drive), looked at only for
-    /// the system's way.
-    fn drop_choice(&self, from: &VPath, folder: &VPath) -> DropChoice {
+    /// What a drop of items from `from` (their folder, or one of them) into `folder` does, with
+    /// the keys `mods`, the setting, and a drag that `allowed` these (a drag of this window's
+    /// allows a copy and a move). The drives are those of the sidebar, which a worker found (none
+    /// known yet: another drive), looked at only for the system's way.
+    pub(super) fn drop_choice(
+        &self,
+        from: &VPath,
+        folder: &VPath,
+        mods: DragMods,
+        allowed: Effects,
+    ) -> DropChoice {
         let same_volume = || {
             let drives: Vec<PathBuf> = self
                 .places
@@ -248,13 +350,7 @@ impl AppState {
                 _ => false,
             }
         };
-        drop_rule::choose(
-            Os::CURRENT,
-            self.drag_default,
-            self.drag_mods,
-            Effects::COPY | Effects::MOVE,
-            same_volume,
-        )
+        drop_rule::choose(Os::CURRENT, self.drag_default, mods, allowed, same_volume)
     }
 
     /// Why the place `spot` does not take the items of the drag whose payload carries `id`,
@@ -284,13 +380,34 @@ impl AppState {
     /// one that may not take them at all: a notice says so, and the next hover shows where a
     /// drop goes.
     pub fn drop_items(&mut self, id: u64, spot: DropSpot) -> Vec<Effect> {
+        self.drop_with(
+            id,
+            spot,
+            self.drag_mods,
+            Effects::COPY | Effects::MOVE,
+            false,
+        )
+    }
+
+    /// [`AppState::drop_items`] with the keys `mods` and a drag that `allowed` these, which asks
+    /// with the menu of 놓을 때 묻기 whatever the keys and the setting when `ask` (a drop with the
+    /// right button): a drag of rows that comes back through the system's drag (module
+    /// `outside`).
+    pub(super) fn drop_with(
+        &mut self,
+        id: u64,
+        spot: DropSpot,
+        mods: DragMods,
+        allowed: Effects,
+        ask: bool,
+    ) -> Vec<Effect> {
         let shown = self
             .drag
             .as_ref()
             .filter(|drag| drag.id == id && id != 0)
             .and_then(|drag| drag.shown.clone());
         let live = self.modal.is_none() && !self.quitting;
-        let Some(offer) = self.drop_offer(id, spot) else {
+        let Some(offer) = self.offer_with(id, spot, mods, allowed) else {
             // The window showed a folder that takes them, and the place holds one that does not.
             return if shown.is_some() && live {
                 vec![Effect::Notice(words::drop_moved().to_owned())]
@@ -301,7 +418,8 @@ impl AppState {
         if shown.is_some_and(|shown| shown != offer.folder) {
             return vec![Effect::Notice(words::drop_moved().to_owned())];
         }
-        let mode = match offer.choice {
+        let choice = if ask { asked(allowed) } else { offer.choice };
+        let mode = match choice {
             DropChoice::Do(DropEffect::Copy) => Some(TransferMode::Copy),
             DropChoice::Do(DropEffect::Move) => Some(TransferMode::Move),
             DropChoice::Ask => None,
@@ -317,6 +435,7 @@ impl AppState {
                 sources: drag.request.sources,
                 folder: offer.folder,
                 side: drag.side,
+                allowed,
             });
             return vec![Effect::ShowMenu(MenuShown::AskDrop)];
         };
@@ -325,16 +444,37 @@ impl AppState {
 
     /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소, and Esc
     /// or a click beside the menu, which the window tells the same): the drop it showed for gets
-    /// that transfer, as a drop that chose it at once would, or is never made. Nothing while a
+    /// that transfer, as a drop that chose it at once would, or is never made. A drag of another
+    /// app that does not allow a move copies for 여기로 이동 (DND-05), and one that does not allow
+    /// a copy makes nothing of 여기로 복사, as the rule of a drop's action goes. Nothing while a
     /// window shows over the main window or the app ends, as for a drop; nor once a press has
     /// readied another drag. The drop is answered once.
     pub fn drop_menu_chosen(&mut self, mode: Option<TransferMode>) -> Vec<Effect> {
-        match (self.asked_drop.take(), mode) {
-            (Some(asked), Some(mode)) if self.modal.is_none() && !self.quitting => {
-                self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
-            }
-            _ => Vec::new(),
+        let (Some(asked), Some(mode)) = (self.asked_drop.take(), mode) else {
+            return Vec::new();
+        };
+        if self.modal.is_some() || self.quitting {
+            return Vec::new();
         }
+        let default = match mode {
+            TransferMode::Move => DragDefault::Move,
+            TransferMode::Copy => DragDefault::Copy,
+        };
+        let choice = drop_rule::choose(
+            Os::CURRENT,
+            default,
+            DragMods::default(),
+            asked.allowed,
+            || false,
+        );
+        let mode = match choice {
+            DropChoice::Do(DropEffect::Move) => TransferMode::Move,
+            DropChoice::Do(DropEffect::Copy) => TransferMode::Copy,
+            DropChoice::Do(DropEffect::Link) | DropChoice::Ask | DropChoice::Refuse(_) => {
+                return Vec::new();
+            }
+        };
+        self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
     }
 
     /// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits:
@@ -363,10 +503,11 @@ impl AppState {
         }
     }
 
-    /// The drag readied last has rested on `spot` for [`SPRING_DELAY`] (머무르면 열기, DND-08),
-    /// as the controller's timer tells: the row of a folder opens that folder in its pane (in a
-    /// new tab beside a pinned one), a tab shows, a closed folder of the tree opens. The drag
-    /// goes on, and a drop goes by what shows then; the pane with the keys keeps them.
+    /// The drag over the window (the one readied last, or a drag of another app while the system
+    /// tells of one, module `outside`) has rested on `spot` for [`SPRING_DELAY`] (머무르면 열기,
+    /// DND-08), as the controller's timer tells: the row of a folder opens that folder in its
+    /// pane (in a new tab beside a pinned one), a tab shows, a closed folder of the tree opens.
+    /// The drag goes on, and a drop goes by what shows then; the pane with the keys keeps them.
     ///
     /// Only the folder the last hover showed opens, the one the timer counted for: the rows under
     /// a still pointer may have changed since (a watch, a job that ended, a listing that came, a
@@ -377,15 +518,14 @@ impl AppState {
     /// ends), on a row that is no folder or below the rows, on a tab that shows already, or on a
     /// folder of the tree that is open or has no folders.
     pub fn drag_rests(&mut self, spot: DropSpot) -> Vec<Effect> {
-        let id = self.drag_id();
-        let shown = self.drag.as_ref().and_then(|drag| drag.shown.clone());
+        let shown = self.shown_folder();
         let Some(folder) = self
             .spot_folder(spot)
             .filter(|folder| Some(folder) == shown.as_ref())
         else {
             return Vec::new();
         };
-        if self.drop_offer(id, spot).is_none() {
+        if !self.still_takes(spot) {
             return Vec::new();
         }
         match spot {
@@ -418,7 +558,7 @@ impl AppState {
 
     /// The folder a drop on `spot` puts the items into; `None` for a row or a tab that is not
     /// there (any more).
-    fn spot_folder(&self, spot: DropSpot) -> Option<VPath> {
+    pub(super) fn spot_folder(&self, spot: DropSpot) -> Option<VPath> {
         match spot {
             DropSpot::Pane { side, row } => {
                 let tab = self.panes.get(side)?.active_tab();

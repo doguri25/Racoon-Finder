@@ -1711,6 +1711,24 @@ pub fn drop_badge(choice: DropChoice, folder: &str) -> String {
     }
 }
 
+/// A drop from another app that left out `count` of its paths, which name no folder or file it
+/// can take (a device or a volume of Windows, a relative path): the others go.
+pub fn dropped_left_out(count: usize) -> String {
+    format!("끌어 온 항목 {count}개는 받을 수 없는 경로라 건너뛰었습니다")
+}
+
+/// A drop from another app whose `count` paths all name no folder or file it can take: nothing
+/// goes.
+pub fn dropped_skipped(count: usize) -> String {
+    format!("끌어 온 항목 {count}개가 모두 받을 수 없는 경로라 받지 않았습니다")
+}
+
+/// What the window says while a drag of another app whose paths all name no folder or file it
+/// can take hovers over a place (the pointer says so too).
+pub fn drop_no_paths() -> &'static str {
+    "여기에 놓을 수 없습니다: 받을 수 있는 경로가 없습니다"
+}
+
 /// What the window says while a drag of items hovers over a place that does not take them
 /// (the pointer says so too): why, for the reason `validity` gives.
 pub fn drop_refused(validity: Validity) -> String {
@@ -2947,6 +2965,11 @@ mod tests {
         assert_eq!(
             drop_badge(DropChoice::Refuse(Refusal::NotAllowed), "백업"),
             "여기에는 놓을 수 없습니다"
+        );
+        // A drag of another app that carries no path to take.
+        assert_eq!(
+            drop_no_paths(),
+            "여기에 놓을 수 없습니다: 받을 수 있는 경로가 없습니다"
         );
     }
 

@@ -8,7 +8,8 @@
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
 //! ([`AppState::drag`]), what its drop does (the keys held and the choices of 보기 ▸ 설정,
 //! module `drop_rule`), what a rest of it opens and the moves it made (module `drag`), the
-//! address bar's lists (module `address`: a folder's subfolders
+//! files another app drags onto the window (module `outside`), the address bar's lists
+//! (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
 //! tools, listing a folder again and the extensions shown or not (module `select`), the
@@ -60,6 +61,7 @@ mod drag;
 pub mod drop_rule;
 mod jobs;
 mod layout;
+mod outside;
 mod panel;
 mod pick;
 mod preview;
@@ -80,7 +82,7 @@ pub use clipboard::{
     CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
 };
 pub use copies::copy_origins;
-pub use drag::{Drag, DropOffer, DropSpot, MOVE_TOAST_TIME, SPRING_DELAY};
+pub use drag::{Drag, DropOffer, DropSpot, Hover, MOVE_TOAST_TIME, SPRING_DELAY, dropped_effect};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use panel::PanelButton;
@@ -359,6 +361,9 @@ pub struct AppState {
     /// The moves drops made, by job, with how many items each carries: the end of one offers to
     /// undo it (DND-07).
     dragged_moves: HashMap<JobId, usize>,
+    /// The drag of another app over the window, while the system tells of one (module
+    /// `outside`).
+    outside: Option<outside::Outside>,
     /// The list of a folder's subfolders that the `›` after a piece of a path row opened.
     subfolders: Option<Subfolders>,
     /// The completion list of the path field being edited.
@@ -484,6 +489,7 @@ impl AppState {
             asked_drop: None,
             drag_submits: Vec::new(),
             dragged_moves: HashMap::new(),
+            outside: None,
             subfolders: None,
             completion: None,
             environment: Environment::default(),

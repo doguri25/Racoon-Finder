@@ -1,11 +1,30 @@
 // Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
 // `file-grid.slint`): the menu of an item and of the part without items, what a drag over the
-// list shows, where in the window the pointer of a drag is (and whether it is still where a list
-// saw it) and the menu of a drop that asks, and how a list keeps the place it scrolled to after
-// a long jump.
+// list shows, the names of the places a drag is over (`DropPlace`, `DropAt`), where in the window
+// the pointer of a drag is (and whether it is still where a list saw it) and the menu of a drop
+// that asks, and how a list keeps the place it scrolled to after a long jump.
 
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
+
+// What a drag is over: a pane's list, a pane's tab, or a row of the tree.
+export enum DropPlace {
+    list,
+    tab,
+    tree,
+}
+
+// The place under a point of the window, as a drag there names it (`MainWindow.spot-at`): row
+// `index` of pane `side`'s list (-1 below the rows), tab `index` of pane `side`, or row `index`
+// of the tree (`side` 0; -1 over a head or a margin of the tree, where no row is). `found` is
+// false where nothing takes drops: `DropPlace` gets no value for nothing, so its default stays
+// what it was.
+export struct DropAt {
+    found: bool,
+    place: DropPlace,
+    side: int,
+    index: int,
+}
 
 // Where the pointer of a drag is, in the window: every place that takes drops (a list, a tab, a
 // row of the tree, the window under them) tells it at each move and at the drop, for what shows

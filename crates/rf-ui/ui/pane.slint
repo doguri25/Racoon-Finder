@@ -13,7 +13,7 @@ import { FileList, FileRow, ColumnView } from "file-list.slint";
 import { FileGrid } from "file-grid.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
-import { DragPointer } from "list-parts.slint";
+import { DragPointer, DropPlace, DropAt } from "list-parts.slint";
 
 // A row of a list of folder names of the address bar: a folder, or a link that leads to one.
 export struct FolderMenuRow {
@@ -287,6 +287,8 @@ component TabButton inherits Rectangle {
     in property <bool> closable;
     in property <bool> can-reopen;
     in property <data-transfer> drag-data;
+    // A drag of another app over the tab, which it takes into the tab's folder.
+    in property <bool> outside-here;
     callback selected();
     callback closed();
     callback command(name: string);
@@ -439,7 +441,7 @@ component TabButton inherits Rectangle {
     }
 
     // The tab's folder takes the drag.
-    if drop.has-drag: Rectangle {
+    if drop.has-drag || root.outside-here: Rectangle {
         border-top-left-radius: Theme.radius;
         border-top-right-radius: Theme.radius;
         border-width: 2px;
@@ -586,6 +588,10 @@ export component Pane inherits Rectangle {
     in property <data-transfer> drag-data;
     // The payload of a drag of a tab: the tab the last press showed, as Rust made it.
     in property <data-transfer> tab-drag-data;
+    // Where a drag of another app is that the pane takes, as Rust found it: the row of its list
+    // (-1 below the rows, -2 for none) or its tab (-1 for none).
+    in property <int> outside-row: -2;
+    in property <int> outside-tab: -1;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     // For the keys: how many lines (rows, or columns of 목록) a page key moves, and how many
@@ -748,6 +754,31 @@ export component Pane inherits Rectangle {
         root.show-active-tab();
     }
 
+    // The place of the pane under the point (`x`, `y`) of the window, as a drag of rows there
+    // names it: a tab of the strip, in the part of it in view (a tab's drop area is all of it),
+    // or the list's own (`FileList.spot-at`, `FileGrid.spot-at`); not `found` elsewhere (the
+    // path row, the status bar, the strip beside the tabs) or while the folder cannot be shown.
+    // The window sets its `side`.
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        let tx = x - tabs-view.absolute-position.x;
+        let ty = y - tabs-view.absolute-position.y;
+        if (tx >= 0 && ty >= 0 && tx < tabs-view.width && ty < tabs-view.height) {
+            let step = root.tab-width + root.tab-gap;
+            let along = tx - tabs-view.content-x;
+            let tab = floor(along / step);
+            return {
+                found: tab >= 0 && tab < root.tab-count && along - tab * step < root.tab-width,
+                place: DropPlace.tab,
+                side: 0,
+                index: tab,
+            };
+        }
+        if (root.view.error != "") {
+            return { found: false, place: DropPlace.list, side: 0, index: -1 };
+        }
+        return root.view.mode == 0 ? files.spot-at(x, y) : grid.spot-at(x, y);
+    }
+
     // The place between the tabs nearest to `x`, a position in the strip: 0 before the first
     // tab, the number of tabs after the last.
     pure function slot-at(x: length) -> int {
@@ -850,6 +881,7 @@ export component Pane inherits Rectangle {
                     closable: root.view.tabs.length > 1;
                     can-reopen: root.view.can-reopen;
                     drag-data: root.tab-drag-data;
+                    outside-here: i == root.outside-tab;
                     selected => {
                         root.tab-selected(i);
                     }
@@ -1162,6 +1194,7 @@ export component Pane inherits Rectangle {
                 then-ascending: root.view.then-ascending;
                 active: root.view.active;
                 drag-data: root.drag-data;
+                outside-row: root.outside-row;
                 drag-ended => {
                     root.drag-ended();
                 }
@@ -1210,6 +1243,7 @@ export component Pane inherits Rectangle {
                 cursor: root.view.cursor;
                 active: root.view.active;
                 drag-data: root.drag-data;
+                outside-row: root.outside-row;
                 drag-ended => {
                     root.drag-ended();
                 }

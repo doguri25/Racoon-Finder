@@ -23,6 +23,18 @@
 //! ([`open::shell`]): none of those calls needs the main thread, and some block until the user
 //! closes a dialog.
 //!
+//! A drag of another app over the window (DND-05) is told by the system: where its pointer is,
+//! the keys held, what it allows and what it carries. [`Controller::outside_over`],
+//! [`Controller::outside_drop`] and [`Controller::outside_leave`] answer it with the state's
+//! module `outside`, and show it as a drag of rows shows: the place under the pointer
+//! (`ui_bridge::drop_spot`), the badge beside it, the frame of the place, the time of a rest.
+//! Each borrows the state briefly, and answers that nothing is done when it is borrowed already
+//! (the system may call it from a loop of its own that runs inside the app's code); a drop's
+//! effects are carried out on the next turn of the event loop, once the system has its answer.
+//! Linux has no such drag: winit tells only the files dropped on the window, one by one
+//! (`DroppedFile`, without the pointer or the keys), which go into the folder the active pane
+//! shows, as a copy (`Controller::file_dropped`).
+//!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
 //! hidden and the jobs go on behind the tray icon (XFER-15), the icon follows the state at each
@@ -41,10 +53,10 @@ use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
-use rf_jobs::{JobEvent, JobSpec, TransferMode};
+use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use rf_platform::dnd::DragMods;
-use rf_platform::shell::Owner;
+use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
+use rf_platform::shell::{Owner, WindowPoint};
 use slint::language::DragAction;
 use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent as WinitEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
@@ -54,7 +66,7 @@ use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
 use crate::instance::RequestStop;
-use crate::jobs::{self, JobEffect, Jobs, QUIT_TIMEOUT};
+use crate::jobs::{self, Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
 use crate::notify::{NOTICE_WAIT, Notifier, OsNotifier, SlintTray, Tray};
@@ -66,8 +78,8 @@ use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::{
-    AppState, ClipboardFailure, Column, DropSpot, Effect, LEFT, Layout, MenuShown, Paging,
-    PathForm, RIGHT, ShellWork, Subfolders, preview_width, start_folders,
+    AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, MenuShown, Paging,
+    PathForm, RIGHT, ShellWork, Subfolders, dropped_effect, preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
@@ -738,48 +750,35 @@ fn tab_command(state: &mut AppState, side: usize, index: usize, name: &str) -> V
     }
 }
 
-/// The place of the state that a drag over `place` names, with the pane `side` and the row or
-/// tab `index` of the callback; `None` for a negative tab or tree row.
-fn drop_spot(place: DropPlace, side_number: i32, i: i32) -> Option<DropSpot> {
-    Some(match place {
-        DropPlace::List => DropSpot::Pane {
-            side: side(side_number),
-            row: index(i),
-        },
-        DropPlace::Tab => DropSpot::Tab {
-            side: side(side_number),
-            index: index(i)?,
-        },
-        DropPlace::Tree => DropSpot::Tree(index(i)?),
-    })
-}
-
 /// What a drop whose `effects` these are did, for the drag it ended: the mode of the transfer
 /// they submit, or `none` (a notice, the menu of 놓을 때 묻기, nothing).
 fn dropped_action(effects: &[Effect]) -> DragAction {
-    effects
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::Job(JobEffect::Submit {
-                spec: JobSpec::Transfer(transfer),
-                ..
-            }) => Some(match transfer.mode {
-                TransferMode::Copy => DragAction::Copy,
-                TransferMode::Move => DragAction::Move,
-            }),
-            _ => None,
-        })
-        .unwrap_or(DragAction::None)
+    match dropped_effect(effects) {
+        Some(DropEffect::Copy) => DragAction::Copy,
+        Some(DropEffect::Move) => DragAction::Move,
+        Some(DropEffect::Link) | None => DragAction::None,
+    }
 }
 
 /// Looks at the events of the window's winit window before Slint does, and passes each on: the
 /// modifier keys, which Slint's drop events do not tell and a drop's action follows
-/// ([`Controller::modifiers_changed`]); and the end of a drag over the window, which Slint does
+/// ([`Controller::modifiers_changed`]); the end of a drag over the window, which Slint does
 /// not tell when the row the drag started on is gone (a folder that opened under it, DND-08) or
-/// when the pointer is past the window's edges ([`Controller::drag_gone`]).
+/// when the pointer is past the window's edges ([`Controller::drag_gone`]); the files another
+/// app dropped on the window, where winit's own drop target takes them (X11:
+/// [`Controller::file_dropped`]; nothing shows while they hover, `HoveredFile`, since winit
+/// tells neither where nor the keys); and where the pointer was last, for the menu of a drop
+/// that asks without telling where it was.
 fn watch_winit_events(window: &MainWindow) {
     window.window().on_winit_window_event(|window, event| {
         match event {
+            WinitEvent::HoveredFileCancelled => {
+                with(Controller::outside_leave);
+            }
+            WinitEvent::DroppedFile(path) => {
+                let path = path.clone();
+                with(|c| c.file_dropped(path));
+            }
             WinitEvent::ModifiersChanged(modifiers) => {
                 let mods = ui_bridge::drag_mods(modifiers.state());
                 with(|c| c.modifiers_changed(mods));
@@ -791,6 +790,10 @@ fn watch_winit_events(window: &MainWindow) {
                 if ui_bridge::outside_window(*position, window.size()) =>
             {
                 with(Controller::drag_maybe_gone);
+            }
+            WinitEvent::CursorMoved { position, .. } => {
+                let at = position.to_logical::<f32>(f64::from(window.scale_factor()));
+                with(|c| c.pointer.set(Some(WindowPoint { x: at.x, y: at.y })));
             }
             WinitEvent::MouseInput {
                 state: ElementState::Released,
@@ -1042,6 +1045,11 @@ pub struct Controller {
     shown_drag: Cell<u64>,
     /// The time of a drag's rest on a place, which then opens (머무르면 열기, DND-08).
     spring: Spring,
+    /// The files winit told were dropped on the window, until the next turn of the event loop
+    /// takes all of one drop at once ([`Controller::file_dropped`]).
+    dropped_files: RefCell<Vec<PathBuf>>,
+    /// Where in the window the pointer was last, as winit told.
+    pointer: Cell<Option<WindowPoint>>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
@@ -1142,6 +1150,8 @@ impl Controller {
             spring: Spring::new(|spot| {
                 with(|c| c.spring_due(spot));
             }),
+            dropped_files: RefCell::new(Vec::new()),
+            pointer: Cell::new(None),
             checks: RefCell::new(CopyChecks::default()),
             sorter: sorter::sorter(|outcome| {
                 post(move |c| {
@@ -1476,42 +1486,192 @@ impl Controller {
     /// every move of the pointer (and as the keys change), it changes nothing else and redraws
     /// nothing.
     fn drop_check(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
-        let Some(spot) = drop_spot(place, side, i) else {
+        let Some(spot) = ui_bridge::spot_of(place, side, i) else {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
-        let (offer, refused) = match self.state.borrow_mut().as_mut() {
-            Some(state) => match state.drop_offer(id, spot) {
-                Some(offer) => (Some(offer), None),
-                None => (None, state.drop_refused(id, spot)),
-            },
-            None => (None, None),
+        let hover = match self.state.borrow_mut().as_mut() {
+            Some(state) => state.drop_hover(id, spot),
+            None => Hover::Nothing,
         };
-        let Some(window) = self.window.upgrade() else {
-            return DragAction::None;
+        let action = match &hover {
+            Hover::Takes(offer) => ui_bridge::drop_action(offer.choice),
+            Hover::Refused(_) | Hover::NoPaths | Hover::Nothing => DragAction::None,
         };
-        let (hint, action) = match (&offer, refused) {
-            (Some(offer), _) => (
-                words::drop_badge(offer.choice, &folder_label(&offer.folder)),
-                ui_bridge::drop_action(offer.choice),
-            ),
-            (None, Some(validity)) => (words::drop_refused(validity), DragAction::None),
-            (None, None) => (String::new(), DragAction::None),
-        };
-        window.invoke_drop_hint(hint.into(), action == DragAction::None);
-        // The time of a rest runs while the drag stays on a place that takes it.
-        let rest = offer
-            .filter(|_| action != DragAction::None)
-            .map(|offer| (spot, offer.folder));
-        self.spring.hover(rest);
+        if let Some(window) = self.window.upgrade() {
+            self.show_hover(&window, spot, &hover, action != DragAction::None);
+        }
         action
+    }
+
+    /// What the window shows of a drag over `spot`, of rows or of another app, the place making
+    /// `hover` of it, which a drop there takes or not (`takes`): what a drop does, or why it does
+    /// nothing there, beside the pointer (DND-03); and the time of a rest, which runs while the
+    /// drag stays on a place that takes it (DND-08). The place's frame is Slint's own for a drag
+    /// of rows; the caller shows it for a drag of another app.
+    fn show_hover(&self, window: &MainWindow, spot: DropSpot, hover: &Hover, takes: bool) {
+        let hint = match hover {
+            Hover::Takes(offer) => words::drop_badge(offer.choice, &folder_label(&offer.folder)),
+            Hover::Refused(validity) => words::drop_refused(*validity),
+            Hover::NoPaths => words::drop_no_paths().to_owned(),
+            Hover::Nothing => String::new(),
+        };
+        window.invoke_drop_hint(hint.into(), !takes);
+        let rest = match hover {
+            Hover::Takes(offer) if takes => Some((spot, offer.folder.clone())),
+            _ => None,
+        };
+        self.spring.hover(rest);
+    }
+
+    /// A drag of another app (or of this app's rows, through the system's drag) carrying `items`,
+    /// with the keys `mods` held and allowing `allowed`, is over the point `at` of the window: what
+    /// a drop there would do, for the system's pointer, or `None`. The window shows it as it shows
+    /// a drag of rows: what a drop does or why not beside the pointer, the frame of the place
+    /// that takes it, the time of a rest there. `None` too, at once, while the state is borrowed
+    /// (the system calls this from a loop of its own inside the app's code).
+    pub fn outside_over(
+        &self,
+        at: WindowPoint,
+        items: &DroppedItems,
+        mods: DragMods,
+        allowed: Effects,
+    ) -> Option<DropEffect> {
+        if self.state.try_borrow_mut().is_err() {
+            return None;
+        }
+        let window = self.window.upgrade()?;
+        let spot = ui_bridge::drop_spot(&window, at);
+        let hover = match self.state.try_borrow_mut().ok()?.as_mut() {
+            Some(state) => state.outside_hover(spot, items, mods, allowed),
+            None => Hover::Nothing,
+        };
+        let effect = hover.effect(allowed);
+        let pointer = window.global::<DragPointer<'_>>();
+        pointer.set_x(at.x);
+        pointer.set_y(at.y);
+        let shown = spot.filter(|_| effect.is_some());
+        window.set_outside_drop(ui_bridge::drop_at(shown));
+        if let Some(spot) = spot {
+            self.show_hover(&window, spot, &hover, effect.is_some());
+        } else {
+            window.invoke_drop_hint("".into(), false);
+            self.spring.stop();
+        }
+        effect
+    }
+
+    /// The drag of another app was dropped at the point `at` of the window, with the right
+    /// button (`right_button`) or not: what was done, for the system (`None` for nothing, and for
+    /// the menu of 놓을 때 묻기, which shows where the drop was); see
+    /// [`AppState::outside_drop`]. What it does is carried out on the next turn of the event
+    /// loop, once the system has its answer: a menu or a question shown now would run inside the
+    /// system's drop. `None`, and nothing done, while the state is borrowed.
+    pub fn outside_drop(
+        &self,
+        at: WindowPoint,
+        items: DroppedItems,
+        mods: DragMods,
+        allowed: Effects,
+        right_button: bool,
+    ) -> Option<DropEffect> {
+        if self.state.try_borrow_mut().is_err() {
+            return None;
+        }
+        let window = self.window.upgrade()?;
+        let spot = ui_bridge::drop_spot(&window, at);
+        self.drag_gone();
+        let pointer = window.global::<DragPointer<'_>>();
+        pointer.set_x(at.x);
+        pointer.set_y(at.y);
+        self.drop_outside(spot, items, mods, allowed, right_button)
+    }
+
+    /// The drag of another app left the window without a drop: nothing shows of it any more,
+    /// and nothing it rested on opens.
+    pub fn outside_leave(&self) {
+        self.drag_gone();
+        if let Ok(mut state) = self.state.try_borrow_mut()
+            && let Some(state) = state.as_mut()
+        {
+            state.outside_leave();
+        }
+    }
+
+    /// The drop of another app's drag on `spot`, as [`Controller::outside_drop`] makes it.
+    fn drop_outside(
+        &self,
+        spot: Option<DropSpot>,
+        items: DroppedItems,
+        mods: DragMods,
+        allowed: Effects,
+        right_button: bool,
+    ) -> Option<DropEffect> {
+        let (done, effects) = {
+            let mut state = self.state.try_borrow_mut().ok()?;
+            state
+                .as_mut()?
+                .outside_drop(spot, items, mods, allowed, right_button)
+        };
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            with(|c| c.update(move |_| effects));
+        });
+        done
+    }
+
+    /// winit told that the file at `path` was dropped on the window (X11, and wherever winit's
+    /// own drop target takes drops): the files of one drop come one after another, so the next
+    /// turn of the event loop takes all of them at once ([`Controller::files_dropped`]).
+    fn file_dropped(&self, path: PathBuf) {
+        let first = {
+            let mut dropped = self.dropped_files.borrow_mut();
+            dropped.push(path);
+            dropped.len() == 1
+        };
+        if first {
+            slint::Timer::single_shot(Duration::ZERO, || {
+                with(Controller::files_dropped);
+            });
+        }
+    }
+
+    /// The files winit told were dropped go into the folder the active pane shows, as the rule
+    /// of a drop's action chooses without a key: winit tells neither where the pointer was nor
+    /// the keys held, nor whether the app they came from allows a move, so only a copy is
+    /// allowed. The menu of 놓을 때 묻기 (the setting 매번 묻기) shows where the pointer was last.
+    fn files_dropped(&self) {
+        let paths = self.dropped_files.take();
+        let Some(active) = self.state.borrow().as_ref().map(AppState::active) else {
+            return;
+        };
+        if let Some(window) = self.window.upgrade() {
+            let at = self.pointer.get().unwrap_or_else(|| {
+                let size = window
+                    .window()
+                    .size()
+                    .to_logical(window.window().scale_factor());
+                WindowPoint {
+                    x: size.width / 2.0,
+                    y: size.height / 2.0,
+                }
+            });
+            let pointer = window.global::<DragPointer<'_>>();
+            pointer.set_x(at.x);
+            pointer.set_y(at.y);
+        }
+        let spot = DropSpot::Pane {
+            side: active,
+            row: None,
+        };
+        let items = DroppedItems { paths, ours: None };
+        self.drop_outside(Some(spot), items, DragMods::default(), Effects::COPY, false);
     }
 
     /// The drag with the payload `data` was dropped on `place`: the place's folder gets the
     /// transfer of its items, or the menu of 놓을 때 묻기 shows, as the state chooses; what the
     /// drop did (a copy, a move), or `none`.
     fn drop_items(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
-        let Some(spot) = drop_spot(place, side, i) else {
+        let Some(spot) = ui_bridge::spot_of(place, side, i) else {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
@@ -1536,9 +1696,9 @@ impl Controller {
     }
 
     /// The drag over the window is over: it ended, dropped or not (`drag-finished` of a drag of
-    /// rows, the left button let go), or it left the window; later also the leave and the drop
-    /// of a drag of another app. Nothing it rested on opens, nothing shows beside its pointer,
-    /// and the lists stop scrolling under it.
+    /// rows, the left button let go), or it left the window; or a drag of another app left it or
+    /// was dropped. Nothing it rested on opens, nothing shows beside its pointer or around a
+    /// place, and the lists stop scrolling under it.
     fn drag_gone(&self) {
         self.spring.stop();
         if let Some(window) = self.window.upgrade() {
