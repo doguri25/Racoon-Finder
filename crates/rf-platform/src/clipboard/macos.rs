@@ -35,7 +35,7 @@ use objc2_foundation::{NSArray, NSString, NSURL};
 use super::{ClipboardFiles, DropEffect, PastedUrl, file_url_of, pasted_url};
 
 /// `public.file-url`.
-fn file_url_type() -> &'static NSPasteboardType {
+pub(crate) fn file_url_type() -> &'static NSPasteboardType {
     // SAFETY: an immutable `NSString` constant of AppKit, set before any code of the app runs.
     unsafe { NSPasteboardTypeFileURL }
 }
@@ -127,8 +127,8 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
 
 /// The paths of the file URLs of the pasteboard's items, and how many of those URLs name no
 /// path that can be read safely (`PastedUrl::Skipped`, and a file reference URL whose item the
-/// system does not find).
-fn file_paths(board: &NSPasteboard) -> (Vec<PathBuf>, usize) {
+/// system does not find). The general pasteboard's, and a drag's (`crate::dnd`).
+pub(crate) fn file_paths(board: &NSPasteboard) -> (Vec<PathBuf>, usize) {
     let items = board
         .pasteboardItems()
         .map(|items| items.to_vec())

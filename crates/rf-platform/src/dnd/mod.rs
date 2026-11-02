@@ -14,8 +14,14 @@
 //!   (`DropDescription`, [`DropHandler::hint`]). A drop answers by [`drop_reply`]: a move as
 //!   the shell's own optimized move (performed: none, logically: a move), never in words the
 //!   source would take as the order to delete the originals itself.
-//! - **macOS:** not yet ([`std::io::ErrorKind::Unsupported`]); winit's own drop of files takes
-//!   them meanwhile.
+//! - **macOS:** a view of the app's own over the window's content (winit's view) takes the drags
+//!   of files and lets every other event through to winit (`hitTest:` answers nil). It reads the
+//!   file URLs of the drag's pasteboard as the clipboard reads them, byte for byte, the keys held
+//!   (`NSEvent.modifierFlags`, `flag_mods`), the source's operation mask (`mask_effects`) and
+//!   `draggingLocation`, which it names from the top ([`flipped_point`]). It answers each step
+//!   with an operation the source allows (`operation_bits`), and takes a drop only for a copy
+//!   or a move the app's job does (`drop_taken`). winit's own drop target, the window, stays:
+//!   it takes a drag over the title bar, and every drag should the view take none.
 //! - **Elsewhere** (Linux, which is for development): `Unsupported`; winit tells the files
 //!   dropped on the window.
 //!
@@ -169,7 +175,7 @@ impl std::fmt::Debug for DropRegistration {
 /// Makes the window `owner` take the system's drags, which `handler` answers, until the
 /// registration is dropped. Call it on the window's thread, for a window that exists; again for
 /// a window made anew (a new handle). `InvalidInput` for an owner without the handle this
-/// system needs; `Unsupported` on macOS (for now) and Linux.
+/// system needs; `Unsupported` on Linux.
 pub fn register_drop_target(
     owner: Owner,
     handler: Rc<dyn DropHandler>,
@@ -354,6 +360,87 @@ fn effect_bits(effect: Option<DropEffect>) -> u32 {
         Some(DropEffect::Link) => DROPEFFECT_LINK,
         None => DROPEFFECT_NONE,
     }
+}
+
+/// `NSDragOperationCopy`, `NSDragOperationLink`, `NSDragOperationGeneric` and
+/// `NSDragOperationMove`.
+const NS_DRAG_COPY: usize = 1;
+const NS_DRAG_LINK: usize = 1 << 1;
+const NS_DRAG_GENERIC: usize = 1 << 2;
+const NS_DRAG_MOVE: usize = 1 << 4;
+
+/// `NSEventModifierFlagShift`, `…Control`, `…Option` and `…Command`.
+const NS_SHIFT: usize = 1 << 17;
+const NS_CONTROL: usize = 1 << 18;
+const NS_OPTION: usize = 1 << 19;
+const NS_COMMAND: usize = 1 << 20;
+
+/// The modifier keys of the flags `flags` (`NSEvent.modifierFlags`): ⌃ is `ctrl`, ⇧ `shift`, ⌥
+/// `alt` and ⌘ `logo`. Caps Lock, fn and the bits of the left or right key leave them alone.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn flag_mods(flags: usize) -> DragMods {
+    DragMods {
+        ctrl: flags & NS_CONTROL != 0,
+        shift: flags & NS_SHIFT != 0,
+        alt: flags & NS_OPTION != 0,
+        logo: flags & NS_COMMAND != 0,
+    }
+}
+
+/// The effects the source's operation mask `mask` (`draggingSourceOperationMask`) allows: copy
+/// for its copy, a move for its move or its generic operation (⌘ narrows Finder's mask to the
+/// generic one), a link for its link.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn mask_effects(mask: usize) -> Effects {
+    let mut allowed = Effects(0);
+    for (bits, effect) in [
+        (NS_DRAG_COPY, Effects::COPY),
+        (NS_DRAG_MOVE | NS_DRAG_GENERIC, Effects::MOVE),
+        (NS_DRAG_LINK, Effects::LINK),
+    ] {
+        if mask & bits != 0 {
+            allowed = allowed | effect;
+        }
+    }
+    allowed
+}
+
+/// The `NSDragOperation` of `effect` for the system's pointer while the drag hovers, for a
+/// source whose mask is `mask`: a move is the source's move, or its generic operation when that
+/// is the only one of the two it allows.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn operation_bits(effect: Option<DropEffect>, mask: usize) -> usize {
+    match effect {
+        Some(DropEffect::Copy) => NS_DRAG_COPY,
+        Some(DropEffect::Move) if mask & (NS_DRAG_MOVE | NS_DRAG_GENERIC) == NS_DRAG_GENERIC => {
+            NS_DRAG_GENERIC
+        }
+        Some(DropEffect::Move) => NS_DRAG_MOVE,
+        Some(DropEffect::Link) => NS_DRAG_LINK,
+        None => 0,
+    }
+}
+
+/// What `performDragOperation:` answers for a drop that did `done`: `YES`, the drop is taken,
+/// only for a copy or a move the app's job does; then the source learns the operation the last
+/// hover answered. `NO` for nothing done (a refusal, a link, which the app does not make, and the
+/// menu of 놓을 때 묻기, whose choice comes later): the source learns of no operation, so never of
+/// a move the user has not chosen yet, and the drag image slides back.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn drop_taken(done: Option<DropEffect>) -> bool {
+    matches!(done, Some(DropEffect::Copy | DropEffect::Move))
 }
 
 /// `DROPIMAGE_INVALID`, `DROPIMAGE_NONE`, `DROPIMAGE_COPY`, `DROPIMAGE_MOVE`.
@@ -583,6 +670,102 @@ mod tests {
         assert_eq!(effect_bits(Some(DropEffect::Move)), DROPEFFECT_MOVE);
         assert_eq!(effect_bits(Some(DropEffect::Link)), DROPEFFECT_LINK);
         assert_eq!(effect_bits(None), DROPEFFECT_NONE);
+    }
+
+    #[test]
+    fn the_flags_of_a_macos_drag_name_its_keys() {
+        assert_eq!(flag_mods(0), DragMods::default());
+        // ⌥ copies, ⌘ moves, ⌥⌘ links in Finder; ⌃ and ⇧ are told as they are.
+        assert_eq!(
+            flag_mods(1 << 19),
+            DragMods {
+                alt: true,
+                ..DragMods::default()
+            }
+        );
+        assert_eq!(
+            flag_mods(1 << 20),
+            DragMods {
+                logo: true,
+                ..DragMods::default()
+            }
+        );
+        assert_eq!(
+            flag_mods((1 << 19) | (1 << 20)),
+            DragMods {
+                alt: true,
+                logo: true,
+                ..DragMods::default()
+            }
+        );
+        assert_eq!(
+            flag_mods((1 << 17) | (1 << 18)),
+            DragMods {
+                shift: true,
+                ctrl: true,
+                ..DragMods::default()
+            }
+        );
+        assert_eq!(
+            flag_mods(NS_SHIFT | NS_CONTROL | NS_OPTION | NS_COMMAND),
+            DragMods {
+                ctrl: true,
+                shift: true,
+                alt: true,
+                logo: true,
+            }
+        );
+        // Caps Lock, the numeric pad, help, fn, and the bits of the left or right key (the low
+        // 16) are no modifier keys of a drag.
+        let others = (1 << 16) | (1 << 21) | (1 << 22) | (1 << 23) | 0x20 | 0x0100;
+        assert_eq!(flag_mods(others), DragMods::default());
+        assert_eq!(
+            flag_mods(others | (1 << 20)),
+            DragMods {
+                logo: true,
+                ..DragMods::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_operations_a_macos_drag_allows_are_the_app_s_effects() {
+        assert_eq!(mask_effects(1), Effects::COPY);
+        assert_eq!(mask_effects(16), Effects::MOVE);
+        // ⌘ narrows Finder's mask to the generic operation: a move.
+        assert_eq!(mask_effects(4), Effects::MOVE);
+        assert_eq!(mask_effects(4 | 16), Effects::MOVE);
+        assert_eq!(mask_effects(2), Effects::LINK);
+        assert_eq!(mask_effects(1 | 2 | 4 | 16), Effects::ALL);
+        // `NSDragOperationEvery`.
+        assert_eq!(mask_effects(usize::MAX), Effects::ALL);
+        // Private and delete allow nothing the app does.
+        assert_eq!(mask_effects(8 | 32), Effects(0));
+        assert_eq!(mask_effects(0), Effects(0));
+    }
+
+    #[test]
+    fn a_macos_drag_is_answered_with_an_operation_its_source_allows() {
+        let finder = 1 | 2 | 4 | 16;
+        assert_eq!(operation_bits(Some(DropEffect::Copy), finder), 1);
+        assert_eq!(operation_bits(Some(DropEffect::Move), finder), 16);
+        assert_eq!(operation_bits(Some(DropEffect::Move), usize::MAX), 16);
+        // ⌘ held: the source allows only its generic operation, which the move is answered as.
+        assert_eq!(operation_bits(Some(DropEffect::Move), 4), 4);
+        assert_eq!(operation_bits(Some(DropEffect::Move), 16), 16);
+        assert_eq!(operation_bits(Some(DropEffect::Link), finder), 2);
+        // Nothing: `NSDragOperationNone`, the no-drop pointer.
+        assert_eq!(operation_bits(None, finder), 0);
+        assert_eq!(operation_bits(None, 0), 0);
+    }
+
+    #[test]
+    fn a_macos_drop_is_taken_only_for_what_the_app_did() {
+        assert!(drop_taken(Some(DropEffect::Copy)));
+        assert!(drop_taken(Some(DropEffect::Move)));
+        // The menu of 놓을 때 묻기 and a refusal: the source must not learn of a move yet.
+        assert!(!drop_taken(None));
+        assert!(!drop_taken(Some(DropEffect::Link)));
     }
 
     /// The image type, the message and the insert of a `DROPDESCRIPTION`'s bytes.

@@ -33,9 +33,11 @@
 //! effects are carried out on the next turn of the event loop, once the system has its answer.
 //! The system tells of it through the window's drop target (`rf_platform::dnd`), which goes on
 //! the window's handle at each show of the window, again for a new handle (module `drops`,
-//! [`window_shown`]). Where the platform has none (Linux, macOS for now), winit tells only the
-//! files dropped on the window, one by one (`DroppedFile`, without the pointer or the keys),
-//! which go into the folder the active pane shows, as a copy (`Controller::file_dropped`).
+//! [`window_shown`]). Where the platform has none (Linux), and where winit's own drop target
+//! still takes the drag (macOS: over the title bar, or everywhere should the platform's view
+//! over the content take no drag), winit tells only the files dropped on the window, one by one
+//! (`DroppedFile`, without the pointer or the keys), which go into the folder the active pane
+//! shows, as a copy (`Controller::file_dropped`).
 //!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
@@ -818,7 +820,7 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// ([`Controller::modifiers_changed`]); the end of a drag over the window, which Slint does
 /// not tell when the row the drag started on is gone (a folder that opened under it, DND-08) or
 /// when the pointer is past the window's edges ([`Controller::drag_gone`]); the files another
-/// app dropped on the window, where winit's own drop target takes them (X11:
+/// app dropped on the window, where winit's own drop target takes them (X11, macOS's title bar:
 /// [`Controller::file_dropped`]; nothing shows while they hover, `HoveredFile`, since winit
 /// tells neither where nor the keys); and where the pointer was last, for the menu of a drop
 /// that asks without telling where it was.
