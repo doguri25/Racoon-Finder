@@ -2,11 +2,14 @@
 //! submits.
 
 use rf_jobs::{ConflictPolicy, JobSpec, TransferItem, TransferMode};
+use rf_platform::dnd::{DragMods, DropEffect};
 
 use super::*;
 use crate::dialogs::Modal;
 use crate::jobs::{JobEffect, Started};
 use crate::pick::Validity;
+use crate::settings::DragDefault;
+use crate::state::drop_rule::{DropChoice, Refusal};
 use crate::words::JobWork;
 
 fn in_a(name: &str) -> VPath {
@@ -229,7 +232,7 @@ fn a_drop_submits_the_transfer_of_the_items_the_drag_started_with() {
     };
     let offered = state.drop_offer(id, spot).expect("the folder takes them");
     assert_eq!((offered.folder, offered.count), (in_b("백업"), 3));
-    let (spec, origin) = the_submit(&state.drop_items(id, spot, TransferMode::Move));
+    let (spec, origin) = the_submit(&state.drop_items(id, spot));
     assert_eq!(origin, Some(LEFT));
     let JobSpec::Transfer(transfer) = spec else {
         panic!("a transfer: {spec:?}");
@@ -246,7 +249,7 @@ fn a_drop_submits_the_transfer_of_the_items_the_drag_started_with() {
     );
     // One drop each: the drag is over.
     assert_eq!(state.drop_offer(id, spot), None);
-    assert_eq!(state.drop_items(id, spot, TransferMode::Move), []);
+    assert_eq!(state.drop_items(id, spot), []);
 }
 
 #[test]
@@ -280,12 +283,12 @@ fn a_drop_goes_only_where_the_window_showed() {
         changes: vec![rf_vfs::Change::Upsert(dir("가나"))],
     });
     assert_eq!(
-        state.drop_items(id, first_row, TransferMode::Move),
+        state.drop_items(id, first_row),
         [Effect::Notice(words::drop_moved().to_owned())]
     );
     // The next hover shows the folder, and a drop then goes there.
     assert_eq!(offer(&mut state, first_row), Some(in_b("가나")));
-    let (spec, _) = the_submit(&state.drop_items(id, first_row, TransferMode::Move));
+    let (spec, _) = the_submit(&state.drop_items(id, first_row));
     let JobSpec::Transfer(transfer) = spec else {
         panic!("a transfer: {spec:?}");
     };
@@ -302,7 +305,7 @@ fn a_drop_after_its_tab_moved_on_or_closed_takes_the_items_it_started_with() {
     let id = state.drag_id();
     // The tab the drag came from goes elsewhere before the drop.
     let _ = state.go_to(folder("c"));
-    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Move));
+    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST));
     assert_eq!(origin, Some(LEFT));
     let JobSpec::Transfer(transfer) = spec else {
         panic!("a transfer: {spec:?}");
@@ -315,13 +318,14 @@ fn a_drop_after_its_tab_moved_on_or_closed_takes_the_items_it_started_with() {
         }]
     );
 
-    // A drag from a tab that closes before the drop.
+    // A drag from a tab that closes before the drop, set to copy.
     let mut state = two_panes();
+    state.set_drag_default(DragDefault::Copy);
     state.press_row(LEFT, 0, false, false);
     let id = state.drag_id();
     let _ = state.add_tab(LEFT);
     let _ = state.close_tab(LEFT, 0);
-    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Copy));
+    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST));
     assert_eq!(origin, Some(LEFT));
     let JobSpec::Transfer(transfer) = spec else {
         panic!("a transfer: {spec:?}");
@@ -338,11 +342,12 @@ fn a_drop_after_its_tab_moved_on_or_closed_takes_the_items_it_started_with() {
 #[test]
 fn a_copy_goes_where_a_move_would() {
     let mut state = two_panes();
+    state.set_drag_default(DragDefault::Copy);
     state.press_row(LEFT, 2, false, false);
     let id = state.drag_id();
     // A copy into the folder the item is in would do nothing either (DND-09).
-    assert_eq!(state.drop_items(id, LEFT_LIST, TransferMode::Copy), []);
-    let (spec, _) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Copy));
+    assert_eq!(state.drop_items(id, LEFT_LIST), []);
+    let (spec, _) = the_submit(&state.drop_items(id, RIGHT_LIST));
     let JobSpec::Transfer(transfer) = spec else {
         panic!("a transfer: {spec:?}");
     };
@@ -368,14 +373,14 @@ fn only_the_payload_of_the_last_drag_drops_and_only_on_the_main_window() {
     let second = state.drag_id();
     assert_ne!(first, second);
     assert_eq!(state.drop_offer(first, RIGHT_LIST), None);
-    assert_eq!(state.drop_items(first, RIGHT_LIST, TransferMode::Move), []);
+    assert_eq!(state.drop_items(first, RIGHT_LIST), []);
     assert!(state.drop_offer(second, RIGHT_LIST).is_some());
 
     // While a window shows over the main window, nothing takes a drop.
     state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     assert_eq!(state.drop_offer(second, RIGHT_LIST), None);
-    assert_eq!(state.drop_items(second, RIGHT_LIST, TransferMode::Move), []);
+    assert_eq!(state.drop_items(second, RIGHT_LIST), []);
     state.dialog_cancelled();
     assert!(state.drop_offer(second, RIGHT_LIST).is_some());
 }
@@ -385,7 +390,7 @@ fn a_dragged_move_tells_what_it_moved_and_offers_its_undo() {
     let mut state = two_panes();
     state.press_row(LEFT, 2, false, false);
     let id = state.drag_id();
-    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST, TransferMode::Move));
+    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST));
     let record = UndoRecord::Moved {
         moves: vec![rf_jobs::MovedItem {
             from: in_a("x.txt"),
@@ -454,11 +459,11 @@ fn a_drop_where_the_rows_changed_to_a_folder_that_refuses_says_so() {
         changes: vec![rf_vfs::Change::Upsert(dir("a"))],
     });
     assert_eq!(
-        state.drop_items(id, first_row, TransferMode::Move),
+        state.drop_items(id, first_row),
         [Effect::Notice(words::drop_moved().to_owned())]
     );
     // A drop the window never offered says nothing.
-    assert_eq!(state.drop_items(id, first_row, TransferMode::Move), []);
+    assert_eq!(state.drop_items(id, first_row), []);
 }
 
 #[test]
@@ -489,5 +494,174 @@ fn a_place_that_refuses_the_items_says_why() {
     assert_eq!(
         words::drop_refused(Validity::IntoSource),
         "여기에 놓을 수 없습니다: 끌고 있는 폴더 자신이거나 그 안입니다"
+    );
+}
+
+/// The keys that ask a drop for a copy on this system: Ctrl, or ⌥ on macOS.
+fn copy_keys() -> DragMods {
+    if Os::CURRENT == Os::MacOs {
+        DragMods {
+            alt: true,
+            ..DragMods::default()
+        }
+    } else {
+        DragMods {
+            ctrl: true,
+            ..DragMods::default()
+        }
+    }
+}
+
+/// The keys that ask a drop for a link on this system: Ctrl+Shift, or ⌥⌘ on macOS.
+fn link_keys() -> DragMods {
+    if Os::CURRENT == Os::MacOs {
+        DragMods {
+            alt: true,
+            logo: true,
+            ..DragMods::default()
+        }
+    } else {
+        DragMods {
+            ctrl: true,
+            shift: true,
+            ..DragMods::default()
+        }
+    }
+}
+
+/// The mode of the transfer `effects` submit.
+fn submitted_mode(effects: &[Effect]) -> TransferMode {
+    match the_submit(effects).0 {
+        JobSpec::Transfer(transfer) => transfer.mode,
+        spec => panic!("a transfer: {spec:?}"),
+    }
+}
+
+#[test]
+fn the_keys_held_choose_what_a_drop_does() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let choice = |state: &mut AppState| state.drop_offer(id, RIGHT_LIST).map(|offer| offer.choice);
+    assert_eq!(choice(&mut state), Some(DropChoice::Do(DropEffect::Move)));
+    // The window tells the keys as they change; each hover asks with the keys held then.
+    state.modifiers_changed(copy_keys());
+    assert_eq!(choice(&mut state), Some(DropChoice::Do(DropEffect::Copy)));
+    state.modifiers_changed(link_keys());
+    assert_eq!(
+        choice(&mut state),
+        Some(DropChoice::Refuse(Refusal::NoLinks))
+    );
+    // A drop the keys refuse does nothing, and the drag may drop again.
+    assert_eq!(state.drop_items(id, RIGHT_LIST), []);
+    state.modifiers_changed(copy_keys());
+    assert_eq!(
+        submitted_mode(&state.drop_items(id, RIGHT_LIST)),
+        TransferMode::Copy
+    );
+
+    // Let go, the setting chooses again.
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    state.modifiers_changed(DragMods::default());
+    assert_eq!(
+        submitted_mode(&state.drop_items(id, RIGHT_LIST)),
+        TransferMode::Move
+    );
+}
+
+#[test]
+fn the_setting_chooses_a_drop_without_a_key() {
+    let mut state = two_panes();
+    assert_eq!(state.drag_default(), DragDefault::Move);
+    state.set_drag_default(DragDefault::Copy);
+    assert_eq!(state.drag_default(), DragDefault::Copy);
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    assert_eq!(
+        submitted_mode(&state.drop_items(id, RIGHT_LIST)),
+        TransferMode::Copy
+    );
+
+    // The system's way: a move within a drive of the sidebar, a copy to another. The drives
+    // come from the places a worker found; none known yet counts as another drive.
+    state.set_drag_default(DragDefault::System);
+    let drive = |path: VPath| Place {
+        label: "디스크".to_owned(),
+        path,
+        kind: PlaceKind::Drive,
+        space: None,
+    };
+    let os_way = |state: &mut AppState| {
+        state.press_row(LEFT, 2, false, false);
+        let id = state.drag_id();
+        state.drop_offer(id, RIGHT_LIST).map(|offer| offer.choice)
+    };
+    assert_eq!(os_way(&mut state), Some(DropChoice::Do(DropEffect::Copy)));
+    let both = VPath::local(std::env::temp_dir()).expect("a local path");
+    let _ = state.set_places(&[drive(both)]);
+    assert_eq!(os_way(&mut state), Some(DropChoice::Do(DropEffect::Move)));
+    // `b` on a drive of its own, `a` on the one that holds both.
+    let both = VPath::local(std::env::temp_dir()).expect("a local path");
+    let _ = state.set_places(&[drive(both), drive(folder("b"))]);
+    assert_eq!(os_way(&mut state), Some(DropChoice::Do(DropEffect::Copy)));
+}
+
+#[test]
+fn a_drop_that_asks_shows_its_menu_and_the_menu_submits_the_job() {
+    let mut state = two_panes();
+    state.set_drag_default(DragDefault::Ask);
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let offer = state
+        .drop_offer(id, RIGHT_LIST)
+        .expect("the folder takes it");
+    assert_eq!(offer.choice, DropChoice::Ask);
+    // No job yet: the menu shows where the drop was.
+    assert_eq!(
+        state.drop_items(id, RIGHT_LIST),
+        [Effect::ShowMenu(MenuShown::AskDrop)]
+    );
+    // One drop each: the drag is over.
+    assert_eq!(state.drop_offer(id, RIGHT_LIST), None);
+    // 여기로 이동 moves the items the drag carried into the folder of the drop.
+    let (spec, origin) = the_submit(&state.drop_menu_chosen(Some(TransferMode::Move)));
+    assert_eq!(origin, Some(LEFT));
+    let JobSpec::Transfer(transfer) = spec else {
+        panic!("a transfer: {spec:?}");
+    };
+    assert_eq!(transfer.mode, TransferMode::Move);
+    assert_eq!(transfer.options.conflict, ConflictPolicy::Ask);
+    assert_eq!(
+        transfer.items,
+        [TransferItem {
+            source: in_a("x.txt"),
+            target: in_b("x.txt"),
+        }]
+    );
+    // The menu answers once.
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+
+    // 여기로 복사 copies; 취소 (and Esc, or a click beside the menu, which choose nothing)
+    // does nothing.
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let _ = state.drop_items(id, RIGHT_LIST);
+    assert_eq!(
+        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Copy))),
+        TransferMode::Copy
+    );
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let _ = state.drop_items(id, RIGHT_LIST);
+    assert_eq!(state.drop_menu_chosen(None), []);
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+    // A key held at the drop chooses at once, without the menu.
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    state.modifiers_changed(copy_keys());
+    assert_eq!(
+        submitted_mode(&state.drop_items(id, RIGHT_LIST)),
+        TransferMode::Copy
     );
 }

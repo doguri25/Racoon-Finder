@@ -6,7 +6,9 @@
 // shortcut table (`keys.rs`) decides what it does, and gives the keys the toolbar's tooltips
 // and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
 // other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
-// under it takes them (`drop-check`). A tab dragged along its strip, or into the other pane's,
+// under it takes them and what a drop there does (`drop-check`), which shows beside the pointer
+// (`drop-hint`), and the menu of 놓을 때 묻기 shows where a drop that asks was
+// (`show-drop-menu`). A tab dragged along its strip, or into the other pane's,
 // moves there (`tab-move-check`). The `›` of a piece of a pane's path row opens the list of that
 // folder's folders under it (`subfolders`, NAV-03); its keys go to Rust with the window's. The
 // preview panel shows the item under the active pane's cursor (`preview`), and so does quick
@@ -36,13 +38,13 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
-import { ItemMenu, OpenWithMenu } from "list-parts.slint";
+import { ItemMenu, OpenWithMenu, DropMenu, DragPointer } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView, ItemMenu
+    PropertiesView, FactRow, HashRowView, ItemMenu, DragPointer
 }
 
 // What a drag is over: a pane's list, a pane's tab, or a row of the tree.
@@ -141,9 +143,16 @@ export component MainWindow inherits Window {
     in-out property <bool> show-hidden;
     in-out property <bool> show-extensions: true;
     // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
-    // readied. And what a drop on the list under the pointer would do ("항목 3개 이동 → 백업").
+    // readied.
     in property <data-transfer> drag-data;
-    in property <string> drag-label;
+    // The choices of 보기 ▸ 설정 (Rust sets them from its state; the menu's marks follow them):
+    // what a drop does without a modifier key (0 이동, 1 복사, 2 OS 방식, 3 매번 묻기), whether a
+    // dragged move offers its undo, and whether a right click shows Windows' menu first, which
+    // the menu offers on Windows alone (`system-menu-offered`).
+    in property <int> drag-default;
+    in-out property <bool> move-undo-toast: true;
+    in-out property <bool> system-menu-first;
+    in property <bool> system-menu-offered;
     // The payload of a drag of a tab, made by Rust as a left press shows the tab.
     in property <data-transfer> tab-drag-data;
     // The layout (Rust sets it from its state; the 보기 menu's marks are bound to it): two panes
@@ -239,6 +248,8 @@ export component MainWindow inherits Window {
     callback split-changed(share: float);
     // A theme was chosen in the 보기 menu (the numbers of `theme-choice`).
     callback theme-chosen(choice: int);
+    // 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작 chose `choice` (the numbers of `drag-default`).
+    callback drag-default-chosen(choice: int);
     // The window's size changed (the settings keep it).
     callback window-resized();
     callback pane-activated(side: int);
@@ -357,11 +368,13 @@ export component MainWindow inherits Window {
     callback tree-clicked(index: int);
     callback tree-toggled(index: int);
     // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
-    // below the rows), tab `index` of pane `side`, or row `index` of the tree (`side` 0), and
-    // asks for `action` (Slint's rule: none or Shift moves, Ctrl copies). Rust gives the
-    // action the place takes, or `none`. Then the drop itself, the same way.
-    callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
-    callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int, action: DragAction) -> DragAction;
+    // below the rows), tab `index` of pane `side`, or row `index` of the tree (`side` 0). Rust
+    // gives what a drop there does, by the keys held and 보기 ▸ 설정 (Slint's own rule, which
+    // knows only Ctrl and Shift, has no say), or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
+    callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
+    // The menu of 놓을 때 묻기 chose `name`: `move`, `copy` or `cancel`.
+    callback drop-menu-chosen(name: string);
 
     // The filter box takes the keys, all its text selected.
     public function focus-filter() {
@@ -502,23 +515,28 @@ export component MainWindow inherits Window {
         }
     }
 
-    // The place under a drag (`place`, of pane `side`) does not take it, for the reason `text`;
-    // an empty one says it does. The reason shows by the place while the drag hovers there, the
-    // pointer moving or not, and goes when the drag moves where nothing takes drops (the
-    // `DropArea` under everything), or ends.
-    public function drop-refused(place: DropPlace, side: int, text: string) {
-        root.refusal = text;
-        root.refusal-place = place;
-        root.refusal-side = side;
-        root.refusal-told = text != "";
+    // What a drop at the place under a drag does, or why it does nothing there (`refused`), as
+    // Rust says at each move: `text` shows beside the pointer (DND-03), in the accent's color or,
+    // refused, in the notices' colors; an empty one shows nothing. It stays while the drag
+    // hovers there, the pointer moving or not, and goes when the drag moves where nothing takes
+    // drops (the `DropArea` under everything), or ends.
+    public function drop-hint(text: string, refused: bool) {
+        root.hint = text;
+        root.hint-refused = refused;
+        root.hint-told = refused && text != "";
     }
 
-    private property <string> refusal;
-    private property <DropPlace> refusal-place;
-    private property <int> refusal-side;
-    // A place has refused the drag in the move that is under way.
-    private property <bool> refusal-told;
-    private property <bool> refusal-in-tree: root.refusal-place == DropPlace.tree;
+    // The menu of 놓을 때 묻기, where the drop was.
+    public function show-drop-menu() {
+        drop-menu.show({ x: DragPointer.x, y: DragPointer.y });
+    }
+
+    private property <string> hint;
+    private property <bool> hint-refused;
+    // A place has refused the drag in the move that is under way, and said why.
+    private property <bool> hint-told;
+    // Something shows beside the pointer of a drag.
+    out property <bool> hint-shown: root.hint != "";
 
     // Scrolls the tree so that row `index` shows.
     public function tree-scroll-to(index: int) {
@@ -655,10 +673,10 @@ export component MainWindow inherits Window {
     // panes) takes it away.
     DropArea {
         can-drop(event) => {
-            if (!root.refusal-told) {
-                root.refusal = "";
+            if (!root.hint-told) {
+                root.hint = "";
             }
-            root.refusal-told = false;
+            root.hint-told = false;
             return DragAction.none;
         }
         dropped(event) => {
@@ -866,6 +884,10 @@ export component MainWindow inherits Window {
                             dual-pane <=> root.dual-pane;
                             stacked <=> root.stacked;
                             sync-navigation <=> root.sync-navigation;
+                            drag-default: root.drag-default;
+                            move-undo-toast <=> root.move-undo-toast;
+                            system-menu-first <=> root.system-menu-first;
+                            system-menu-offered: root.system-menu-offered;
                             command(name) => {
                                 root.command(name);
                                 if (name == "focus-tree") {
@@ -874,6 +896,9 @@ export component MainWindow inherits Window {
                             }
                             theme-chosen(choice) => {
                                 root.theme-chosen(choice);
+                            }
+                            drag-default-chosen(choice) => {
+                                root.drag-default-chosen(choice);
                             }
                             even-split => {
                                 root.split-changed(0.5);
@@ -993,16 +1018,15 @@ export component MainWindow inherits Window {
                         rows: root.tree;
                         cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
                         accepts-drops: true;
-                        refusal: root.refusal-in-tree ? root.refusal : "";
                         row-clicked(index) => {
                             root.tree-clicked(index);
                             keys.focus();
                         }
-                        drop-check(data, index, action) => {
-                            return root.drop-check(data, DropPlace.tree, 0, index, action);
+                        drop-check(data, index) => {
+                            return root.drop-check(data, DropPlace.tree, 0, index);
                         }
-                        dropped(data, index, action) => {
-                            return root.drop-items(data, DropPlace.tree, 0, index, action);
+                        dropped(data, index) => {
+                            return root.drop-items(data, DropPlace.tree, 0, index);
                         }
                         row-toggled(index) => {
                             root.tree-toggled(index);
@@ -1042,10 +1066,8 @@ export component MainWindow inherits Window {
                         view: root.left-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
-                        drag-label: root.drag-label;
-                        refusal: !root.refusal-in-tree && root.refusal-side == 0 ? root.refusal : "";
                         drag-ended => {
-                            root.refusal = "";
+                            root.hint = "";
                         }
                         activated => {
                             root.pane-activated(0);
@@ -1145,17 +1167,17 @@ export component MainWindow inherits Window {
                             root.retry(0);
                             keys.focus();
                         }
-                        list-drop-check(data, index, action) => {
-                            return root.drop-check(data, DropPlace.list, 0, index, action);
+                        list-drop-check(data, index) => {
+                            return root.drop-check(data, DropPlace.list, 0, index);
                         }
-                        list-dropped(data, index, action) => {
-                            return root.drop-items(data, DropPlace.list, 0, index, action);
+                        list-dropped(data, index) => {
+                            return root.drop-items(data, DropPlace.list, 0, index);
                         }
-                        tab-drop-check(data, index, action) => {
-                            return root.drop-check(data, DropPlace.tab, 0, index, action);
+                        tab-drop-check(data, index) => {
+                            return root.drop-check(data, DropPlace.tab, 0, index);
                         }
-                        tab-dropped(data, index, action) => {
-                            return root.drop-items(data, DropPlace.tab, 0, index, action);
+                        tab-dropped(data, index) => {
+                            return root.drop-items(data, DropPlace.tab, 0, index);
                         }
                     }
 
@@ -1184,10 +1206,8 @@ export component MainWindow inherits Window {
                         view: root.right-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
-                        drag-label: root.drag-label;
-                        refusal: !root.refusal-in-tree && root.refusal-side == 1 ? root.refusal : "";
                         drag-ended => {
-                            root.refusal = "";
+                            root.hint = "";
                         }
                         activated => {
                             root.pane-activated(1);
@@ -1287,17 +1307,17 @@ export component MainWindow inherits Window {
                             root.retry(1);
                             keys.focus();
                         }
-                        list-drop-check(data, index, action) => {
-                            return root.drop-check(data, DropPlace.list, 1, index, action);
+                        list-drop-check(data, index) => {
+                            return root.drop-check(data, DropPlace.list, 1, index);
                         }
-                        list-dropped(data, index, action) => {
-                            return root.drop-items(data, DropPlace.list, 1, index, action);
+                        list-dropped(data, index) => {
+                            return root.drop-items(data, DropPlace.list, 1, index);
                         }
-                        tab-drop-check(data, index, action) => {
-                            return root.drop-check(data, DropPlace.tab, 1, index, action);
+                        tab-drop-check(data, index) => {
+                            return root.drop-check(data, DropPlace.tab, 1, index);
                         }
-                        tab-dropped(data, index, action) => {
-                            return root.drop-items(data, DropPlace.tab, 1, index, action);
+                        tab-dropped(data, index) => {
+                            return root.drop-items(data, DropPlace.tab, 1, index);
                         }
                     }
                 }
@@ -1445,6 +1465,32 @@ export component MainWindow inherits Window {
             }
             keys.focus();
             root.completion-chosen(side, index);
+        }
+    }
+
+    // Beside the pointer of a drag of rows: what a drop there does ("이동 → 백업"), or why it does
+    // nothing (DND-03). Below and to the right of the pointer, kept inside the window, and
+    // narrower than it; it takes no pointer.
+    if root.hint != "": Rectangle {
+        x: max(4px, min(DragPointer.x + 16px, root.width - self.width - 4px));
+        y: max(4px, min(DragPointer.y + 20px, root.height - self.height - 4px));
+        width: min(hint-text.preferred-width + 20px, root.width - 8px);
+        height: 26px;
+        border-radius: 13px;
+        background: root.hint-refused ? Theme.toast-bg : Theme.accent;
+        drop-shadow-blur: 6px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: #00000033;
+
+        hint-text := Text {
+            width: parent.width - 20px;
+            text: root.hint;
+            color: root.hint-refused ? Theme.toast-text : Theme.on-accent;
+            font-size: Theme.font-small;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
 
@@ -1727,8 +1773,9 @@ export component MainWindow inherits Window {
         }
     }
 
-    // At the window's top left corner and without room, so that it shows at the window's
-    // coordinates of the item menu that showed last, and takes no click itself.
+    // At the window's top left corner and without room, so that they show at the window's
+    // coordinates of the item menu that showed last and of the drop, and take no click
+    // themselves.
     Rectangle {
         x: 0px;
         y: 0px;
@@ -1739,6 +1786,12 @@ export component MainWindow inherits Window {
             apps: root.open-with-apps;
             chosen(index) => {
                 root.open-with-chosen(index);
+            }
+        }
+
+        drop-menu := DropMenu {
+            chosen(name) => {
+                root.drop-menu-chosen(name);
             }
         }
     }

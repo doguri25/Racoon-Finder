@@ -3,6 +3,7 @@
 pub mod attrs;
 pub mod clipboard;
 pub mod desktop;
+pub mod dnd;
 pub mod fileid;
 pub mod fsops;
 pub mod known;

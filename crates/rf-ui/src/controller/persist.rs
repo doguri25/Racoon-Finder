@@ -332,8 +332,9 @@ impl Controller {
     }
 
     /// The settings with what the window shows now, and their text: the tabs, the active pane,
-    /// the hidden items, the recent targets, the theme and the window's size (kept as it was
-    /// while the window is maximized, full screen or minimized). `None` before the panes show.
+    /// the hidden items, the recent targets, the choices of 보기 ▸ 설정, the theme and the
+    /// window's size (kept as it was while the window is maximized, full screen or minimized).
+    /// `None` before the panes show.
     fn snapshot(&self) -> Option<(Settings, String)> {
         let mut settings = self.settings.borrow().clone();
         {
@@ -342,6 +343,9 @@ impl Controller {
             settings.set_session(&state.session());
             settings.set_recent(state.recent_targets());
             settings.set_views(state.views());
+            settings.drag_default = state.drag_default();
+            settings.move_undo_toast = state.move_undo_toast();
+            settings.system_menu_first = state.system_menu_first();
         }
         settings.theme = self.theme.get();
         if let Some(size) = self.window_size() {

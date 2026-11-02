@@ -118,6 +118,16 @@ impl Owner {
     }
 }
 
+/// A place in the app's window, in logical pixels from the top left corner of its content (as
+/// Slint lays it out). It is all the app and this crate tell each other of a place on the
+/// window: screen coordinates, physical pixels and macOS's upward y are this crate's to turn
+/// into it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// The extensions of the files Windows runs as administrator, as File Explorer offers it on
 /// them: programs (`exe`, `com`), batch files (`bat`, `cmd`) and management consoles (`msc`).
 /// An installer (`msi`) asks for the rights it needs itself, so File Explorer has no "run as

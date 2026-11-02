@@ -16,10 +16,10 @@ use rf_ui::state::{Column, FolderView, MenuFacts, ShownColumn, ViewMode};
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DropPlace, FactRow, FolderMenuRow, FolderMenuView,
-    HashRowView, ItemMenu, JobRowView, JobTray, MainWindow, MessageView, NameView, NoticeWindow,
-    PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView,
-    PropertiesView, RecentRowView, RecoveryView, Theme,
+    ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, FactRow, FolderMenuRow,
+    FolderMenuView, HashRowView, ItemMenu, JobRowView, JobTray, MainWindow, MessageView, NameView,
+    NoticeWindow, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind,
+    PreviewView, PropertiesView, RecentRowView, RecoveryView, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -1017,7 +1017,7 @@ fn header_window() -> (MainWindow, PaneModels, Rc<RefCell<Vec<String>>>) {
     let record = note(&calls);
     window.on_sort(move |side, column, then| record(format!("sort {side} {column} {then}")));
     let record = note(&calls);
-    window.on_drop_check(move |_, _, _, _, _| {
+    window.on_drop_check(move |_, _, _, _| {
         record("drop-check".to_owned());
         DragAction::None
     });
@@ -2802,7 +2802,7 @@ fn a_folder_the_picker_cannot_take_is_not_selectable_for_screen_readers() {
 
 /// What a drag's callbacks told: the payload's id, where, which pane, which row or tab, and
 /// the action asked for.
-type DropCall = (u64, DropPlace, i32, i32, DragAction);
+type DropCall = (u64, DropPlace, i32, i32);
 
 /// The centre of the one element labelled `label` with role `role`.
 fn centre_of(window: &MainWindow, label: &str, role: AccessibleRole) -> LogicalPosition {
@@ -2846,8 +2846,8 @@ struct DragCalls {
 /// A window whose left pane lists the folder `docs` and the file `x.txt`, whose right pane
 /// lists the folder `백업` and the file `y.txt`, and whose tree has the place `홈`, with the
 /// payload of drag 42. Its callbacks answer as the controller does when the items are in the
-/// left pane's folder: the left pane's list takes nothing, every other place takes them,
-/// and the label names the place.
+/// left pane's folder: the left pane's list takes nothing, every other place takes them as a
+/// move, and what shows beside the pointer names the place.
 fn drag_window() -> (MainWindow, Rc<DragCalls>, [PaneModels; 2], Rc<TreeRows>) {
     let window = window();
     let left = listed_pane(vec![
@@ -2882,22 +2882,29 @@ fn drag_window() -> (MainWindow, Rc<DragCalls>, [PaneModels; 2], Rc<TreeRows>) {
     window.on_row_released(move |side, i| record.rows.borrow_mut().push(("release", side, i)));
     let record = Rc::clone(&calls);
     let weak = window.as_weak();
-    window.on_drop_check(move |data, place, side, i, action| {
-        let call = (ui_bridge::drag_id(&data), place, side, i, action);
+    window.on_drop_check(move |data, place, side, i| {
+        let call = (ui_bridge::drag_id(&data), place, side, i);
         record.checks.borrow_mut().push(call);
-        if side == 0 && place == DropPlace::List {
-            return DragAction::None;
-        }
+        let refused = side == 0 && place == DropPlace::List;
         if let Some(window) = weak.upgrade() {
-            window.set_drag_label(format!("{place:?} {i}").into());
+            let hint = if refused {
+                String::new()
+            } else {
+                format!("{place:?} {i}")
+            };
+            window.invoke_drop_hint(hint.into(), false);
         }
-        action
+        if refused {
+            DragAction::None
+        } else {
+            DragAction::Move
+        }
     });
     let record = Rc::clone(&calls);
-    window.on_drop_items(move |data, place, side, i, action| {
-        let call = (ui_bridge::drag_id(&data), place, side, i, action);
+    window.on_drop_items(move |data, place, side, i| {
+        let call = (ui_bridge::drag_id(&data), place, side, i);
         record.drops.borrow_mut().push(call);
-        action
+        DragAction::Move
     });
     (window, calls, models, tree_rows)
 }
@@ -2922,46 +2929,95 @@ fn a_row_dragged_onto_the_other_pane_drops_there() {
     );
 
     // A drag over the other pane: its folder row, then its list below the rows. The payload
-    // is the one Rust made; no modifier asks for a move.
+    // is the one Rust made.
     drag_to(&window, x_txt, backup);
-    assert_eq!(
-        last_check(),
-        Some((42, DropPlace::List, 1, 0, DragAction::Move))
+    assert_eq!(last_check(), Some((42, DropPlace::List, 1, 0)));
+    // The list tells the window where the pointer is, in the window's coordinates.
+    let pointer_at = || {
+        let at = window.global::<DragPointer<'_>>();
+        LogicalPosition::new(at.get_x(), at.get_y())
+    };
+    assert_eq!(pointer_at(), backup);
+    // While a place takes it, what the drop would do shows beside the pointer: below and to
+    // the right of it, inside the window.
+    let hint = labelled(&window, "List 0", AccessibleRole::Text);
+    assert_eq!(hint.len(), 1);
+    let at = hint[0].absolute_position();
+    assert!(
+        at.x > backup.x && at.y > backup.y,
+        "{at:?} beside {backup:?}"
     );
-    // While a place takes it, the label says what the drop would do.
-    assert_eq!(labelled(&window, "List 0", AccessibleRole::Text).len(), 1);
+    let window_width = window
+        .window()
+        .size()
+        .to_logical(window.window().scale_factor())
+        .width;
+    assert!(at.x + hint[0].size().width <= window_width);
     pointer(&window, "move", right_empty);
-    assert_eq!(
-        last_check(),
-        Some((42, DropPlace::List, 1, -1, DragAction::Move))
-    );
-    // Ctrl asks for a copy, from the moment it is pressed.
+    assert_eq!(last_check(), Some((42, DropPlace::List, 1, -1)));
+    assert_eq!(pointer_at(), right_empty);
+    assert_eq!(labelled(&window, "List 0", AccessibleRole::Text).len(), 0);
+    assert_eq!(labelled(&window, "List -1", AccessibleRole::Text).len(), 1);
+    // A modifier key asks again from the moment it is pressed, the pointer still: Rust
+    // answers with the keys held then.
+    let checks = calls.checks.borrow().len();
     let control = char::from(Key::Control).to_string();
     window.window().dispatch_event(WindowEvent::KeyPressed {
         text: control.clone().into(),
     });
-    assert_eq!(
-        last_check(),
-        Some((42, DropPlace::List, 1, -1, DragAction::Copy))
-    );
+    assert_eq!(calls.checks.borrow().len(), checks + 1);
     window.window().dispatch_event(WindowEvent::KeyReleased {
         text: control.into(),
     });
-    assert_eq!(
-        last_check(),
-        Some((42, DropPlace::List, 1, -1, DragAction::Move))
-    );
+    assert_eq!(calls.checks.borrow().len(), checks + 2);
+    assert_eq!(last_check(), Some((42, DropPlace::List, 1, -1)));
     pointer(&window, "release", right_empty);
     assert_eq!(
         calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
-        [(42, DropPlace::List, 1, -1, DragAction::Move)]
+        [(42, DropPlace::List, 1, -1)]
     );
-    // The drag took the release: no click of the row, and the label is gone.
+    // The drag took the release: no click of the row, and nothing shows beside the pointer.
     assert_eq!(
         calls.rows.borrow_mut().drain(..).collect::<Vec<_>>(),
         [("press", 0, 1)]
     );
     assert_eq!(labelled(&window, "List -1", AccessibleRole::Text).len(), 0);
+}
+
+#[test]
+fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
+    let (window, _calls, _models, _tree) = drag_window();
+    let chosen = Calls::default();
+    let record = chosen.clone();
+    window.on_drop_menu_chosen(move |name| record.note(name.to_string()));
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    drag_to(&window, x_txt, backup);
+    pointer(&window, "release", backup);
+    // As Rust shows it for a drop that asks, after the drop.
+    for (item, name) in [
+        ("여기로 이동", "move"),
+        ("여기로 복사", "copy"),
+        ("취소", "cancel"),
+    ] {
+        window.invoke_show_drop_menu();
+        choose_item(&window, item);
+        assert_eq!(chosen.take(), [name], "{item}");
+    }
+    // Esc closes it, choosing nothing.
+    window.invoke_show_drop_menu();
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, "여기로 이동")
+            .next()
+            .is_some()
+    );
+    press(&window, Key::Escape);
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, "여기로 이동")
+            .next()
+            .is_none()
+    );
+    assert_eq!(chosen.take(), Vec::<String>::new());
 }
 
 /// The left pane of [`drag_window`] shown in `mode`.
@@ -3033,7 +3089,7 @@ fn icons_and_the_list_take_presses_drags_and_menus_as_rows_do() {
         pointer(&window, "release", backup);
         assert_eq!(
             calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
-            [(42, DropPlace::List, 1, 0, DragAction::Move)],
+            [(42, DropPlace::List, 1, 0)],
             "{mode:?}"
         );
         // And an item of the other pane onto this pane's folder item asks this list about it.
@@ -3042,7 +3098,14 @@ fn icons_and_the_list_take_presses_drags_and_menus_as_rows_do() {
         drag_to(&window, y_txt, docs);
         assert_eq!(
             calls.checks.borrow().last().copied(),
-            Some((42, DropPlace::List, 0, 0, DragAction::Move)),
+            Some((42, DropPlace::List, 0, 0)),
+            "{mode:?}"
+        );
+        // The items tell where the pointer is, as the rows of 자세히 do.
+        let at = window.global::<DragPointer<'_>>();
+        assert_eq!(
+            LogicalPosition::new(at.get_x(), at.get_y()),
+            docs,
             "{mode:?}"
         );
         pointer(&window, "release", docs);
@@ -3118,7 +3181,7 @@ fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
     drag_to(&window, x_txt, docs);
     assert_eq!(
         calls.checks.borrow().last().copied(),
-        Some((42, DropPlace::List, 0, 0, DragAction::Move))
+        Some((42, DropPlace::List, 0, 0))
     );
     pointer(&window, "release", docs);
     assert_eq!(calls.drops.borrow().as_slice(), []);
@@ -3135,10 +3198,17 @@ fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
     let home = centre_of(&window, "홈", AccessibleRole::ListItem);
     for (target, place, side) in [(right_tab, DropPlace::Tab, 1), (home, DropPlace::Tree, 0)] {
         drag_to(&window, x_txt, target);
+        // They tell where the pointer is too, for what shows beside it.
+        let at = window.global::<DragPointer<'_>>();
+        assert_eq!(LogicalPosition::new(at.get_x(), at.get_y()), target);
+        assert_eq!(
+            labelled(&window, &format!("{place:?} 0"), AccessibleRole::Text).len(),
+            1
+        );
         pointer(&window, "release", target);
         assert_eq!(
             calls.drops.borrow_mut().drain(..).collect::<Vec<_>>(),
-            [(42, place, side, 0, DragAction::Move)]
+            [(42, place, side, 0)]
         );
     }
 }
@@ -3146,28 +3216,27 @@ fn nothing_drops_where_rust_refuses_and_tabs_and_the_tree_take_drops() {
 #[test]
 fn a_refused_place_says_why_while_the_drag_stays_over_it() {
     let (window, _calls, _models, _tree) = drag_window();
-    // As the controller does: every check tells the window whether the place refuses, and why.
+    // As the controller does: every check tells the window what a drop there does, or why it
+    // does nothing there.
     let weak = window.as_weak();
-    window.on_drop_check(move |_, place, side, _, action| {
+    window.on_drop_check(move |_, place, side, _| {
         let refused = side == 0 && place == DropPlace::List;
         if let Some(window) = weak.upgrade() {
-            let why = if refused {
+            let hint = if refused {
                 "여기에 놓을 수 없습니다: 같은 폴더"
             } else {
-                ""
+                "이동 → 백업"
             };
-            window.invoke_drop_refused(place, side, why.into());
+            window.invoke_drop_hint(hint.into(), refused);
         }
-        if refused { DragAction::None } else { action }
+        if refused {
+            DragAction::None
+        } else {
+            DragAction::Move
+        }
     });
-    let shown = || {
-        !labelled(
-            &window,
-            "여기에 놓을 수 없습니다: 같은 폴더",
-            AccessibleRole::Text,
-        )
-        .is_empty()
-    };
+    let says = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+    let shown = || says("여기에 놓을 수 없습니다: 같은 폴더");
     let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
     let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
     let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
@@ -3186,9 +3255,10 @@ fn a_refused_place_says_why_while_the_drag_stays_over_it() {
     assert!(!shown());
     pointer(&window, "move", docs);
     assert!(shown());
-    // A place that takes the drag says nothing.
+    // A place that takes the drag says what a drop does there instead.
     pointer(&window, "move", backup);
     assert!(!shown());
+    assert!(says("이동 → 백업"));
     // The end of the drag takes it away.
     pointer(&window, "move", docs);
     assert!(shown());
@@ -4402,6 +4472,69 @@ fn the_view_menu_switches_the_layout() {
         press(&window, Key::Escape);
         press(&window, Key::Escape);
     }
+}
+
+#[test]
+fn the_view_menu_s_settings_choose_what_a_drop_does() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let record = calls.clone();
+    window.on_drag_default_chosen(move |choice| record.note(format!("drag-default {choice}")));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    // The menu opens, and the sub-menus `subs` of it in turn.
+    let open = |subs: &[&str]| {
+        button.invoke_accessible_default_action();
+        for sub in subs {
+            choose_item(&window, sub);
+        }
+    };
+    let items = [(0, "이동"), (1, "복사"), (2, "OS 방식"), (3, "매번 묻기")];
+    for (choice, item) in items {
+        open(&["설정", "끌어 놓기 기본 동작"]);
+        choose_item(&window, item);
+        assert_eq!(calls.take(), [format!("drag-default {choice}")], "{item}");
+    }
+    // The default Rust sets has the one mark of the menus (the others' marks are off).
+    window.set_show_tree(false);
+    window.set_dual_pane(false);
+    window.set_show_extensions(false);
+    window.set_move_undo_toast(false);
+    let middle_y =
+        |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
+    for (choice, item) in items {
+        window.set_drag_default(choice);
+        open(&["설정", "끌어 놓기 기본 동작"]);
+        let marks: Vec<ElementHandle> =
+            ElementHandle::find_by_accessible_label(&window, "✓").collect();
+        assert_eq!(marks.len(), 1, "{item}");
+        let marked = ElementHandle::find_by_accessible_label(&window, item)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {item}"));
+        assert!(
+            (middle_y(&marks[0]) - middle_y(&marked)).abs() < 4.0,
+            "the mark is by {item}"
+        );
+        for _ in 0..3 {
+            press(&window, Key::Escape);
+        }
+    }
+    // The switches say their commands. The right click's Windows menu is offered on Windows
+    // alone.
+    let windows_menu = "오른쪽 클릭에 Windows 메뉴 바로 띄우기";
+    open(&["설정"]);
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, windows_menu)
+            .next()
+            .is_none()
+    );
+    choose_item(&window, "끌어서 옮긴 뒤 되돌리기 알림");
+    assert_eq!(calls.take(), ["toggle-move-undo-toast"]);
+    window.set_system_menu_offered(true);
+    open(&["설정"]);
+    choose_item(&window, windows_menu);
+    assert_eq!(calls.take(), ["toggle-system-menu-first"]);
 }
 
 #[test]

@@ -2,11 +2,13 @@
 // "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
 // it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
 // scrolls as freely as one with a few. The main window's tree takes dragged rows into the
-// folder of the row under the pointer (`accepts-drops`); the picker's takes none.
+// folder of the row under the pointer (`accepts-drops`), and tells where the pointer is
+// (`DragPointer`); the picker's takes none.
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { DragPointer } from "list-parts.slint";
 
 // The head above a row: the first favorite starts "즐겨찾기", the first drive "이 PC".
 export enum SectionHead {
@@ -50,10 +52,10 @@ component TreeItem inherits Rectangle {
     callback clicked();
     // A click on the chevron.
     callback toggled();
-    // A drag with the payload `data` over the row asks for `action`: what the row's folder
-    // takes, or `none`. Then the drop itself, the same way.
-    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, action: DragAction) -> DragAction;
+    // A drag with the payload `data` over the row: what a drop into the row's folder does (Rust
+    // chooses it), or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer) -> DragAction;
+    callback dropped(data: data-transfer) -> DragAction;
 
     // The head takes more room above the drives, which come after the favorites.
     private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
@@ -103,10 +105,12 @@ component TreeItem inherits Rectangle {
         drop := DropArea {
             enabled: root.accepts-drops;
             can-drop(event) => {
-                return root.drop-check(event.data, event.proposed-action);
+                DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                return root.drop-check(event.data);
             }
             dropped(event) => {
-                return root.dropped(event.data, event.proposed-action);
+                DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                return root.dropped(event.data);
             }
         }
 
@@ -216,17 +220,16 @@ export component Sidebar inherits Rectangle {
     in property <string> label: "폴더 트리";
     // Whether the rows take dragged rows into their folders.
     in property <bool> accepts-drops;
-    // Why the row under a drag does not take it ("여기에 놓을 수 없습니다: …"); empty otherwise.
-    in property <string> refusal;
     // The row of the keyboard cursor, while the tree has the keys; -1 for none.
     in property <int> cursor-row: -1;
     // A click on row `index`: show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
     callback row-toggled(index: int);
-    // A drag over row `index`, and its drop (`accepts-drops` only): what its folder takes.
-    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag over row `index`, and its drop (`accepts-drops` only): what a drop into its folder
+    // does.
+    callback drop-check(data: data-transfer, index: int) -> DragAction;
+    callback dropped(data: data-transfer, index: int) -> DragAction;
 
     // Scrolls row `index` to the middle of the list, unless it shows already.
     //
@@ -288,11 +291,11 @@ export component Sidebar inherits Rectangle {
             toggled => {
                 root.row-toggled(i);
             }
-            drop-check(data, action) => {
-                return root.drop-check(data, i, action);
+            drop-check(data) => {
+                return root.drop-check(data, i);
             }
-            dropped(data, action) => {
-                return root.dropped(data, i, action);
+            dropped(data) => {
+                return root.dropped(data, i);
             }
         }
     }
@@ -303,27 +306,6 @@ export component Sidebar inherits Rectangle {
         triggered => {
             root.scroll-target = -1;
             self.stop();
-        }
-    }
-
-    if root.refusal != "": Rectangle {
-        x: 8px;
-        y: parent.height - self.height - 10px;
-        width: parent.width - 16px;
-        height: refused.preferred-height + 12px;
-        border-radius: 12px;
-        background: Theme.toast-bg;
-
-        refused := Text {
-            x: 12px;
-            width: parent.width - 24px;
-            text: root.refusal;
-            color: Theme.toast-text;
-            font-size: Theme.font-small;
-            font-weight: 600;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            wrap: word-wrap;
         }
     }
 }

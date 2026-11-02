@@ -14,7 +14,7 @@ import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
-import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, ListSettle, ListScroll } from "list-parts.slint";
 
 // What the pointer did to an item.
 enum TileEvent {
@@ -158,19 +158,16 @@ export component FileGrid inherits Rectangle {
     // many lines a page key moves (the rows, or the columns, that fit on screen).
     out property <int> line-items: root.columnar ? root.per-column : root.per-row;
     out property <int> page-lines: root.columnar ? max(1, floor(columns-view.visible-width / root.tile-w)) : max(1, floor(icons.visible-height / root.tile-h));
-    // The payload of a drag, what a drop would do, and why the place under a drag does not take
-    // it (as `FileList` has them).
+    // The payload of a drag of the items (as `FileList` has it).
     in property <data-transfer> drag-data;
-    in property <string> drag-label;
-    in property <string> refusal;
 
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
     callback row-activated(index: int);
     callback row-menu(index: int);
     callback menu-command(name: string);
-    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    callback drop-check(data: data-transfer, index: int) -> DragAction;
+    callback dropped(data: data-transfer, index: int) -> DragAction;
     callback drag-ended();
 
     private property <bool> columnar: root.mode == 1;
@@ -263,10 +260,12 @@ export component FileGrid inherits Rectangle {
         can-drop(event) => {
             let index = root.index-at(event.position.x, event.position.y);
             self.target = index >= 0 && root.rows[index].is-dir ? index : -1;
-            return root.drop-check(event.data, index, event.proposed-action);
+            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            return root.drop-check(event.data, index);
         }
         dropped(event) => {
-            return root.dropped(event.data, root.index-at(event.position.x, event.position.y), event.proposed-action);
+            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            return root.dropped(event.data, root.index-at(event.position.x, event.position.y));
         }
 
         // The menu of the part of the list without items.
@@ -368,14 +367,11 @@ export component FileGrid inherits Rectangle {
         }
     }
 
-    // The frame, the label of the drop, or why it cannot be made there.
-    DropHint {
+    // The frame while the pane's folder takes the drag.
+    DropFrame {
         width: parent.width;
         height: parent.height;
-        dragging: drop.has-drag;
         frame: drop.has-drag && drop.target < 0;
-        label: root.drag-label;
-        refusal: root.refusal;
     }
 
     key-menus := KeyMenus {

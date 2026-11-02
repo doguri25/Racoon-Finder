@@ -71,6 +71,9 @@ pub enum MenuShown {
     /// The menu of the apps that can open a file, with these titles, where the item menu
     /// showed last; the one chosen goes to [`AppState::open_with_chosen`].
     Apps(Vec<String>),
+    /// The menu of 놓을 때 묻기 where a drag was dropped (여기로 이동, 여기로 복사, 취소); what it
+    /// chooses goes to [`AppState::drop_menu_chosen`].
+    AskDrop,
 }
 
 /// What the item menu offers for the items it is for, besides what it always has.
@@ -139,6 +142,15 @@ impl AppState {
     /// What the item menu offers for the items it opened for last.
     pub fn item_menu(&self) -> MenuFacts {
         self.shell.menu
+    }
+
+    /// Whether a right click shows Windows' own menu of the items first (보기 ▸ 설정, OPS-05).
+    pub fn system_menu_first(&self) -> bool {
+        self.system_menu_first
+    }
+
+    pub fn set_system_menu_first(&mut self, on: bool) {
+        self.system_menu_first = on;
     }
 
     /// Notes what the item menu of pane `side` offers, as it opens for the items a command acts

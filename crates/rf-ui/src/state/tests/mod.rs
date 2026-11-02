@@ -18,6 +18,7 @@ mod address;
 mod clipboard;
 mod copies;
 mod drag;
+mod drop_rule;
 mod jobs;
 mod layout;
 mod nav;

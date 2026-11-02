@@ -6,7 +6,8 @@
 //! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
-//! ([`AppState::drag`]), the address bar's lists (module `address`: a folder's subfolders
+//! ([`AppState::drag`]) and what its drop does (the keys held and the choices of 보기 ▸ 설정,
+//! module `drop_rule`), the address bar's lists (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
 //! tools, listing a folder again and the extensions shown or not (module `select`), the
@@ -33,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rf_core::{ErrorKind, Os, VPath};
 use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
+use rf_platform::dnd::DragMods;
 use rf_vfs::{SortKey, VisibilityFilter};
 
 use crate::dialogs::{Failures, Modal};
@@ -46,7 +48,7 @@ use crate::places::Place;
 use crate::preview::PreviewRequest;
 use crate::properties::MeasureRequest;
 use crate::selection::Pick;
-use crate::settings::{Found, Session, SessionPane, Waiting};
+use crate::settings::{DragDefault, Found, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
@@ -54,6 +56,7 @@ mod address;
 mod clipboard;
 mod copies;
 mod drag;
+pub mod drop_rule;
 mod jobs;
 mod layout;
 mod panel;
@@ -337,6 +340,16 @@ pub struct AppState {
     drag: Option<Drag>,
     /// The click a press on a selected row left for its release.
     pending_click: Option<drag::PendingClick>,
+    /// The modifier keys held now, as the window last told ([`AppState::modifiers_changed`]).
+    drag_mods: DragMods,
+    /// What a drop does without a modifier key (보기 ▸ 설정).
+    drag_default: DragDefault,
+    /// A dragged move offers its undo once it is done (보기 ▸ 설정, DND-07).
+    move_undo_toast: bool,
+    /// A right click shows Windows' own menu first (보기 ▸ 설정, OPS-05).
+    system_menu_first: bool,
+    /// The drop that waits for the menu of 놓을 때 묻기 to choose.
+    asked_drop: Option<drag::AskedDrop>,
     /// The list of a folder's subfolders that the `›` after a piece of a path row opened.
     subfolders: Option<Subfolders>,
     /// The completion list of the path field being edited.
@@ -455,6 +468,11 @@ impl AppState {
             copies: copies::Copies::default(),
             drag: None,
             pending_click: None,
+            drag_mods: DragMods::default(),
+            drag_default: DragDefault::default(),
+            move_undo_toast: true,
+            system_menu_first: false,
+            asked_drop: None,
             subfolders: None,
             completion: None,
             environment: Environment::default(),

@@ -41,18 +41,20 @@ use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
-use rf_jobs::{JobEvent, TransferMode};
+use rf_jobs::{JobEvent, JobSpec, TransferMode};
 use rf_platform::KnownFolder;
+use rf_platform::dnd::DragMods;
 use rf_platform::shell::Owner;
 use slint::language::DragAction;
-use slint::winit_030::WinitWindowAccessor;
+use slint::winit_030::winit::event::WindowEvent as WinitEvent;
+use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
 use crate::dialogs::{ConflictChoice, Modal};
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
 use crate::instance::RequestStop;
-use crate::jobs::{self, Jobs, QUIT_TIMEOUT};
+use crate::jobs::{self, JobEffect, Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
 use crate::loader::{CopyChecks, LoadEvent, LoadTicket, Loader};
 use crate::notify::{NOTICE_WAIT, Notifier, OsNotifier, SlintTray, Tray};
@@ -71,8 +73,8 @@ use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
 };
 use crate::{
-    DialogKind, DropPlace, FolderMenuRow, ItemMenu, JobRowView, MainWindow, RecentRowView, TabDrop,
-    open, words,
+    DialogKind, DragPointer, DropPlace, FolderMenuRow, ItemMenu, JobRowView, MainWindow,
+    RecentRowView, TabDrop, open, words,
 };
 
 pub mod clipboard;
@@ -191,10 +193,12 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     // The layout of the last run from the start, before the panes' folders are known.
     show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
+    window.set_system_menu_offered(Os::CURRENT == Os::Windows);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     *controller.log_dir.borrow_mut() = log_dir;
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
+    watch_winit_events(window);
 
     let loader = controller.loader.clone();
     spawn_worker("rf-ui-start", move || {
@@ -484,17 +488,41 @@ fn connect(window: &MainWindow) {
     window.on_tree_toggled(|i| {
         with(|c| c.update_at(i, AppState::toggle_tree_row));
     });
-    window.on_drop_check(|data, place, s, i, action| {
-        with(|c| c.drop_check(&data, place, s, i, action)).unwrap_or(DragAction::None)
-    });
-    window.on_drop_items(|data, place, s, i, action| {
-        with(|c| c.drop_items(&data, place, s, i, action)).unwrap_or(DragAction::None)
-    });
+    connect_drops(window);
     connect_tabs(window);
     connect_jobs(window);
     connect_report(window);
     connect_pick(window);
     connect_properties(window);
+}
+
+/// The callbacks of a drag of rows: a hover over a place and a drop there, the choice of the
+/// menu of 놓을 때 묻기, and 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작.
+fn connect_drops(window: &MainWindow) {
+    window.on_drop_check(|data, place, s, i| {
+        with(|c| c.drop_check(&data, place, s, i)).unwrap_or(DragAction::None)
+    });
+    window.on_drop_items(|data, place, s, i| {
+        with(|c| c.drop_items(&data, place, s, i)).unwrap_or(DragAction::None)
+    });
+    window.on_drop_menu_chosen(|name| {
+        let mode = match name.as_str() {
+            "move" => Some(TransferMode::Move),
+            "copy" => Some(TransferMode::Copy),
+            _ => None,
+        };
+        with(|c| c.update(|state| state.drop_menu_chosen(mode)));
+    });
+    window.on_drag_default_chosen(|choice| {
+        if let Some(default) = ui_bridge::drag_default_of(choice) {
+            with(|c| {
+                c.update(|state| {
+                    state.set_drag_default(default);
+                    Vec::new()
+                });
+            });
+        }
+    });
 }
 
 /// The callbacks of the properties window: an algorithm chosen, the 중지 of the count and of
@@ -709,6 +737,37 @@ fn drop_spot(place: DropPlace, side_number: i32, i: i32) -> Option<DropSpot> {
         },
         DropPlace::Tree => DropSpot::Tree(index(i)?),
     })
+}
+
+/// What a drop whose `effects` these are did, for the drag it ended: the mode of the transfer
+/// they submit, or `none` (a notice, the menu of 놓을 때 묻기, nothing).
+fn dropped_action(effects: &[Effect]) -> DragAction {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Job(JobEffect::Submit {
+                spec: JobSpec::Transfer(transfer),
+                ..
+            }) => Some(match transfer.mode {
+                TransferMode::Copy => DragAction::Copy,
+                TransferMode::Move => DragAction::Move,
+            }),
+            _ => None,
+        })
+        .unwrap_or(DragAction::None)
+}
+
+/// Looks at the events of the window's winit window before Slint does, and passes each on: the
+/// modifier keys, which Slint's drop events do not tell and a drop's action follows
+/// ([`Controller::modifiers_changed`]).
+fn watch_winit_events(window: &MainWindow) {
+    window.window().on_winit_window_event(|_, event| {
+        if let WinitEvent::ModifiersChanged(modifiers) = event {
+            let mods = ui_bridge::drag_mods(modifiers.state());
+            with(|c| c.modifiers_changed(mods));
+        }
+        EventResult::Propagate
+    });
 }
 
 /// The callbacks of the destination picker.
@@ -1108,6 +1167,12 @@ impl Controller {
         // The tabs show the views remembered for their folders, and ask for their listings in
         // their orders.
         state.set_views(self.settings.borrow().views());
+        {
+            let settings = self.settings.borrow();
+            state.set_drag_default(settings.drag_default);
+            state.set_move_undo_toast(settings.move_undo_toast);
+            state.set_system_menu_first(settings.system_menu_first);
+        }
         state.settle_views(&mut effects);
         if !self.saver.writable() {
             effects.push(Effect::Notice(words::settings_unreadable().to_owned()));
@@ -1362,20 +1427,13 @@ impl Controller {
         keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
     }
 
-    /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`)
-    /// and asks for `action`: the action the place takes, or `none`. What a drop there would
-    /// do goes to the label beside it. Called at every move of the pointer, it changes nothing
-    /// else and redraws nothing.
-    fn drop_check(
-        &self,
-        data: &DataTransfer,
-        place: DropPlace,
-        side: i32,
-        i: i32,
-        action: DragAction,
-    ) -> DragAction {
-        let (Some(spot), Some(mode)) = (drop_spot(place, side, i), ui_bridge::drag_mode(action))
-        else {
+    /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`):
+    /// what a drop there does with the keys held now and 보기 ▸ 설정, which the pointer shows, or
+    /// `none`. What it does, or why it does nothing there, shows beside the pointer. Called at
+    /// every move of the pointer (and as the keys change), it changes nothing else and redraws
+    /// nothing.
+    fn drop_check(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
+        let Some(spot) = drop_spot(place, side, i) else {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
@@ -1389,44 +1447,69 @@ impl Controller {
         let Some(window) = self.window.upgrade() else {
             return DragAction::None;
         };
-        // Why the place does not take them, beside it; nothing where it does.
-        let why = refused.map(words::drop_refused).unwrap_or_default();
-        window.invoke_drop_refused(place, side, why.into());
-        let Some(offer) = offer else {
-            return DragAction::None;
+        let (hint, action) = match (offer, refused) {
+            (Some(offer), _) => (
+                words::drop_badge(offer.choice, &folder_label(&offer.folder)),
+                ui_bridge::drop_action(offer.choice),
+            ),
+            (None, Some(validity)) => (words::drop_refused(validity), DragAction::None),
+            (None, None) => (String::new(), DragAction::None),
         };
-        let label = words::drag_label(offer.count, mode, &folder_label(&offer.folder));
-        if window.get_drag_label() != label.as_str() {
-            window.set_drag_label(label.into());
-        }
+        window.invoke_drop_hint(hint.into(), action == DragAction::None);
         action
     }
 
-    /// The drag with the payload `data` was dropped on `place` with `action`: the place's
-    /// folder gets the transfer of its items, when it takes them; the action done, or `none`.
-    fn drop_items(
-        &self,
-        data: &DataTransfer,
-        place: DropPlace,
-        side: i32,
-        i: i32,
-        action: DragAction,
-    ) -> DragAction {
-        let (Some(spot), Some(mode)) = (drop_spot(place, side, i), ui_bridge::drag_mode(action))
-        else {
+    /// The drag with the payload `data` was dropped on `place`: the place's folder gets the
+    /// transfer of its items, or the menu of 놓을 때 묻기 shows, as the state chooses; what the
+    /// drop did (a copy, a move), or `none`.
+    fn drop_items(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
+        let Some(spot) = drop_spot(place, side, i) else {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
-        let mut taken = false;
+        let mut done = DragAction::None;
         self.update(|state| {
-            let effects = state.drop_items(id, spot, mode);
-            // A notice (the drop was not made) takes nothing.
-            taken = effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::Job(_)));
+            let effects = state.drop_items(id, spot);
+            done = dropped_action(&effects);
             effects
         });
-        if taken { action } else { DragAction::None }
+        done
+    }
+
+    /// The modifier keys changed: the state chooses a drop's action with them from now on.
+    /// While a drag hovers over a place (something shows beside its pointer), the window asks
+    /// again where the pointer is, on the next turn of the event loop, so that the pointer and
+    /// what shows beside it follow the keys without a move of the mouse. Slint asks again at the
+    /// press of a key itself, but winit may tell the keys held after that press.
+    fn modifiers_changed(&self, mods: DragMods) {
+        if let Some(state) = self.state.borrow_mut().as_mut() {
+            state.modifiers_changed(mods);
+        }
+        if self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.get_hint_shown())
+        {
+            slint::Timer::single_shot(Duration::ZERO, || {
+                with(Controller::hover_again);
+            });
+        }
+    }
+
+    /// The pointer of the drag that hovers moves to where it is, so that the place under it
+    /// answers again ([`Controller::drop_check`]).
+    fn hover_again(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if !window.get_hint_shown() {
+            return;
+        }
+        let pointer = window.global::<DragPointer<'_>>();
+        let position = slint::LogicalPosition::new(pointer.get_x(), pointer.get_y());
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
     }
 
     /// A left press on tab `i` of pane `side`: the tab shows, and the payload of a drag of it is
@@ -1548,6 +1631,18 @@ impl Controller {
             "folder-properties" => return self.update(AppState::folder_properties),
             "folder-terminal" => return self.update(AppState::folder_terminal),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
+            "toggle-move-undo-toast" => {
+                return self.update(|state| {
+                    state.set_move_undo_toast(!state.move_undo_toast());
+                    Vec::new()
+                });
+            }
+            "toggle-system-menu-first" => {
+                return self.update(|state| {
+                    state.set_system_menu_first(!state.system_menu_first());
+                    Vec::new()
+                });
+            }
             _ => {}
         }
         if let Some(form) = name
@@ -2008,8 +2103,8 @@ impl Controller {
         }
     }
 
-    /// Shows a menu that no click opened: the item menu or the folder's from the keys, or the
-    /// menu of the apps that can open a file.
+    /// Shows a menu that no click opened: the item menu or the folder's from the keys, the
+    /// menu of the apps that can open a file, or the menu of 놓을 때 묻기 where a drop was.
     fn show_menu(&self, menu: MenuShown) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -2025,6 +2120,7 @@ impl Controller {
                 );
                 window.invoke_show_open_with();
             }
+            MenuShown::AskDrop => window.invoke_show_drop_menu(),
         }
     }
 
@@ -2102,6 +2198,9 @@ impl Controller {
             window.set_can_up(tab.location().parent().is_some());
             window.set_show_hidden(state.show_hidden());
             window.set_show_extensions(state.show_extensions());
+            window.set_drag_default(ui_bridge::drag_default_number(state.drag_default()));
+            window.set_move_undo_toast(state.move_undo_toast());
+            window.set_system_menu_first(state.system_menu_first());
             show_layout(&window, state.layout(), state.syncing());
             window.set_preview_fits(!state.preview_cramped());
             let list = state.subfolders().map(|list| (list.names(), list.cursor()));

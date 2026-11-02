@@ -3,6 +3,13 @@
 //! them, and a drop there submits their move or copy at once, without the picker. A child of
 //! [`state`](super), so these methods see the fields of [`AppState`].
 //!
+//! What a drop does is the state's to choose, not the window's (DND-02): the modifier keys held
+//! ([`AppState::modifiers_changed`], which the window tells as they change), the setting of
+//! 보기 ▸ 설정 ([`AppState::set_drag_default`]) and the drives of the sidebar (for the system's
+//! way: a move within a drive, a copy to another) go into [`drop_rule::choose`], at every hover
+//! and at the drop. The choice of 놓을 때 묻기 drops nothing yet: the menu shows where the drop
+//! was, and the transfer it chooses goes the way a drop's would ([`AppState::drop_menu_chosen`]).
+//!
 //! The items are noted when the press readies the drag ([`Drag`]), under an id that the
 //! drag's payload carries ([`AppState::drag_id`]): a drop always moves the items the drag
 //! started with, even when the pane's rows have changed since (a folder's watch), and a payload
@@ -20,14 +27,19 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
-use rf_core::{EntryKind, VPath};
+use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{ConflictPolicy, JobSpec, TransferMode, TransferOptions, TransferSpec};
+use rf_platform::dnd::{DragMods, DropEffect, Effects};
 
+use super::drop_rule::{self, DropChoice};
 use super::jobs::submit;
-use super::{AppState, Effect};
+use super::{AppState, Effect, MenuShown};
 use crate::pane::next_generation;
 use crate::pick::{PickRequest, Validity, validate};
+use crate::places::PlaceKind;
+use crate::settings::DragDefault;
 use crate::words;
 
 /// The items a drag from a pane carries, as they were when the press readied it.
@@ -67,6 +79,17 @@ pub struct DropOffer {
     pub folder: VPath,
     /// How many items the drag carries.
     pub count: usize,
+    /// What a drop there does, with the keys held now.
+    pub choice: DropChoice,
+}
+
+/// A drop that waits for the menu of 놓을 때 묻기: the items the drag carried, the folder they
+/// go into, and the pane they came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct AskedDrop {
+    sources: Vec<VPath>,
+    folder: VPath,
+    side: usize,
 }
 
 /// A press on a selected row, whose click waits for the release: no drag came of it then.
@@ -143,10 +166,35 @@ impl AppState {
         self.drag.as_ref()
     }
 
-    /// Whether the place `spot` takes the items of the drag whose payload carries `id`, and
-    /// into which folder: never while a window shows over the main window or the app ends,
-    /// nor for the payload of another drag. Found from the paths alone, so that it can answer
-    /// at every move of the pointer. The drag notes the folder, which the window shows.
+    /// The modifier keys held now, as the window tells them at each change: the next hover and
+    /// the next drop choose with them.
+    pub fn modifiers_changed(&mut self, mods: DragMods) {
+        self.drag_mods = mods;
+    }
+
+    /// What a drop does without a modifier key (보기 ▸ 설정 ▸ 끌어 놓기 기본 동작).
+    pub fn drag_default(&self) -> DragDefault {
+        self.drag_default
+    }
+
+    pub fn set_drag_default(&mut self, default: DragDefault) {
+        self.drag_default = default;
+    }
+
+    /// Whether a move made by a drag offers its undo once it is done (보기 ▸ 설정, DND-07).
+    pub fn move_undo_toast(&self) -> bool {
+        self.move_undo_toast
+    }
+
+    pub fn set_move_undo_toast(&mut self, on: bool) {
+        self.move_undo_toast = on;
+    }
+
+    /// Whether the place `spot` takes the items of the drag whose payload carries `id`, into
+    /// which folder, and what a drop there does with the keys held now: never while a window
+    /// shows over the main window or the app ends, nor for the payload of another drag. Found
+    /// from the paths alone, so that it can answer at every move of the pointer. The drag notes
+    /// the folder, which the window shows, unless the keys refuse the drop there.
     pub fn drop_offer(&mut self, id: u64, spot: DropSpot) -> Option<DropOffer> {
         if self.modal.is_some() || self.quitting {
             return None;
@@ -162,11 +210,41 @@ impl AppState {
         if takes != Validity::Ok {
             return None;
         }
-        drag.shown = Some(folder.clone());
+        let count = drag.request.sources.len();
+        let choice = self.drop_choice(&self.drag.as_ref()?.request.from_dir, &folder);
+        if !matches!(choice, DropChoice::Refuse(_))
+            && let Some(drag) = self.drag.as_mut()
+        {
+            drag.shown = Some(folder.clone());
+        }
         Some(DropOffer {
             folder,
-            count: drag.request.sources.len(),
+            count,
+            choice,
         })
+    }
+
+    /// What a drop of items from the folder `from` into `folder` does, with the keys held now
+    /// and the setting. A drag of this window's allows a copy and a move; the drives are those
+    /// of the sidebar, which a worker found (none known yet: another drive).
+    fn drop_choice(&self, from: &VPath, folder: &VPath) -> DropChoice {
+        let drives: Vec<PathBuf> = self
+            .places
+            .iter()
+            .filter(|place| place.kind == PlaceKind::Drive)
+            .filter_map(|place| place.path.as_local().map(Path::to_path_buf))
+            .collect();
+        let same_volume = match (from.as_local(), folder.as_local()) {
+            (Some(from), Some(folder)) => drop_rule::same_volume(from, folder, &drives),
+            _ => false,
+        };
+        drop_rule::choose(
+            Os::CURRENT,
+            self.drag_default,
+            self.drag_mods,
+            Effects::COPY | Effects::MOVE,
+            same_volume,
+        )
     }
 
     /// Why the place `spot` does not take the items of the drag whose payload carries `id`,
@@ -187,13 +265,15 @@ impl AppState {
         (takes != Validity::Ok).then_some(takes)
     }
 
-    /// The drag whose payload carries `id` was dropped on `spot`, to `mode` its items: a
-    /// place that takes them gets their transfer, which asks about a name that is taken, and
-    /// the drag is over (one drop each). Elsewhere nothing happens. Nor where the rows changed
-    /// under a still pointer since the last hover (a folder's watch), so that `spot` now holds
-    /// another folder than the one the window showed, one that may not take them at all: a
-    /// notice says so, and the next hover shows where a drop goes.
-    pub fn drop_items(&mut self, id: u64, spot: DropSpot, mode: TransferMode) -> Vec<Effect> {
+    /// The drag whose payload carries `id` was dropped on `spot`: a place that takes them gets
+    /// their transfer as the keys held and the setting choose ([`DropOffer::choice`]), which
+    /// asks about a name that is taken, or the menu of 놓을 때 묻기 ([`MenuShown::AskDrop`]),
+    /// and the drag is over (one drop each). Elsewhere, and where the keys refuse the drop,
+    /// nothing happens. Nor where the rows changed under a still pointer since the last hover (a
+    /// folder's watch), so that `spot` now holds another folder than the one the window showed,
+    /// one that may not take them at all: a notice says so, and the next hover shows where a
+    /// drop goes.
+    pub fn drop_items(&mut self, id: u64, spot: DropSpot) -> Vec<Effect> {
         let shown = self
             .drag
             .as_ref()
@@ -211,17 +291,38 @@ impl AppState {
         if shown.is_some_and(|shown| shown != offer.folder) {
             return vec![Effect::Notice(words::drop_moved().to_owned())];
         }
+        let mode = match offer.choice {
+            DropChoice::Do(DropEffect::Copy) => Some(TransferMode::Copy),
+            DropChoice::Do(DropEffect::Move) => Some(TransferMode::Move),
+            DropChoice::Ask => None,
+            // The keys refuse it (no links are made).
+            DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => return Vec::new(),
+        };
         let Some(drag) = self.drag.take() else {
             return Vec::new();
         };
         self.pending_click = None;
-        let options = TransferOptions {
-            conflict: ConflictPolicy::Ask,
-            ..TransferOptions::default()
+        let Some(mode) = mode else {
+            self.asked_drop = Some(AskedDrop {
+                sources: drag.request.sources,
+                folder: offer.folder,
+                side: drag.side,
+            });
+            return vec![Effect::ShowMenu(MenuShown::AskDrop)];
         };
-        match TransferSpec::into_dir(mode, &drag.request.sources, &offer.folder, options) {
-            Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(drag.side))],
-            Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
+        transfer_into(mode, &drag.request.sources, &offer.folder, drag.side)
+    }
+
+    /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소): the drop
+    /// it showed for gets that transfer, as a drop that chose it at once would. Esc and a click
+    /// beside the menu close it choosing nothing, and its drop is never made; the next drop that
+    /// asks takes its place. Nothing as the app ends.
+    pub fn drop_menu_chosen(&mut self, mode: Option<TransferMode>) -> Vec<Effect> {
+        match (self.asked_drop.take(), mode) {
+            (Some(asked), Some(mode)) if !self.quitting => {
+                transfer_into(mode, &asked.sources, &asked.folder, asked.side)
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -249,5 +350,23 @@ impl AppState {
                 self.tree.node(id).map(|node| node.path.clone())
             }
         }
+    }
+}
+
+/// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits: it
+/// asks about a name that is taken.
+fn transfer_into(
+    mode: TransferMode,
+    sources: &[VPath],
+    folder: &VPath,
+    side: usize,
+) -> Vec<Effect> {
+    let options = TransferOptions {
+        conflict: ConflictPolicy::Ask,
+        ..TransferOptions::default()
+    };
+    match TransferSpec::into_dir(mode, sources, folder, options) {
+        Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(side))],
+        Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
     }
 }

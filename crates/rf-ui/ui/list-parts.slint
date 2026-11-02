@@ -1,10 +1,56 @@
 // Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
 // `file-grid.slint`): the menu of an item and of the part without items, what a drag over the
-// list shows, and how a list keeps
-// the place it scrolled to after a long jump.
+// list shows, where in the window the pointer of a drag is and the menu of a drop that asks,
+// and how a list keeps the place it scrolled to after a long jump.
 
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
+
+// Where the pointer of a drag is, in the window: every place that takes drops (a list, a tab, a
+// row of the tree) tells it at each move and at the drop, for what shows beside the pointer
+// (DND-03) and the menu of 놓을 때 묻기, which shows where the drop was.
+export global DragPointer {
+    in-out property <length> x;
+    in-out property <length> y;
+
+    // The pointer is at (`x`, `y`) of the window.
+    public function at(x: length, y: length) {
+        DragPointer.x = x;
+        DragPointer.y = y;
+    }
+}
+
+// The menu of a drop that asks what to do (놓을 때 묻기, DND-04), where the drop was: move or copy
+// the items there, or nothing (취소; Esc and a click beside the menu choose nothing too). It takes
+// no click itself (`enabled: false`): it shows only when it is asked to.
+export component DropMenu inherits ContextMenuArea {
+    // An item was chosen: `move`, `copy` or `cancel`.
+    callback chosen(name: string);
+
+    enabled: false;
+
+    Menu {
+        MenuItem {
+            title: "여기로 이동";
+            activated => {
+                root.chosen("move");
+            }
+        }
+        MenuItem {
+            title: "여기로 복사";
+            activated => {
+                root.chosen("copy");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "취소";
+            activated => {
+                root.chosen("cancel");
+            }
+        }
+    }
+}
 
 // What the item menu offers for the items it opens for, besides what it always has: Rust sets it
 // (`AppState::item_menu`) before the menu shows. And where an item menu showed last, in the
@@ -305,42 +351,10 @@ export component OpenWithMenu inherits ContextMenuArea {
     }
 }
 
-// A pill near the bottom of a list: what a drop would do, or why it cannot be made there.
-component DropPill inherits Rectangle {
-    in property <string> text;
-    in property <brush> fill;
-    in property <brush> ink;
-    // The size of the list it shows over.
-    in property <length> room-width;
-    in property <length> room-height;
-
-    x: (root.room-width - self.width) / 2;
-    y: root.room-height - self.height - 14px;
-    width: min(shown.preferred-width + 28px, root.room-width - 24px);
-    height: 30px;
-    border-radius: 15px;
-    background: root.fill;
-
-    shown := Text {
-        width: parent.width - 28px;
-        text: root.text;
-        color: root.ink;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-}
-
 // What a list shows of a drag of items over it: an accent frame around it while its own folder
-// takes them (`frame`), what the drop would do while a place of it takes them (`label`), and why
-// the place under the pointer does not take them (`refusal`, while it does not).
-export component DropHint {
-    // A drag the list takes is over it.
-    in property <bool> dragging;
+// takes them. What a drop would do shows beside the pointer (the main window's badge).
+export component DropFrame {
     in property <bool> frame;
-    in property <string> label;
-    in property <string> refusal;
 
     if root.frame: Rectangle {
         x: 2px;
@@ -350,20 +364,6 @@ export component DropHint {
         border-width: 2px;
         border-color: Theme.accent;
         border-radius: Theme.radius;
-    }
-    if !root.dragging && root.refusal != "": DropPill {
-        room-width: root.width;
-        room-height: root.height;
-        text: root.refusal;
-        fill: Theme.toast-bg;
-        ink: Theme.toast-text;
-    }
-    if root.dragging && root.label != "": DropPill {
-        room-width: root.width;
-        room-height: root.height;
-        text: root.label;
-        fill: Theme.accent;
-        ink: Theme.on-accent;
     }
 }
 

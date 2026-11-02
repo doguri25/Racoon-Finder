@@ -13,6 +13,7 @@ import { FileList, FileRow, ColumnView } from "file-list.slint";
 import { FileGrid } from "file-grid.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { ScrollCue } from "widgets.slint";
+import { DragPointer } from "list-parts.slint";
 
 // A row of a list of folder names of the address bar: a folder, or a link that leads to one.
 export struct FolderMenuRow {
@@ -289,12 +290,12 @@ component TabButton inherits Rectangle {
     callback selected();
     callback closed();
     callback command(name: string);
-    // A drag with the payload `data` over the tab asks for `action`: what the tab's folder
-    // takes, or `none`. Then the drop itself, the same way, at `x` in the tab: a drop lands on
-    // the place under the pointer, so a dragged tab let go over this one comes here too, though
-    // the strip took its hover.
-    callback drop-check(data: data-transfer, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, action: DragAction, x: length) -> DragAction;
+    // A drag with the payload `data` over the tab: what a drop into the tab's folder does
+    // (Rust chooses it), or `none`. Then the drop itself, the same way, at `x` in the tab: a drop
+    // lands on the place under the pointer, so a dragged tab let go over this one comes here
+    // too, though the strip took its hover.
+    callback drop-check(data: data-transfer) -> DragAction;
+    callback dropped(data: data-transfer, x: length) -> DragAction;
 
     height: 34px;
     min-width: 72px;
@@ -424,10 +425,12 @@ component TabButton inherits Rectangle {
 
     drop := DropArea {
         can-drop(event) => {
-            return root.drop-check(event.data, event.proposed-action);
+            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            return root.drop-check(event.data);
         }
         dropped(event) => {
-            return root.dropped(event.data, event.proposed-action, event.position.x);
+            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            return root.dropped(event.data, event.position.x);
         }
     }
 
@@ -575,11 +578,8 @@ export component Pane inherits Rectangle {
     in property <PaneView> view;
     // The pane's name for screen readers.
     in property <string> label;
-    // The payload of a drag of the rows, and what a drop on the list would do (`FileList`).
+    // The payload of a drag of the rows (`FileList`).
     in property <data-transfer> drag-data;
-    in property <string> drag-label;
-    // Why the place of the pane under a drag does not take it (`FileList.refusal`).
-    in property <string> refusal;
     // The payload of a drag of a tab: the tab the last press showed, as Rust made it.
     in property <data-transfer> tab-drag-data;
     // The path row shows a text field instead of the crumbs.
@@ -638,11 +638,11 @@ export component Pane inherits Rectangle {
     callback menu-command(name: string);
     callback retry();
     // A drag over row `index` of the list (-1 below the rows) or over tab `index`, and its
-    // drop: what each takes (`FileList.drop-check`).
-    callback list-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback list-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback tab-drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback tab-dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // drop: what each does (`FileList.drop-check`).
+    callback list-drop-check(data: data-transfer, index: int) -> DragAction;
+    callback list-dropped(data: data-transfer, index: int) -> DragAction;
+    callback tab-drop-check(data: data-transfer, index: int) -> DragAction;
+    callback tab-dropped(data: data-transfer, index: int) -> DragAction;
     // A drag of the pane's rows ended.
     callback drag-ended();
 
@@ -857,16 +857,16 @@ export component Pane inherits Rectangle {
                     command(name) => {
                         root.tab-command(i, name);
                     }
-                    drop-check(data, action) => {
-                        return root.tab-drop-check(data, i, action);
+                    drop-check(data) => {
+                        return root.tab-drop-check(data, i);
                     }
                     // A dragged tab goes where the strip showed it would; dragged rows go into
                     // the tab's folder.
-                    dropped(data, action, x) => {
+                    dropped(data, x) => {
                         if (root.tab-move-dropped(data, root.slot-at(tabs-view.x + tabs-view.content-x + self.x + x))) {
                             return DragAction.move;
                         }
-                        return root.tab-dropped(data, i, action);
+                        return root.tab-dropped(data, i);
                     }
                 }
             }
@@ -1160,8 +1160,6 @@ export component Pane inherits Rectangle {
                 then-ascending: root.view.then-ascending;
                 active: root.view.active;
                 drag-data: root.drag-data;
-                drag-label: root.drag-label;
-                refusal: root.refusal;
                 drag-ended => {
                     root.drag-ended();
                 }
@@ -1186,11 +1184,11 @@ export component Pane inherits Rectangle {
                 row-released(index) => {
                     root.row-released(index);
                 }
-                drop-check(data, index, action) => {
-                    return root.list-drop-check(data, index, action);
+                drop-check(data, index) => {
+                    return root.list-drop-check(data, index);
                 }
-                dropped(data, index, action) => {
-                    return root.list-dropped(data, index, action);
+                dropped(data, index) => {
+                    return root.list-dropped(data, index);
                 }
                 row-activated(index) => {
                     root.row-activated(index);
@@ -1210,8 +1208,6 @@ export component Pane inherits Rectangle {
                 cursor: root.view.cursor;
                 active: root.view.active;
                 drag-data: root.drag-data;
-                drag-label: root.drag-label;
-                refusal: root.refusal;
                 drag-ended => {
                     root.drag-ended();
                 }
@@ -1221,11 +1217,11 @@ export component Pane inherits Rectangle {
                 row-released(index) => {
                     root.row-released(index);
                 }
-                drop-check(data, index, action) => {
-                    return root.list-drop-check(data, index, action);
+                drop-check(data, index) => {
+                    return root.list-drop-check(data, index);
                 }
-                dropped(data, index, action) => {
-                    return root.list-dropped(data, index, action);
+                dropped(data, index) => {
+                    return root.list-dropped(data, index);
                 }
                 row-activated(index) => {
                     root.row-activated(index);

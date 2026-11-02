@@ -14,9 +14,11 @@ use std::rc::Rc;
 use jiff::tz::TimeZone;
 use rf_core::{Attributes, Entry, EntryKind, Os, VPath};
 use rf_jobs::TransferMode;
+use rf_platform::dnd::{DragMods, DropEffect};
 use rf_platform::shell::Owner;
 use rf_vfs::{SortKey, SortOrder};
 use slint::language::DragAction;
+use slint::winit_030::winit::keyboard::ModifiersState;
 use slint::{
     ComponentHandle, DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, SharedString,
     VecModel,
@@ -40,6 +42,8 @@ use crate::places::{Place, PlaceKind};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
+use crate::settings::DragDefault;
+use crate::state::drop_rule::DropChoice;
 use crate::state::{Column, Completion, MenuFacts, Names, PathForm, PreviewShown};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
@@ -825,12 +829,45 @@ pub fn tab_id(data: &DataTransfer) -> Option<u64> {
         .map(|token| token.0)
 }
 
-/// What a drop with `action` does with the items; `None` for an action this app does not
-/// take (none, link).
-pub fn drag_mode(action: DragAction) -> Option<TransferMode> {
-    match action {
-        DragAction::Move => Some(TransferMode::Move),
-        DragAction::Copy => Some(TransferMode::Copy),
+/// What the window answers a drag over a place where a drop does `choice`, which its pointer
+/// shows: a copy, a move (the menu of 놓을 때 묻기 too, which takes the drop), or none.
+pub fn drop_action(choice: DropChoice) -> DragAction {
+    match choice {
+        DropChoice::Do(DropEffect::Copy) => DragAction::Copy,
+        DropChoice::Do(DropEffect::Move) | DropChoice::Ask => DragAction::Move,
+        DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => DragAction::None,
+    }
+}
+
+/// The modifier keys winit tells (`ModifiersChanged`), as a drop's rule reads them: ⌘ on macOS
+/// and the Windows key are `logo`.
+pub fn drag_mods(state: ModifiersState) -> DragMods {
+    DragMods {
+        ctrl: state.control_key(),
+        shift: state.shift_key(),
+        alt: state.alt_key(),
+        logo: state.super_key(),
+    }
+}
+
+/// The number of `default` among the items of 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작: 0 이동, 1 복사,
+/// 2 OS 방식, 3 매번 묻기.
+pub fn drag_default_number(default: DragDefault) -> i32 {
+    match default {
+        DragDefault::Move => 0,
+        DragDefault::Copy => 1,
+        DragDefault::System => 2,
+        DragDefault::Ask => 3,
+    }
+}
+
+/// The default whose item is number `number` ([`drag_default_number`]); `None` for no item.
+pub fn drag_default_of(number: i32) -> Option<DragDefault> {
+    match number {
+        0 => Some(DragDefault::Move),
+        1 => Some(DragDefault::Copy),
+        2 => Some(DragDefault::System),
+        3 => Some(DragDefault::Ask),
         _ => None,
     }
 }
@@ -2255,11 +2292,67 @@ mod tests {
         // A payload from elsewhere (text another drag carries) is no drag of this app's.
         assert_eq!(drag_id(&DataTransfer::from(SharedString::from("/etc"))), 0);
         assert_eq!(drag_id(&DataTransfer::default()), 0);
+    }
 
-        assert_eq!(drag_mode(DragAction::Move), Some(TransferMode::Move));
-        assert_eq!(drag_mode(DragAction::Copy), Some(TransferMode::Copy));
-        assert_eq!(drag_mode(DragAction::Link), None);
-        assert_eq!(drag_mode(DragAction::None), None);
+    #[test]
+    fn the_pointer_shows_what_a_drop_does() {
+        use crate::state::drop_rule::Refusal;
+
+        assert_eq!(
+            drop_action(DropChoice::Do(DropEffect::Copy)),
+            DragAction::Copy
+        );
+        assert_eq!(
+            drop_action(DropChoice::Do(DropEffect::Move)),
+            DragAction::Move
+        );
+        // The menu of 놓을 때 묻기 takes the drop as a move would, and asks.
+        assert_eq!(drop_action(DropChoice::Ask), DragAction::Move);
+        for refused in [
+            DropChoice::Do(DropEffect::Link),
+            DropChoice::Refuse(Refusal::NoLinks),
+            DropChoice::Refuse(Refusal::NotAllowed),
+        ] {
+            assert_eq!(drop_action(refused), DragAction::None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn the_keys_winit_tells_are_those_of_a_drop() {
+        assert_eq!(drag_mods(ModifiersState::empty()), DragMods::default());
+        assert_eq!(
+            drag_mods(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            DragMods {
+                ctrl: true,
+                shift: true,
+                ..DragMods::default()
+            }
+        );
+        // ⌥⌘ on macOS, Alt+Win on Windows.
+        assert_eq!(
+            drag_mods(ModifiersState::ALT | ModifiersState::SUPER),
+            DragMods {
+                alt: true,
+                logo: true,
+                ..DragMods::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_drag_defaults_have_the_numbers_of_their_menu_items() {
+        for default in [
+            DragDefault::Move,
+            DragDefault::Copy,
+            DragDefault::System,
+            DragDefault::Ask,
+        ] {
+            assert_eq!(drag_default_of(drag_default_number(default)), Some(default));
+        }
+        assert_eq!(drag_default_number(DragDefault::Move), 0);
+        assert_eq!(drag_default_number(DragDefault::Ask), 3);
+        assert_eq!(drag_default_of(-1), None);
+        assert_eq!(drag_default_of(4), None);
     }
 
     #[test]

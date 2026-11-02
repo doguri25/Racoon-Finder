@@ -14,6 +14,7 @@ use rf_jobs::{
     JobKind, JobSpec, JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
 use rf_platform::KnownFolder;
+use rf_platform::dnd::DropEffect;
 use rf_platform::shell::App;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
@@ -21,6 +22,7 @@ use crate::hashing::HashFailure;
 use crate::jobs::JobRow;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
+use crate::state::drop_rule::{DropChoice, Refusal};
 use crate::state::{ClipboardFailure, Column};
 
 /// How many characters a path takes at most in a row of a recovered job, beside its buttons:
@@ -1684,15 +1686,19 @@ pub fn pick_no_match() -> &'static str {
     "펼쳐 본 폴더 중에 맞는 이름이 없습니다"
 }
 
-/// What a drop of `count` dragged items on the list under the pointer would do, shown at the
-/// foot of that list while the drag hovers (DND-03): `항목 3개 이동 → 백업`, with `folder`, the
-/// name of the folder they would go into.
-pub fn drag_label(count: usize, mode: TransferMode, folder: &str) -> String {
-    let what = match mode {
-        TransferMode::Copy => "복사",
-        TransferMode::Move => "이동",
-    };
-    format!("{} {what} → {folder}", item_count(count))
+/// What a drop at the place under the pointer would do, beside the pointer while a drag hovers
+/// there (DND-03): `이동 → 백업`, with `folder`, the name of the folder the items would go
+/// into, or why the keys held refuse the drop.
+pub fn drop_badge(choice: DropChoice, folder: &str) -> String {
+    match choice {
+        DropChoice::Do(DropEffect::Move) => format!("이동 → {folder}"),
+        DropChoice::Do(DropEffect::Copy) => format!("복사 → {folder}"),
+        DropChoice::Ask => format!("놓을 때 묻기 → {folder}"),
+        DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(Refusal::NoLinks) => {
+            "링크 만들기는 아직 없습니다".to_owned()
+        }
+        DropChoice::Refuse(Refusal::NotAllowed) => "여기에는 놓을 수 없습니다".to_owned(),
+    }
 }
 
 /// What the window says while a drag of items hovers over a place that does not take them
@@ -2914,12 +2920,23 @@ mod tests {
     #[test]
     fn a_drag_says_what_its_drop_would_do() {
         assert_eq!(
-            drag_label(3, TransferMode::Move, "백업"),
-            "항목 3개 이동 → 백업"
+            drop_badge(DropChoice::Do(DropEffect::Move), "백업"),
+            "이동 → 백업"
         );
         assert_eq!(
-            drag_label(1, TransferMode::Copy, "Downloads"),
-            "항목 1개 복사 → Downloads"
+            drop_badge(DropChoice::Do(DropEffect::Copy), "Downloads"),
+            "복사 → Downloads"
+        );
+        assert_eq!(drop_badge(DropChoice::Ask, "백업"), "놓을 때 묻기 → 백업");
+        for links in [
+            DropChoice::Refuse(Refusal::NoLinks),
+            DropChoice::Do(DropEffect::Link),
+        ] {
+            assert_eq!(drop_badge(links, "백업"), "링크 만들기는 아직 없습니다");
+        }
+        assert_eq!(
+            drop_badge(DropChoice::Refuse(Refusal::NotAllowed), "백업"),
+            "여기에는 놓을 수 없습니다"
         );
     }
 

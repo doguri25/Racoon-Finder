@@ -8,14 +8,15 @@
 // (`drag-data`, the id of the items it noted). The whole list is one place to drop on, which
 // asks Rust about the row under the pointer: a folder's row takes the items into that folder,
 // any other row and the part below the rows into the pane's folder. A place that takes them
-// shows an accent frame, and what the drop would do; one that does not shows nothing, and the
-// pointer says so.
+// shows an accent frame; one that does not shows nothing, and the pointer says so. What a drop
+// would do shows beside the pointer (the main window's badge), which the list tells where it is
+// (`DragPointer`).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
-import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropHint, ListSettle, ListScroll } from "list-parts.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, ListSettle, ListScroll } from "list-parts.slint";
 
 export { ColumnView }
 
@@ -94,12 +95,6 @@ export component FileList inherits Rectangle {
     out property <int> first-row: max(0, floor(-list.content-y / Theme.row-height));
     // The payload of a drag of the rows: the id of the items the last press readied.
     in property <data-transfer> drag-data;
-    // What a drop here would do ("항목 3개 이동 → 백업"), as Rust last said while the drag
-    // hovered; shown while this list takes the drag.
-    in property <string> drag-label;
-    // Why the place under the pointer does not take the drag ("여기에 놓을 수 없습니다: …"), while
-    // a drag hovers there; empty otherwise.
-    in property <string> refusal;
 
     // A click on the head of column `column` (with Shift: `then`).
     callback sort(column: int, then: bool);
@@ -122,10 +117,10 @@ export component FileList inherits Rectangle {
     // A menu item: the name of the toolbar command it runs (move, copy, open, rename, delete,
     // delete-permanently, new-folder).
     callback menu-command(name: string);
-    // A drag with the payload `data` is over row `index` (-1 below the rows) and asks for
-    // `action`: the action this list takes, or `none`. Then the drop itself, the same way.
-    callback drop-check(data: data-transfer, index: int, action: DragAction) -> DragAction;
-    callback dropped(data: data-transfer, index: int, action: DragAction) -> DragAction;
+    // A drag with the payload `data` is over row `index` (-1 below the rows): what a drop there
+    // does (Rust chooses it), or `none`. Then the drop itself, the same way.
+    callback drop-check(data: data-transfer, index: int) -> DragAction;
+    callback dropped(data: data-transfer, index: int) -> DragAction;
     // A drag of this list's rows ended.
     callback drag-ended();
 
@@ -218,10 +213,12 @@ export component FileList inherits Rectangle {
                 can-drop(event) => {
                     let row = root.row-at(event.position.y);
                     self.target-row = row >= 0 && root.rows[row].is-dir ? row : -1;
-                    return root.drop-check(event.data, row, event.proposed-action);
+                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    return root.drop-check(event.data, row);
                 }
                 dropped(event) => {
-                    return root.dropped(event.data, root.row-at(event.position.y), event.proposed-action);
+                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    return root.dropped(event.data, root.row-at(event.position.y));
                 }
 
                 // The menu of the part of the list below the rows.
@@ -359,14 +356,11 @@ export component FileList inherits Rectangle {
                 }
             }
 
-            // The frame, the label of the drop, or why it cannot be made there.
-            DropHint {
+            // The frame while the pane's folder takes the drag.
+            DropFrame {
                 width: parent.width;
                 height: parent.height;
-                dragging: drop.has-drag;
                 frame: drop.has-drag && drop.target-row < 0;
-                label: root.drag-label;
-                refusal: root.refusal;
             }
         }
 

@@ -1,8 +1,9 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
-// the names, the sidebar and the preview panel, the layout, the panes and the tabs, and 경로 복사
-// of the active pane's items. It is short enough for a 560px window: the themes and the layout
-// are sub-menus of their own. Every item says its key (KEY-03), and the keys reach every item:
+// the names, the sidebar and the preview panel, the layout, the panes and the tabs, 경로 복사
+// of the active pane's items, and 설정 (what a drop does, the undo of a dragged move, and on
+// Windows the menu of a right click). It is short enough for a 560px window: the themes and the
+// layout are sub-menus of their own. Every item says its key (KEY-03), and the keys reach every item:
 // F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
@@ -26,10 +27,19 @@ export component ViewMenu inherits ContextMenuArea {
     in-out property <bool> dual-pane;
     in-out property <bool> stacked;
     in-out property <bool> sync-navigation;
+    // 설정: what a drop does without a modifier key (0 이동, 1 복사, 2 OS 방식, 3 매번 묻기), and
+    // the two switches, two-way with the window's; the last one only where it is offered
+    // (Windows).
+    in property <int> drag-default;
+    in-out property <bool> move-undo-toast;
+    in-out property <bool> system-menu-first;
+    in property <bool> system-menu-offered;
 
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
     callback theme-chosen(choice: int);
+    // 끌어 놓기 기본 동작 chose `choice` (the numbers of `drag-default`).
+    callback drag-default-chosen(choice: int);
     // 두 패널을 같은 크기로, and the divider moved by `step` of the room.
     callback even-split();
     callback divider-moved(step: float);
@@ -47,9 +57,11 @@ export component ViewMenu inherits ContextMenuArea {
     // have closed (a sub-menu's choice leaves them nowhere).
     callback sub-menu-done();
 
-    // Opens the menu at `x`, `y`, its marks showing the active pane's view.
+    // Opens the menu at `x`, `y`, its marks showing the active pane's view and what a drop
+    // does.
     public function open(x: length, y: length) {
         root.mark();
+        root.mark-drag-default(root.drag-default);
         root.show({ x: x, y: y });
     }
 
@@ -129,6 +141,23 @@ export component ViewMenu inherits ContextMenuArea {
     }
     changed theme-choice => {
         root.mark-theme(root.theme-choice);
+    }
+
+    private property <bool> drag-move-mark;
+    private property <bool> drag-copy-mark;
+    private property <bool> drag-system-mark;
+    private property <bool> drag-ask-mark;
+    function mark-drag-default(choice: int) {
+        root.drag-move-mark = choice == 0;
+        root.drag-copy-mark = choice == 1;
+        root.drag-system-mark = choice == 2;
+        root.drag-ask-mark = choice == 3;
+    }
+    // An item of 끌어 놓기 기본 동작: its mark alone shows, and Rust keeps the choice.
+    function choose-drag-default(choice: int) {
+        root.mark-drag-default(choice);
+        root.drag-default-chosen(choice);
+        root.done();
     }
 
     // An item of a sub-menu: its marks show the view it made.
@@ -723,6 +752,69 @@ export component ViewMenu inherits ContextMenuArea {
                 title: PathForms.title(i);
                 activated => {
                     root.command("copy-path-\{i}");
+                    root.done();
+                }
+            }
+        }
+        // The settings the app keeps that have no place elsewhere: what a drop does without a
+        // modifier key (DND-02), the toast that offers to undo a dragged move (DND-07), and on
+        // Windows whether a right click shows Windows' own menu (OPS-05). After 경로 복사
+        // without a separator, which a 560px window has no room for.
+        Menu {
+            title: "설정";
+
+            Menu {
+                title: "끌어 놓기 기본 동작";
+
+                MenuItem {
+                    title: "이동";
+                    checkable: true;
+                    checked <=> root.drag-move-mark;
+                    activated => {
+                        root.choose-drag-default(0);
+                    }
+                }
+                MenuItem {
+                    title: "복사";
+                    checkable: true;
+                    checked <=> root.drag-copy-mark;
+                    activated => {
+                        root.choose-drag-default(1);
+                    }
+                }
+                // As the system's file manager does: a move within a drive, a copy to another.
+                MenuItem {
+                    title: "OS 방식";
+                    checkable: true;
+                    checked <=> root.drag-system-mark;
+                    activated => {
+                        root.choose-drag-default(2);
+                    }
+                }
+                MenuItem {
+                    title: "매번 묻기";
+                    checkable: true;
+                    checked <=> root.drag-ask-mark;
+                    activated => {
+                        root.choose-drag-default(3);
+                    }
+                }
+            }
+            MenuItem {
+                title: "끌어서 옮긴 뒤 되돌리기 알림";
+                checkable: true;
+                checked <=> root.move-undo-toast;
+                activated => {
+                    root.command("toggle-move-undo-toast");
+                    root.done();
+                }
+            }
+            if root.system-menu-offered: MenuItem {
+                title: "오른쪽 클릭에 Windows 메뉴 바로 띄우기";
+                checkable: true;
+                checked <=> root.system-menu-first;
+                activated => {
+                    root.command("toggle-system-menu-first");
                     root.done();
                 }
             }

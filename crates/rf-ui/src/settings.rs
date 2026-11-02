@@ -2,9 +2,11 @@
 //! (`AppPaths::config_dir`): the theme, whether hidden items show and whether the names show
 //! their extensions (`hide_extensions`, NAV-11), the window's size and layout
 //! (`[layout]`), the tabs of both panes (in their order, pinned or not) and which one has the
-//! keyboard, the destination picker's recent targets, and the views remembered per folder
+//! keyboard, the destination picker's recent targets, the views remembered per folder
 //! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
-//! first).
+//! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
+//! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07)
+//! and whether a right click shows Windows' menu first (`system_menu_first`, OPS-05).
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -22,7 +24,9 @@
 //! in the file. Running an older version in between loses as little as it can. The other way
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
 //! with the default layout and no tab pinned, one without `[[folder_views]]` with no view
-//! remembered, and one without `hide_extensions` with the extensions shown. A folder view falls back one key at a time too: a mode or a key of the order this
+//! remembered, one without `hide_extensions` with the extensions shown, and one without the
+//! choices of 보기 ▸ 설정 with a drop that moves, the undo offered and the app's menu first. A
+//! folder view falls back one key at a time too: a mode or a key of the order this
 //! version does not know shows as the default one, and a column it does not know is left out of
 //! the view; all of them are kept as written (`UnknownParts`) and written back, until the user
 //! changes that part here, and the keys of a newer version stay in its `extra`.
@@ -79,6 +83,21 @@ pub enum ThemeChoice {
     System,
     Light,
     Dark,
+}
+
+/// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기 기본 동작, DND-02).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DragDefault {
+    /// Move the items.
+    #[default]
+    Move,
+    /// Copy them.
+    Copy,
+    /// As the system's file manager does: move them within a drive, copy them to another.
+    System,
+    /// Ask with a menu where they are dropped (놓을 때 묻기).
+    Ask,
 }
 
 /// The tabs of one pane, as stored.
@@ -175,8 +194,12 @@ impl LayoutSettings {
 
 /// Everything `settings.toml` holds. A key the file lacks, or whose value this version cannot
 /// read, takes its default.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each key is a separate choice of the user's, kept as the file has it"
+)]
 pub struct Settings {
     #[serde(deserialize_with = "or_default")]
     pub theme: ThemeChoice,
@@ -198,6 +221,17 @@ pub struct Settings {
     /// The destination picker's recent targets, the last one chosen first, as `VPath::to_uri`.
     #[serde(deserialize_with = "or_default")]
     pub recent_targets: Vec<String>,
+    /// What a drop does when no modifier key says (DND-02).
+    #[serde(deserialize_with = "or_default")]
+    pub drag_default: DragDefault,
+    /// A move made by a drag offers its undo in a toast once it is done (DND-07); on unless the
+    /// file says `false`.
+    #[serde(deserialize_with = "or_true")]
+    pub move_undo_toast: bool,
+    /// A right click shows Windows' own menu of the items rather than the app's (OPS-05); only
+    /// Windows has one.
+    #[serde(deserialize_with = "or_default")]
+    pub system_menu_first: bool,
     /// How the window lays out its panes and side panels.
     #[serde(deserialize_with = "or_default")]
     pub layout: LayoutSettings,
@@ -215,6 +249,26 @@ pub struct Settings {
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            theme: ThemeChoice::default(),
+            show_hidden: false,
+            hide_extensions: false,
+            window: None,
+            active_pane: 0,
+            recent_targets: Vec::new(),
+            drag_default: DragDefault::default(),
+            move_undo_toast: true,
+            system_menu_first: false,
+            layout: LayoutSettings::default(),
+            panes: Vec::new(),
+            folder_views: Vec::new(),
+            extra: toml::Table::new(),
+        }
+    }
 }
 
 /// One folder's view, as stored (an entry of `[[folder_views]]`). Each key the entry lacks, or
@@ -428,6 +482,15 @@ where
 {
     let value = toml::Value::deserialize(deserializer)?;
     Ok(value.try_into().unwrap_or_default())
+}
+
+/// A known flag that is on by default: `false` only when the file says so.
+fn or_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(true))
 }
 
 /// The folder views as a list, without the entries that are no table; no list at all is none.
@@ -735,6 +798,9 @@ impl Settings {
             window: self.window,
             active_pane: self.active_pane,
             recent_targets: self.recent_targets.clone(),
+            drag_default: self.drag_default,
+            move_undo_toast: self.move_undo_toast,
+            system_menu_first: self.system_menu_first,
             layout: self.layout.clone(),
             panes: self.panes.clone(),
             folder_views: Vec::new(),
@@ -990,6 +1056,9 @@ mod tests {
             theme: ThemeChoice::Dark,
             show_hidden: true,
             window: Some((1500, 900)),
+            drag_default: DragDefault::Ask,
+            move_undo_toast: false,
+            system_menu_first: true,
             ..Settings::default()
         };
         settings.set_session(&Session {
@@ -1163,6 +1232,61 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         std::fs::write(dir.path().join(FILE_NAME), "hide_extensions = \"yes\"\n").expect("written");
         assert!(!load(dir.path()).settings.hide_extensions);
+    }
+
+    #[test]
+    fn the_drag_settings_round_trip_and_take_their_defaults_when_missing() {
+        // A drop moves, a dragged move offers its undo, a right click shows the app's menu.
+        let defaults = Settings::default();
+        assert_eq!(defaults.drag_default, DragDefault::Move);
+        assert!(defaults.move_undo_toast);
+        assert!(!defaults.system_menu_first);
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let drag = |settings: &Settings| {
+            (
+                settings.drag_default,
+                settings.move_undo_toast,
+                settings.system_menu_first,
+            )
+        };
+        for (default, name) in [
+            (DragDefault::Move, "move"),
+            (DragDefault::Copy, "copy"),
+            (DragDefault::System, "system"),
+            (DragDefault::Ask, "ask"),
+        ] {
+            let settings = Settings {
+                drag_default: default,
+                move_undo_toast: false,
+                system_menu_first: true,
+                ..Settings::default()
+            };
+            settings.save(dir.path()).expect("saved");
+            let text = std::fs::read_to_string(&file).expect("read");
+            assert!(
+                text.contains(&format!("drag_default = \"{name}\"")),
+                "{text}"
+            );
+            assert_eq!(load(dir.path()), writable(settings));
+        }
+        // A file of the demos before, without the keys, takes the defaults.
+        std::fs::write(&file, "theme = \"dark\"\n").expect("written");
+        assert_eq!(
+            drag(&load(dir.path()).settings),
+            (DragDefault::Move, true, false)
+        );
+        // So do values this version cannot read: one odd value does not cost the others.
+        std::fs::write(
+            &file,
+            "drag_default = \"fling\"\nmove_undo_toast = \"yes\"\nsystem_menu_first = 1\n\
+             theme = \"dark\"\n",
+        )
+        .expect("written");
+        let loaded = load(dir.path()).settings;
+        assert_eq!(drag(&loaded), (DragDefault::Move, true, false));
+        assert_eq!(loaded.theme, ThemeChoice::Dark);
     }
 
     #[test]
