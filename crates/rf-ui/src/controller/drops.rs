@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::io;
 
-use rf_platform::dnd::{DragMods, DropEffect, DropHandler, DroppedItems, Effects};
+use rf_platform::dnd::{DragMods, DropEffect, DropHandler, DropHint, DroppedItems, Effects};
 use rf_platform::shell::{Owner, WindowPoint};
 
 use super::{Controller, with};
@@ -46,7 +46,7 @@ impl DropHandler for WindowDrops {
         with(|c| c.outside_drop(at, items, mods, allowed, right_button)).flatten()
     }
 
-    fn hint(&self) -> String {
+    fn hint(&self) -> DropHint {
         with(Controller::outside_hint).unwrap_or_default()
     }
 }

@@ -23,8 +23,14 @@
 //!   (`DropDescription`, [`DropHandler::hint`](super::DropHandler::hint)); a description that
 //!   cannot be written is left out.
 //! - **The drop** answers by [`drop_reply`](super::drop_reply) and writes `Performed
-//!   DropEffect` and `Logical Performed DropEffect` on the data object; a write that fails is
-//!   left out. A move is never answered as one.
+//!   DropEffect` and `Logical Performed DropEffect` on the data object as it says; a write that
+//!   fails is left out. A move is answered as the shell answers its own optimized move: `Drop`'s
+//!   effect and `Performed DropEffect` say none, `Logical Performed DropEffect` says move, so
+//!   the source never deletes the originals itself.
+//! - **No borrow across a call out:** the target's record of the drag (a `RefCell`) is never
+//!   borrowed while the handler runs or while a COM object is called or let go (its data object
+//!   is held in an `Rc`, so that a borrow only copies a pointer): a call of the system may pump
+//!   the thread's messages and come back into the target.
 
 use std::ffi::{OsStr, c_void};
 use std::io;
@@ -91,6 +97,13 @@ pub fn register(owner: Owner, handler: Rc<dyn DropHandler>) -> io::Result<Regist
     .ok();
     let target = target::drop_target(hwnd, handler, helper, formats);
     // winit's target goes first. A window without one refuses the call, which is no matter.
+    // Revoking only `Release`s the target that `RegisterDragDrop` held, and the counts balance:
+    // winit keeps its own reference and frees it as the window goes (`WM_NCDESTROY`), and its
+    // `WM_DESTROY` revokes whatever is registered then, which is ours. winit's `QueryInterface`
+    // is `unimplemented!()`, so nothing here may ask winit's target for an interface (no
+    // `CoDisconnectObject`, no marshalling of it). Should a revoke ever reach it, the way out is
+    // `BackendSelector::with_winit_window_attributes_hook` with `with_drag_and_drop(false)` and
+    // an `OleInitialize` of the app's own on this thread.
     // SAFETY: `hwnd` names the app's window, on this thread.
     let _ = unsafe { RevokeDragDrop(hwnd) };
     // SAFETY: as above, in an apartment OLE is initialized in; the system holds a reference to
@@ -143,15 +156,16 @@ mod target {
     use super::{Formats, put_block, read_effect, with_block, write_effect};
     use crate::clipboard::{global_bytes, hdrop_units};
     use crate::dnd::{
-        DropEffect, DropHandler, DroppedItems, allowed_effects, client_point, description_bytes,
-        drop_reply, effect_bits, key_mods, ours_in, right_button,
+        DropEffect, DropHandler, DropHint, DropReply, DroppedItems, allowed_effects, client_point,
+        description_bytes, drop_reply, effect_bits, key_mods, ours_in, right_button,
     };
     use crate::shell::WindowPoint;
 
     /// A drag of the system over the window, from its `DragEnter` on.
     struct Over {
-        /// Its data object, for the drop description while it hovers.
-        data: IDataObject,
+        /// Its data object, for the drop description while it hovers; in an `Rc`, so that a
+        /// borrow of the record copies a pointer and calls nothing of COM.
+        data: Rc<IDataObject>,
         /// Its items; `None` for a drag without files, which the window does not take.
         items: Option<Rc<DroppedItems>>,
         /// The drag is one with the right button.
@@ -204,8 +218,8 @@ mod target {
         /// The drag over the window at `point`, with the key state `state` and the effects
         /// `effect` allows on input: the handler's answer goes to `effect` for the system's
         /// pointer, and under the drag image. The answer's bits.
-        fn hover(&self, state: u32, point: &POINTL, effect: *mut DROPEFFECT) -> u32 {
-            let allowed = allowed_effects(read_effect(effect));
+        fn hover(&self, state: u32, point: POINTL, effect: Option<&mut DROPEFFECT>) -> u32 {
+            let allowed = allowed_effects(read_effect(effect.as_deref()));
             let held = self.drag.borrow_mut().as_mut().map(|over| {
                 over.right_button |= right_button(state);
                 (over.items.clone(), over.data.clone())
@@ -213,7 +227,7 @@ mod target {
             let (answer, data) = match held {
                 Some((Some(items), data)) => {
                     // Nothing of the target is borrowed while the handler runs.
-                    let at = self.window_point(point);
+                    let at = self.window_point(&point);
                     let answer = self.handler.over(at, key_mods(state), allowed, &items);
                     (answer, Some(data))
                 }
@@ -229,7 +243,7 @@ mod target {
 
         /// Writes under the drag image what a drop does (`effect`) and what the window says of it
         /// (`hint`), when it changed.
-        fn describe(&self, data: &IDataObject, effect: Option<DropEffect>, hint: &str) {
+        fn describe(&self, data: &IDataObject, effect: Option<DropEffect>, hint: &DropHint) {
             let bytes = description_bytes(effect, hint);
             {
                 let mut drag = self.drag.borrow_mut();
@@ -293,15 +307,21 @@ mod target {
             pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
+            // SAFETY: the system hands a pointer to a live `DWORD` for the call, or none.
+            let effect = unsafe { pdweffect.as_mut() };
             let data = pdataobj.cloned();
             let items = data.as_ref().and_then(|data| self.items(data)).map(Rc::new);
-            *self.drag.borrow_mut() = data.clone().map(|data| Over {
-                data,
+            let entered = data.clone().map(|data| Over {
+                data: Rc::new(data),
                 items,
                 right_button: right_button(grfkeystate.0),
                 described: None,
             });
-            let shown = self.hover(grfkeystate.0, pt, pdweffect);
+            // The record of a drag that never left (its source gone) lets its data object go
+            // only once the record is no longer borrowed.
+            let stale = self.drag.replace(entered);
+            drop(stale);
+            let shown = self.hover(grfkeystate.0, *pt, effect);
             if let Some(data) = &data {
                 self.helper(*pt, |helper, point| {
                     // SAFETY: the window, the drag's data object and a live point.
@@ -317,7 +337,9 @@ mod target {
             pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
-            let shown = self.hover(grfkeystate.0, pt, pdweffect);
+            // SAFETY: as in `DragEnter`.
+            let effect = unsafe { pdweffect.as_mut() };
+            let shown = self.hover(grfkeystate.0, *pt, effect);
             self.helper(*pt, |helper, point| {
                 // SAFETY: a live point.
                 let _ = unsafe { helper.DragOver(point, DROPEFFECT(shown)) };
@@ -326,7 +348,7 @@ mod target {
         }
 
         fn DragLeave(&self) -> windows::core::Result<()> {
-            let over = self.drag.borrow_mut().take();
+            let over = self.drag.take();
             self.handler.leave();
             // The source's own description comes back.
             if let Some(over) = over
@@ -335,7 +357,7 @@ mod target {
                 put_block(
                     &over.data,
                     self.formats.description,
-                    &description_bytes(None, ""),
+                    &description_bytes(None, &DropHint::default()),
                 );
             }
             if let Some(helper) = &self.helper {
@@ -352,9 +374,11 @@ mod target {
             pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
-            let over = self.drag.borrow_mut().take();
+            // SAFETY: as in `DragEnter`.
+            let effect = unsafe { pdweffect.as_mut() };
+            let over = self.drag.take();
             let data = pdataobj.cloned();
-            let allowed = allowed_effects(read_effect(pdweffect));
+            let allowed = allowed_effects(read_effect(effect.as_deref()));
             let right = over.is_some_and(|over| over.right_button) || right_button(grfkeystate.0);
             // Every path is read now: the data object is not used once the drop returns.
             let items = data.as_ref().and_then(|data| self.items(data));
@@ -372,13 +396,22 @@ mod target {
                 self.handler.leave();
                 None
             };
-            let (reply, performed) = drop_reply(done);
-            if let (Some(data), Some(performed)) = (&data, performed) {
-                let bytes = performed.to_le_bytes();
-                put_block(data, self.formats.performed, &bytes);
-                put_block(data, self.formats.logical, &bytes);
+            let DropReply {
+                effect: reply,
+                performed,
+                logical,
+            } = drop_reply(done);
+            if let Some(data) = &data {
+                for (format, written) in [
+                    (self.formats.performed, performed),
+                    (self.formats.logical, logical),
+                ] {
+                    if let Some(written) = written {
+                        put_block(data, format, &written.to_le_bytes());
+                    }
+                }
             }
-            write_effect(pdweffect, reply);
+            write_effect(effect, reply);
             if let Some(data) = &data {
                 self.helper(*pt, |helper, point| {
                     // SAFETY: the drag's data object and a live point.
@@ -390,16 +423,14 @@ mod target {
     }
 }
 
-/// The effects `effect` holds; none for no pointer.
-fn read_effect(effect: *mut DROPEFFECT) -> u32 {
-    // SAFETY: the system hands a pointer to a live `DWORD` for the call, or none.
-    unsafe { effect.as_ref() }.map_or(0, |effect| effect.0)
+/// The effects `effect` holds; none for no `DWORD` (the system handed a null pointer).
+fn read_effect(effect: Option<&DROPEFFECT>) -> u32 {
+    effect.map_or(0, |effect| effect.0)
 }
 
-/// Writes `bits` to `effect`, unless there is no pointer.
-fn write_effect(effect: *mut DROPEFFECT, bits: u32) {
-    // SAFETY: as in `read_effect`.
-    if let Some(effect) = unsafe { effect.as_mut() } {
+/// Writes `bits` to `effect`, unless there is none.
+fn write_effect(effect: Option<&mut DROPEFFECT>, bits: u32) {
+    if let Some(effect) = effect {
         *effect = DROPEFFECT(bits);
     }
 }

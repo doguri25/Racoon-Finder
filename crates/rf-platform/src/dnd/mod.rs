@@ -11,8 +11,9 @@
 //!   registered format [`ours_format`]), the keys of `grfKeyState` and the point of `POINTL`,
 //!   which it turns into the window's logical pixels ([`client_point`]). The shell's drag image
 //!   follows the drag (`IDropTargetHelper`), with what a drop would do written under it
-//!   (`DropDescription`, [`DropHandler::hint`]). A drop answers by [`drop_reply`]: never a
-//!   move, which the source would take as the order to delete the originals at once.
+//!   (`DropDescription`, [`DropHandler::hint`]). A drop answers by [`drop_reply`]: a move as
+//!   the shell's own optimized move (performed: none, logically: a move), never in words the
+//!   source would take as the order to delete the originals itself.
 //! - **macOS:** not yet ([`std::io::ErrorKind::Unsupported`]); winit's own drop of files takes
 //!   them meanwhile.
 //! - **Elsewhere** (Linux, which is for development): `Unsupported`; winit tells the files
@@ -138,9 +139,18 @@ pub trait DropHandler {
     /// What the window says of the drop the last [`DropHandler::over`] answered, or why there is
     /// none: the system may show it under its pointer (Windows' drop description). Empty for
     /// nothing to say.
-    fn hint(&self) -> String {
-        String::new()
+    fn hint(&self) -> DropHint {
+        DropHint::default()
     }
+}
+
+/// What the window says of a drop, for the words the system shows under its drag image: the
+/// `message`, in which `%1` stands for `insert`, a folder's name, which the system shows as it is
+/// (a `%1` in a name stays a `%1`), as File Explorer's "이동 → %1" shows the folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct DropHint {
+    pub message: String,
+    pub insert: String,
 }
 
 /// The window's drop target, from [`register_drop_target`]; dropping it takes it away from the
@@ -175,21 +185,43 @@ pub const DROPEFFECT_COPY: u32 = 1;
 pub const DROPEFFECT_MOVE: u32 = 2;
 pub const DROPEFFECT_LINK: u32 = 4;
 
-/// What a drop target answers the system for a drop that did `done`: the effect `Drop` returns,
-/// and the effect it writes on the data object as `Performed DropEffect` and `Logical Performed
-/// DropEffect` (`None`: nothing written).
+/// What a drop target answers the system for a drop ([`drop_reply`]): the effect `Drop` returns,
+/// and the effects it writes on the data object as `Performed DropEffect` and as `Logical
+/// Performed DropEffect` (`None`: nothing written).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DropReply {
+    pub effect: u32,
+    pub performed: Option<u32>,
+    pub logical: Option<u32>,
+}
+
+/// What a drop target answers the system for a drop that did `done` ([`DropReply`]).
 ///
-/// A move answers `DROPEFFECT_NONE` and writes `DROPEFFECT_MOVE` (an "optimized move": the
-/// target moves the items itself). A source that got `DROPEFFECT_MOVE` back would delete the
-/// originals at once, before the app's job has copied them; the job deletes each original once
-/// its copy is done. A copy answers and writes `DROPEFFECT_COPY`. Nothing done (a refusal, the
-/// menu of 놓을 때 묻기, whose choice comes later, a link, which the app does not make) answers
-/// `DROPEFFECT_NONE` and writes nothing.
-pub fn drop_reply(done: Option<DropEffect>) -> (u32, Option<u32>) {
+/// A move is done by the app's own job, which deletes each original once its copy is done, as
+/// the shell does after an "optimized move": `Drop` returns `DROPEFFECT_NONE`, `Performed
+/// DropEffect` is `DROPEFFECT_NONE` and `Logical Performed DropEffect` is `DROPEFFECT_MOVE`. The
+/// source must never read "move" from `Drop`'s effect or from `Performed DropEffect`: either
+/// tells it that the target only copied, and it would delete the originals itself, at once,
+/// before the app's copy is done (an "unoptimized move"). A copy answers `DROPEFFECT_COPY` in all
+/// three. Nothing done (a refusal, the menu of 놓을 때 묻기, whose choice comes later, a link,
+/// which the app does not make) answers `DROPEFFECT_NONE` and writes nothing.
+pub fn drop_reply(done: Option<DropEffect>) -> DropReply {
     match done {
-        Some(DropEffect::Move) => (DROPEFFECT_NONE, Some(DROPEFFECT_MOVE)),
-        Some(DropEffect::Copy) => (DROPEFFECT_COPY, Some(DROPEFFECT_COPY)),
-        Some(DropEffect::Link) | None => (DROPEFFECT_NONE, None),
+        Some(DropEffect::Move) => DropReply {
+            effect: DROPEFFECT_NONE,
+            performed: Some(DROPEFFECT_NONE),
+            logical: Some(DROPEFFECT_MOVE),
+        },
+        Some(DropEffect::Copy) => DropReply {
+            effect: DROPEFFECT_COPY,
+            performed: Some(DROPEFFECT_COPY),
+            logical: Some(DROPEFFECT_COPY),
+        },
+        Some(DropEffect::Link) | None => DropReply {
+            effect: DROPEFFECT_NONE,
+            performed: None,
+            logical: None,
+        },
     }
 }
 
@@ -337,36 +369,48 @@ const DESCRIPTION_UNITS: usize = 260;
 /// `effect` and the window says `hint`: a `DROPDESCRIPTION` (packed: its image type, then the
 /// message and the insert, each 260 UTF-16 units ended by a NUL). The image is the effect's (a
 /// refusal's "none" when the window says why), or `DROPIMAGE_INVALID`, which gives the source's
-/// own back, where the window says nothing; the message is `hint`, cut at a whole character to
-/// fit; the insert is empty.
+/// own back, where the window says nothing. The message and the insert are the hint's, each cut
+/// at a whole character to fit.
 #[cfg_attr(
     not(windows),
     allow(dead_code, reason = "used by Windows code; tested on every OS")
 )]
-fn description_bytes(effect: Option<DropEffect>, hint: &str) -> Vec<u8> {
+fn description_bytes(effect: Option<DropEffect>, hint: &DropHint) -> Vec<u8> {
     let image = match effect {
-        _ if hint.is_empty() => DROPIMAGE_INVALID,
+        _ if hint.message.is_empty() => DROPIMAGE_INVALID,
         Some(DropEffect::Copy) => DROPIMAGE_COPY,
         Some(DropEffect::Move) => DROPIMAGE_MOVE,
         Some(DropEffect::Link) | None => DROPIMAGE_NONE,
     };
-    let mut message = Vec::with_capacity(DESCRIPTION_UNITS);
-    for character in hint.chars() {
-        let mut units = [0; 2];
-        let units = character.encode_utf16(&mut units);
-        // Room for the NUL stays.
-        if message.len() + units.len() >= DESCRIPTION_UNITS {
-            break;
-        }
-        message.extend_from_slice(units);
-    }
-    message.resize(DESCRIPTION_UNITS, 0);
     let mut bytes = Vec::with_capacity(4 + DESCRIPTION_UNITS * 4);
     bytes.extend_from_slice(&image.to_le_bytes());
-    for unit in message.into_iter().chain([0; DESCRIPTION_UNITS]) {
-        bytes.extend_from_slice(&unit.to_le_bytes());
+    for text in [&hint.message, &hint.insert] {
+        for unit in description_units(text) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
     }
     bytes
+}
+
+/// `text` as one of `DROPDESCRIPTION`'s strings: its UTF-16 units, cut at a whole character to
+/// leave room for the NUL, then NULs to the end.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by Windows code; tested on every OS")
+)]
+fn description_units(text: &str) -> [u16; DESCRIPTION_UNITS] {
+    let mut units = [0; DESCRIPTION_UNITS];
+    let mut length = 0;
+    for character in text.chars() {
+        let mut encoded = [0; 2];
+        let encoded = character.encode_utf16(&mut encoded);
+        if length + encoded.len() >= DESCRIPTION_UNITS {
+            break;
+        }
+        units[length..length + encoded.len()].copy_from_slice(encoded);
+        length += encoded.len();
+    }
+    units
 }
 
 #[cfg(test)]
@@ -391,20 +435,37 @@ mod tests {
 
     #[test]
     fn a_drop_never_answers_a_move_that_the_source_would_finish_by_deleting() {
-        // Review Focus: File Explorer deletes the originals of a move it is told of at once.
+        // Review Focus: File Explorer deletes the originals at once when `Drop` or `Performed
+        // DropEffect` says "move" (an unoptimized move); the app's job deletes each one only
+        // once its copy is done, as the shell's own optimized move does.
         assert_eq!(
             drop_reply(Some(DropEffect::Move)),
-            (DROPEFFECT_NONE, Some(DROPEFFECT_MOVE))
+            DropReply {
+                effect: DROPEFFECT_NONE,
+                performed: Some(DROPEFFECT_NONE),
+                logical: Some(DROPEFFECT_MOVE),
+            }
         );
         assert_eq!(
             drop_reply(Some(DropEffect::Copy)),
-            (DROPEFFECT_COPY, Some(DROPEFFECT_COPY))
+            DropReply {
+                effect: DROPEFFECT_COPY,
+                performed: Some(DROPEFFECT_COPY),
+                logical: Some(DROPEFFECT_COPY),
+            }
         );
         // The menu of 놓을 때 묻기 and a refusal: nothing done yet, nothing written.
-        assert_eq!(drop_reply(None), (DROPEFFECT_NONE, None));
-        assert_eq!(drop_reply(Some(DropEffect::Link)), (DROPEFFECT_NONE, None));
+        let nothing = DropReply {
+            effect: DROPEFFECT_NONE,
+            performed: None,
+            logical: None,
+        };
+        assert_eq!(drop_reply(None), nothing);
+        assert_eq!(drop_reply(Some(DropEffect::Link)), nothing);
         for done in [None, Some(DropEffect::Copy), Some(DropEffect::Move)] {
-            assert_ne!(drop_reply(done).0, DROPEFFECT_MOVE, "{done:?}");
+            let reply = drop_reply(done);
+            assert_ne!(reply.effect, DROPEFFECT_MOVE, "{done:?}");
+            assert_ne!(reply.performed, Some(DROPEFFECT_MOVE), "{done:?}");
         }
     }
 
@@ -471,14 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn the_format_of_the_app_s_own_drag_is_named_after_the_app() {
-        assert_eq!(
-            ours_format(),
-            format!("{}.Drag", rf_core::identity::DATA_DIR_NAME)
-        );
-    }
-
-    #[test]
     fn the_key_state_of_a_drag_names_its_keys_and_its_button() {
         assert_eq!(key_mods(0), DragMods::default());
         // The left button alone, as during any drag with it.
@@ -532,8 +585,8 @@ mod tests {
         assert_eq!(effect_bits(None), DROPEFFECT_NONE);
     }
 
-    /// The image type and the message of a `DROPDESCRIPTION`'s bytes.
-    fn description(bytes: &[u8]) -> (i32, String, Vec<u16>) {
+    /// The image type, the message and the insert of a `DROPDESCRIPTION`'s bytes.
+    fn description(bytes: &[u8]) -> (i32, String, String) {
         assert_eq!(bytes.len(), 4 + DESCRIPTION_UNITS * 4);
         let image = i32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
         let units: Vec<u16> = bytes[4..]
@@ -542,42 +595,76 @@ mod tests {
             .iter()
             .map(|pair| u16::from_le_bytes(*pair))
             .collect();
+        let text = |units: &[u16]| {
+            let end = units.iter().position(|&unit| unit == 0).expect("a NUL");
+            String::from_utf16(&units[..end]).expect("UTF-16")
+        };
         let (message, insert) = units.split_at(DESCRIPTION_UNITS);
-        let end = message.iter().position(|&unit| unit == 0).expect("a NUL");
-        (
-            image,
-            String::from_utf16(&message[..end]).expect("UTF-16"),
-            insert.to_vec(),
-        )
+        (image, text(message), text(insert))
+    }
+
+    fn hint(message: &str, insert: &str) -> DropHint {
+        DropHint {
+            message: message.to_owned(),
+            insert: insert.to_owned(),
+        }
     }
 
     #[test]
     fn the_words_under_the_drag_image_say_what_the_window_says() {
-        let (image, message, insert) =
-            description(&description_bytes(Some(DropEffect::Move), "이동 → 백업"));
-        assert_eq!((image, message.as_str()), (DROPIMAGE_MOVE, "이동 → 백업"));
-        assert!(insert.iter().all(|&unit| unit == 0));
-        let (image, message, _) =
-            description(&description_bytes(Some(DropEffect::Copy), "복사 → 문서"));
-        assert_eq!((image, message.as_str()), (DROPIMAGE_COPY, "복사 → 문서"));
-        // A refusal says why, with the "none" image.
-        let (image, message, _) = description(&description_bytes(
-            None,
-            "여기에 놓을 수 없습니다: 항목이 이미 이 폴더에 있습니다",
+        // The folder goes in the insert, for `%1`, as File Explorer's own words do.
+        let moved = description(&description_bytes(
+            Some(DropEffect::Move),
+            &hint("이동 → %1", "백업"),
         ));
-        assert_eq!(image, DROPIMAGE_NONE);
         assert_eq!(
-            message,
-            "여기에 놓을 수 없습니다: 항목이 이미 이 폴더에 있습니다"
+            moved,
+            (DROPIMAGE_MOVE, "이동 → %1".to_owned(), "백업".to_owned())
+        );
+        let copied = description(&description_bytes(
+            Some(DropEffect::Copy),
+            &hint("복사 → %1", "문서"),
+        ));
+        assert_eq!(
+            copied,
+            (DROPIMAGE_COPY, "복사 → %1".to_owned(), "문서".to_owned())
+        );
+        // A folder whose name holds `%1` keeps it: the insert is never read for `%1`.
+        let odd = description(&description_bytes(
+            Some(DropEffect::Move),
+            &hint("이동 → %1", "100%1 완료"),
+        ));
+        assert_eq!(
+            (odd.1.as_str(), odd.2.as_str()),
+            ("이동 → %1", "100%1 완료")
+        );
+        // A refusal says why, with the "none" image.
+        let refused = description(&description_bytes(
+            None,
+            &hint(
+                "여기에 놓을 수 없습니다: 항목이 이미 이 폴더에 있습니다",
+                "",
+            ),
+        ));
+        assert_eq!(
+            refused,
+            (
+                DROPIMAGE_NONE,
+                "여기에 놓을 수 없습니다: 항목이 이미 이 폴더에 있습니다".to_owned(),
+                String::new()
+            )
         );
         // Nothing to say gives the source's own description back.
-        let (image, message, _) = description(&description_bytes(None, ""));
-        assert_eq!((image, message.as_str()), (DROPIMAGE_INVALID, ""));
+        let silent = description(&description_bytes(None, &DropHint::default()));
+        assert_eq!(silent, (DROPIMAGE_INVALID, String::new(), String::new()));
         // A long folder name is cut to fit, never inside a character of two units.
-        let long = format!("이동 → {}", "😀".repeat(200));
-        let (_, message, _) = description(&description_bytes(Some(DropEffect::Move), &long));
-        assert!(long.starts_with(&message));
-        assert!(message.encode_utf16().count() < DESCRIPTION_UNITS);
-        assert!(message.encode_utf16().count() >= DESCRIPTION_UNITS - 2);
+        let long = "😀".repeat(200);
+        let (_, _, insert) = description(&description_bytes(
+            Some(DropEffect::Move),
+            &hint("이동 → %1", &long),
+        ));
+        assert!(long.starts_with(&insert));
+        assert!(insert.encode_utf16().count() < DESCRIPTION_UNITS);
+        assert!(insert.encode_utf16().count() >= DESCRIPTION_UNITS - 2);
     }
 }

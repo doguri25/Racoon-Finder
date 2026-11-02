@@ -62,6 +62,12 @@ impl Spring {
     pub(super) fn stop(&self) {
         self.hover(None);
     }
+
+    /// Whether the time of a rest runs.
+    #[cfg(test)]
+    pub(super) fn running(&self) -> bool {
+        self.timer.running()
+    }
 }
 
 #[cfg(test)]
