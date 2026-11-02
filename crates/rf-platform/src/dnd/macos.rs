@@ -53,9 +53,10 @@
 //!   (`NSWorkspace iconForFile:`), stacked under the pointer. The event it begins with is the
 //!   app's current one when it is a drag of the left button in the window, else one made for
 //!   where the mouse is now. Its source ([`DragSource`]) allows what [`source_mask`] says: out of
-//!   the app all that Finder's own drags allow, within it a move or a copy. As the session ends,
-//!   it hands what the taker did to `done` ([`ended_effect`]), and nothing else: nothing is
-//!   deleted here. The source is held until then ([`DRAGGING`]).
+//!   the app all that Finder's own drags allow, within it a move (with the generic operation, so
+//!   that the window's answer keeps the move's pointer) or a copy. As the session ends, it hands
+//!   what the taker did to `done` ([`ended_effect`]), and nothing else: nothing is deleted here.
+//!   The source is held until then ([`DRAGGING`]).
 //! - **No borrow across a call out:** the view's record of the drag (a `RefCell`) is never
 //!   borrowed while the handler runs, and the view holds itself alive while it does, so that a
 //!   handler that lets the registration go does not let the view go under its own call.

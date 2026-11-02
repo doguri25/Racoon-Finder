@@ -550,7 +550,9 @@ fn drop_taken(done: Option<DropEffect>) -> bool {
 /// app (`within` false), as Finder's own drags do, a copy, a move, its generic operation (the
 /// taker's own, which Finder takes for a move) and a link, for the taker to choose from by its
 /// keys; within the app (back over the window), a move or a copy alone, which the window's drop
-/// makes ([`mask_effects`]).
+/// makes ([`mask_effects`]), with the generic operation for the move: the window answers a move
+/// with it ([`answer_for`]), and the pointer keeps the move's arrow rather than a copy's "+". The
+/// app is the source there and deletes nothing whatever it hears.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
@@ -561,10 +563,7 @@ fn source_mask(allowed: Effects, within: bool) -> usize {
         mask |= NS_DRAG_COPY;
     }
     if allowed.contains(DropEffect::Move) {
-        mask |= NS_DRAG_MOVE;
-        if !within {
-            mask |= NS_DRAG_GENERIC;
-        }
+        mask |= NS_DRAG_MOVE | NS_DRAG_GENERIC;
     }
     if allowed.contains(DropEffect::Link) && !within {
         mask |= NS_DRAG_LINK;
@@ -1015,12 +1014,14 @@ mod tests {
         let finder = NS_DRAG_COPY | NS_DRAG_LINK | NS_DRAG_GENERIC | NS_DRAG_MOVE;
         // Out of the app, as Finder's own drags: the taker chooses, by its keys.
         assert_eq!(source_mask(Effects::ALL, false), finder);
-        // Within it (back over the window): a move or a copy, which the window's drop makes.
-        assert_eq!(source_mask(Effects::ALL, true), NS_DRAG_COPY | NS_DRAG_MOVE);
-        assert_eq!(
-            mask_effects(source_mask(Effects::ALL, true)),
-            Effects::COPY | Effects::MOVE
-        );
+        // Within it (back over the window): a move or a copy, which the window's drop makes,
+        // with the generic operation for its move, so that the window answers a move as Finder's
+        // own drags hear it, with the move cursor (never the "+" of a copy).
+        let within = source_mask(Effects::ALL, true);
+        assert_eq!(within, NS_DRAG_COPY | NS_DRAG_GENERIC | NS_DRAG_MOVE);
+        assert_eq!(mask_effects(within), Effects::COPY | Effects::MOVE);
+        assert_eq!(answer_for(Some(DropEffect::Move), within), NS_DRAG_GENERIC);
+        assert_eq!(answer_for(Some(DropEffect::Copy), within), NS_DRAG_COPY);
         // Only what the drag allows.
         assert_eq!(source_mask(Effects::COPY, false), NS_DRAG_COPY);
         assert_eq!(source_mask(Effects::COPY, true), NS_DRAG_COPY);
@@ -1028,7 +1029,10 @@ mod tests {
             source_mask(Effects::MOVE, false),
             NS_DRAG_GENERIC | NS_DRAG_MOVE
         );
-        assert_eq!(source_mask(Effects::MOVE, true), NS_DRAG_MOVE);
+        assert_eq!(
+            source_mask(Effects::MOVE, true),
+            NS_DRAG_GENERIC | NS_DRAG_MOVE
+        );
         assert_eq!(source_mask(Effects::LINK, false), NS_DRAG_LINK);
         assert_eq!(source_mask(Effects::LINK, true), 0);
         assert_eq!(source_mask(Effects(0), false), 0);
