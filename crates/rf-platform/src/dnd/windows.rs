@@ -179,7 +179,11 @@ fn items_of(data: &IDataObject, ours: u16) -> Option<DroppedItems> {
         })
         .flatten()
         .and_then(|tag| ours_in(&tag, std::process::id()));
-    Some(DroppedItems { paths, ours })
+    Some(DroppedItems {
+        paths,
+        ours,
+        skipped: 0,
+    })
 }
 
 pub fn drag_out(

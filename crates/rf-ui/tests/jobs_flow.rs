@@ -646,7 +646,7 @@ fn files_another_app_drops_are_copied_or_moved_by_the_apps_own_job() {
     let mut state = harness.open(&left, &right);
     let dropped = |name: &str| DroppedItems {
         paths: vec![elsewhere.join(name)],
-        ours: None,
+        ..DroppedItems::default()
     };
 
     // As winit tells a drop (X11): the files alone, into the folder the active pane shows, which

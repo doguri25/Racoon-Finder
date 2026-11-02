@@ -15,8 +15,9 @@
 //!   focus, as it has during its drag, so the keys the system tells with each move choose, never
 //!   [`AppState::modifiers_changed`]'s.
 //! - **The paths** go through the clipboard's check (`local_paths`): a device's, a relative one,
-//!   one that is not local is left out, and the drop tells how many. A drag that carries nothing
-//!   else is refused.
+//!   one that is not local is left out, and the drop tells how many, with the items the system
+//!   itself left out ([`DroppedItems::skipped`], macOS's file URLs that name no path to read
+//!   safely). A drag that carries nothing else is refused, and says why as it hovers.
 //! - **Where they go** is the place's folder, as for a drag of rows: never one of them or a
 //!   folder inside one, and the ones already in that folder stay where they are (DND-09), so a
 //!   place where all of them are takes nothing.
@@ -93,10 +94,12 @@ impl AppState {
             };
             return self.hover_with(id, spot, mods, allowed);
         }
+        // A drag that names nothing of files is none the window knows; one whose items were
+        // all left out (by the system, or by the check of the paths) is refused, saying why.
         let sources = self
             .outside
             .as_ref()
-            .filter(|_| !items.paths.is_empty())
+            .filter(|_| !items.paths.is_empty() || items.skipped > 0)
             .map(|outside| outside.sources.clone());
         let hover = if let (Some(spot), Some(sources)) = (spot, sources) {
             self.foreign_hover(&sources, spot, mods, allowed)
@@ -135,7 +138,11 @@ impl AppState {
     ) -> (Option<DropEffect>, Vec<Effect>) {
         // What the hovers of this drag showed, if the system told of them.
         let hovered = self.outside.take().filter(|outside| outside.items == items);
-        let DroppedItems { paths, ours } = items;
+        let DroppedItems {
+            paths,
+            ours,
+            skipped,
+        } = items;
         if let Some(id) = self.ours(ours) {
             let Some(spot) = spot else {
                 return (None, Vec::new());
@@ -147,6 +154,8 @@ impl AppState {
             return (None, Vec::new());
         };
         let (sources, left_out) = local_paths(&paths);
+        // The items the system left out (macOS) are told with the paths the app does not take.
+        let left_out = left_out + skipped;
         if sources.is_empty() {
             let told = (left_out > 0).then(|| Effect::Notice(words::dropped_skipped(left_out)));
             return (None, told.into_iter().collect());

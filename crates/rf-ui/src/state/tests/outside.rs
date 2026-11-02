@@ -29,7 +29,7 @@ fn path_of(path: &VPath) -> PathBuf {
 fn items(paths: &[VPath]) -> DroppedItems {
     DroppedItems {
         paths: paths.iter().map(path_of).collect(),
-        ours: None,
+        ..DroppedItems::default()
     }
 }
 
@@ -172,7 +172,7 @@ fn the_paths_another_app_drops_are_checked_as_a_pastes_are() {
     let z = in_c("z.txt");
     let mixed = DroppedItems {
         paths: vec![shadow.clone(), path_of(&z), relative.clone()],
-        ours: None,
+        ..DroppedItems::default()
     };
     // The others go, and a notice tells how many were left out.
     assert_eq!(
@@ -193,7 +193,7 @@ fn the_paths_another_app_drops_are_checked_as_a_pastes_are() {
     // Nothing but such paths: refused, and the drop says why.
     let unusable = DroppedItems {
         paths: vec![shadow, relative],
-        ours: None,
+        ..DroppedItems::default()
     };
     assert_eq!(
         state.outside_over(Some(RIGHT_LIST), &unusable, plain(), both()),
@@ -220,6 +220,60 @@ fn the_paths_another_app_drops_are_checked_as_a_pastes_are() {
     assert_eq!(
         words::dropped_skipped(2),
         "끌어 온 항목 2개가 모두 받을 수 없는 경로라 받지 않았습니다"
+    );
+}
+
+#[test]
+fn the_items_the_system_left_out_are_told_as_the_paths_the_app_does_not_take() {
+    // macOS leaves out the file URLs it cannot read safely (another computer's, an encoded `/`,
+    // a Finder reference to an item that is gone) and counts them: the drop tells them with the
+    // paths the app does not take.
+    let mut state = two_panes();
+    let relative = PathBuf::from("relative.txt");
+    let z = in_c("z.txt");
+    let some = DroppedItems {
+        paths: vec![path_of(&z), relative],
+        skipped: 2,
+        ..DroppedItems::default()
+    };
+    assert_eq!(
+        state.outside_over(Some(RIGHT_LIST), &some, plain(), both()),
+        Some(DropEffect::Move)
+    );
+    let (done, effects) = state.outside_drop(Some(RIGHT_LIST), some, plain(), both(), false);
+    assert_eq!(done, Some(DropEffect::Move));
+    assert_eq!(moved_items(&effects)[0].source, z);
+    assert!(
+        effects.contains(&Effect::Notice(words::dropped_left_out(3))),
+        "{effects:?}"
+    );
+
+    // All of them left out: no path, but the drag is one of files, which the window refuses,
+    // saying why beside the pointer; a drop says so too.
+    let none = DroppedItems {
+        skipped: 3,
+        ..DroppedItems::default()
+    };
+    assert_eq!(
+        state.outside_hover(Some(RIGHT_LIST), &none, plain(), both()),
+        Hover::NoPaths
+    );
+    assert_eq!(
+        state.outside_over(Some(RIGHT_LIST), &none, plain(), both()),
+        None
+    );
+    assert_eq!(
+        state.outside_drop(Some(RIGHT_LIST), none, plain(), both(), false),
+        (None, vec![Effect::Notice(words::dropped_skipped(3))])
+    );
+    // Over no place, nothing to say.
+    let none = DroppedItems {
+        skipped: 1,
+        ..DroppedItems::default()
+    };
+    assert_eq!(
+        state.outside_hover(None, &none, plain(), both()),
+        Hover::Nothing
     );
 }
 
@@ -399,6 +453,7 @@ fn this_apps_own_drag_back_through_the_system_drops_as_a_drag_in_the_window() {
     let back = DroppedItems {
         paths: Vec::new(),
         ours: Some(id),
+        ..DroppedItems::default()
     };
     // It hovers as the drag in the window does, with the keys the system tells: the pane the
     // items are in takes nothing.
@@ -440,6 +495,7 @@ fn this_apps_own_drag_back_through_the_system_drops_as_a_drag_in_the_window() {
     let back = DroppedItems {
         paths: Vec::new(),
         ours: Some(state.drag_id()),
+        ..DroppedItems::default()
     };
     assert_eq!(
         state.outside_drop(Some(RIGHT_LIST), back, plain(), both(), true),
@@ -459,6 +515,7 @@ fn this_apps_own_drag_back_through_the_system_drops_as_a_drag_in_the_window() {
     let stale = DroppedItems {
         paths: vec![path_of(&in_c("z.txt"))],
         ours: Some(id),
+        ..DroppedItems::default()
     };
     let (_, effects) = state.outside_drop(Some(RIGHT_LIST), stale, plain(), both(), false);
     assert_eq!(moved_items(&effects)[0].source, in_c("z.txt"));

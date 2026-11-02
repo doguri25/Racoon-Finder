@@ -20,9 +20,11 @@
 //!   window keeps winit's drop alone.
 //! - **The items:** the file URLs of the drag's pasteboard (`public.file-url`), read as the
 //!   clipboard reads them, byte for byte ([`file_paths`]), as the drag enters and again at the
-//!   drop. A drag that names no path the app can read is answered `NSDragOperationNone` all the
-//!   way and never reaches the handler; a drag that carries no file URL (text from a browser)
-//!   never comes to this view.
+//!   drop. The URLs that name no path the app can read safely (another computer's, an encoded
+//!   `/`, a Finder reference to an item that is gone) are left out and counted
+//!   ([`DroppedItems::skipped`]), for the window to tell; a drag of nothing else reaches the
+//!   handler all the same, which refuses it and says why. A drag that carries no file URL (text
+//!   from a browser) never comes to this view.
 //! - **The keys, the point and the effects:** the modifier keys held now
 //!   (`NSEvent.modifierFlags`, [`flag_mods`]), never winit's, which it forgets while another app
 //!   has the focus; `draggingLocation`, in the view's points from its top left corner
@@ -36,10 +38,11 @@
 //!   for a source that allows no generic one. A source that allows nothing but its move cannot
 //!   drop here: the handler hears that it allows no move ([`mask_effects`]). The pointer shows
 //!   that answer at each step, and `AppKit` asks again from time to time while the pointer rests
-//!   (`wantsPeriodicDraggingUpdates`), so that a list that scrolls under a still pointer shows
-//!   the row under it. The drop is taken only for a copy or a move the app's job does
-//!   ([`drop_taken`]): then the source learns of the operation the last step answered, never a
-//!   move. The menu of 놓을 때 묻기 and a refusal take nothing, so the source learns of nothing
+//!   (as it does for every destination that does not say otherwise; the view's
+//!   `wantsPeriodicDraggingUpdates` says YES all the same), so that a list that scrolls under a
+//!   still pointer shows the row under it. The drop is taken only for a copy or a move the app's
+//!   job does ([`drop_taken`]): then the source learns of the operation the last step answered,
+//!   never a move. The menu of 놓을 때 묻기 and a refusal take nothing, so the source learns of nothing
 //!   before the user chooses, and the drag image slides back. The app's job deletes each
 //!   original of a move once its copy is done.
 //! - **The app's own drag** (a drag of rows that left the window and came back) is the one whose
@@ -175,6 +178,8 @@ define_class!(
             self.hover(sender)
         }
 
+        /// YES, as `AppKit` takes it of a destination without this method: said here so that
+        /// no change of that default stops the steps of a still pointer.
         #[unsafe(method(wantsPeriodicDraggingUpdates))]
         fn wants_periodic_dragging_updates(&self) -> bool {
             true
@@ -262,17 +267,19 @@ fn keys() -> DragMods {
     flag_mods(NSEvent::modifierFlags_class().0)
 }
 
-/// The items of the drag `sender`: the paths of its file URLs, read byte for byte, and its id
-/// when the app started it; `None` when it names no path the app can read (those URLs are left
-/// out, as a paste leaves them out).
+/// The items of the drag `sender`: the paths of its file URLs, read byte for byte, its id when
+/// the app started it, and how many of its URLs name no path the app can read safely, which are
+/// left out of the paths as a paste leaves them out ([`DroppedItems::skipped`]); `None` when it
+/// names no file at all.
 fn items_of(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<DroppedItems> {
-    let (paths, _left_out) = autoreleasepool(|_| file_paths(&sender.draggingPasteboard()));
-    if paths.is_empty() {
+    let (paths, skipped) = autoreleasepool(|_| file_paths(&sender.draggingPasteboard()));
+    if paths.is_empty() && skipped == 0 {
         return None;
     }
     Some(DroppedItems {
         paths,
         ours: ours_of(sender),
+        skipped,
     })
 }
 
@@ -460,7 +467,7 @@ impl DragSource {
 #[cfg(test)]
 mod tests {
     use objc2::encode::Encode;
-    use objc2::runtime::{AnyClass, Sel};
+    use objc2::runtime::{AnyClass, Bool, Sel};
     use objc2::{ClassType, sel};
     use objc2_app_kit::{NSDragOperation, NSDraggingContext};
     use objc2_foundation::NSPoint;
@@ -506,20 +513,30 @@ mod tests {
     /// Making the view's class, which needs no window, checks in a debug build that `hitTest:`
     /// has the types `NSView` gives it and that each method of a drag destination is one that
     /// `NSDraggingDestination` declares: a mistake would stop the app at the window's first show.
+    /// The types of the drag methods, which that check does not look at, are checked here
+    /// against what `AppKit` passes and takes back.
     #[test]
     fn the_view_s_class_answers_what_appkit_asks_of_a_drop_target() {
         let class = Overlay::class();
-        for selector in [
-            sel!(hitTest:),
-            sel!(draggingEntered:),
-            sel!(draggingUpdated:),
-            sel!(wantsPeriodicDraggingUpdates),
-            sel!(draggingExited:),
-            sel!(prepareForDragOperation:),
-            sel!(performDragOperation:),
-        ] {
-            assert!(class.responds_to(selector), "{selector}");
-        }
         assert_eq!(class.name().to_str(), Ok("RFDropOverlay"));
+        let operation = NSDragOperation::ENCODING.to_string();
+        let yes_or_no = Bool::ENCODING.to_string();
+        let point = NSPoint::ENCODING.to_string();
+        for (selector, returns, takes) in [
+            (sel!(hitTest:), "@", point.as_str()),
+            (sel!(draggingEntered:), operation.as_str(), "@"),
+            (sel!(draggingUpdated:), operation.as_str(), "@"),
+            (sel!(draggingExited:), "v", "@"),
+            (sel!(prepareForDragOperation:), yes_or_no.as_str(), "@"),
+            (sel!(performDragOperation:), yes_or_no.as_str(), "@"),
+        ] {
+            assert!(has_types(class, selector, returns, &[takes]), "{selector}");
+        }
+        assert!(has_types(
+            class,
+            sel!(wantsPeriodicDraggingUpdates),
+            &yes_or_no,
+            &[]
+        ));
     }
 }

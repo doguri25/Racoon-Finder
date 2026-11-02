@@ -117,6 +117,12 @@ pub struct DroppedItems {
     pub paths: Vec<PathBuf>,
     /// The id of the drag when this app dragged them out itself; `None` for another app's.
     pub ours: Option<u64>,
+    /// How many of its items the system's drag names in a way that gives no path to read safely,
+    /// and are left out of `paths`: on macOS a file URL of another computer
+    /// (`file://server/share/a`), one with an encoded `/`, or a Finder reference to an item that
+    /// is gone, as a paste leaves them out; 0 on Windows, whose `CF_HDROP` gives every path. The
+    /// window tells them as it tells the paths it does not take.
+    pub skipped: usize,
 }
 
 /// What the window does with a drag of the system over it, step by step, on the window's

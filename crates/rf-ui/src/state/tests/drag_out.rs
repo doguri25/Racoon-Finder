@@ -134,6 +134,7 @@ fn a_drag_out_that_comes_back_moves_once_as_a_drag_in_the_window() {
     let back = DroppedItems {
         paths: out.paths.clone(),
         ours: Some(out.ours),
+        ..DroppedItems::default()
     };
     assert_eq!(
         state.outside_over(Some(RIGHT_LIST), &back, DragMods::default(), Effects::ALL),

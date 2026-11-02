@@ -1830,7 +1830,10 @@ impl Controller {
             side: active,
             row: None,
         };
-        let items = DroppedItems { paths, ours: None };
+        let items = DroppedItems {
+            paths,
+            ..DroppedItems::default()
+        };
         self.drop_outside(Some(spot), items, DragMods::default(), Effects::COPY, false);
     }
 
@@ -3250,7 +3253,7 @@ mod tests {
         let held = controller.state.borrow_mut();
         let items = DroppedItems {
             paths: vec![dir.path().join("a.txt")],
-            ours: None,
+            ..DroppedItems::default()
         };
         let at = WindowPoint { x: 400.0, y: 300.0 };
         let done = controller.outside_drop(at, items, DragMods::default(), Effects::COPY, false);
