@@ -19,9 +19,10 @@
 //!   file URLs of the drag's pasteboard as the clipboard reads them, byte for byte, the keys held
 //!   (`NSEvent.modifierFlags`, `flag_mods`), the source's operation mask (`mask_effects`) and
 //!   `draggingLocation`, which it names from the top ([`flipped_point`]). It answers each step
-//!   with an operation the source allows (`operation_bits`), and takes a drop only for a copy
-//!   or a move the app's job does (`drop_taken`). winit's own drop target, the window, stays:
-//!   it takes a drag over the title bar, and every drag should the view take none.
+//!   with an operation the source allows but never the source's move (`answer_for`: a move is
+//!   the generic operation, or a copy), and takes a drop only for a copy or a move the app's job
+//!   does (`drop_taken`). winit's own drop target, the window, stays: it takes a drag over the
+//!   title bar, and every drag should the view take none.
 //! - **Elsewhere** (Linux, which is for development): `Unsupported`; winit tells the files
 //!   dropped on the window.
 //!
@@ -391,50 +392,54 @@ fn flag_mods(flags: usize) -> DragMods {
 }
 
 /// The effects the source's operation mask `mask` (`draggingSourceOperationMask`) allows: copy
-/// for its copy, a move for its move or its generic operation (⌘ narrows Finder's mask to the
-/// generic one), a link for its link.
+/// for its copy; a move for its move or its generic operation (⌘ narrows Finder's mask to the
+/// generic one), but only where the app can answer the move without telling the source of a move
+/// ([`answer_for`]), so a source that allows nothing but its move allows the app none; a link for
+/// its link.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
 )]
 fn mask_effects(mask: usize) -> Effects {
     let mut allowed = Effects(0);
-    for (bits, effect) in [
-        (NS_DRAG_COPY, Effects::COPY),
-        (NS_DRAG_MOVE | NS_DRAG_GENERIC, Effects::MOVE),
-        (NS_DRAG_LINK, Effects::LINK),
-    ] {
-        if mask & bits != 0 {
-            allowed = allowed | effect;
-        }
+    if mask & NS_DRAG_COPY != 0 {
+        allowed = allowed | Effects::COPY;
+    }
+    if mask & (NS_DRAG_MOVE | NS_DRAG_GENERIC) != 0 && answer_for(Some(DropEffect::Move), mask) != 0
+    {
+        allowed = allowed | Effects::MOVE;
+    }
+    if mask & NS_DRAG_LINK != 0 {
+        allowed = allowed | Effects::LINK;
     }
     allowed
 }
 
-/// The `NSDragOperation` of `effect` for the system's pointer while the drag hovers, for a
-/// source whose mask is `mask`: a move is the source's move, or its generic operation when that
-/// is the only one of the two it allows.
+/// What the source of a drag hears of the app's choice `chosen`, for a source whose mask is
+/// `mask` (an `NSDragOperation`): what the pointer shows while the drag hovers, and what the
+/// source learns of a drop the app takes ([`drop_taken`]). Never its move, which a source may
+/// read as "moved, delete the originals" while the app's own copy still runs: a copy is a copy;
+/// a move the app's job makes is the generic operation (the destination's own), or, for a source
+/// that allows no generic one, a copy, or else nothing (the drop is refused); nothing is nothing.
+/// A link, which the app does not make, is nothing too.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
 )]
-fn operation_bits(effect: Option<DropEffect>, mask: usize) -> usize {
-    match effect {
+fn answer_for(chosen: Option<DropEffect>, mask: usize) -> usize {
+    match chosen {
         Some(DropEffect::Copy) => NS_DRAG_COPY,
-        Some(DropEffect::Move) if mask & (NS_DRAG_MOVE | NS_DRAG_GENERIC) == NS_DRAG_GENERIC => {
-            NS_DRAG_GENERIC
-        }
-        Some(DropEffect::Move) => NS_DRAG_MOVE,
-        Some(DropEffect::Link) => NS_DRAG_LINK,
-        None => 0,
+        Some(DropEffect::Move) if mask & NS_DRAG_GENERIC != 0 => NS_DRAG_GENERIC,
+        Some(DropEffect::Move) if mask & NS_DRAG_COPY != 0 => NS_DRAG_COPY,
+        Some(DropEffect::Move | DropEffect::Link) | None => 0,
     }
 }
 
 /// What `performDragOperation:` answers for a drop that did `done`: `YES`, the drop is taken,
 /// only for a copy or a move the app's job does; then the source learns the operation the last
-/// hover answered. `NO` for nothing done (a refusal, a link, which the app does not make, and the
-/// menu of 놓을 때 묻기, whose choice comes later): the source learns of no operation, so never of
-/// a move the user has not chosen yet, and the drag image slides back.
+/// hover answered ([`answer_for`], never a move). `NO` for nothing done (a refusal, a link, which
+/// the app does not make, and the menu of 놓을 때 묻기, whose choice comes later): the source
+/// learns of no operation, and the drag image slides back.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
@@ -731,10 +736,15 @@ mod tests {
     #[test]
     fn the_operations_a_macos_drag_allows_are_the_app_s_effects() {
         assert_eq!(mask_effects(1), Effects::COPY);
-        assert_eq!(mask_effects(16), Effects::MOVE);
         // ⌘ narrows Finder's mask to the generic operation: a move.
         assert_eq!(mask_effects(4), Effects::MOVE);
         assert_eq!(mask_effects(4 | 16), Effects::MOVE);
+        // A move the app answers as a copy, the source allowing no generic operation.
+        assert_eq!(mask_effects(1 | 16), Effects::COPY | Effects::MOVE);
+        // A source that allows nothing but its move allows the app no move: the app never
+        // answers one.
+        assert_eq!(mask_effects(16), Effects(0));
+        assert_eq!(mask_effects(2 | 16), Effects::LINK);
         assert_eq!(mask_effects(2), Effects::LINK);
         assert_eq!(mask_effects(1 | 2 | 4 | 16), Effects::ALL);
         // `NSDragOperationEvery`.
@@ -745,18 +755,58 @@ mod tests {
     }
 
     #[test]
-    fn a_macos_drag_is_answered_with_an_operation_its_source_allows() {
+    fn a_macos_drag_s_source_never_hears_of_a_move() {
         let finder = 1 | 2 | 4 | 16;
-        assert_eq!(operation_bits(Some(DropEffect::Copy), finder), 1);
-        assert_eq!(operation_bits(Some(DropEffect::Move), finder), 16);
-        assert_eq!(operation_bits(Some(DropEffect::Move), usize::MAX), 16);
-        // ⌘ held: the source allows only its generic operation, which the move is answered as.
-        assert_eq!(operation_bits(Some(DropEffect::Move), 4), 4);
-        assert_eq!(operation_bits(Some(DropEffect::Move), 16), 16);
-        assert_eq!(operation_bits(Some(DropEffect::Link), finder), 2);
-        // Nothing: `NSDragOperationNone`, the no-drop pointer.
-        assert_eq!(operation_bits(None, finder), 0);
-        assert_eq!(operation_bits(None, 0), 0);
+        assert_eq!(answer_for(Some(DropEffect::Copy), finder), 1);
+        assert_eq!(answer_for(Some(DropEffect::Copy), 1), 1);
+        // A move is the destination's own operation, never the source's move.
+        assert_eq!(answer_for(Some(DropEffect::Move), finder), 4);
+        assert_eq!(answer_for(Some(DropEffect::Move), usize::MAX), 4);
+        // ⌘ held: Finder allows only its generic operation.
+        assert_eq!(answer_for(Some(DropEffect::Move), 4), 4);
+        assert_eq!(answer_for(Some(DropEffect::Move), 4 | 16), 4);
+        // No generic operation: a copy, as far as the source knows; the app's job still moves.
+        assert_eq!(answer_for(Some(DropEffect::Move), 1 | 16), 1);
+        // A source that allows only its move cannot drop into the app.
+        assert_eq!(answer_for(Some(DropEffect::Move), 16), 0);
+        assert_eq!(answer_for(Some(DropEffect::Move), 2 | 16), 0);
+        // Nothing, and a link, which the app does not make: `NSDragOperationNone`.
+        assert_eq!(answer_for(None, finder), 0);
+        assert_eq!(answer_for(None, 0), 0);
+        assert_eq!(answer_for(Some(DropEffect::Link), finder), 0);
+        let masks = [
+            0,
+            1,
+            2,
+            4,
+            8,
+            16,
+            32,
+            1 | 16,
+            2 | 16,
+            4 | 16,
+            finder,
+            usize::MAX,
+        ];
+        for mask in masks {
+            for chosen in [
+                None,
+                Some(DropEffect::Copy),
+                Some(DropEffect::Move),
+                Some(DropEffect::Link),
+            ] {
+                // Never a move, nor more than one operation.
+                let answer = answer_for(chosen, mask);
+                assert!(
+                    [0, 1, 4].contains(&answer),
+                    "{chosen:?} {mask:#x}: {answer}"
+                );
+            }
+            // The app is told a move is allowed only where it can answer one.
+            if mask_effects(mask).contains(DropEffect::Move) {
+                assert_ne!(answer_for(Some(DropEffect::Move), mask), 0, "{mask:#x}");
+            }
+        }
     }
 
     #[test]

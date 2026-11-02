@@ -28,15 +28,18 @@
 //!   (`draggingSourceOperationMask`, [`mask_effects`]), which `AppKit` has already narrowed by the
 //!   keys (⌥ to copy, ⌘ to the generic operation, ⌃ to a link). No drag here is one with the
 //!   right button.
-//! - **The answers:** the handler's effect, as an operation the source allows
-//!   ([`operation_bits`]), at each step: `AppKit` asks again from time to time while the pointer
-//!   rests (`wantsPeriodicDraggingUpdates`), so that a list that scrolls under a still pointer
-//!   shows the row under it. The drop is taken only for a copy or a move the app's job does
-//!   ([`drop_taken`]): then the source learns of the operation the last step answered. The menu
-//!   of 놓을 때 묻기 and a refusal take nothing, so the source learns of no move before the user
-//!   chooses one, and the drag image slides back. A move is the app's own job's, which deletes
-//!   each original once its copy is done; Finder, which drags most files, leaves a moved file to
-//!   the destination and deletes nothing itself.
+//! - **The answers:** what the source hears is never its move ([`answer_for`]), which it may
+//!   read as "moved, delete the originals" while the app's own copy still runs: a copy is a copy,
+//!   and a move the app's job makes is the generic operation (the destination's own), or a copy
+//!   for a source that allows no generic one. A source that allows nothing but its move cannot
+//!   drop here: the handler hears that it allows no move ([`mask_effects`]). The pointer shows
+//!   that answer at each step, and `AppKit` asks again from time to time while the pointer rests
+//!   (`wantsPeriodicDraggingUpdates`), so that a list that scrolls under a still pointer shows
+//!   the row under it. The drop is taken only for a copy or a move the app's job does
+//!   ([`drop_taken`]): then the source learns of the operation the last step answered, never a
+//!   move. The menu of 놓을 때 묻기 and a refusal take nothing, so the source learns of nothing
+//!   before the user chooses, and the drag image slides back. The app's job deletes each
+//!   original of a move once its copy is done.
 //! - **The app's own drag** (a drag of rows that left the window and came back, Task 5) is not
 //!   told yet: [`ours_of`] names none.
 //! - **No borrow across a call out:** the view's record of the drag (a `RefCell`) is never
@@ -57,8 +60,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect};
 
 use super::{
-    DragMods, DropHandler, DroppedItems, drop_taken, flag_mods, flipped_point, mask_effects,
-    operation_bits,
+    DragMods, DropHandler, DroppedItems, answer_for, drop_taken, flag_mods, flipped_point,
+    mask_effects,
 };
 use crate::clipboard::{file_paths, file_url_type};
 use crate::shell::{Owner, WindowPoint};
@@ -203,8 +206,9 @@ impl Overlay {
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 
-    /// The drag `sender` over the view: the handler's answer, as the operation for the system's
-    /// pointer; none for a drag that names no path, which the handler never hears of.
+    /// The drag `sender` over the view: the handler's answer, as the operation the pointer shows
+    /// and the source hears ([`answer_for`], never a move); none for a drag that names no path,
+    /// which the handler never hears of.
     fn hover(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
         let _alive = self.retain();
         // Nothing of the view is borrowed while the handler runs.
@@ -215,7 +219,7 @@ impl Overlay {
         let handler = Rc::clone(&self.ivars().handler);
         let mask = sender.draggingSourceOperationMask().0;
         let answer = handler.over(self.point_of(sender), keys(), mask_effects(mask), &items);
-        NSDragOperation(operation_bits(answer, mask))
+        NSDragOperation(answer_for(answer, mask))
     }
 
     /// Where the drag `sender` is, in the window's logical pixels from the top left corner of its
