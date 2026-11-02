@@ -26,9 +26,16 @@
 //! - **Elsewhere** (Linux, which is for development): `Unsupported`; winit tells the files
 //!   dropped on the window.
 //!
+//! A drag of the app's rows that leaves the window goes on as the system's drag ([`drag_out`],
+//! DND-05 보내기), which other apps take by the system's rules: `SHDoDragDrop` of the shell's data
+//! object of the items on Windows, a dragging session of their file URLs on macOS; nothing
+//! elsewhere ([`DRAGS_OUT`]). It carries the app's tag, so that the window's own drop target
+//! knows it should it come back; and the app deletes nothing once it ends, whatever the taker
+//! did.
+//!
 //! What the system says is turned into this crate's words by pure functions, which the tests
 //! check on every system: the answers of a drop, the points, the tag of the app's own drag, the
-//! keys, the effects and the words under the drag image.
+//! keys, the effects (of a drop and of a drag out) and the words under the drag image.
 
 use std::io;
 use std::ops::BitOr;
@@ -184,6 +191,54 @@ pub fn register_drop_target(
     imp::register(owner, handler).map(|registration| DropRegistration {
         _registration: registration,
     })
+}
+
+/// Whether this system carries a drag of the app's rows on out of the window ([`drag_out`]):
+/// Windows and macOS. Elsewhere (Linux) a drag of rows stays the window's, and one let go outside
+/// it drops nothing.
+pub const DRAGS_OUT: bool = imp::DRAGS_OUT;
+
+/// Carries a drag of the app's rows on out of the window `owner` as the system's drag of the
+/// files and folders at `paths` (DND-05 보내기), which another app takes as the system's rules
+/// say (File Explorer and Finder by their keys, a browser's upload, a mail's attachment). The
+/// drag allows `allowed`, and carries the tag of the app's drag `ours` ([`ours_tag`], or on
+/// macOS the app's own source object), so that the window's own drop target knows it as this
+/// drag of rows should it come back over the window ([`DroppedItems::ours`]). `done` hears what
+/// the app that took it did, once, when the drag ends: `None` for nothing (and for a drop back
+/// on the window, whose own job the window made as it took it).
+///
+/// The app deletes nothing after a drag out, whatever `done` hears (a move included): a move is
+/// the taker's to finish; a taker that only copied leaves a copy.
+///
+/// Call it on the window's thread, with nothing borrowed that the window's drop target needs,
+/// and never from inside a call of that drop target:
+///
+/// - **Windows:** the drag runs inside this call, in the system's own loop (`SHDoDragDrop`,
+///   with the shell's drag image), which calls the window's drop target as the drag passes over
+///   the window; `done` is called before it returns. The item ids of the paths go (as File
+///   Explorer's own drag carries them), with the tag in the format [`ours_format`]; a path that
+///   names no item (any more) is left out.
+/// - **macOS:** the drag begins (`beginDraggingSessionWithItems:event:source:` on the window's
+///   view, a file URL for each path, byte for byte, with its icon) and runs on in the app's event
+///   loop; `done` is called as it ends.
+///
+/// `Unsupported` where [`DRAGS_OUT`] is false; `InvalidInput` for no paths or an owner without
+/// the handle this system needs; another error for a drag that could not begin. `done` is never
+/// called when this fails.
+pub fn drag_out(
+    owner: Owner,
+    paths: &[PathBuf],
+    allowed: Effects,
+    ours: u64,
+    done: Box<dyn FnOnce(Option<DropEffect>)>,
+) -> io::Result<()> {
+    if DRAGS_OUT && paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to drag",
+        ));
+    }
+    imp::drag_out(owner, paths, allowed, ours, done)
 }
 
 /// `DROPEFFECT_NONE`, `DROPEFFECT_COPY`, `DROPEFFECT_MOVE` and `DROPEFFECT_LINK`.
@@ -363,12 +418,48 @@ fn effect_bits(effect: Option<DropEffect>) -> u32 {
     }
 }
 
-/// `NSDragOperationCopy`, `NSDragOperationLink`, `NSDragOperationGeneric` and
-/// `NSDragOperationMove`.
+/// The `DROPEFFECT` bits of the effects `allowed`, which a drag the app starts allows
+/// ([`drag_out`]): the other way round of `allowed_effects`.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by Windows code; tested on every OS")
+)]
+fn effects_bits(allowed: Effects) -> u32 {
+    [
+        (DropEffect::Copy, DROPEFFECT_COPY),
+        (DropEffect::Move, DROPEFFECT_MOVE),
+        (DropEffect::Link, DROPEFFECT_LINK),
+    ]
+    .into_iter()
+    .filter(|&(effect, _)| allowed.contains(effect))
+    .fold(DROPEFFECT_NONE, |bits, (_, bit)| bits | bit)
+}
+
+/// What the app that took a drag the app started did with it, as the system's drag tells as it
+/// ends (the effect `SHDoDragDrop` gives, which is what the drop target answered): a move, else a
+/// copy, else a link; `None` for nothing (a drag let go where nothing took it, or Esc). Only for
+/// the app's ears: it deletes nothing, whatever this says ([`drag_out`]).
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by Windows code; tested on every OS")
+)]
+fn performed_effect(bits: u32) -> Option<DropEffect> {
+    [
+        (DROPEFFECT_MOVE, DropEffect::Move),
+        (DROPEFFECT_COPY, DropEffect::Copy),
+        (DROPEFFECT_LINK, DropEffect::Link),
+    ]
+    .into_iter()
+    .find_map(|(bit, effect)| (bits & bit != 0).then_some(effect))
+}
+
+/// `NSDragOperationCopy`, `NSDragOperationLink`, `NSDragOperationGeneric`,
+/// `NSDragOperationMove` and `NSDragOperationDelete`.
 const NS_DRAG_COPY: usize = 1;
 const NS_DRAG_LINK: usize = 1 << 1;
 const NS_DRAG_GENERIC: usize = 1 << 2;
 const NS_DRAG_MOVE: usize = 1 << 4;
+const NS_DRAG_DELETE: usize = 1 << 5;
 
 /// `NSEventModifierFlagShift`, `…Control`, `…Option` and `…Command`.
 const NS_SHIFT: usize = 1 << 17;
@@ -446,6 +537,54 @@ fn answer_for(chosen: Option<DropEffect>, mask: usize) -> usize {
 )]
 fn drop_taken(done: Option<DropEffect>) -> bool {
     matches!(done, Some(DropEffect::Copy | DropEffect::Move))
+}
+
+/// What the app's own drag source allows of the effects `allowed`, as `AppKit` asks it for the
+/// place the drag is over (`draggingSession:sourceOperationMaskForDraggingContext:`): out of the
+/// app (`within` false), as Finder's own drags do, a copy, a move, its generic operation (the
+/// taker's own, which Finder takes for a move) and a link, for the taker to choose from by its
+/// keys; within the app (back over the window), a move or a copy alone, which the window's drop
+/// makes ([`mask_effects`]).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn source_mask(allowed: Effects, within: bool) -> usize {
+    let mut mask = 0;
+    if allowed.contains(DropEffect::Copy) {
+        mask |= NS_DRAG_COPY;
+    }
+    if allowed.contains(DropEffect::Move) {
+        mask |= NS_DRAG_MOVE;
+        if !within {
+            mask |= NS_DRAG_GENERIC;
+        }
+    }
+    if allowed.contains(DropEffect::Link) && !within {
+        mask |= NS_DRAG_LINK;
+    }
+    mask
+}
+
+/// What the app that took a drag the app started did with it, as its source hears as it ends
+/// (`draggingSession:endedAtPoint:operation:`): a move (the source's move, the generic operation,
+/// which the taker made its own, or the Trash's delete), else a copy, else a link; `None` for
+/// nothing. Only for the app's ears: it deletes nothing, whatever this says ([`drag_out`]).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn ended_effect(operation: usize) -> Option<DropEffect> {
+    [
+        (
+            NS_DRAG_MOVE | NS_DRAG_GENERIC | NS_DRAG_DELETE,
+            DropEffect::Move,
+        ),
+        (NS_DRAG_COPY, DropEffect::Copy),
+        (NS_DRAG_LINK, DropEffect::Link),
+    ]
+    .into_iter()
+    .find_map(|(bits, effect)| (operation & bits != 0).then_some(effect))
 }
 
 /// `DROPIMAGE_INVALID`, `DROPIMAGE_NONE`, `DROPIMAGE_COPY`, `DROPIMAGE_MOVE`.
@@ -807,6 +946,106 @@ mod tests {
                 assert_ne!(answer_for(Some(DropEffect::Move), mask), 0, "{mask:#x}");
             }
         }
+    }
+
+    #[test]
+    fn rows_are_dragged_out_where_the_system_takes_them() {
+        assert_eq!(DRAGS_OUT, cfg!(any(windows, target_os = "macos")));
+    }
+
+    #[test]
+    fn a_drag_out_allows_the_system_s_bits_of_its_effects() {
+        assert_eq!(
+            effects_bits(Effects::ALL),
+            DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK
+        );
+        assert_eq!(effects_bits(Effects::COPY), DROPEFFECT_COPY);
+        assert_eq!(effects_bits(Effects::MOVE), DROPEFFECT_MOVE);
+        assert_eq!(effects_bits(Effects::LINK), DROPEFFECT_LINK);
+        assert_eq!(effects_bits(Effects(0)), DROPEFFECT_NONE);
+        for allowed in [
+            Effects(0),
+            Effects::COPY,
+            Effects::MOVE,
+            Effects::LINK,
+            Effects::COPY | Effects::MOVE,
+            Effects::MOVE | Effects::LINK,
+            Effects::ALL,
+        ] {
+            // What a drop target reads of the drag is what the drag allows.
+            assert_eq!(
+                allowed_effects(effects_bits(allowed)),
+                allowed,
+                "{allowed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_another_app_did_with_a_drag_out_on_windows_is_its_effect() {
+        assert_eq!(performed_effect(DROPEFFECT_NONE), None);
+        assert_eq!(performed_effect(DROPEFFECT_COPY), Some(DropEffect::Copy));
+        assert_eq!(performed_effect(DROPEFFECT_MOVE), Some(DropEffect::Move));
+        assert_eq!(performed_effect(DROPEFFECT_LINK), Some(DropEffect::Link));
+        // File Explorer's scroll bit, and bits of nothing the app knows, tell nothing more.
+        assert_eq!(
+            performed_effect(DROPEFFECT_COPY | 0x8000_0000),
+            Some(DropEffect::Copy)
+        );
+        assert_eq!(performed_effect(0x8000_0000), None);
+        // More than one, which no target answers: the move, then the copy.
+        assert_eq!(
+            performed_effect(DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK),
+            Some(DropEffect::Move)
+        );
+        assert_eq!(
+            performed_effect(DROPEFFECT_COPY | DROPEFFECT_LINK),
+            Some(DropEffect::Copy)
+        );
+    }
+
+    #[test]
+    fn the_app_s_drag_source_allows_all_out_of_the_app_and_a_move_or_a_copy_in_it() {
+        let finder = NS_DRAG_COPY | NS_DRAG_LINK | NS_DRAG_GENERIC | NS_DRAG_MOVE;
+        // Out of the app, as Finder's own drags: the taker chooses, by its keys.
+        assert_eq!(source_mask(Effects::ALL, false), finder);
+        // Within it (back over the window): a move or a copy, which the window's drop makes.
+        assert_eq!(source_mask(Effects::ALL, true), NS_DRAG_COPY | NS_DRAG_MOVE);
+        assert_eq!(
+            mask_effects(source_mask(Effects::ALL, true)),
+            Effects::COPY | Effects::MOVE
+        );
+        // Only what the drag allows.
+        assert_eq!(source_mask(Effects::COPY, false), NS_DRAG_COPY);
+        assert_eq!(source_mask(Effects::COPY, true), NS_DRAG_COPY);
+        assert_eq!(
+            source_mask(Effects::MOVE, false),
+            NS_DRAG_GENERIC | NS_DRAG_MOVE
+        );
+        assert_eq!(source_mask(Effects::MOVE, true), NS_DRAG_MOVE);
+        assert_eq!(source_mask(Effects::LINK, false), NS_DRAG_LINK);
+        assert_eq!(source_mask(Effects::LINK, true), 0);
+        assert_eq!(source_mask(Effects(0), false), 0);
+    }
+
+    #[test]
+    fn what_another_app_did_with_a_drag_out_on_macos_is_its_operation() {
+        assert_eq!(ended_effect(0), None);
+        assert_eq!(ended_effect(NS_DRAG_COPY), Some(DropEffect::Copy));
+        assert_eq!(ended_effect(NS_DRAG_LINK), Some(DropEffect::Link));
+        // The source's move, the taker's own (generic) one, and the Trash's delete all moved
+        // the items away.
+        assert_eq!(ended_effect(NS_DRAG_MOVE), Some(DropEffect::Move));
+        assert_eq!(ended_effect(NS_DRAG_GENERIC), Some(DropEffect::Move));
+        assert_eq!(ended_effect(NS_DRAG_DELETE), Some(DropEffect::Move));
+        // `NSDragOperationPrivate` tells nothing the app knows.
+        assert_eq!(ended_effect(1 << 3), None);
+        // More than one, which no taker answers: the move, then the copy.
+        assert_eq!(ended_effect(usize::MAX), Some(DropEffect::Move));
+        assert_eq!(
+            ended_effect(NS_DRAG_COPY | NS_DRAG_LINK),
+            Some(DropEffect::Copy)
+        );
     }
 
     #[test]

@@ -29,6 +29,12 @@
 //! [`AppState::drag_rests`]): the controller's timer counts the rest, and the drag goes on. A
 //! move a drop submits is noted with how many items it carries (`AppState::drop_transfer`),
 //! so that its end offers its undo for [`MOVE_TOAST_TIME`] (DND-07, module `jobs`).
+//!
+//! A drag that leaves the window goes on as the system's drag to other apps (DND-05 보내기,
+//! [`AppState::drag_leaves_window`]), once, with the local paths of its items and its id; it
+//! stays readied, so that it is still this drag of rows should it come back over the window
+//! (module `outside`). Its end ([`AppState::drag_out_ended`]) makes no job, whatever the app that
+//! took it did: that app finishes a move, and the app deletes nothing.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -70,6 +76,20 @@ pub struct Drag {
     /// The folder the last hover showed the items would go into; `None` after a hover where
     /// nothing takes them.
     pub(super) shown: Option<VPath>,
+    /// The drag went on out of the window as the system's drag
+    /// ([`AppState::drag_leaves_window`]).
+    out: bool,
+}
+
+/// A drag of rows that goes on out of the window as the system's drag (DND-05 보내기,
+/// [`AppState::drag_leaves_window`]): the local paths of its items, which the system carries to
+/// another app, and the drag's id, which the system's drag carries along, so that the window's
+/// own drop target knows the drag should it come back over the window
+/// ([`DroppedItems::ours`](rf_platform::dnd::DroppedItems::ours)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DragOut {
+    pub paths: Vec<PathBuf>,
+    pub ours: u64,
 }
 
 /// A place a drag is over.
@@ -212,6 +232,7 @@ impl AppState {
                 request,
                 takes: HashMap::new(),
                 shown: None,
+                out: false,
             });
         effects
     }
@@ -567,6 +588,50 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// The drag of rows under way left the window, and the system carries it on to other apps
+    /// (DND-05 보내기): the local paths of its items and its id, for the system's drag. `None`,
+    /// and the drag stays the window's, for no drag readied (or one dropped already), for a drag
+    /// that went out once already (never twice), for one of items that have no local path, and
+    /// while a window shows over the main one or the app ends. A drag that goes out makes no
+    /// click of its press ([`AppState::release_row`]).
+    ///
+    /// The drag stays readied under its id: the system's drag may come back over the window,
+    /// where it is this drag of rows ([`AppState::outside_drop`]), until it ends
+    /// ([`AppState::drag_out_ended`]).
+    pub fn drag_leaves_window(&mut self) -> Option<DragOut> {
+        if self.modal.is_some() || self.quitting {
+            return None;
+        }
+        let drag = self.drag.as_mut().filter(|drag| !drag.out)?;
+        let paths: Vec<PathBuf> = drag
+            .request
+            .sources
+            .iter()
+            .filter_map(|source| source.as_local().map(Path::to_path_buf))
+            .collect();
+        if paths.is_empty() {
+            return None;
+        }
+        drag.out = true;
+        let ours = drag.id;
+        self.pending_click = None;
+        Some(DragOut { paths, ours })
+    }
+
+    /// The system's drag that a drag of rows went on as ([`AppState::drag_leaves_window`]) is
+    /// over, and the app that took it did `done` (`None`: nothing, or the drop was the window's
+    /// own, which made its job then). The app does nothing of it, whatever it was (a move
+    /// included): it deletes nothing, since a move is the other app's to finish, and an app that
+    /// only copied leaves a copy; the watch of a folder shows what changed. The drag is over.
+    /// Nothing for a drag that never went out.
+    pub fn drag_out_ended(&mut self, done: Option<DropEffect>) -> Vec<Effect> {
+        let _ = done;
+        if self.drag.as_ref().is_some_and(|drag| drag.out) {
+            self.drag = None;
+        }
+        Vec::new()
     }
 
     /// The folder a drop on `spot` puts the items into; `None` for a row or a tab that is not

@@ -55,8 +55,9 @@ fn count(change: isize) -> u64 {
     u64::try_from(change).unwrap_or(0)
 }
 
-/// The pasteboard item of the file at `path`, with its file URL; and `text` as text, if any.
-fn item(path: &Path, text: Option<&str>) -> io::Result<Retained<NSPasteboardItem>> {
+/// The pasteboard item of the file at `path`, with its file URL; and `text` as text, if any. The
+/// clipboard's, and a drag's out of the window (`crate::dnd`).
+pub(crate) fn item(path: &Path, text: Option<&str>) -> io::Result<Retained<NSPasteboardItem>> {
     let url = NSString::from_str(&file_url_of(path.as_os_str().as_bytes()));
     let item = NSPasteboardItem::new();
     if !item.setString_forType(&url, file_url_type()) {

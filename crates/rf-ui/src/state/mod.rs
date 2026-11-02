@@ -82,7 +82,9 @@ pub use clipboard::{
     CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
 };
 pub use copies::copy_origins;
-pub use drag::{Drag, DropOffer, DropSpot, Hover, MOVE_TOAST_TIME, SPRING_DELAY, dropped_effect};
+pub use drag::{
+    Drag, DragOut, DropOffer, DropSpot, Hover, MOVE_TOAST_TIME, SPRING_DELAY, dropped_effect,
+};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use panel::PanelButton;

@@ -36,6 +36,12 @@ export global DragPointer {
     in-out property <length> y;
     // A drag is over the window: from its first move there until it ends or leaves (`gone`).
     in-out property <bool> over;
+    // A drag of rows (a row's `DragArea` is `dragging`) is under way, over the window or past its
+    // edges: from the move that starts it until it ends. Rust reads it as the pointer leaves the
+    // window, where the system's drag carries the drag on (DND-05), and clears it as it ends
+    // Slint's drag for that, and as the left button is let go (a drag whose row is gone tells no
+    // end).
+    in-out property <bool> rows;
 
     // A list scrolled under the still pointer of a drag: what is under it changed, so Rust has
     // the window ask the place there again, as a move of the pointer would.

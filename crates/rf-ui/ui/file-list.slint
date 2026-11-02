@@ -318,6 +318,9 @@ export component FileList inherits Rectangle {
                                 drag-finished(action) => {
                                     root.drag-ended();
                                 }
+                                changed dragging => {
+                                    DragPointer.rows = self.dragging;
+                                }
 
                                 row-menu := RowMenu {
                                     command(name) => {

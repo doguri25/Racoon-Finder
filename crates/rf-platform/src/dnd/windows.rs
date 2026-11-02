@@ -4,7 +4,8 @@
 )]
 
 //! The window's drop target on Windows: an `IDropTarget` of the app's own in the place of
-//! winit's, on the window's (STA) thread, where winit has initialized OLE.
+//! winit's, on the window's (STA) thread, where winit has initialized OLE. And the drag of rows
+//! the app carries out of the window ([`drag_out`]).
 //!
 //! - **The items:** the paths of `CF_HDROP`, read as the clipboard reads them, when the drag
 //!   enters the window and again inside `Drop` (the data object is not used once a call
@@ -31,29 +32,49 @@
 //!   borrowed while the handler runs or while a COM object is called or let go (its data object
 //!   is held in an `Rc`, so that a borrow only copies a pointer): a call of the system may pump
 //!   the thread's messages and come back into the target.
+//! - **A drag out** ([`drag_out`]) is the shell's own drag of the items: their item ids
+//!   (`ILCreateFromPathW`), made into the shell's data object (`SHCreateShellItemArrayFromIDLists`,
+//!   then its `BHID_DataObject`), which carries `CF_HDROP`, the shell's id lists and what File
+//!   Explorer's drags carry, and the tag of the app's drag, written in the same registered format
+//!   the target reads ([`ours_number`], [`items_of`]). `SHDoDragDrop` runs the drag in the
+//!   system's loop, with the shell's drag image and its default drop source, until it ends; the
+//!   window's own target answers it as it passes over the window. What the taker did goes to
+//!   `done` and nowhere else: nothing is deleted here.
 
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io;
 use std::mem::ManuallyDrop;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HGLOBAL, HWND};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM,
-    STGMEDIUM_0, TYMED_HGLOBAL,
+    CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, IBindCtx, IDataObject,
+    STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Ole::{DROPEFFECT, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop};
+use windows::Win32::System::Ole::{
+    CF_HDROP, DROPEFFECT, IDropSource, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+};
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CFSTR_DROPDESCRIPTION, CFSTR_LOGICALPERFORMEDDROPEFFECT, CFSTR_PERFORMEDDROPEFFECT,
-    CLSID_DragDropHelper, IDropTargetHelper,
+    BHID_DataObject, CFSTR_DROPDESCRIPTION, CFSTR_LOGICALPERFORMEDDROPEFFECT,
+    CFSTR_PERFORMEDDROPEFFECT, CLSID_DragDropHelper, IDropTargetHelper, ILCreateFromPathW, ILFree,
+    SHCreateShellItemArrayFromIDLists, SHDoDragDrop,
 };
 use windows::core::{IUnknown, PCWSTR};
 
-use super::{DropHandler, ours_format};
-use crate::clipboard::Global;
+use super::{
+    DropEffect, DropHandler, DroppedItems, Effects, effects_bits, ours_format, ours_in, ours_tag,
+    performed_effect,
+};
+use crate::clipboard::{Global, global_bytes, hdrop_units};
 use crate::shell::Owner;
 use crate::win_util::{to_io, wide};
+
+pub const DRAGS_OUT: bool = true;
 
 /// The window's drop target, registered until this is dropped.
 pub struct Registration {
@@ -68,8 +89,9 @@ impl Drop for Registration {
     }
 }
 
-pub fn register(owner: Owner, handler: Rc<dyn DropHandler>) -> io::Result<Registration> {
-    let hwnd = owner
+/// The window handle of `owner`; `InvalidInput` for an owner without one.
+fn window_of(owner: Owner) -> io::Result<HWND> {
+    owner
         .raw()
         .map(|hwnd| {
             // A handle is a number that names a window, not memory to read.
@@ -77,10 +99,13 @@ pub fn register(owner: Owner, handler: Rc<dyn DropHandler>) -> io::Result<Regist
                 hwnd.get().cast_unsigned(),
             ))
         })
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no window handle"))?;
-    let ours = wide(OsStr::new(&ours_format()));
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no window handle"))
+}
+
+pub fn register(owner: Owner, handler: Rc<dyn DropHandler>) -> io::Result<Registration> {
+    let hwnd = window_of(owner)?;
     let formats = Formats {
-        ours: registered(PCWSTR(ours.as_ptr())),
+        ours: ours_number(),
         description: registered(CFSTR_DROPDESCRIPTION),
         performed: registered(CFSTR_PERFORMEDDROPEFFECT),
         logical: registered(CFSTR_LOGICALPERFORMEDDROPEFFECT),
@@ -121,6 +146,125 @@ fn registered(name: PCWSTR) -> u16 {
     u16::try_from(format).unwrap_or(0)
 }
 
+/// The number of the registered format the tag of the app's own drag goes in ([`ours_format`]):
+/// the one format a drag out writes it in ([`drag_data`]) and the window's target reads it from
+/// ([`items_of`]); 0 when it cannot be registered.
+fn ours_number() -> u16 {
+    let name = wide(OsStr::new(&ours_format()));
+    registered(PCWSTR(name.as_ptr()))
+}
+
+/// The items of the data object `data`: its paths of `CF_HDROP` and, for a drag this process
+/// started, its id, read from its block in the registered format `ours` ([`ours_number`]);
+/// `None` for a drag without files.
+fn items_of(data: &IDataObject, ours: u16) -> Option<DroppedItems> {
+    let units = with_block(data, CF_HDROP.0, |global| {
+        // SAFETY: the data object's `CF_HDROP` block, which it keeps until the medium is
+        // released after this.
+        unsafe { hdrop_units(global) }.ok()
+    })?;
+    if units.is_empty() {
+        return None;
+    }
+    let paths = units
+        .iter()
+        .map(|units| PathBuf::from(OsString::from_wide(units)))
+        .collect();
+    let ours = (ours != 0)
+        .then(|| {
+            with_block(data, ours, |global| {
+                // SAFETY: as above, the block of the tag.
+                unsafe { global_bytes(global) }.ok()
+            })
+        })
+        .flatten()
+        .and_then(|tag| ours_in(&tag, std::process::id()));
+    Some(DroppedItems { paths, ours })
+}
+
+pub fn drag_out(
+    owner: Owner,
+    paths: &[PathBuf],
+    allowed: Effects,
+    ours: u64,
+    done: Box<dyn FnOnce(Option<DropEffect>)>,
+) -> io::Result<()> {
+    let hwnd = window_of(owner)?;
+    let data = drag_data(paths, &ours_tag(std::process::id(), ours))?;
+    // SAFETY: the app's window, on its thread, in the apartment where winit initialized OLE; the
+    // data object lives through the call. The system runs the drag in a loop of its own until it
+    // ends, with its default drop source (`None`), and calls the window's own drop target as the
+    // drag passes over it, which borrows nothing the caller holds.
+    let effect = unsafe {
+        SHDoDragDrop(
+            Some(hwnd),
+            &data,
+            None::<&IDropSource>,
+            DROPEFFECT(effects_bits(allowed)),
+        )
+    }
+    .map_err(|e| to_io(&e))?;
+    done(performed_effect(effect.0));
+    Ok(())
+}
+
+/// The shell's data object of the items at `paths`, as File Explorer's own drag of them makes it
+/// (their item ids), with `tag` written in the format of the tag of the app's own drag
+/// ([`ours_number`]). A path that names no item (any more) is left out; `NotFound` when none
+/// does.
+fn drag_data(paths: &[PathBuf], tag: &[u8]) -> io::Result<IDataObject> {
+    let ids = ItemIds::of(paths)?;
+    let pointers = ids.pointers();
+    // SAFETY: absolute item ids, which `ids` keeps alive through the call; the array copies them.
+    let items = unsafe { SHCreateShellItemArrayFromIDLists(&pointers) }.map_err(|e| to_io(&e))?;
+    let handler = BHID_DataObject;
+    // SAFETY: a shell item array, bound without a bind context; `handler` lives through the call.
+    let data: IDataObject = unsafe { items.BindToHandler(None::<&IBindCtx>, &raw const handler) }
+        .map_err(|e| to_io(&e))?;
+    put_block(&data, ours_number(), tag);
+    Ok(data)
+}
+
+/// The absolute item ids (PIDLs) of some paths, freed as this goes.
+struct ItemIds(Vec<NonNull<ITEMIDLIST>>);
+
+impl ItemIds {
+    /// The ids of the items at `paths` that are there; `NotFound` when none is.
+    fn of(paths: &[PathBuf]) -> io::Result<ItemIds> {
+        let mut ids = ItemIds(Vec::with_capacity(paths.len()));
+        for path in paths {
+            let name = wide(path.as_os_str());
+            // SAFETY: a NUL-terminated path that lives through the call; the id it gives, if
+            // any, is this one's to free.
+            let id = unsafe { ILCreateFromPathW(PCWSTR(name.as_ptr())) };
+            if let Some(id) = NonNull::new(id) {
+                ids.0.push(id);
+            }
+        }
+        if ids.0.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "none of the items is there",
+            ));
+        }
+        Ok(ids)
+    }
+
+    /// The ids, for a call that reads them while this lives.
+    fn pointers(&self) -> Vec<*const ITEMIDLIST> {
+        self.0.iter().map(|id| id.as_ptr().cast_const()).collect()
+    }
+}
+
+impl Drop for ItemIds {
+    fn drop(&mut self) {
+        for id in &self.0 {
+            // SAFETY: an id `ILCreateFromPathW` gave, freed once.
+            unsafe { ILFree(Some(id.as_ptr().cast_const())) };
+        }
+    }
+}
+
 /// The registered formats the target reads and writes; 0 for one that could not be registered.
 #[derive(Clone, Copy, Debug)]
 struct Formats {
@@ -139,25 +283,21 @@ struct Formats {
 )]
 mod target {
     use std::cell::RefCell;
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-    use std::path::PathBuf;
     use std::rc::Rc;
 
     use windows::Win32::Foundation::{HWND, POINT, POINTL};
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::System::Com::IDataObject;
-    use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT, IDropTarget, IDropTarget_Impl};
+    use windows::Win32::System::Ole::{DROPEFFECT, IDropTarget, IDropTarget_Impl};
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Shell::IDropTargetHelper;
     use windows::core::{Ref, implement};
 
-    use super::{Formats, put_block, read_effect, with_block, write_effect};
-    use crate::clipboard::{global_bytes, hdrop_units};
+    use super::{Formats, items_of, put_block, read_effect, write_effect};
     use crate::dnd::{
         DropEffect, DropHandler, DropHint, DropReply, DroppedItems, allowed_effects, client_point,
-        description_bytes, drop_reply, effect_bits, key_mods, ours_in, right_button,
+        description_bytes, drop_reply, effect_bits, key_mods, right_button,
     };
     use crate::shell::WindowPoint;
 
@@ -258,31 +398,9 @@ mod target {
             put_block(data, self.formats.description, &bytes);
         }
 
-        /// The items of the data object `data`: its paths of `CF_HDROP` and, for a drag this
-        /// process started, its id; `None` for a drag without files.
+        /// The items of the data object `data` ([`items_of`]).
         fn items(&self, data: &IDataObject) -> Option<DroppedItems> {
-            let units = with_block(data, CF_HDROP.0, |global| {
-                // SAFETY: the data object's `CF_HDROP` block, which it keeps until the medium is
-                // released after this.
-                unsafe { hdrop_units(global) }.ok()
-            })?;
-            if units.is_empty() {
-                return None;
-            }
-            let paths = units
-                .iter()
-                .map(|units| PathBuf::from(OsString::from_wide(units)))
-                .collect();
-            let ours = (self.formats.ours != 0)
-                .then(|| {
-                    with_block(data, self.formats.ours, |global| {
-                        // SAFETY: as above, the block of the tag.
-                        unsafe { global_bytes(global) }.ok()
-                    })
-                })
-                .flatten()
-                .and_then(|tag| ours_in(&tag, std::process::id()));
-            Some(DroppedItems { paths, ours })
+            items_of(data, self.formats.ours)
         }
 
         /// Shows the drag image at `point`, through the shell's helper, for `call`.
@@ -490,5 +608,62 @@ fn put_block(data: &IDataObject, format: u16, bytes: &[u8]) {
     // once the call has worked, and a call that failed leaves it ours, which `global` frees.
     if unsafe { data.SetData(&raw const wanted, &raw const medium, true) }.is_ok() {
         global.given();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+
+    use super::*;
+
+    /// OLE on the test's thread, as winit initializes it on the window's.
+    struct Ole;
+
+    impl Ole {
+        fn new() -> Ole {
+            // SAFETY: no reserved pointer; the test's thread is new, so no apartment is set yet.
+            unsafe { OleInitialize(None) }.expect("OLE on the test's thread");
+            Ole
+        }
+    }
+
+    impl Drop for Ole {
+        fn drop(&mut self) {
+            // SAFETY: balances the one `OleInitialize` that worked on this thread.
+            unsafe { OleUninitialize() };
+        }
+    }
+
+    /// Whether `a` and `b` name the same item: the shell may name a folder of the path by its
+    /// long name where the test's temporary folder has its short one.
+    fn same_item(a: &std::path::Path, b: &std::path::Path) -> bool {
+        std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+    }
+
+    #[test]
+    fn the_tag_a_drag_out_writes_is_the_one_the_window_s_drop_target_reads() {
+        let _ole = Ole::new();
+        let folder = tempfile::tempdir().expect("a folder");
+        let file = folder.path().join("끌기.txt");
+        std::fs::write(&file, b"x").expect("a file");
+        let inner = folder.path().join("하위");
+        std::fs::create_dir(&inner).expect("a folder");
+
+        // The drag out's data object, read as the window's target reads a drag over it.
+        let tag = ours_tag(std::process::id(), 0x0102_0304_0506_0708);
+        let data = drag_data(&[file.clone(), inner.clone()], &tag).expect("a data object");
+        let items = items_of(&data, ours_number()).expect("files");
+        assert_eq!(items.ours, Some(0x0102_0304_0506_0708));
+        assert_eq!(items.paths.len(), 2);
+        assert!(same_item(&items.paths[0], &file), "{:?}", items.paths);
+        assert!(same_item(&items.paths[1], &inner), "{:?}", items.paths);
+
+        // Another running copy of the app reads another process's drag: another app's.
+        let other = ours_tag(std::process::id().wrapping_add(1), 7);
+        let data = drag_data(std::slice::from_ref(&file), &other).expect("a data object");
+        let items = items_of(&data, ours_number()).expect("files");
+        assert_eq!(items.ours, None);
+        assert_eq!(items.paths.len(), 1);
     }
 }

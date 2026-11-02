@@ -3558,6 +3558,54 @@ fn the_window_tells_rust_where_a_drag_hovers_nothing_and_when_it_ends() {
 }
 
 #[test]
+fn a_drag_of_rows_is_told_and_ends_with_no_drop_as_it_leaves_the_window() {
+    // DND-05 보내기: Rust sees a drag of rows under way (`DragPointer.rows`), and ends Slint's
+    // drag before the system's drag carries it on, by telling the window that the pointer left
+    // it, as the controller does: no drop, though the last move was over a place that takes it,
+    // where a release would drop.
+    let (window, calls, models, _tree) = drag_window();
+    let told = Calls::default();
+    let record = told.clone();
+    window.on_drag_ended(move || record.note("ended"));
+    let rows = || {
+        // As at the top of a turn of the event loop, where the window's change handlers run.
+        slint::platform::update_timers_and_animations();
+        window.global::<DragPointer<'_>>().get_rows()
+    };
+    let over = || window.global::<DragPointer<'_>>().get_over();
+    for mode in [ViewMode::Details, ViewMode::LargeIcons] {
+        left_in(&window, &models, mode);
+        let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+        let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+        assert!(!rows(), "{mode:?}");
+        // A press is no drag yet.
+        pointer(&window, "move", x_txt);
+        pointer(&window, "press", x_txt);
+        assert!(!rows(), "{mode:?}");
+        pointer(&window, "release", x_txt);
+
+        drag_to(&window, x_txt, backup);
+        assert!(rows(), "{mode:?}");
+        assert!(over(), "{mode:?}");
+        assert_eq!(
+            calls.checks.borrow().last().copied(),
+            Some((42, DropPlace::List, 1, 0)),
+            "{mode:?}"
+        );
+        told.take();
+        window.window().dispatch_event(WindowEvent::PointerExited);
+        assert_eq!(told.take(), ["ended"], "{mode:?}");
+        assert!(calls.drops.borrow().is_empty(), "{mode:?}");
+        assert!(!over(), "{mode:?}");
+        assert!(!rows(), "{mode:?}");
+        // The button let go later (the system's drag had it) drops nothing either.
+        pointer(&window, "release", backup);
+        assert!(calls.drops.borrow().is_empty(), "{mode:?}");
+        assert_eq!(told.take(), Vec::<String>::new(), "{mode:?}");
+    }
+}
+
+#[test]
 fn near_the_right_and_bottom_edges_the_badge_goes_left_of_and_above_the_pointer() {
     let (window, _calls, _models, _tree) = drag_window();
     let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);

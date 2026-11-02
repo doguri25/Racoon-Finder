@@ -1,6 +1,7 @@
 //! Tests of [`AppState`](super::AppState): the panes, the keys and the tree ([`nav`]), the
-//! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]), and the layout
-//! and the commands between the panes ([`layout`]), the tree from the keyboard ([`sidebar`]),
+//! file commands, the jobs and the dialogs ([`jobs`]), dragging rows ([`drag`]) and out of the
+//! window ([`drag_out`]), and the layout and the commands between the panes ([`layout`]), the
+//! tree from the keyboard ([`sidebar`]),
 //! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), the system clipboard
 //! ([`clipboard`]), the properties window ([`properties`]), the item menu and the system's ways
 //! to open an item ([`shell`]), with the helpers they share.
@@ -18,6 +19,7 @@ mod address;
 mod clipboard;
 mod copies;
 mod drag;
+mod drag_out;
 mod drop_rule;
 mod jobs;
 mod layout;

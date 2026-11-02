@@ -71,6 +71,9 @@ component Tile inherits Rectangle {
         drag-finished(action) => {
             root.event(TileEvent.drag-end, false, false, "");
         }
+        changed dragging => {
+            DragPointer.rows = self.dragging;
+        }
 
         item-menu := RowMenu {
             command(name) => {

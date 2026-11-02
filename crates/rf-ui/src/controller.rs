@@ -39,6 +39,14 @@
 //! (`DroppedFile`, without the pointer or the keys), which go into the folder the active pane
 //! shows, as a copy (`Controller::file_dropped`).
 //!
+//! A drag of rows that goes past the window's edges goes on as the system's drag (DND-05 보내기,
+//! `Controller::drag_leaves`), on the next turn of the event loop: Slint's drag ends with no
+//! drop, what it started stops, and `rf_platform::dnd::drag_out` carries the items to the app
+//! that takes them, with no borrow of the state held (on Windows the system's drag runs inside
+//! that call, and the window's own drop target answers it there). The app deletes nothing once
+//! it ends ([`AppState::drag_out_ended`]). Where the system takes no such drag (Linux), the drag
+//! stays Slint's.
+//!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
 //! hidden and the jobs go on behind the tray icon (XFER-15), the icon follows the state at each
@@ -59,7 +67,9 @@ use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use rf_platform::dnd::{DragMods, DropEffect, DropHint, DropRegistration, DroppedItems, Effects};
+use rf_platform::dnd::{
+    self, DragMods, DropEffect, DropHint, DropRegistration, DroppedItems, Effects,
+};
 use rf_platform::shell::{Owner, WindowPoint};
 use slint::language::DragAction;
 use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent as WinitEvent};
@@ -805,6 +815,16 @@ fn system_hint(hover: &Hover) -> DropHint {
     }
 }
 
+/// Tells why a drag of rows that left the window did not go on as the system's drag, where a
+/// developer or a report of a user sees it; the drag is over.
+#[expect(
+    clippy::print_stderr,
+    reason = "the app has no log of its own yet; Slint's own messages go to the same place"
+)]
+fn log_drag_out_failed(error: &std::io::Error) {
+    eprintln!("the drag could not go out of the window: {error}");
+}
+
 /// What a drop whose `effects` these are did, for the drag it ended: the mode of the transfer
 /// they submit, or `none` (a notice, the menu of 놓을 때 묻기, nothing).
 fn dropped_action(effects: &[Effect]) -> DragAction {
@@ -819,7 +839,9 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// modifier keys, which Slint's drop events do not tell and a drop's action follows
 /// ([`Controller::modifiers_changed`]); the end of a drag over the window, which Slint does
 /// not tell when the row the drag started on is gone (a folder that opened under it, DND-08) or
-/// when the pointer is past the window's edges ([`Controller::drag_gone`]); the files another
+/// when the pointer is past the window's edges ([`Controller::drag_gone`]); a drag of rows that
+/// goes past the window's edges, which goes on as the system's drag (DND-05 보내기,
+/// [`Controller::pointer_outside`]), and the left button it needs held; the files another
 /// app dropped on the window, where winit's own drop target takes them (X11, macOS's title bar:
 /// [`Controller::file_dropped`]; nothing shows while they hover, `HoveredFile`, since winit
 /// tells neither where nor the keys); and where the pointer was last, for the menu of a drop
@@ -844,20 +866,28 @@ fn watch_winit_events(window: &MainWindow) {
             WinitEvent::CursorMoved { position, .. }
                 if ui_bridge::outside_window(*position, window.size()) =>
             {
-                with(Controller::drag_maybe_gone);
+                with(Controller::pointer_outside);
             }
             WinitEvent::CursorMoved { position, .. } => {
                 let at = position.to_logical::<f32>(f64::from(window.scale_factor()));
                 with(|c| c.pointer.set(Some(WindowPoint { x: at.x, y: at.y })));
             }
             WinitEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                with(|c| c.left_down.set(true));
+            }
+            WinitEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
             } => {
+                with(|c| c.left_down.set(false));
                 // Once Slint has taken the release: its drop, or the end of the drag.
                 slint::Timer::single_shot(Duration::ZERO, || {
-                    with(Controller::drag_maybe_gone);
+                    with(Controller::left_button_released);
                 });
             }
             _ => {}
@@ -1112,6 +1142,12 @@ pub struct Controller {
     /// Whether the window moved its pointer over the tree for the drag of another app
     /// ([`Controller::leave_tree`]).
     moved_over_tree: Cell<bool>,
+    /// The left button is down in the window, as winit told last: a drag of rows goes out of the
+    /// window only while it is ([`Controller::drag_leaves`]).
+    left_down: Cell<bool>,
+    /// The drag of rows that left the window goes out on the next turn of the event loop
+    /// ([`Controller::pointer_outside`]).
+    leaving: Cell<bool>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
@@ -1215,10 +1251,12 @@ impl Controller {
             dropped_files: RefCell::new(Vec::new()),
             pointer: Cell::new(None),
             drop_target: DropTarget::new(|owner| {
-                rf_platform::dnd::register_drop_target(owner, Rc::new(WindowDrops))
+                dnd::register_drop_target(owner, Rc::new(WindowDrops))
             }),
             outside_hint: RefCell::new(DropHint::default()),
             moved_over_tree: Cell::new(false),
+            left_down: Cell::new(false),
+            leaving: Cell::new(false),
             checks: RefCell::new(CopyChecks::default()),
             sorter: sorter::sorter(|outcome| {
                 post(move |c| {
@@ -1846,6 +1884,88 @@ impl Controller {
             .is_some_and(|window| window.global::<DragPointer<'_>>().get_over());
         if over {
             self.drag_gone();
+        }
+    }
+
+    /// The left button was let go, and Slint has taken the release: a drag of rows is over (its
+    /// row, gone, may tell no end), and so is any drag over the window.
+    fn left_button_released(&self) {
+        if let Some(window) = self.window.upgrade() {
+            window.global::<DragPointer<'_>>().set_rows(false);
+        }
+        self.drag_maybe_gone();
+    }
+
+    /// The pointer is past the window's edges, where a drag holds it: a drag of rows goes on as
+    /// the system's drag, on the next turn of the event loop (DND-05 보내기,
+    /// [`Controller::drag_leaves`]), where the system takes one ([`dnd::DRAGS_OUT`]; elsewhere it
+    /// stays Slint's, and a release out there drops nothing); and any drag over the window is
+    /// gone from it.
+    fn pointer_outside(&self) {
+        let rows = self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.global::<DragPointer<'_>>().get_rows());
+        if dnd::DRAGS_OUT && rows && !self.leaving.replace(true) {
+            slint::Timer::single_shot(Duration::ZERO, || {
+                with(Controller::drag_leaves);
+            });
+        }
+        self.drag_maybe_gone();
+    }
+
+    /// The drag of rows under way left the window ([`Controller::pointer_outside`]), and goes on
+    /// as the system's drag, which other apps take (DND-05 보내기), while the left button is
+    /// still down and the state lets it go ([`AppState::drag_leaves_window`]; else it stays
+    /// Slint's):
+    ///
+    /// 1. Slint's drag ends with no drop: the pointer leaves the window as far as Slint knows (a
+    ///    `PointerExited`, after which `drag-finished` comes with `none`, never a drop, which a
+    ///    release would make where the last move was taken), and `DragPointer` forgets it. From
+    ///    then on the window may name a place under the system's drag (`ui_bridge::drop_spot`),
+    ///    which moves Slint's pointer, since no drag of Slint's is under way.
+    /// 2. What the drag started stops: the time of a rest and the lists that scroll under it
+    ///    ([`Controller::drag_gone`]).
+    /// 3. The system's drag begins, with no borrow of the state held: on Windows it runs inside
+    ///    the call, and the window's own drop target answers it as it passes over the window
+    ///    (module `drops`), the drag of rows that came back. Its end comes to
+    ///    [`AppState::drag_out_ended`], which does nothing with what the taker did: the app
+    ///    deletes nothing.
+    fn drag_leaves(&self) {
+        self.leaving.set(false);
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let pointer = window.global::<DragPointer<'_>>();
+        if !pointer.get_rows() || !self.left_down.get() {
+            return;
+        }
+        let out = self
+            .state
+            .borrow_mut()
+            .as_mut()
+            .and_then(AppState::drag_leaves_window);
+        let Some(out) = out else {
+            return;
+        };
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerExited);
+        pointer.set_rows(false);
+        self.drag_gone();
+        let done: Box<dyn FnOnce(Option<DropEffect>)> = Box::new(|taken| {
+            // Out of the system's call (macOS: its callback) first.
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                with(|c| c.update(|state| state.drag_out_ended(taken)));
+            });
+        });
+        match dnd::drag_out(self.owner(), &out.paths, Effects::ALL, out.ours, done) {
+            // The system's drag has the button now: winit hears no release of it.
+            Ok(()) => self.left_down.set(false),
+            Err(error) => {
+                log_drag_out_failed(&error);
+                self.update(|state| state.drag_out_ended(None));
+            }
         }
     }
 

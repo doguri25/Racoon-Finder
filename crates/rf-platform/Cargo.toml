@@ -23,8 +23,8 @@ windows-core = "0.62.2"
 block2 = "0.6.2"
 libc = "0.2.191"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "block2", "NSView", "NSResponder", "NSDragging", "NSEvent"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray", "NSBundle", "NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "block2", "NSView", "NSResponder", "NSDragging", "NSEvent", "NSApplication", "NSDraggingItem", "NSDraggingSession", "NSImage", "NSWindow", "NSGraphicsContext"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray", "NSBundle", "NSGeometry", "NSProcessInfo"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2", "UNNotification"] }
 
 [target."cfg(unix)".dependencies]
