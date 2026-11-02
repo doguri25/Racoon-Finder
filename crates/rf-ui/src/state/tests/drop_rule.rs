@@ -51,7 +51,7 @@ const NOT_ALLOWED: DropChoice = DropChoice::Refuse(Refusal::NotAllowed);
 /// What a drop does on `os` with `mods` held, the setting a move, everything allowed, within
 /// one drive.
 fn keyed(os: Os, mods: DragMods) -> DropChoice {
-    choose(os, DragDefault::Move, mods, Effects::ALL, true)
+    choose(os, DragDefault::Move, mods, Effects::ALL, || true)
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn windows_takes_file_explorers_keys() {
         DragDefault::Copy,
         SHIFT_KEY,
         Effects::ALL,
-        false,
+        || false,
     );
     assert_eq!(copying, MOVE);
 }
@@ -81,7 +81,7 @@ fn macos_takes_finders_keys() {
     // Control and Shift change nothing there: the setting chooses.
     for mods in [CTRL_KEY, SHIFT_KEY, CTRL_SHIFT_KEYS] {
         assert_eq!(keyed(Os::MacOs, mods), MOVE, "{mods:?}");
-        let copying = choose(Os::MacOs, DragDefault::Copy, mods, Effects::ALL, true);
+        let copying = choose(Os::MacOs, DragDefault::Copy, mods, Effects::ALL, || true);
         assert_eq!(copying, COPY, "{mods:?}");
     }
 }
@@ -96,7 +96,8 @@ fn linux_takes_the_keys_of_its_file_managers() {
 #[test]
 fn without_a_key_the_setting_chooses() {
     for os in [Os::Windows, Os::MacOs, Os::Other] {
-        let plain = |default, same_volume| choose(os, default, NO_KEYS, Effects::ALL, same_volume);
+        let plain =
+            |default, same_volume| choose(os, default, NO_KEYS, Effects::ALL, || same_volume);
         for same_volume in [true, false] {
             assert_eq!(plain(DragDefault::Move, same_volume), MOVE, "{os:?}");
             assert_eq!(plain(DragDefault::Copy, same_volume), COPY, "{os:?}");
@@ -113,28 +114,74 @@ fn without_a_key_the_setting_chooses() {
 }
 
 #[test]
+fn the_drives_are_looked_at_only_for_the_systems_way_without_a_key() {
+    let looks = std::cell::Cell::new(0);
+    let look = || {
+        looks.set(looks.get() + 1);
+        true
+    };
+    // A setting other than the system's way, or a key, chooses without them.
+    for default in [DragDefault::Move, DragDefault::Copy, DragDefault::Ask] {
+        choose(Os::Windows, default, NO_KEYS, Effects::ALL, look);
+    }
+    let copying = choose(
+        Os::Windows,
+        DragDefault::System,
+        CTRL_KEY,
+        Effects::ALL,
+        look,
+    );
+    assert_eq!(copying, COPY);
+    assert_eq!(looks.get(), 0);
+    let moving = choose(
+        Os::Windows,
+        DragDefault::System,
+        NO_KEYS,
+        Effects::ALL,
+        look,
+    );
+    assert_eq!(moving, MOVE);
+    assert_eq!(looks.get(), 1);
+}
+
+#[test]
 fn a_key_that_asks_for_what_the_drag_does_not_allow_refuses() {
     let copy_only = choose(
         Os::Windows,
         DragDefault::Move,
         SHIFT_KEY,
         Effects::COPY,
-        true,
+        || true,
     );
     assert_eq!(copy_only, NOT_ALLOWED);
-    let move_only = choose(Os::MacOs, DragDefault::Move, ALT_KEY, Effects::MOVE, true);
+    let move_only = choose(Os::MacOs, DragDefault::Move, ALT_KEY, Effects::MOVE, || {
+        true
+    });
     assert_eq!(move_only, NOT_ALLOWED);
-    let move_only = choose(Os::Other, DragDefault::Move, CTRL_KEY, Effects::MOVE, true);
+    let move_only = choose(
+        Os::Other,
+        DragDefault::Move,
+        CTRL_KEY,
+        Effects::MOVE,
+        || true,
+    );
     assert_eq!(move_only, NOT_ALLOWED);
     // A key for a link refuses for that reason, whatever the drag allows.
-    let linked = choose(Os::Windows, DragDefault::Move, ALT_KEY, Effects::LINK, true);
+    let linked = choose(
+        Os::Windows,
+        DragDefault::Move,
+        ALT_KEY,
+        Effects::LINK,
+        || true,
+    );
     assert_eq!(linked, NO_LINKS);
 }
 
 #[test]
 fn a_setting_the_drag_does_not_allow_falls_back_from_a_move_to_a_copy() {
-    let plain =
-        |default, allowed, same_volume| choose(Os::Windows, default, NO_KEYS, allowed, same_volume);
+    let plain = |default, allowed, same_volume| {
+        choose(Os::Windows, default, NO_KEYS, allowed, || same_volume)
+    };
     // DND-05: where the drag allows no move, a move is a copy.
     assert_eq!(plain(DragDefault::Move, Effects::COPY, true), COPY);
     assert_eq!(plain(DragDefault::System, Effects::COPY, true), COPY);

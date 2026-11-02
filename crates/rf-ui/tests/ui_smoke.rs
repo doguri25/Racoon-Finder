@@ -2994,7 +2994,23 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
     let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
     drag_to(&window, x_txt, backup);
     pointer(&window, "release", backup);
-    // As Rust shows it for a drop that asks, after the drop.
+    // As Rust shows it for a drop that asks, after the drop: where the drop was. Its items lie
+    // where the menu shows (the testing backend tells their places in the menu): a click at the
+    // drop's place moved by the first item's place in the menu chooses that item.
+    window.invoke_show_drop_menu();
+    let first = ElementHandle::find_by_accessible_label(&window, "여기로 이동")
+        .next()
+        .expect("the menu shows");
+    let (in_menu, size) = (first.absolute_position(), first.size());
+    let on_first = LogicalPosition::new(
+        backup.x + in_menu.x + size.width / 2.0,
+        backup.y + in_menu.y + size.height / 2.0,
+    );
+    pointer(&window, "move", on_first);
+    pointer(&window, "press", on_first);
+    pointer(&window, "release", on_first);
+    run_for(300);
+    assert_eq!(chosen.take(), ["move"], "the menu shows at the drop");
     for (item, name) in [
         ("여기로 이동", "move"),
         ("여기로 복사", "copy"),
@@ -3002,9 +3018,11 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
     ] {
         window.invoke_show_drop_menu();
         choose_item(&window, item);
+        // Said once: the menu's close after a choice says nothing more.
+        run_for(300);
         assert_eq!(chosen.take(), [name], "{item}");
     }
-    // Esc closes it, choosing nothing.
+    // Esc closes it, choosing nothing, which the window tells as 취소 once it sees it closed.
     window.invoke_show_drop_menu();
     assert!(
         ElementHandle::find_by_accessible_label(&window, "여기로 이동")
@@ -3017,7 +3035,20 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
             .next()
             .is_none()
     );
-    assert_eq!(chosen.take(), Vec::<String>::new());
+    run_for(300);
+    assert_eq!(chosen.take(), ["cancel"]);
+    // So does a click beside it.
+    window.invoke_show_drop_menu();
+    let beside = LogicalPosition::new(backup.x, backup.y + 300.0);
+    pointer(&window, "press", beside);
+    pointer(&window, "release", beside);
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, "여기로 이동")
+            .next()
+            .is_none()
+    );
+    run_for(300);
+    assert_eq!(chosen.take(), ["cancel"]);
 }
 
 /// The left pane of [`drag_window`] shown in `mode`.
@@ -3480,6 +3511,54 @@ fn the_window_tells_rust_where_a_drag_hovers_nothing_and_when_it_ends() {
     assert!(!over());
     assert!(labelled(&window, "List 0", AccessibleRole::Text).is_empty());
     pointer(&window, "release", backup);
+}
+
+#[test]
+fn near_the_right_and_bottom_edges_the_badge_goes_left_of_and_above_the_pointer() {
+    let (window, _calls, _models, _tree) = drag_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let list = element_of(&window, "FileList::list", true);
+    let (at, size) = (list.absolute_position(), list.size());
+    let room = window
+        .window()
+        .size()
+        .to_logical(window.window().scale_factor());
+    // The bottom right corner of the right pane's list, by the window's.
+    let corner = LogicalPosition::new(at.x + size.width - 4.0, at.y + size.height - 4.0);
+    drag_to(&window, x_txt, corner);
+    // The badge: its text with 10px on either side, 26px tall around the text's middle.
+    let badge = || {
+        let text = labelled(&window, "List -1", AccessibleRole::Text).remove(0);
+        let (at, size) = (text.absolute_position(), text.size());
+        let middle = at.y + size.height / 2.0;
+        (
+            at.x - 10.0,
+            middle - 13.0,
+            at.x + size.width + 10.0,
+            middle + 13.0,
+        )
+    };
+    let (left, top, right, bottom) = badge();
+    // Right of and below the pointer it would not fit.
+    let width = right - left;
+    assert!(
+        corner.x + 16.0 + width + 4.0 > room.width,
+        "{corner:?} in {room:?}"
+    );
+    assert!(
+        corner.y + 20.0 + 26.0 + 4.0 > room.height,
+        "{corner:?} in {room:?}"
+    );
+    // So it goes left of the pointer and above it, off what is under it, inside the window.
+    assert!(right <= corner.x, "{right} {corner:?}");
+    assert!(bottom <= corner.y, "{bottom} {corner:?}");
+    assert!(left >= 0.0 && top >= 0.0);
+    // Away from the edges it is below and to the right of the pointer, as before.
+    let middle = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    pointer(&window, "move", middle);
+    let (left, top, _, _) = badge();
+    assert!(left > middle.x && top > middle.y, "{left} {top} {middle:?}");
+    pointer(&window, "release", middle);
 }
 
 #[test]
@@ -4658,13 +4737,26 @@ fn the_view_menu_switches_the_layout() {
         ("배치", "두 패널을 같은 크기로", "split 0.50"),
         ("배치", "분할선을 왼쪽으로", "split 0.40"),
         ("배치", "분할선을 오른쪽으로", "split 0.60"),
-        ("", "패널 바꾸기", "swap-panes"),
-        ("", "같은 폴더를 반대편에", "same-folder"),
-        ("", "탐색 동기화", "toggle-sync"),
+        ("배치", "패널 바꾸기", "swap-panes"),
+        ("배치", "같은 폴더를 반대편에", "same-folder"),
+        ("배치", "탐색 동기화", "toggle-sync"),
     ] {
         choose(sub, item);
         assert_eq!(calls.take(), [call], "{item}");
     }
+    // The menu fits a window 560px tall below its button (about 45px down), with room to spare:
+    // its last item ends well before 500px of the menu (the testing backend tells the places of
+    // a menu's items in the menu).
+    open("");
+    let last = ElementHandle::find_by_accessible_label(&window, "설정")
+        .next()
+        .expect("the menu shows 설정");
+    let end = last.absolute_position().y + last.size().height;
+    assert!(
+        end < 490.0,
+        "the 보기 menu is {end}px tall to its last item"
+    );
+    press(&window, Key::Escape);
     // One above the other, the divider goes up and down.
     window.set_stacked(true);
     open("배치");
@@ -4682,8 +4774,8 @@ fn the_view_menu_switches_the_layout() {
     for (sub, item) in [
         ("배치", "두 패널을 같은 크기로"),
         ("배치", "분할선을 왼쪽으로"),
-        ("", "같은 폴더를 반대편에"),
-        ("", "탐색 동기화"),
+        ("배치", "같은 폴더를 반대편에"),
+        ("배치", "탐색 동기화"),
     ] {
         window.set_dual_pane(false);
         open(sub);
@@ -4696,8 +4788,8 @@ fn the_view_menu_switches_the_layout() {
         }
     }
     default_layout(&window);
-    // The marks show the layout as Rust sets it back after each toggle: 폴더 트리, 미리 보기
-    // 패널 and 탐색 동기화 in the menu, 듀얼 패널 and 위아래로 나누기 in its 배치 menu (and no
+    // The marks show the layout as Rust sets it back after each toggle: 폴더 트리 and 미리 보기
+    // 패널 in the menu, 듀얼 패널, 위아래로 나누기 and 탐색 동기화 in its 배치 menu (and no
     // other: the extensions are not shown).
     window.set_show_extensions(false);
     let marks = || {
@@ -4736,9 +4828,15 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
             choose_item(&window, sub);
         }
     };
-    let items = [(0, "이동"), (1, "복사"), (2, "OS 방식"), (3, "매번 묻기")];
+    // The four defaults are items of 설정 itself.
+    let items = [
+        (0, "끌어 놓기: 이동"),
+        (1, "끌어 놓기: 복사"),
+        (2, "끌어 놓기: OS 방식"),
+        (3, "끌어 놓기: 매번 묻기"),
+    ];
     for (choice, item) in items {
-        open(&["설정", "끌어 놓기 기본 동작"]);
+        open(&["설정"]);
         choose_item(&window, item);
         assert_eq!(calls.take(), [format!("drag-default {choice}")], "{item}");
     }
@@ -4749,22 +4847,33 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     window.set_move_undo_toast(false);
     let middle_y =
         |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
-    for (choice, item) in items {
-        window.set_drag_default(choice);
-        open(&["설정", "끌어 놓기 기본 동작"]);
-        let marks: Vec<ElementHandle> =
-            ElementHandle::find_by_accessible_label(&window, "✓").collect();
-        assert_eq!(marks.len(), 1, "{item}");
+    let marked_by = |item: &str| {
         let marked = ElementHandle::find_by_accessible_label(&window, item)
             .next()
             .unwrap_or_else(|| panic!("the menu shows {item}"));
-        assert!(
-            (middle_y(&marks[0]) - middle_y(&marked)).abs() < 4.0,
-            "the mark is by {item}"
-        );
-        for _ in 0..3 {
+        ElementHandle::find_by_accessible_label(&window, "✓")
+            .any(|mark| (middle_y(&mark) - middle_y(&marked)).abs() < 4.0)
+    };
+    for (choice, item) in items {
+        window.set_drag_default(choice);
+        open(&["설정"]);
+        let marks = ElementHandle::find_by_accessible_label(&window, "✓").count();
+        assert_eq!(marks, 1, "{item}");
+        assert!(marked_by(item), "the mark is by {item}");
+        for _ in 0..2 {
             press(&window, Key::Escape);
         }
+    }
+    // The switch of the undo toast has its mark while it is on.
+    window.set_move_undo_toast(true);
+    open(&["설정"]);
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&window, "✓").count(),
+        2
+    );
+    assert!(marked_by("끌어서 옮긴 뒤 되돌리기 알림"));
+    for _ in 0..2 {
+        press(&window, Key::Escape);
     }
     // The switches say their commands. The right click's Windows menu is offered on Windows
     // alone.

@@ -1,10 +1,11 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
-// the names, the sidebar and the preview panel, the layout, the panes and the tabs, 경로 복사
-// of the active pane's items, and 설정 (what a drop does, the undo of a dragged move, and on
-// Windows the menu of a right click). It is short enough for a 560px window: the themes and the
-// layout are sub-menus of their own. Every item says its key (KEY-03), and the keys reach every item:
-// F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
+// the names, the sidebar and the preview panel, the layout and the commands between the panes,
+// the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the undo of a
+// dragged move, and on Windows the menu of a right click). It is short enough for a 560px window,
+// with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
+// their own, and no sub-menu has one of its own to open over it. Every item says its key
+// (KEY-03), and the keys reach every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
 // items are two-way bound to properties set from the state: the view's marks as the menu opens and
@@ -38,7 +39,7 @@ export component ViewMenu inherits ContextMenuArea {
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
     callback theme-chosen(choice: int);
-    // 끌어 놓기 기본 동작 chose `choice` (the numbers of `drag-default`).
+    // An item 끌어 놓기: … of 설정 chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // 두 패널을 같은 크기로, and the divider moved by `step` of the room.
     callback even-split();
@@ -153,7 +154,8 @@ export component ViewMenu inherits ContextMenuArea {
         root.drag-system-mark = choice == 2;
         root.drag-ask-mark = choice == 3;
     }
-    // An item of 끌어 놓기 기본 동작: its mark alone shows, and Rust keeps the choice.
+    // An item of what a drop does without a key (끌어 놓기: …): its mark alone shows, and Rust
+    // keeps the choice.
     function choose-drag-default(choice: int) {
         root.mark-drag-default(choice);
         root.drag-default-chosen(choice);
@@ -601,8 +603,8 @@ export component ViewMenu inherits ContextMenuArea {
             }
         }
         MenuSeparator { }
-        // The panes: one or two, beside or above each other, and the divider between them (its
-        // items act only while two panes show).
+        // The panes: one or two, beside or above each other, the divider between them (its
+        // items act only while two panes show), and the commands between them.
         Menu {
             title: "배치";
 
@@ -649,28 +651,33 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-        }
-        // Those for the other pane act only while two panes show.
-        MenuItem {
-            title: Shortcuts.titled("패널 바꾸기", Shortcuts.swap-panes);
-            activated => {
-                root.command("swap-panes");
+            MenuSeparator { }
+            // The commands between the two panes; those for the other pane act only while two
+            // panes show.
+            MenuItem {
+                title: Shortcuts.titled("패널 바꾸기", Shortcuts.swap-panes);
+                activated => {
+                    root.command("swap-panes");
+                    root.done();
+                }
             }
-        }
-        MenuItem {
-            title: Shortcuts.titled("같은 폴더를 반대편에", Shortcuts.same-folder);
-            enabled: root.dual-pane;
-            activated => {
-                root.command("same-folder");
+            MenuItem {
+                title: Shortcuts.titled("같은 폴더를 반대편에", Shortcuts.same-folder);
+                enabled: root.dual-pane;
+                activated => {
+                    root.command("same-folder");
+                    root.done();
+                }
             }
-        }
-        MenuItem {
-            title: Shortcuts.titled("탐색 동기화", Shortcuts.sync-navigation);
-            enabled: root.dual-pane;
-            checkable: true;
-            checked <=> root.sync-navigation;
-            activated => {
-                root.command("toggle-sync");
+            MenuItem {
+                title: Shortcuts.titled("탐색 동기화", Shortcuts.sync-navigation);
+                enabled: root.dual-pane;
+                checkable: true;
+                checked <=> root.sync-navigation;
+                activated => {
+                    root.command("toggle-sync");
+                    root.done();
+                }
             }
         }
         MenuSeparator { }
@@ -758,48 +765,47 @@ export component ViewMenu inherits ContextMenuArea {
         }
         // The settings the app keeps that have no place elsewhere: what a drop does without a
         // modifier key (DND-02), the toast that offers to undo a dragged move (DND-07), and on
-        // Windows whether a right click shows Windows' own menu (OPS-05). After 경로 복사
-        // without a separator, which a 560px window has no room for.
+        // Windows whether a right click shows Windows' own menu (OPS-05). The four defaults are
+        // its own items, not a sub-menu of it: a third level would open over the 보기 menu in a
+        // narrow window and hide this one. After 경로 복사 without a separator, for the room of
+        // a 560px window.
         Menu {
             title: "설정";
 
-            Menu {
-                title: "끌어 놓기 기본 동작";
-
-                MenuItem {
-                    title: "이동";
-                    checkable: true;
-                    checked <=> root.drag-move-mark;
-                    activated => {
-                        root.choose-drag-default(0);
-                    }
-                }
-                MenuItem {
-                    title: "복사";
-                    checkable: true;
-                    checked <=> root.drag-copy-mark;
-                    activated => {
-                        root.choose-drag-default(1);
-                    }
-                }
-                // As the system's file manager does: a move within a drive, a copy to another.
-                MenuItem {
-                    title: "OS 방식";
-                    checkable: true;
-                    checked <=> root.drag-system-mark;
-                    activated => {
-                        root.choose-drag-default(2);
-                    }
-                }
-                MenuItem {
-                    title: "매번 묻기";
-                    checkable: true;
-                    checked <=> root.drag-ask-mark;
-                    activated => {
-                        root.choose-drag-default(3);
-                    }
+            MenuItem {
+                title: "끌어 놓기: 이동";
+                checkable: true;
+                checked <=> root.drag-move-mark;
+                activated => {
+                    root.choose-drag-default(0);
                 }
             }
+            MenuItem {
+                title: "끌어 놓기: 복사";
+                checkable: true;
+                checked <=> root.drag-copy-mark;
+                activated => {
+                    root.choose-drag-default(1);
+                }
+            }
+            // As the system's file manager does: a move within a drive, a copy to another.
+            MenuItem {
+                title: "끌어 놓기: OS 방식";
+                checkable: true;
+                checked <=> root.drag-system-mark;
+                activated => {
+                    root.choose-drag-default(2);
+                }
+            }
+            MenuItem {
+                title: "끌어 놓기: 매번 묻기";
+                checkable: true;
+                checked <=> root.drag-ask-mark;
+                activated => {
+                    root.choose-drag-default(3);
+                }
+            }
+            MenuSeparator { }
             MenuItem {
                 title: "끌어서 옮긴 뒤 되돌리기 알림";
                 checkable: true;

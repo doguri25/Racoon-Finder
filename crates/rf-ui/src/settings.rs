@@ -85,7 +85,7 @@ pub enum ThemeChoice {
     Dark,
 }
 
-/// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기 기본 동작, DND-02).
+/// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기: …, DND-02).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DragDefault {

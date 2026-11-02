@@ -248,7 +248,7 @@ export component MainWindow inherits Window {
     callback split-changed(share: float);
     // A theme was chosen in the 보기 menu (the numbers of `theme-choice`).
     callback theme-chosen(choice: int);
-    // 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작 chose `choice` (the numbers of `drag-default`).
+    // 보기 ▸ 설정 ▸ 끌어 놓기: … chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // The window's size changed (the settings keep it).
     callback window-resized();
@@ -541,8 +541,20 @@ export component MainWindow inherits Window {
 
     // The menu of 놓을 때 묻기, where the drop was.
     public function show-drop-menu() {
+        drop-keys.focus();
+        root.drop-asking = true;
         drop-menu.show({ x: DragPointer.x, y: DragPointer.y });
+        // Slint's own menu has taken the keys from `drop-keys` by now. The system's own menu
+        // (Windows, macOS) takes none and gives none back, and has closed by now: the keys go
+        // back at once, and what it chose comes later.
+        if (drop-keys.has-focus) {
+            root.drop-asking = false;
+            root.give-keys-back();
+        }
     }
+
+    // The menu of 놓을 때 묻기 is open, and its drop waits for it (`drop-keys`).
+    private property <bool> drop-asking;
 
     private property <string> hint;
     private property <bool> hint-refused;
@@ -692,7 +704,7 @@ export component MainWindow inherits Window {
     // panes) takes it away. Either way the pointer is told, and nothing it rests on opens.
     DropArea {
         can-drop(event) => {
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             if (!root.hint-told) {
                 root.hint = "";
             }
@@ -1492,11 +1504,13 @@ export component MainWindow inherits Window {
     }
 
     // Beside the pointer of a drag of rows: what a drop there does ("이동 → 백업"), or why it does
-    // nothing (DND-03). Below and to the right of the pointer, kept inside the window, and
-    // narrower than it; it takes no pointer.
+    // nothing (DND-03). Below and to the right of the pointer; near the right or the bottom edge
+    // of the window, where it would not fit there, to the left of it or above it, off the place
+    // under the pointer as far as the window has room. Narrower than the window; it takes no
+    // pointer.
     if root.hint != "": Rectangle {
-        x: max(4px, min(DragPointer.x + 16px, root.width - self.width - 4px));
-        y: max(4px, min(DragPointer.y + 20px, root.height - self.height - 4px));
+        x: DragPointer.x + 16px + self.width + 4px <= root.width ? DragPointer.x + 16px : max(4px, DragPointer.x - 8px - self.width);
+        y: DragPointer.y + 20px + self.height + 4px <= root.height ? DragPointer.y + 20px : max(4px, DragPointer.y - 8px - self.height);
         width: min(hint-text.preferred-width + 20px, root.width - 8px);
         height: 26px;
         border-radius: 13px;
@@ -1812,9 +1826,35 @@ export component MainWindow inherits Window {
             }
         }
 
-        drop-menu := DropMenu {
-            chosen(name) => {
-                root.drop-menu-chosen(name);
+        // The menu of 놓을 때 묻기 opens from here, which has the keys as it opens: Slint's own menu
+        // gives them back here as it closes, after its choice if there is one. A menu tells no
+        // close without a choice (Esc, a click beside it), so that is when the window says 취소,
+        // and the drop is never made; the keys then go back where they were. (The system's own
+        // menu of Windows and macOS tells neither: Rust forgets its drop at the next press of a
+        // row, and nothing can choose it meanwhile.)
+        drop-keys := FocusScope {
+            width: 0px;
+            height: 0px;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            focus-gained(reason) => {
+                if (reason != FocusReason.popup-activation) {
+                    return;
+                }
+                if (root.drop-asking) {
+                    root.drop-asking = false;
+                    root.drop-menu-chosen("cancel");
+                }
+                if (root.dialog == DialogKind.none) {
+                    root.give-keys-back();
+                }
+            }
+
+            drop-menu := DropMenu {
+                chosen(name) => {
+                    root.drop-asking = false;
+                    root.drop-menu-chosen(name);
+                }
             }
         }
     }

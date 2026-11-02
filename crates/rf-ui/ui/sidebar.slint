@@ -107,11 +107,11 @@ component TreeItem inherits Rectangle {
         drop := DropArea {
             enabled: root.accepts-drops;
             can-drop(event) => {
-                DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                DragPointer.at(self.absolute-position, event.position);
                 return root.drop-check(event.data);
             }
             dropped(event) => {
-                DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                DragPointer.at(self.absolute-position, event.position);
                 return root.dropped(event.data);
             }
         }
@@ -312,7 +312,7 @@ export component Sidebar inherits Rectangle {
         height: list.height;
         enabled: root.accepts-drops;
         can-drop(event) => {
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             root.saw-drag();
             return DragAction.none;
         }

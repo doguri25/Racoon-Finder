@@ -301,12 +301,12 @@ export component FileGrid inherits Rectangle {
         can-drop(event) => {
             let index = root.index-at(event.position.x, event.position.y);
             self.target = index >= 0 && root.rows[index].is-dir ? index : -1;
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             root.saw-drag();
             return root.drop-check(event.data, index);
         }
         dropped(event) => {
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             return root.dropped(event.data, root.index-at(event.position.x, event.position.y));
         }
 

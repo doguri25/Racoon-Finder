@@ -499,7 +499,7 @@ fn connect(window: &MainWindow) {
 }
 
 /// The callbacks of a drag of rows: a hover over a place and a drop there, the choice of the
-/// menu of 놓을 때 묻기, and 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작.
+/// menu of 놓을 때 묻기, and 보기 ▸ 설정 ▸ 끌어 놓기: ….
 fn connect_drops(window: &MainWindow) {
     window.on_drop_check(|data, place, s, i| {
         with(|c| c.drop_check(&data, place, s, i)).unwrap_or(DragAction::None)

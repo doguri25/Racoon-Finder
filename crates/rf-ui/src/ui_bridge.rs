@@ -861,8 +861,8 @@ pub fn outside_window(position: PhysicalPosition<f64>, size: PhysicalSize) -> bo
         || position.y >= f64::from(size.height)
 }
 
-/// The number of `default` among the items of 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작: 0 이동, 1 복사,
-/// 2 OS 방식, 3 매번 묻기.
+/// The number of `default` among the items 끌어 놓기: … of 보기 ▸ 설정: 0 이동, 1 복사, 2 OS
+/// 방식, 3 매번 묻기.
 pub fn drag_default_number(default: DragDefault) -> i32 {
     match default {
         DragDefault::Move => 0,

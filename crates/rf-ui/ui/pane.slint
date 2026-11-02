@@ -429,11 +429,11 @@ component TabButton inherits Rectangle {
 
     drop := DropArea {
         can-drop(event) => {
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             return root.drop-check(event.data);
         }
         dropped(event) => {
-            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            DragPointer.at(self.absolute-position, event.position);
             return root.dropped(event.data, event.position.x);
         }
     }
@@ -820,7 +820,7 @@ export component Pane inherits Rectangle {
                 property <length> hover-x;
                 property <data-transfer> hover-data;
                 can-drop(event) => {
-                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    DragPointer.at(self.absolute-position, event.position);
                     self.hover-x = event.position.x;
                     self.hover-data = event.data;
                     self.slot = root.slot-at(event.position.x);

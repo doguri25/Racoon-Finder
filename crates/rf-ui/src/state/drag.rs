@@ -89,8 +89,6 @@ pub enum DropSpot {
 pub struct DropOffer {
     /// The folder they would go into.
     pub folder: VPath,
-    /// How many items the drag carries.
-    pub count: usize,
     /// What a drop there does, with the keys held now.
     pub choice: DropChoice,
 }
@@ -122,6 +120,8 @@ impl AppState {
     pub fn press_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
         self.activate(side);
         self.pending_click = None;
+        // A drop that waited for the menu of 놓을 때 묻기 is not made after another drag starts.
+        self.asked_drop = None;
         // A row the window drew and the state no longer has readies no drag, rather than
         // leaving the last press's.
         self.drag = None;
@@ -184,7 +184,7 @@ impl AppState {
         self.drag_mods = mods;
     }
 
-    /// What a drop does without a modifier key (보기 ▸ 설정 ▸ 끌어 놓기 기본 동작).
+    /// What a drop does without a modifier key (보기 ▸ 설정 ▸ 끌어 놓기: …).
     pub fn drag_default(&self) -> DragDefault {
         self.drag_default
     }
@@ -222,33 +222,31 @@ impl AppState {
         if takes != Validity::Ok {
             return None;
         }
-        let count = drag.request.sources.len();
         let choice = self.drop_choice(&self.drag.as_ref()?.request.from_dir, &folder);
         if !matches!(choice, DropChoice::Refuse(_))
             && let Some(drag) = self.drag.as_mut()
         {
             drag.shown = Some(folder.clone());
         }
-        Some(DropOffer {
-            folder,
-            count,
-            choice,
-        })
+        Some(DropOffer { folder, choice })
     }
 
     /// What a drop of items from the folder `from` into `folder` does, with the keys held now
     /// and the setting. A drag of this window's allows a copy and a move; the drives are those
-    /// of the sidebar, which a worker found (none known yet: another drive).
+    /// of the sidebar, which a worker found (none known yet: another drive), looked at only for
+    /// the system's way.
     fn drop_choice(&self, from: &VPath, folder: &VPath) -> DropChoice {
-        let drives: Vec<PathBuf> = self
-            .places
-            .iter()
-            .filter(|place| place.kind == PlaceKind::Drive)
-            .filter_map(|place| place.path.as_local().map(Path::to_path_buf))
-            .collect();
-        let same_volume = match (from.as_local(), folder.as_local()) {
-            (Some(from), Some(folder)) => drop_rule::same_volume(from, folder, &drives),
-            _ => false,
+        let same_volume = || {
+            let drives: Vec<PathBuf> = self
+                .places
+                .iter()
+                .filter(|place| place.kind == PlaceKind::Drive)
+                .filter_map(|place| place.path.as_local().map(Path::to_path_buf))
+                .collect();
+            match (from.as_local(), folder.as_local()) {
+                (Some(from), Some(folder)) => drop_rule::same_volume(from, folder, &drives),
+                _ => false,
+            }
         };
         drop_rule::choose(
             Os::CURRENT,
@@ -325,13 +323,14 @@ impl AppState {
         self.drop_transfer(mode, &drag.request.sources, &offer.folder, drag.side)
     }
 
-    /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소): the drop
-    /// it showed for gets that transfer, as a drop that chose it at once would. Esc and a click
-    /// beside the menu close it choosing nothing, and its drop is never made; the next drop that
-    /// asks takes its place. Nothing as the app ends.
+    /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소, and Esc
+    /// or a click beside the menu, which the window tells the same): the drop it showed for gets
+    /// that transfer, as a drop that chose it at once would, or is never made. Nothing while a
+    /// window shows over the main window or the app ends, as for a drop; nor once a press has
+    /// readied another drag. The drop is answered once.
     pub fn drop_menu_chosen(&mut self, mode: Option<TransferMode>) -> Vec<Effect> {
         match (self.asked_drop.take(), mode) {
-            (Some(asked), Some(mode)) if !self.quitting => {
+            (Some(asked), Some(mode)) if self.modal.is_none() && !self.quitting => {
                 self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
             }
             _ => Vec::new(),

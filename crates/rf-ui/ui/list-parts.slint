@@ -21,10 +21,11 @@ export global DragPointer {
     // the window ask the place there again, as a move of the pointer would.
     callback moved-under();
 
-    // The pointer is at (`x`, `y`) of the window.
-    public function at(x: length, y: length) {
-        DragPointer.x = x;
-        DragPointer.y = y;
+    // The pointer is at `offset` of a place that lies at `origin` of the window (a drop area's
+    // `absolute-position` and its event's `position`): the one rule of the window's coordinates.
+    public function at(origin: Point, offset: Point) {
+        DragPointer.x = origin.x + offset.x;
+        DragPointer.y = origin.y + offset.y;
         DragPointer.over = true;
     }
 

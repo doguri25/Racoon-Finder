@@ -250,12 +250,12 @@ export component FileList inherits Rectangle {
                 can-drop(event) => {
                     let row = root.row-at(event.position.y);
                     self.target-row = row >= 0 && root.rows[row].is-dir ? row : -1;
-                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    DragPointer.at(self.absolute-position, event.position);
                     root.saw-drag();
                     return root.drop-check(event.data, row);
                 }
                 dropped(event) => {
-                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    DragPointer.at(self.absolute-position, event.position);
                     return root.dropped(event.data, root.row-at(event.position.y));
                 }
 

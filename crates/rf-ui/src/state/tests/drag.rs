@@ -231,7 +231,7 @@ fn a_drop_submits_the_transfer_of_the_items_the_drag_started_with() {
         row: Some(0),
     };
     let offered = state.drop_offer(id, spot).expect("the folder takes them");
-    assert_eq!((offered.folder, offered.count), (in_b("백업"), 3));
+    assert_eq!(offered.folder, in_b("백업"));
     let (spec, origin) = the_submit(&state.drop_items(id, spot));
     assert_eq!(origin, Some(LEFT));
     let JobSpec::Transfer(transfer) = spec else {
@@ -383,6 +383,37 @@ fn only_the_payload_of_the_last_drag_drops_and_only_on_the_main_window() {
     assert_eq!(state.drop_items(second, RIGHT_LIST), []);
     state.dialog_cancelled();
     assert!(state.drop_offer(second, RIGHT_LIST).is_some());
+}
+
+#[test]
+fn a_drop_that_asks_is_forgotten_by_the_next_drag_and_while_a_window_shows() {
+    let mut state = two_panes();
+    state.set_drag_default(DragDefault::Ask);
+    let ask = |state: &mut AppState| {
+        state.press_row(LEFT, 2, false, false);
+        let id = state.drag_id();
+        assert_eq!(
+            state.drop_items(id, RIGHT_LIST),
+            [Effect::ShowMenu(MenuShown::AskDrop)]
+        );
+    };
+    // Its menu closed choosing nothing (Esc, a click beside it, which the window tells as
+    // 취소), and the next choice has no drop to make.
+    ask(&mut state);
+    assert_eq!(state.drop_menu_chosen(None), []);
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+    // A press that readies another drag forgets it too.
+    ask(&mut state);
+    state.press_row(LEFT, 1, false, false);
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+    // While a window shows over the main window, its choice makes nothing, and the drop is
+    // forgotten.
+    ask(&mut state);
+    state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
+    assert!(matches!(state.modal(), Some(Modal::Name(_))));
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+    state.dialog_cancelled();
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
 }
 
 /// The record of a move of `x.txt` from `a` into `b`.

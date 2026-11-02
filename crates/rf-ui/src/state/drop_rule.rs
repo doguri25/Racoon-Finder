@@ -1,6 +1,6 @@
 //! What a drop does (DND-02, DND-04): the modifier keys held, the setting of 보기 ▸ 설정 ▸
-//! 끌어 놓기 기본 동작 ([`DragDefault`]) and what the drag allows choose it, with the keys of
-//! each system's file manager. Pure: the rules of every system are tested on any.
+//! 끌어 놓기: … ([`DragDefault`]) and what the drag allows choose it, with the keys of each
+//! system's file manager. Pure: the rules of every system are tested on any.
 //!
 //! | System | Copy | Move | Link |
 //! | --- | --- | --- | --- |
@@ -44,13 +44,13 @@ pub enum Refusal {
 
 /// What a drop does on `os` with the keys `mods` held, the setting `default` and the effects
 /// the drag `allowed`, the items going to a folder on the drive they are on or not
-/// (`same_volume`, [`same_volume`]).
+/// (`same_volume`, [`same_volume`]), which is asked only for the system's way without a key.
 pub fn choose(
     os: Os,
     default: DragDefault,
     mods: DragMods,
     allowed: Effects,
-    same_volume: bool,
+    same_volume: impl FnOnce() -> bool,
 ) -> DropChoice {
     if let Some(asked) = keyed_effect(os, mods) {
         return match asked {
@@ -61,7 +61,7 @@ pub fn choose(
     }
     let wanted = match default {
         DragDefault::Move => DropEffect::Move,
-        DragDefault::System if same_volume => DropEffect::Move,
+        DragDefault::System if same_volume() => DropEffect::Move,
         DragDefault::Copy | DragDefault::System => DropEffect::Copy,
         DragDefault::Ask => {
             let either = allowed.contains(DropEffect::Move) || allowed.contains(DropEffect::Copy);
