@@ -187,6 +187,15 @@ pub(super) fn asked(allowed: Effects) -> DropChoice {
     )
 }
 
+/// The menu of 놓을 때 묻기 for a drop whose drag `allowed` these: it offers only what the drag
+/// allows (a drag of another app on Linux allows no move, and its menu no 여기로 이동).
+pub(super) fn ask_menu(allowed: Effects) -> Effect {
+    Effect::ShowMenu(MenuShown::AskDrop {
+        moves: allowed.contains(DropEffect::Move),
+        copies: allowed.contains(DropEffect::Copy),
+    })
+}
+
 /// A press on a selected row, whose click waits for the release: no drag came of it then.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingClick {
@@ -471,18 +480,18 @@ impl AppState {
                 side: drag.side,
                 allowed,
             });
-            return vec![Effect::ShowMenu(MenuShown::AskDrop)];
+            return vec![ask_menu(allowed)];
         };
         self.drop_transfer(mode, &drag.request.sources, &offer.folder, drag.side)
     }
 
     /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소, and Esc
     /// or a click beside the menu, which the window tells the same): the drop it showed for gets
-    /// that transfer, as a drop that chose it at once would, or is never made. A drag of another
-    /// app that does not allow a move copies for 여기로 이동 (DND-05), and one that does not allow
-    /// a copy makes nothing of 여기로 복사, as the rule of a drop's action goes. Nothing while a
-    /// window shows over the main window or the app ends, as for a drop; nor once a press has
-    /// readied another drag. The drop is answered once.
+    /// that transfer, as a drop that chose it at once would, or is never made. The menu offers
+    /// only what the drag allows ([`MenuShown::AskDrop`]); a choice it does not allow makes
+    /// nothing, never the other transfer in its place. Nothing while a window shows over the
+    /// main window or the app ends, as for a drop; nor once a press has readied another drag.
+    /// The drop is answered once.
     pub fn drop_menu_chosen(&mut self, mode: Option<TransferMode>) -> Vec<Effect> {
         let (Some(asked), Some(mode)) = (self.asked_drop.take(), mode) else {
             return Vec::new();
@@ -490,24 +499,13 @@ impl AppState {
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }
-        let default = match mode {
-            TransferMode::Move => DragDefault::Move,
-            TransferMode::Copy => DragDefault::Copy,
+        let effect = match mode {
+            TransferMode::Move => DropEffect::Move,
+            TransferMode::Copy => DropEffect::Copy,
         };
-        let choice = drop_rule::choose(
-            Os::CURRENT,
-            default,
-            DragMods::default(),
-            asked.allowed,
-            || false,
-        );
-        let mode = match choice {
-            DropChoice::Do(DropEffect::Move) => TransferMode::Move,
-            DropChoice::Do(DropEffect::Copy) => TransferMode::Copy,
-            DropChoice::Do(DropEffect::Link) | DropChoice::Ask | DropChoice::Refuse(_) => {
-                return Vec::new();
-            }
-        };
+        if !asked.allowed.contains(effect) {
+            return Vec::new();
+        }
         self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
     }
 

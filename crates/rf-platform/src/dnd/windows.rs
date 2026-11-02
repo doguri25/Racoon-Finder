@@ -39,7 +39,9 @@
 //!   the target reads ([`ours_number`], [`items_of`]). `SHDoDragDrop` runs the drag in the
 //!   system's loop, with the shell's drag image and its default drop source, until it ends; the
 //!   window's own target answers it as it passes over the window. What the taker did goes to
-//!   `done` and nowhere else: nothing is deleted here.
+//!   `done` and nowhere else: nothing is deleted here. It begins only while the primary mouse
+//!   button is down as the mouse has it ([`primary_held`]): with none held, the default drop
+//!   source would drop at once wherever the pointer is.
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::io;
@@ -58,17 +60,19 @@ use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT, IDropSource, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     BHID_DataObject, CFSTR_DROPDESCRIPTION, CFSTR_LOGICALPERFORMEDDROPEFFECT,
     CFSTR_PERFORMEDDROPEFFECT, CLSID_DragDropHelper, IDropTargetHelper, ILCreateFromPathW, ILFree,
     SHCreateShellItemArrayFromIDLists, SHDoDragDrop,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
 use windows::core::{IUnknown, PCWSTR};
 
 use super::{
-    DropEffect, DropHandler, DroppedItems, Effects, effects_bits, ours_format, ours_in, ours_tag,
-    performed_effect,
+    DropEffect, DropHandler, DroppedItems, Effects, button_held, effects_bits, ours_format,
+    ours_in, ours_tag, performed_effect, primary_down,
 };
 use crate::clipboard::{Global, global_bytes, hdrop_units};
 use crate::shell::Owner;
@@ -193,6 +197,7 @@ pub fn drag_out(
     ours: u64,
     done: Box<dyn FnOnce(Option<DropEffect>)>,
 ) -> io::Result<()> {
+    button_held(primary_held())?;
     let hwnd = window_of(owner)?;
     let data = drag_data(paths, &ours_tag(std::process::id(), ours))?;
     // SAFETY: the app's window, on its thread, in the apartment where winit initialized OLE; the
@@ -210,6 +215,22 @@ pub fn drag_out(
     .map_err(|e| to_io(&e))?;
     done(performed_effect(effect.0));
     Ok(())
+}
+
+/// Whether the mouse button that drags is down now, as the mouse has it (not as the window's
+/// messages last told): the primary one, which the user may have swapped with the other
+/// ([`primary_down`](super::primary_down)).
+fn primary_held() -> bool {
+    // SAFETY: each call takes a plain value and only reads the system's state; no pointer is
+    // involved.
+    let (left, right, swapped) = unsafe {
+        (
+            GetAsyncKeyState(i32::from(VK_LBUTTON.0)),
+            GetAsyncKeyState(i32::from(VK_RBUTTON.0)),
+            GetSystemMetrics(SM_SWAPBUTTON) != 0,
+        )
+    };
+    primary_down(left, right, swapped)
 }
 
 /// The shell's data object of the items at `paths`, as File Explorer's own drag of them makes it

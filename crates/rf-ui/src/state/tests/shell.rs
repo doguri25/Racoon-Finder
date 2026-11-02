@@ -805,6 +805,51 @@ fn what_windows_own_menu_chose_acts_only_on_what_the_menu_was_for() {
 }
 
 #[test]
+fn windows_own_menu_shows_on_its_turn_only_while_nothing_has_changed() {
+    let mut state = with_windows_menu();
+    let ask = |state: &mut AppState, rows: &[usize]| {
+        choose(state, rows);
+        token_of(&run(state, Command::SystemMenu))
+    };
+    // Asked a turn of the event loop before, as the controller shows it: nothing has changed,
+    // and it shows.
+    let token = ask(&mut state, &[1]);
+    assert!(state.system_menu_due(token));
+    // A menu asked before the last one does not show.
+    let first = ask(&mut state, &[1]);
+    let last = ask(&mut state, &[2]);
+    assert!(!state.system_menu_due(first));
+    assert!(state.system_menu_due(last));
+    // A dialog came in the meantime (a job's question): the menu does not show over it, and is
+    // forgotten; nothing of it is done later.
+    let token = ask(&mut state, &[1]);
+    run(&mut state, Command::Properties);
+    assert!(state.modal().is_some());
+    assert!(!state.system_menu_due(token));
+    state.dialog_cancelled();
+    assert!(!state.system_menu_due(token), "forgotten");
+    assert_eq!(
+        state.system_menu_chosen(token, SystemMenuChoice::App(AppVerb::Rename)),
+        []
+    );
+    assert_eq!(state.modal(), None);
+    // The items a command acts on are not the menu's any more, or the pane shows another
+    // folder (a key, a listing, a folder's watch): it does not show.
+    let token = ask(&mut state, &[1]);
+    choose(&mut state, &[2]);
+    assert!(!state.system_menu_due(token));
+    let token = ask(&mut state, &[]);
+    let effects = state.go_to(folder("b"));
+    assert!(!effects.is_empty(), "{effects:?}");
+    assert!(!state.system_menu_due(token));
+    // Nor while the app ends.
+    let _ = state.go_to(folder("a"));
+    let token = ask(&mut state, &[]);
+    assert_eq!(state.request_close(), [Effect::Quit]);
+    assert!(!state.system_menu_due(token));
+}
+
+#[test]
 fn share_hands_the_items_a_command_acts_on_to_the_system_s_picker() {
     let mut state = listed();
     state.row_menu(LEFT, 1);

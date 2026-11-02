@@ -57,7 +57,8 @@
 //!   the app all that Finder's own drags allow, within it a move (with the generic operation, so
 //!   that the window's answer keeps the move's pointer) or a copy. As the session ends, it hands
 //!   what the taker did to `done` ([`ended_effect`]), and nothing else: nothing is deleted here.
-//!   The source is held until then ([`DRAGGING`]).
+//!   The source is held until then ([`DRAGGING`]). It begins only while the left button is down
+//!   as the mouse has it (`NSEvent.pressedMouseButtons`, [`left_pressed`]).
 //! - **No borrow across a call out:** the view's record of the drag (a `RefCell`) is never
 //!   borrowed while the handler runs, and the view holds itself alive while it does, so that a
 //!   handler that lets the registration go does not let the view go under its own call.
@@ -82,8 +83,8 @@ use objc2_foundation::{
 };
 
 use super::{
-    DragMods, DropEffect, DropHandler, DroppedItems, Effects, answer_for, drop_taken, ended_effect,
-    flag_mods, flipped_point, icon_place, mask_effects, source_mask,
+    DragMods, DropEffect, DropHandler, DroppedItems, Effects, answer_for, button_held, drop_taken,
+    ended_effect, flag_mods, flipped_point, icon_place, left_pressed, mask_effects, source_mask,
 };
 use crate::clipboard::{file_item, file_paths, file_url_type};
 use crate::shell::{Owner, WindowPoint};
@@ -317,6 +318,9 @@ pub fn drag_out(
     ours: u64,
     done: Box<dyn FnOnce(Option<DropEffect>)>,
 ) -> io::Result<()> {
+    // As the mouse has it, not as the window last heard: a session begun with no button held
+    // would end at once with a drop where the pointer is.
+    button_held(left_pressed(NSEvent::pressedMouseButtons()))?;
     let (mtm, view) = content_view(owner)?;
     autoreleasepool(|_| {
         let window = view

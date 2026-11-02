@@ -233,9 +233,14 @@ pub const DRAGS_OUT: bool = imp::DRAGS_OUT;
 ///   view, a file URL for each path, byte for byte, with its icon) and runs on in the app's event
 ///   loop; `done` is called as it ends.
 ///
-/// `Unsupported` where [`DRAGS_OUT`] is false; `InvalidInput` for no paths or an owner without
-/// the handle this system needs; another error for a drag that could not begin. `done` is never
-/// called when this fails.
+/// The drag begins only while the mouse button that drags is down, as the system has the mouse
+/// (Windows: the physical primary button, `GetAsyncKeyState` with `SM_SWAPBUTTON`; macOS:
+/// `NSEvent.pressedMouseButtons`), whatever the window last heard: the system's drag would drop
+/// at once where no button is held.
+///
+/// `Unsupported` where [`DRAGS_OUT`] is false; `InvalidInput` for no paths, for the button that
+/// drags up, or for an owner without the handle this system needs; another error for a drag that
+/// could not begin. `done` is never called when this fails.
 pub fn drag_out(
     owner: Owner,
     paths: &[PathBuf],
@@ -250,6 +255,53 @@ pub fn drag_out(
         ));
     }
     imp::drag_out(owner, paths, allowed, ours, done)
+}
+
+/// Whether a drag out may begin, with the mouse button that drags down now (`held`) or not, as
+/// the system has the mouse rather than as the window last heard: `InvalidInput` for a button
+/// that is up. The system's drag would end at once with a drop wherever the pointer is (OLE's
+/// default drop source drops where no button is held, and `AppKit` ends a session at the
+/// button's release), a drop the user never made: a loop of the system (a menu's) can take the
+/// button's release, which the window then never hears.
+#[cfg_attr(
+    not(any(windows, target_os = "macos")),
+    allow(
+        dead_code,
+        reason = "used by Windows and macOS code; tested on every OS"
+    )
+)]
+fn button_held(held: bool) -> io::Result<()> {
+    if held {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the mouse button that drags is up",
+        ))
+    }
+}
+
+/// Whether the mouse button that drags is down, from the states of the physical buttons as
+/// `GetAsyncKeyState` gives them (Windows; the high bit is set while one is down): `left`'s, or
+/// `right`'s where the user swapped the buttons (`swapped`, `SM_SWAPBUTTON`: the setting for the
+/// left hand), since that call reads the physical buttons, not what they mean.
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "used by Windows code; tested on every OS")
+)]
+fn primary_down(left: i16, right: i16, swapped: bool) -> bool {
+    let state = if swapped { right } else { left };
+    state < 0
+}
+
+/// Whether the left button, the one that drags, is among the buttons `pressed`
+/// (`NSEvent.pressedMouseButtons`, macOS: bit 0 the left button, bit 1 the right one, and on).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn left_pressed(pressed: usize) -> bool {
+    pressed & 1 != 0
 }
 
 /// `DROPEFFECT_NONE`, `DROPEFFECT_COPY`, `DROPEFFECT_MOVE` and `DROPEFFECT_LINK`.
@@ -871,6 +923,30 @@ mod tests {
         assert_eq!(
             ours_in(&ours_tag(u32::MAX, u64::MAX), u32::MAX),
             Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn a_drag_out_begins_only_while_the_button_that_drags_is_down() {
+        // Windows: the high bit of `GetAsyncKeyState`; the left button drags, or the right one
+        // where the user swapped them (`SM_SWAPBUTTON`).
+        let (down, up, toggled) = (i16::MIN, 0, 1);
+        assert!(primary_down(down, up, false));
+        assert!(!primary_down(up, down, false));
+        assert!(!primary_down(toggled, up, false), "the low bit is no press");
+        assert!(primary_down(up, down, true));
+        assert!(!primary_down(down, up, true));
+        assert!(primary_down(down | 1, up, false));
+        // macOS: bit 0 of `pressedMouseButtons`, the left button.
+        assert!(left_pressed(0b1));
+        assert!(left_pressed(0b11));
+        assert!(!left_pressed(0b10), "the right button alone");
+        assert!(!left_pressed(0));
+        // Up, no drag begins: the system's would drop at once where no button is held.
+        assert!(button_held(true).is_ok());
+        assert_eq!(
+            button_held(false).map_err(|e| e.kind()),
+            Err(io::ErrorKind::InvalidInput)
         );
     }
 

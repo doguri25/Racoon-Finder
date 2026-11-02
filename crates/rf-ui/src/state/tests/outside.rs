@@ -8,8 +8,8 @@ use rf_jobs::{ConflictPolicy, JobSpec, TransferItem, TransferMode};
 use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
 
 use super::drag::{
-    LEFT_LIST, RIGHT_LIST, copy_keys, in_a, in_b, link_keys, run_move, submitted_mode, the_submit,
-    toasts, two_panes,
+    LEFT_LIST, RIGHT_LIST, ask_menu, copy_keys, in_a, in_b, link_keys, run_move, submitted_mode,
+    the_submit, toasts, two_panes,
 };
 use super::*;
 use crate::dialogs::Modal;
@@ -374,7 +374,7 @@ fn a_drop_with_the_right_button_asks_with_the_menu_of_a_drop_that_asks() {
     // no job yet, and the system is told that nothing was done.
     assert_eq!(
         state.outside_drop(Some(RIGHT_LIST), dragged.clone(), copy_keys(), both(), true),
-        (None, vec![Effect::ShowMenu(MenuShown::AskDrop)])
+        (None, vec![ask_menu(true, true)])
     );
     let (spec, _) = the_submit(&state.drop_menu_chosen(Some(TransferMode::Move)));
     let JobSpec::Transfer(transfer) = spec else {
@@ -392,8 +392,7 @@ fn a_drop_with_the_right_button_asks_with_the_menu_of_a_drop_that_asks() {
     // The menu answers once.
     assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
 
-    // 매번 묻기 asks too. A drag that allows only a copy copies for 여기로 이동 (DND-05: no move,
-    // a copy); one that allows only a move makes nothing of 여기로 복사.
+    // 매번 묻기 asks too, with the menu of what the drag allows (below).
     state.set_drag_default(DragDefault::Ask);
     assert_eq!(
         state.outside_over(Some(RIGHT_LIST), &dragged, plain(), Effects::COPY),
@@ -407,30 +406,19 @@ fn a_drop_with_the_right_button_asks_with_the_menu_of_a_drop_that_asks() {
             Effects::COPY,
             false
         ),
-        (None, vec![Effect::ShowMenu(MenuShown::AskDrop)])
+        (None, vec![ask_menu(false, true)])
     );
     assert_eq!(
-        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Move))),
+        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Copy))),
         TransferMode::Copy
     );
-    assert_eq!(
-        state.outside_drop(
-            Some(RIGHT_LIST),
-            dragged.clone(),
-            plain(),
-            Effects::MOVE,
-            false
-        ),
-        (None, vec![Effect::ShowMenu(MenuShown::AskDrop)])
-    );
-    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Copy)), []);
 
     // Its drop does not outlive the menu: closed choosing nothing (Esc), it is forgotten; a
     // window over the main one lets the menu's choice make nothing.
     let ask = |state: &mut AppState| {
         assert_eq!(
             state.outside_drop(Some(RIGHT_LIST), dragged.clone(), plain(), both(), true),
-            (None, vec![Effect::ShowMenu(MenuShown::AskDrop)])
+            (None, vec![ask_menu(true, true)])
         );
     };
     ask(&mut state);
@@ -441,6 +429,49 @@ fn a_drop_with_the_right_button_asks_with_the_menu_of_a_drop_that_asks() {
     assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
     state.dialog_cancelled();
     assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+}
+
+#[test]
+fn the_menu_of_a_drop_that_asks_offers_only_what_the_drag_allows() {
+    let mut state = two_panes();
+    state.set_drag_default(DragDefault::Ask);
+    let dragged = items(&[in_c("z.txt")]);
+    let ask = |state: &mut AppState, allowed: Effects| {
+        let (done, effects) =
+            state.outside_drop(Some(RIGHT_LIST), dragged.clone(), plain(), allowed, false);
+        assert_eq!(done, None);
+        effects
+    };
+    // A drag that allows both: 여기로 이동 and 여기로 복사, each doing what it says.
+    assert_eq!(ask(&mut state, both()), [ask_menu(true, true)]);
+    assert_eq!(
+        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Move))),
+        TransferMode::Move
+    );
+    // One that allows no move (every drop winit tells on Linux): 여기로 복사 alone; a move it
+    // does not allow makes nothing, never a copy in its place.
+    assert_eq!(ask(&mut state, Effects::COPY), [ask_menu(false, true)]);
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Move)), []);
+    assert_eq!(
+        ask(&mut state, Effects::COPY | Effects::LINK),
+        [ask_menu(false, true)]
+    );
+    assert_eq!(
+        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Copy))),
+        TransferMode::Copy
+    );
+    // One that allows no copy: 여기로 이동 alone.
+    assert_eq!(ask(&mut state, Effects::MOVE), [ask_menu(true, false)]);
+    assert_eq!(state.drop_menu_chosen(Some(TransferMode::Copy)), []);
+    assert_eq!(ask(&mut state, Effects::MOVE), [ask_menu(true, false)]);
+    assert_eq!(
+        submitted_mode(&state.drop_menu_chosen(Some(TransferMode::Move))),
+        TransferMode::Move
+    );
+    // A drag of rows in the window allows both.
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    assert_eq!(state.drop_items(id, RIGHT_LIST), [ask_menu(true, true)]);
 }
 
 #[test]
@@ -499,7 +530,7 @@ fn this_apps_own_drag_back_through_the_system_drops_as_a_drag_in_the_window() {
     };
     assert_eq!(
         state.outside_drop(Some(RIGHT_LIST), back, plain(), both(), true),
-        (None, vec![Effect::ShowMenu(MenuShown::AskDrop)])
+        (None, vec![ask_menu(true, true)])
     );
     let (spec, origin) = the_submit(&state.drop_menu_chosen(Some(TransferMode::Copy)));
     assert_eq!(origin, Some(LEFT));

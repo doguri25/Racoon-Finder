@@ -35,9 +35,9 @@ use rf_jobs::TransferMode;
 use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
 
 use super::clipboard::local_paths;
-use super::drag::{AskedDrop, DropOffer, Hover, asked, dropped_effect};
+use super::drag::{AskedDrop, DropOffer, Hover, ask_menu, asked, dropped_effect};
 use super::drop_rule::DropChoice;
-use super::{AppState, DropSpot, Effect, MenuShown};
+use super::{AppState, DropSpot, Effect};
 use crate::pick::Validity;
 use crate::words;
 
@@ -200,7 +200,7 @@ impl AppState {
                     side,
                     allowed,
                 });
-                vec![Effect::ShowMenu(MenuShown::AskDrop)]
+                vec![ask_menu(allowed)]
             }
             // The keys refuse it (no links are made), or the drag allows nothing it would do.
             DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => return (None, Vec::new()),

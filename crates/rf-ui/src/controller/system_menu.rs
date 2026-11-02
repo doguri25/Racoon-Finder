@@ -17,10 +17,13 @@
 //! It runs a loop of the system's own on the UI thread until it closes, in which the window's
 //! drop target and the system's messages to the window may come back into the app. So it shows
 //! on the next turn of the event loop ([`Controller::ask_system_menu`]), out of the callback that
-//! asked, with what it is of copied out of the state and no borrow of it held. Once it has
-//! closed, the keys go back to the panes, as after the app's menus, and what was chosen goes to
-//! the state ([`system_menu_chosen`]): the app does its own commands there (이름 바꾸기, the
-//! trash, the clipboard) through its job engine and undo.
+//! asked, with what it is of copied out of the state and no borrow of it held; and only if, by
+//! then, no dialog has come, the app does not end, its items are still the ones chosen, and the
+//! left button is up ([`Controller::system_menu`]). No menu shows while the left button is down
+//! ([`Controller::right_button_pressed`]). Once it has closed, the keys go back to the panes, as
+//! after the app's menus, and what was chosen goes to the state ([`system_menu_chosen`]): the app
+//! does its own commands there (이름 바꾸기, the trash, the clipboard) through its job engine and
+//! undo.
 //!
 //! The picker of 공유… shows the same way, on the next turn of the event loop, where the item menu
 //! showed ([`Controller::ask_share`]).
@@ -41,10 +44,11 @@ use crate::words::{self, ShellAction};
 use crate::{DropPlace, ItemMenu};
 
 impl Controller {
-    /// The right button went down in the window, at the pointer winit told last: where the
-    /// system has a menu of its own and the press is on a pane's list (a row, or the part
-    /// without rows), the place of the menus of the lists is noted there, and the state says
-    /// whether the system's menu shows in the place of the app's
+    /// The right button went down in the window, at the pointer winit told last, with the left
+    /// button up ([`Controller::right_button_pressed`]): where the system has a menu of its own
+    /// and the press is on a pane's list (a row, or the part without rows), the place of the
+    /// menus of the lists is noted there, and the state says whether the system's menu shows in
+    /// the place of the app's
     /// ([`AppState::right_click`](crate::state::AppState::right_click)). `true` when it does:
     /// the press is then kept from Slint, whose menu would show too.
     pub(super) fn right_pressed(&self) -> bool {
@@ -99,7 +103,22 @@ impl Controller {
     /// The system's menu of `ask` at `at`, until it closes, with no borrow of the state held;
     /// then the keys go back to the panes, and what was chosen to the state. A menu that could
     /// not show says why.
+    ///
+    /// Asked a turn of the event loop before, it shows only while the state still has it due
+    /// ([`AppState::system_menu_due`](crate::state::AppState::system_menu_due): no dialog came
+    /// meanwhile, the app does not end, and its items are still the ones chosen), and while the
+    /// left button is up: its loop would take the button's release and leave a drag running with
+    /// no button held ([`Controller::right_button_pressed`]). Else nothing shows, and the keys
+    /// stay where they are.
     fn system_menu(&self, ask: &SystemMenuAsk, at: WindowPoint) {
+        let due = self
+            .state
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|state| state.system_menu_due(ask.token));
+        if !due || self.left_down.get() {
+            return;
+        }
         let shown = match ask.folder.as_local() {
             Some(folder) => shell::system_menu(self.owner(), folder, &ask.names, at, ask.extended),
             None => Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),

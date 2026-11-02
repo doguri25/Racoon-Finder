@@ -609,8 +609,11 @@ export component MainWindow inherits Window {
         DragPointer.gone();
     }
 
-    // The menu of 놓을 때 묻기, where the drop was.
-    public function show-drop-menu() {
+    // The menu of 놓을 때 묻기, where the drop was, with 여기로 이동 where the drag allows a move
+    // (`moves`) and 여기로 복사 where it allows a copy (`copies`).
+    public function show-drop-menu(moves: bool, copies: bool) {
+        root.drop-moves = moves;
+        root.drop-copies = copies;
         drop-keys.focus();
         root.drop-asking = true;
         drop-menu.show({ x: DragPointer.x, y: DragPointer.y });
@@ -625,6 +628,9 @@ export component MainWindow inherits Window {
 
     // The menu of 놓을 때 묻기 is open, and its drop waits for it (`drop-keys`).
     private property <bool> drop-asking;
+    // What that menu offers: what the drag allows (`show-drop-menu`).
+    private property <bool> drop-moves: true;
+    private property <bool> drop-copies: true;
 
     private property <string> hint;
     private property <bool> hint-refused;
@@ -1929,6 +1935,8 @@ export component MainWindow inherits Window {
             }
 
             drop-menu := DropMenu {
+                moves: root.drop-moves;
+                copies: root.drop-copies;
                 chosen(name) => {
                     root.drop-asking = false;
                     root.drop-menu-chosen(name);

@@ -191,6 +191,15 @@ impl Command {
         )
     }
 
+    /// Whether the command opens a menu: the 보기 menu, the item menu (or the folder's), or the
+    /// system's own. None opens while the left button is down in the window ([`held_key`]).
+    pub fn opens_menu(&self) -> bool {
+        matches!(
+            self,
+            Command::ViewMenu | Command::ContextMenu | Command::SystemMenu
+        )
+    }
+
     /// Whether the command acts on the rows of the active pane: its items, its cursor or its
     /// selection, or the pane with the keyboard. While the sidebar's tree has the keys, such a
     /// key does nothing (the tree's rows are not the pane's); the window's other commands work
@@ -447,8 +456,36 @@ pub fn pane_command(text: &str, mods: Mods, os: Os, typing: bool) -> Option<Comm
 /// ([`AppState::escape`](crate::state::AppState::escape)). The table's other key to clear the
 /// selection (macOS ⌥⌘A) and the 선택 menu's item clear it alone.
 pub fn cancels_cut(text: &str, mods: Mods) -> bool {
+    esc_alone(text, mods)
+}
+
+/// Whether `text` held with `mods` is Esc with no modifier key.
+fn esc_alone(text: &str, mods: Mods) -> bool {
     let mut chars = text.chars();
     mods == Mods::NONE && chars.next() == Some(char::from(Key::Escape)) && chars.next().is_none()
+}
+
+/// What a key does while the left button is down in the window ([`held_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HeldKey {
+    /// Esc alone: a drag of rows under way ends with no drop, as File Explorer's and Finder's
+    /// Esc end theirs; the selection stays.
+    CancelDrag,
+    /// A key that opens a menu ([`Command::opens_menu`]): none opens.
+    NoMenu,
+}
+
+/// What `text` held with `mods` does on `os` while the left button is down in the window, where
+/// a drag may be under way: no key opens a menu, whose loop would take the button's release (the
+/// window would never hear it, and the drag would go on with no button held), and Esc ends a drag
+/// of rows. `None`: the key does what it always does.
+pub fn held_key(text: &str, mods: Mods, os: Os) -> Option<HeldKey> {
+    if esc_alone(text, mods) {
+        return Some(HeldKey::CancelDrag);
+    }
+    command_for(text, mods, os)
+        .filter(Command::opens_menu)
+        .map(|_| HeldKey::NoMenu)
 }
 
 /// What a key does while quick look shows ([`quick_look_key`]).
@@ -949,6 +986,15 @@ mod tests {
         t.to_owned()
     }
 
+    /// The text and the modifiers of a key event that presses `chord`.
+    fn chord_input(chord: Chord) -> (String, Mods) {
+        let text = match chord.press {
+            Press::Key(k) => key(k),
+            Press::Char(c) => c.to_string(),
+        };
+        (text, chord.mods)
+    }
+
     /// Checks that each key of `cases`, held with its modifiers, gives its command on `os`.
     fn check(os: Os, cases: &[(String, Mods, Command)]) {
         for (text, mods, command) in cases {
@@ -1435,6 +1481,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn while_the_left_button_is_down_esc_ends_a_drag_and_no_key_opens_a_menu() {
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            assert_eq!(
+                held_key(&key(Key::Escape), NONE, os),
+                Some(HeldKey::CancelDrag),
+                "{os:?}"
+            );
+            // Every key of the 보기 menu, the item menu and Windows' own.
+            for (chord, command) in bindings(os) {
+                if matches!(command, C::ViewMenu | C::ContextMenu | C::SystemMenu) {
+                    let (text, mods) = chord_input(chord);
+                    assert_eq!(
+                        held_key(&text, mods, os),
+                        Some(HeldKey::NoMenu),
+                        "{os:?} {}",
+                        label(chord, os)
+                    );
+                }
+            }
+            // The other keys do what they always do.
+            assert_eq!(held_key(&key(Key::Escape), SHIFT, os), None, "{os:?}");
+            assert_eq!(held_key(&key(Key::Delete), NONE, os), None, "{os:?}");
+            assert_eq!(held_key(&text("c"), CMD, os), None, "{os:?}");
+        }
+        assert!(C::ViewMenu.opens_menu());
+        assert!(!C::Properties.opens_menu());
     }
 
     #[test]

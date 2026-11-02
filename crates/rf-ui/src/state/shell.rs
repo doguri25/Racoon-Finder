@@ -87,9 +87,10 @@ pub enum MenuShown {
     /// The menu of the apps that can open a file, with these titles, where the item menu
     /// showed last; the one chosen goes to [`AppState::open_with_chosen`].
     Apps(Vec<String>),
-    /// The menu of 놓을 때 묻기 where a drag was dropped (여기로 이동, 여기로 복사, 취소); what it
-    /// chooses goes to [`AppState::drop_menu_chosen`].
-    AskDrop,
+    /// The menu of 놓을 때 묻기 where a drag was dropped: 여기로 이동 where the drag allows a move
+    /// (`moves`), 여기로 복사 where it allows a copy (`copies`), and 취소; what it chooses goes
+    /// to [`AppState::drop_menu_chosen`].
+    AskDrop { moves: bool, copies: bool },
 }
 
 /// Where the system's own menu of items shows ([`SystemMenuAsk`]).
@@ -364,6 +365,32 @@ impl AppState {
         now.sort_unstable();
         then.sort_unstable();
         now == then
+    }
+
+    /// Whether the system's menu of the ask `token` may show now: the controller shows it on
+    /// the next turn of the event loop after the ask, and much may have come in between. It
+    /// shows while it is the menu asked for last, no window or quick look shows over the main
+    /// one, the app does not end, and its pane still shows its folder with the same items to act
+    /// on (the items it was of are still there and chosen, as its choice needs them). Else it is
+    /// forgotten and does not show: a dialog that came meanwhile (a job's question) stays in
+    /// front, and a menu of other items than the ones chosen now would act on those.
+    pub fn system_menu_due(&mut self, token: u64) -> bool {
+        let Some(asked) = self
+            .shell
+            .system
+            .as_ref()
+            .filter(|asked| asked.token == token)
+        else {
+            return false;
+        };
+        let due = self.modal.is_none()
+            && !self.quitting
+            && !self.quick_look_open()
+            && self.still_for(asked);
+        if !due {
+            self.shell.system = None;
+        }
+        due
     }
 
     /// What was chosen in the system's menu of the ask `token`, the one the state asked for

@@ -2998,7 +2998,7 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
     // As Rust shows it for a drop that asks, after the drop: where the drop was. Its items lie
     // where the menu shows (the testing backend tells their places in the menu): a click at the
     // drop's place moved by the first item's place in the menu chooses that item.
-    window.invoke_show_drop_menu();
+    window.invoke_show_drop_menu(true, true);
     let first = ElementHandle::find_by_accessible_label(&window, "여기로 이동")
         .next()
         .expect("the menu shows");
@@ -3017,14 +3017,14 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
         ("여기로 복사", "copy"),
         ("취소", "cancel"),
     ] {
-        window.invoke_show_drop_menu();
+        window.invoke_show_drop_menu(true, true);
         choose_item(&window, item);
         // Said once: the menu's close after a choice says nothing more.
         run_for(300);
         assert_eq!(chosen.take(), [name], "{item}");
     }
     // Esc closes it, choosing nothing, which the window tells as 취소 once it sees it closed.
-    window.invoke_show_drop_menu();
+    window.invoke_show_drop_menu(true, true);
     assert!(
         ElementHandle::find_by_accessible_label(&window, "여기로 이동")
             .next()
@@ -3039,7 +3039,7 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
     run_for(300);
     assert_eq!(chosen.take(), ["cancel"]);
     // So does a click beside it.
-    window.invoke_show_drop_menu();
+    window.invoke_show_drop_menu(true, true);
     let beside = LogicalPosition::new(backup.x, backup.y + 300.0);
     pointer(&window, "press", beside);
     pointer(&window, "release", beside);
@@ -3050,6 +3050,22 @@ fn a_drop_that_asks_shows_its_menu_until_a_choice_or_esc() {
     );
     run_for(300);
     assert_eq!(chosen.take(), ["cancel"]);
+    // It offers only what the drag allows: a drag that allows no move (Linux's drops) has no
+    // 여기로 이동, one that allows no copy no 여기로 복사.
+    let shows = |item: &str| {
+        ElementHandle::find_by_accessible_label(&window, item)
+            .next()
+            .is_some()
+    };
+    for (moves, copies) in [(false, true), (true, false)] {
+        window.invoke_show_drop_menu(moves, copies);
+        assert_eq!(shows("여기로 이동"), moves);
+        assert_eq!(shows("여기로 복사"), copies);
+        assert!(shows("취소"));
+        press(&window, Key::Escape);
+        run_for(300);
+        assert_eq!(chosen.take(), ["cancel"]);
+    }
 }
 
 /// The left pane of [`drag_window`] shown in `mode`.
@@ -6824,7 +6840,7 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
     window.set_quick_look(true);
     assert_eq!(spot(backup), None);
     window.set_quick_look(false);
-    window.invoke_show_drop_menu();
+    window.invoke_show_drop_menu(true, true);
     assert_eq!(spot(backup), None);
     press(&window, Key::Escape);
     assert_eq!(
@@ -6946,7 +6962,7 @@ fn drops_are_refused_while_a_window_or_a_list_shows_over_the_panes() {
     window.set_subfolders(folder_menu(&["docs", "src"], -1, ""));
     assert_eq!(refused(&window), (true, None));
     window.set_subfolders(FolderMenuView::default());
-    window.invoke_show_drop_menu();
+    window.invoke_show_drop_menu(true, true);
     assert_eq!(refused(&window), (true, None));
     press(&window, Key::Escape);
     assert_eq!(refused(&window), (false, taken));

@@ -855,8 +855,10 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// app dropped on the window, where winit's own drop target takes them (X11, macOS's title bar:
 /// [`Controller::file_dropped`]; nothing shows while they hover, `HoveredFile`, since winit
 /// tells neither where nor the keys); where the pointer was last, for the menu of a drop that
-/// asks without telling where it was; and a right press that shows Windows' own menu in the
-/// place of the app's (OPS-05, [`Controller::right_pressed`]), which Slint then never sees.
+/// asks without telling where it was; and a right press, which Slint then never sees when it
+/// ends a drag of rows or comes while the left button is down (no menu shows then), or when it
+/// shows Windows' own menu in the place of the app's (OPS-05,
+/// [`Controller::right_button_pressed`]).
 fn watch_winit_events(window: &MainWindow) {
     window.window().on_winit_window_event(|window, event| {
         match event {
@@ -895,9 +897,7 @@ fn watch_winit_events(window: &MainWindow) {
                 button: MouseButton::Right,
                 ..
             } => {
-                // Windows' own menu in the place of the app's (OPS-05): Slint never sees the
-                // press, whose menu would show too.
-                if with(Controller::right_pressed).unwrap_or(false) {
+                if with(Controller::right_button_pressed).unwrap_or(false) {
                     return EventResult::PreventDefault;
                 }
             }
@@ -1165,7 +1165,10 @@ pub struct Controller {
     /// ([`Controller::leave_tree`]).
     moved_over_tree: Cell<bool>,
     /// The left button is down in the window, as winit told last: a drag of rows goes out of the
-    /// window only while it is ([`Controller::drag_leaves`]).
+    /// window only while it is ([`Controller::drag_leaves`]), and no menu shows while it is
+    /// ([`Controller::right_button_pressed`], [`Controller::held_key`]). Cleared, too, where
+    /// nothing waits for its release any more: a drag of rows ended by Esc or a right press, or
+    /// one that went out of the window.
     left_down: Cell<bool>,
     /// The drag of rows that left the window goes out on the next turn of the event loop
     /// ([`Controller::pointer_outside`]).
@@ -1532,9 +1535,13 @@ impl Controller {
     }
 
     /// A key (`repeat`: the system repeats a held one); `true` when the window used it. While
-    /// the list of subfolders under a `›` shows, its keys (`keys::list_key`) go to it; any other
-    /// command closes it as it does its work.
+    /// the left button is down in the window, Esc ends a drag of rows and no key opens a menu
+    /// ([`Controller::held_key`]). While the list of subfolders under a `›` shows, its keys
+    /// (`keys::list_key`) go to it; any other command closes it as it does its work.
     fn key(&self, text: &str, mods: Mods, repeat: bool) -> bool {
+        if let Some(used) = self.held_key(text, mods) {
+            return used;
+        }
         let listing = self
             .state
             .borrow()
@@ -1587,10 +1594,14 @@ impl Controller {
         used
     }
 
-    /// A key while the sidebar's tree has the keys; `true` when it is used there. A key of the
-    /// tree moves in it; one of the panes' rows is used, and does nothing; any other goes on to
-    /// the window's keys (`false`), as from the panes.
+    /// A key while the sidebar's tree has the keys; `true` when it is used there. While the left
+    /// button is down, as from the panes ([`Controller::held_key`]). A key of the tree moves in
+    /// it; one of the panes' rows is used, and does nothing; any other goes on to the window's
+    /// keys (`false`), as from the panes.
     fn tree_key(&self, text: &str, mods: Mods) -> bool {
+        if let Some(used) = self.held_key(text, mods) {
+            return used;
+        }
         if let Some(key) = keys::tree_key(text, mods, Os::CURRENT) {
             self.update(|state| state.tree_key(key));
             return true;
@@ -1601,6 +1612,9 @@ impl Controller {
     /// A key while the job panel has the keys; `true` when it is used there, as with the tree
     /// ([`Controller::tree_key`]).
     fn panel_key(&self, text: &str, mods: Mods) -> bool {
+        if let Some(used) = self.held_key(text, mods) {
+            return used;
+        }
         if let Some(key) = keys::panel_key(text, mods, Os::CURRENT) {
             self.update(|state| state.panel_key(key));
             return true;
@@ -1932,6 +1946,74 @@ impl Controller {
         self.drag_maybe_gone();
     }
 
+    /// The right button went down in the window: `true` when the press is kept from Slint.
+    ///
+    /// While the left button is down in the window, no menu shows, the app's or the system's:
+    /// the menu's loop would take the left button's release, which winit then never tells, and a
+    /// drag under way would go on with no button held, to drop at the next click, or to go out
+    /// of the window as the system's drag, which drops at once where no button is held. A drag
+    /// of rows ends there with no drop, as File Explorer ends its own at a right press
+    /// ([`Controller::cancel_drag_of_rows`]). Slint, which passes a right press on to the place
+    /// under the pointer during a drag, never sees it. With the left button up, the system's own
+    /// menu may show in the place of the app's ([`Controller::right_pressed`]).
+    fn right_button_pressed(&self) -> bool {
+        if self.left_down.get() {
+            self.cancel_drag_of_rows();
+            return true;
+        }
+        self.right_pressed()
+    }
+
+    /// A key while the left button is down in the window ([`keys::held_key`]): Esc ends a drag of
+    /// rows under way, and nothing else (the selection stays); a key that opens a menu opens
+    /// none, as a right press shows none then ([`Controller::right_button_pressed`]). `Some`,
+    /// whether the key is used, when it is one of those; `None` leaves the key to do what it
+    /// always does (Esc too, when no drag of rows is under way).
+    fn held_key(&self, text: &str, mods: Mods) -> Option<bool> {
+        if !self.left_down.get() {
+            return None;
+        }
+        match keys::held_key(text, mods, Os::CURRENT)? {
+            keys::HeldKey::CancelDrag => self.cancel_drag_of_rows().then_some(true),
+            keys::HeldKey::NoMenu => Some(true),
+        }
+    }
+
+    /// Ends the drag of rows under way (the left button is down in the window, and a row's drag
+    /// area drags: `DragPointer.rows`) with no drop, as Esc or a right press does; `true` when
+    /// there was one. Slint's drag ends as when it goes out of the window as the system's drag
+    /// ([`Controller::end_drag_of_rows`]), and the left button counts as up from now on: the
+    /// release of a menu that showed anyway may never come, and the next exit from the window
+    /// starts no drag out ([`Controller::drag_leaves`]). Its release, when it comes, drops
+    /// nothing. The drag the press readied stays the state's until the next press: it never went
+    /// out, and no drag of Slint carries it any more.
+    fn cancel_drag_of_rows(&self) -> bool {
+        let Some(window) = self.window.upgrade() else {
+            return false;
+        };
+        if !self.left_down.get() || !window.global::<DragPointer<'_>>().get_rows() {
+            return false;
+        }
+        self.end_drag_of_rows(&window);
+        self.left_down.set(false);
+        true
+    }
+
+    /// Slint's drag of rows ends with no drop: the pointer leaves the window as far as Slint
+    /// knows (a `PointerExited`, after which `drag-finished` comes with `none`, never a drop,
+    /// which a release would make where the last move was taken), `DragPointer` forgets it, and
+    /// what the drag started stops: the time of a rest and the lists that scroll under it
+    /// ([`Controller::drag_gone`]). From then on the window may name a place under the system's
+    /// drag (`ui_bridge::drop_spot`), which moves Slint's pointer, since no drag of Slint's is
+    /// under way.
+    fn end_drag_of_rows(&self, window: &MainWindow) {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerExited);
+        window.global::<DragPointer<'_>>().set_rows(false);
+        self.drag_gone();
+    }
+
     /// The left button was let go, and Slint has taken the release: a drag of rows is over (its
     /// row, gone, may tell no end), and so is any drag over the window.
     fn left_button_released(&self) {
@@ -1964,16 +2046,12 @@ impl Controller {
     /// still down and the state lets it go ([`AppState::drag_leaves_window`]; else it stays
     /// Slint's):
     ///
-    /// 1. Slint's drag ends with no drop: the pointer leaves the window as far as Slint knows (a
-    ///    `PointerExited`, after which `drag-finished` comes with `none`, never a drop, which a
-    ///    release would make where the last move was taken), and `DragPointer` forgets it. From
-    ///    then on the window may name a place under the system's drag (`ui_bridge::drop_spot`),
-    ///    which moves Slint's pointer, since no drag of Slint's is under way.
-    /// 2. What the drag started stops: the time of a rest and the lists that scroll under it
-    ///    ([`Controller::drag_gone`]).
-    /// 3. The system's drag begins, with no borrow of the state held: on Windows it runs inside
-    ///    the call, and the window's own drop target answers it as it passes over the window
-    ///    (module `drops`), the drag of rows that came back. Its end comes to
+    /// 1. Slint's drag ends with no drop, and what it started stops
+    ///    ([`Controller::end_drag_of_rows`]).
+    /// 2. The system's drag begins, with no borrow of the state held, if the left button is
+    ///    still down as the system has it (`rf_platform::dnd::drag_out` checks): on Windows it
+    ///    runs inside the call, and the window's own drop target answers it as it passes over the
+    ///    window (module `drops`), the drag of rows that came back. Its end comes to
     ///    [`AppState::drag_out_ended`], which does nothing with what the taker did: the app
     ///    deletes nothing.
     fn drag_leaves(&self) {
@@ -1981,8 +2059,7 @@ impl Controller {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        let pointer = window.global::<DragPointer<'_>>();
-        if !pointer.get_rows() || !self.left_down.get() {
+        if !window.global::<DragPointer<'_>>().get_rows() || !self.left_down.get() {
             return;
         }
         let out = self
@@ -1993,11 +2070,7 @@ impl Controller {
         let Some(out) = out else {
             return;
         };
-        window
-            .window()
-            .dispatch_event(slint::platform::WindowEvent::PointerExited);
-        pointer.set_rows(false);
-        self.drag_gone();
+        self.end_drag_of_rows(&window);
         let ours = out.ours;
         let done: Box<dyn FnOnce(Option<DropEffect>)> = Box::new(move |taken| {
             // Out of the system's call (macOS: its callback) first.
@@ -2005,13 +2078,14 @@ impl Controller {
                 with(|c| c.update(|state| state.drag_out_ended(ours, taken)));
             });
         });
-        match dnd::drag_out(self.owner(), &out.paths, Effects::ALL, out.ours, done) {
-            // The system's drag has the button now: winit hears no release of it.
-            Ok(()) => self.left_down.set(false),
-            Err(error) => {
-                log_drag_out_failed(&error);
-                self.update(|state| state.drag_out_ended(ours, None));
-            }
+        let begun = dnd::drag_out(self.owner(), &out.paths, Effects::ALL, out.ours, done);
+        // Nothing waits for the button's release any more: the system's drag has it (winit hears
+        // no release of it), or it is up already (a loop of the system took its release), or
+        // Slint's drag is over anyway.
+        self.left_down.set(false);
+        if let Err(error) = begun {
+            log_drag_out_failed(&error);
+            self.update(|state| state.drag_out_ended(ours, None));
         }
     }
 
@@ -2676,7 +2750,7 @@ impl Controller {
                 );
                 window.invoke_show_open_with();
             }
-            MenuShown::AskDrop => window.invoke_show_drop_menu(),
+            MenuShown::AskDrop { moves, copies } => window.invoke_show_drop_menu(moves, copies),
         }
     }
 
@@ -3361,5 +3435,248 @@ mod tests {
         assert!(!controller.spring.running());
         drop(controller);
         assert!(jobs.close_down(Duration::from_secs(10)));
+    }
+
+    /// A window with the app's controller, as [`begin`] connects them, whose left pane lists the
+    /// file `x.txt` of a folder and whose right pane an empty folder, both real; the drops Slint
+    /// makes are counted. What the winit hook would do is done by hand: the tests have no winit.
+    struct Dragging {
+        window: MainWindow,
+        controller: Rc<Controller>,
+        jobs: Jobs,
+        /// How many drops Slint made (`drop-items`).
+        drops: Rc<Cell<usize>>,
+        /// The middle of the row of `x.txt`, and a place of the right pane's list.
+        row: slint::LogicalPosition,
+        there: slint::LogicalPosition,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Dragging {
+        fn new() -> Dragging {
+            use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+            use rf_core::{Entry, EntryKind};
+
+            i_slint_backend_testing::init_no_event_loop();
+            let window = MainWindow::new().expect("the window");
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(1280.0, 800.0));
+            window.show().expect("it shows");
+            let dir = tempfile::tempdir().expect("a temporary folder");
+            let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+            std::fs::create_dir(&left).expect("a folder");
+            std::fs::create_dir(&right).expect("a folder");
+            std::fs::write(left.join("x.txt"), b"x").expect("a file");
+            let jobs =
+                Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
+            let saver = Saver::new(dir.path().join("config"), true);
+            let controller = Rc::new(Controller::new(
+                &window,
+                jobs.clone(),
+                Settings::default(),
+                saver,
+            ));
+            CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
+            connect(&window);
+            let drops = Rc::new(Cell::new(0));
+            let counted = Rc::clone(&drops);
+            window.on_drop_items(move |data, place, s, i| {
+                counted.set(counted.get() + 1);
+                with(|c| c.drop_items(&data, place, s, i)).unwrap_or(DragAction::None)
+            });
+            let left = VPath::local(&left).expect("a local path");
+            let (mut state, effects) = AppState::new(
+                left.clone(),
+                VPath::local(&right).expect("a local path"),
+                None,
+            );
+            for effect in effects {
+                if let Effect::Load(request) = effect {
+                    let entries = if request.path == left {
+                        vec![Entry::new("x.txt", EntryKind::File)]
+                    } else {
+                        Vec::new()
+                    };
+                    state.loaded(LoadEvent::Listed {
+                        generation: request.generation,
+                        entries,
+                    });
+                }
+            }
+            *controller.state.borrow_mut() = Some(state);
+            controller.redraw();
+            slint::platform::update_timers_and_animations();
+            let row = ElementHandle::find_by_accessible_label(&window, "x.txt")
+                .find(|found| found.accessible_role() == Some(AccessibleRole::ListItem))
+                .expect("the row of x.txt");
+            let (at, size) = (row.absolute_position(), row.size());
+            let row =
+                slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+            let there = slint::LogicalPosition::new(row.x + 640.0, row.y + 100.0);
+            let spot = window.invoke_spot_at(there.x, there.y);
+            assert!(spot.found && spot.place == DropPlace::List && spot.side == 1);
+            Dragging {
+                window,
+                controller,
+                jobs,
+                drops,
+                row,
+                there,
+                _dir: dir,
+            }
+        }
+
+        /// The left button at `at`, pressed (`down`) or let go, as winit tells it to the hook
+        /// and then to Slint.
+        fn left(&self, down: bool, at: slint::LogicalPosition) {
+            use slint::platform::{PointerEventButton, WindowEvent};
+
+            let button = PointerEventButton::Left;
+            self.controller.left_down.set(down);
+            self.window.window().dispatch_event(if down {
+                WindowEvent::PointerPressed {
+                    position: at,
+                    button,
+                }
+            } else {
+                WindowEvent::PointerReleased {
+                    position: at,
+                    button,
+                }
+            });
+            if !down {
+                self.controller.left_button_released();
+            }
+            slint::platform::update_timers_and_animations();
+        }
+
+        fn move_to(&self, at: slint::LogicalPosition) {
+            self.window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+            slint::platform::update_timers_and_animations();
+        }
+
+        /// A drag of the row of `x.txt` (its press selects it) over the right pane's list, which
+        /// takes it.
+        fn drag_row(&self) {
+            self.move_to(self.row);
+            self.left(true, self.row);
+            for step in [10.0, 20.0, 30.0] {
+                self.move_to(slint::LogicalPosition::new(self.row.x + step, self.row.y));
+            }
+            self.move_to(self.there);
+            assert!(self.rows(), "a drag of rows is under way");
+            assert!(self.over());
+        }
+
+        /// `DragPointer.rows`, as at the top of a turn of the event loop.
+        fn rows(&self) -> bool {
+            slint::platform::update_timers_and_animations();
+            self.window.global::<DragPointer<'_>>().get_rows()
+        }
+
+        fn over(&self) -> bool {
+            self.window.global::<DragPointer<'_>>().get_over()
+        }
+
+        /// Whether the drag the press readied is still the window's, never gone out of it
+        /// (`AppState::drag_leaves_window` would hand it out now).
+        fn never_went_out(&self) -> bool {
+            self.controller
+                .state
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|state| state.drag_leaves_window().is_some())
+        }
+
+        fn end(self) {
+            CONTROLLER.with(|cell| cell.borrow_mut().take());
+            drop(self.controller);
+            assert!(self.jobs.close_down(Duration::from_secs(10)));
+        }
+    }
+
+    #[test]
+    fn a_drag_of_rows_goes_out_only_while_the_button_is_down() {
+        let dragging = Dragging::new();
+        // The key of the 보기 menu here (F10, macOS ⌘J).
+        let (chord, _) = keys::bindings(Os::CURRENT)
+            .find(|(_, command)| **command == Command::ViewMenu)
+            .expect("a key of the 보기 menu");
+        let view_key = match chord.press {
+            keys::Press::Key(key) => char::from(key).to_string(),
+            keys::Press::Char(c) => c.to_string(),
+        };
+        let menu_shows = || {
+            slint::platform::update_timers_and_animations();
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &dragging.window,
+                "보기 방식",
+            )
+            .next()
+            .is_some()
+        };
+        dragging.drag_row();
+        // During the drag no key opens a menu, whose loop would take the left button's
+        // release: the drag goes on.
+        assert!(dragging.controller.key(&view_key, chord.mods, false));
+        assert!(!menu_shows());
+        assert!(dragging.rows());
+        // A right press during the drag (with Shift, or with Windows' menu first, a menu of the
+        // system would take the left button's release) ends it with no drop, as File Explorer
+        // ends its own, and shows no menu: Slint never sees the press.
+        assert!(
+            dragging.controller.right_button_pressed(),
+            "kept from Slint"
+        );
+        assert!(!dragging.rows());
+        assert!(!dragging.over());
+        assert!(!dragging.controller.left_down.get());
+        // The pointer that leaves the window then carries nothing out of it (on Windows and
+        // macOS the system's drag would drop at once, with no button held).
+        dragging.controller.pointer_outside();
+        dragging.controller.drag_leaves();
+        assert!(dragging.never_went_out());
+        // Neither the release of the left button nor a later click on the other pane drops it.
+        dragging.move_to(dragging.there);
+        dragging.left(false, dragging.there);
+        dragging.left(true, dragging.there);
+        dragging.left(false, dragging.there);
+        assert_eq!(dragging.drops.get(), 0);
+        assert!(!dragging.rows());
+        // With the left button up, the key opens its menu as before.
+        assert!(dragging.controller.key(&view_key, chord.mods, false));
+        assert!(menu_shows());
+        dragging.end();
+    }
+
+    #[test]
+    fn esc_ends_a_drag_of_rows_with_no_drop_and_keeps_the_selection() {
+        let escape = char::from(slint::platform::Key::Escape).to_string();
+        let dragging = Dragging::new();
+        let selected = || {
+            dragging.controller.state.borrow().as_ref().map(|state| {
+                let tab = state.panes()[LEFT].active_tab();
+                tab.selection().indices(tab.visible())
+            })
+        };
+        dragging.drag_row();
+        assert_eq!(selected(), Some(vec![0]));
+        assert!(dragging.controller.key(&escape, Mods::NONE, false));
+        assert!(!dragging.rows());
+        assert!(!dragging.over());
+        assert_eq!(selected(), Some(vec![0]), "the selection stays");
+        // The release where the drag was drops nothing, and nothing goes out of the window.
+        dragging.left(false, dragging.there);
+        assert_eq!(dragging.drops.get(), 0);
+        dragging.controller.pointer_outside();
+        dragging.controller.drag_leaves();
+        assert!(dragging.never_went_out());
+        // With no drag, Esc clears the selection as before.
+        assert!(dragging.controller.key(&escape, Mods::NONE, false));
+        assert_eq!(selected(), Some(Vec::new()));
+        dragging.end();
     }
 }

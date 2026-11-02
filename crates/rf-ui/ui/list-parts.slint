@@ -94,22 +94,28 @@ export component DragSeen {
 }
 
 // The menu of a drop that asks what to do (놓을 때 묻기, DND-04), where the drop was: move or copy
-// the items there, or nothing (취소; Esc and a click beside the menu choose nothing too). It takes
-// no click itself (`enabled: false`): it shows only when it is asked to.
+// the items there, or nothing (취소; Esc and a click beside the menu choose nothing too). It
+// offers only what the drag allows (`moves`, `copies`), as File Explorer's menu of a drag with
+// the right button leaves out what the source forbids. It takes no click itself
+// (`enabled: false`): it shows only when it is asked to.
 export component DropMenu inherits ContextMenuArea {
+    // Whether the drag allows a move (여기로 이동) and a copy (여기로 복사).
+    in property <bool> moves: true;
+    in property <bool> copies: true;
+
     // An item was chosen: `move`, `copy` or `cancel`.
     callback chosen(name: string);
 
     enabled: false;
 
     Menu {
-        MenuItem {
+        if root.moves: MenuItem {
             title: "여기로 이동";
             activated => {
                 root.chosen("move");
             }
         }
-        MenuItem {
+        if root.copies: MenuItem {
             title: "여기로 복사";
             activated => {
                 root.chosen("copy");
