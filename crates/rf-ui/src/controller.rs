@@ -1917,9 +1917,10 @@ impl Controller {
     /// ([`Controller::drag_maybe_gone`]). With the left button up, Slint hears it too
     /// (`PointerExited`): its adapter passes no `CursorLeft` on while it thinks a button is
     /// pressed, as after a drag of rows that went on as the system's drag, whose release it never
-    /// heard, and a row would stay shown as under the pointer. A second exit, after the
-    /// adapter's own, finds nothing under the pointer. With the button down, the pointer that
-    /// left is a drag's, which goes on.
+    /// heard, and a row would stay shown as under the pointer. The hook runs before the adapter,
+    /// so this exit is the first: the adapter's own, when it passes one on, comes second and
+    /// finds nothing under the pointer. With the button down, the pointer that left is a drag's,
+    /// which goes on.
     fn pointer_left(&self) {
         if !self.left_down.get()
             && let Some(window) = self.window.upgrade()
@@ -1997,10 +1998,11 @@ impl Controller {
             .dispatch_event(slint::platform::WindowEvent::PointerExited);
         pointer.set_rows(false);
         self.drag_gone();
-        let done: Box<dyn FnOnce(Option<DropEffect>)> = Box::new(|taken| {
+        let ours = out.ours;
+        let done: Box<dyn FnOnce(Option<DropEffect>)> = Box::new(move |taken| {
             // Out of the system's call (macOS: its callback) first.
             slint::Timer::single_shot(Duration::ZERO, move || {
-                with(|c| c.update(|state| state.drag_out_ended(taken)));
+                with(|c| c.update(|state| state.drag_out_ended(ours, taken)));
             });
         });
         match dnd::drag_out(self.owner(), &out.paths, Effects::ALL, out.ours, done) {
@@ -2008,7 +2010,7 @@ impl Controller {
             Ok(()) => self.left_down.set(false),
             Err(error) => {
                 log_drag_out_failed(&error);
-                self.update(|state| state.drag_out_ended(None));
+                self.update(|state| state.drag_out_ended(ours, None));
             }
         }
     }

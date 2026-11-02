@@ -620,17 +620,22 @@ impl AppState {
         Some(DragOut { paths, ours })
     }
 
-    /// The system's drag that a drag of rows went on as ([`AppState::drag_leaves_window`]) is
-    /// over, and the app that took it did `done` (`None`: nothing). A drop back on the window,
-    /// which made its own job then, is what that drop answered (`None` for a move on Windows; a
-    /// copy, or on macOS the move its generic operation reads as). The app does nothing of it,
-    /// whatever it was (a move
+    /// The system's drag that the drag of rows `ours` went on as
+    /// ([`AppState::drag_leaves_window`], [`DragOut::ours`]) is over, and the app that took it
+    /// did `done` (`None`: nothing). A drop back on the window, which made its own job then, is
+    /// what that drop answered (`None` for a move on Windows; a copy, or on macOS the move its
+    /// generic operation reads as). The app does nothing of it, whatever it was (a move
     /// included): it deletes nothing, since a move is the other app's to finish, and an app that
     /// only copied leaves a copy; the watch of a folder shows what changed. The drag is over.
-    /// Nothing for a drag that never went out.
-    pub fn drag_out_ended(&mut self, done: Option<DropEffect>) -> Vec<Effect> {
+    /// Nothing for a drag that never went out, nor for the end of an earlier drag, which comes
+    /// late: a drag readied since stays.
+    pub fn drag_out_ended(&mut self, ours: u64, done: Option<DropEffect>) -> Vec<Effect> {
         let _ = done;
-        if self.drag.as_ref().is_some_and(|drag| drag.out) {
+        if self
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.out && drag.id == ours)
+        {
             self.drag = None;
         }
         Vec::new()

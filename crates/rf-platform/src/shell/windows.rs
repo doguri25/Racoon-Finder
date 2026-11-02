@@ -33,13 +33,15 @@
 //!   `CMF_NORMAL | CMF_CANRENAME`, and `CMF_EXTENDEDVERBS` for Shift's commands.
 //! - **Who shows it:** a hidden window of this module's own class, owned by the app's window
 //!   ([`Helper`]), owns the menu (`TrackPopupMenuEx` with `TPM_RETURNCMD | TPM_RIGHTBUTTON`),
-//!   after `SetForegroundWindow` of the app's window, so that a click elsewhere closes it. Its
-//!   procedure ([`helper_proc`]) hands `WM_INITMENUPOPUP`, `WM_DRAWITEM`, `WM_MEASUREITEM` and
-//!   `WM_MENUCHAR` to the menu (`IContextMenu3::HandleMenuMsg2`, else
-//!   `IContextMenu2::HandleMenuMsg`), which fills 보내기, 연결 프로그램 and the extensions'
-//!   submenus as they open and draws their icons. winit's window and its procedure are left as
-//!   they are. Nothing is borrowed while the menu's code runs: the procedure takes a clone of
-//!   the menu's interface ([`HOSTED`]), since that code may pump messages and come back.
+//!   after `SetForegroundWindow` of the app's window, so that a click elsewhere closes it; once
+//!   it has closed, `WM_NULL` goes to the app's window, as `TrackPopupMenu`'s remarks ask, so
+//!   that the next menu closes the same way. Its procedure ([`helper_proc`]) hands
+//!   `WM_INITMENUPOPUP`, `WM_DRAWITEM`, `WM_MEASUREITEM` and `WM_MENUCHAR` to the menu
+//!   (`IContextMenu3::HandleMenuMsg2`, else `IContextMenu2::HandleMenuMsg`), which fills 보내기,
+//!   연결 프로그램 and the extensions' submenus as they open and draws their icons. winit's
+//!   window and its procedure are left as they are (`WM_NULL` is a message any window takes).
+//!   Nothing is borrowed while the menu's code runs: the procedure takes a clone of the menu's
+//!   interface ([`HOSTED`]), since that code may pump messages and come back.
 //! - **What is chosen:** a command whose verb (`GetCommandString(GCS_VERBW)`) the app does
 //!   itself ([`app_verb`]: 이름 바꾸기, 삭제, 잘라내기, 복사, 붙여넣기, with Shift as it is held as
 //!   the menu closes) comes back to the app ([`SystemMenuChoice::App`]); any other is carried out
@@ -76,9 +78,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, HMENU,
-    RegisterClassExW, SW_SHOWNORMAL, SetForegroundWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    PostMessageW, RegisterClassExW, SW_SHOWNORMAL, SetForegroundWindow, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
+    WM_NULL, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{HRESULT, Interface, PCSTR, PCWSTR, PSTR, w};
 
@@ -361,7 +363,7 @@ pub fn system_menu(
         // SAFETY: the filled menu, at a point of the screen, owned by the hidden window of this
         // thread; the call returns once the menu has closed, with the id of the command chosen
         // (0 for none).
-        unsafe {
+        let chosen = unsafe {
             TrackPopupMenuEx(
                 popup.0,
                 (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
@@ -371,7 +373,12 @@ pub fn system_menu(
                 None,
             )
         }
-        .0
+        .0;
+        // SAFETY: a message that does nothing, posted to the app's window, which outlives the
+        // call. `TrackPopupMenu`'s documented insurance: the thread switches to the app once,
+        // so that the next menu closes on a click elsewhere too. A failure leaves only that.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
+        chosen
     };
     let Some(offset) = u32::try_from(chosen)
         .ok()

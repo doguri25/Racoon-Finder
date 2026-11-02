@@ -29,9 +29,11 @@
 //! app's menus ([`AppState::more_options`]). The state copies out what it is of
 //! ([`SystemMenuAsk`]: the folder, the names of the items or none for the folder's own menu, its
 //! place), and the controller shows it on the next turn of the event loop with no borrow held.
-//! What the user chose there comes back to [`AppState::system_menu_chosen`]: the commands the app
-//! has itself (이름 바꾸기, the trash or a deletion for good, 잘라내기, 복사, 붙여넣기) are the app's,
-//! through its job engine and undo; the system carried out the rest. Where the system has no
+//! What the user chose there comes back to [`AppState::system_menu_chosen`], with the ask's
+//! token: the commands the app has itself (이름 바꾸기, the trash or a deletion for good, 잘라내기,
+//! 복사, 붙여넣기) are the app's, through its job engine and undo, while the pane still shows the
+//! menu's folder and its items are still the ones a command acts on; the system carried out the
+//! rest. Where the system has no
 //! such menu (macOS, Linux), the keys show the app's menu. macOS shares the items through its
 //! own picker instead ([`AppState::share`], 공유… in the item menu).
 
@@ -107,6 +109,9 @@ pub enum MenuPlace {
 /// borrow of the state held (`rf_platform::shell::system_menu`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemMenuAsk {
+    /// Which ask it is: what is chosen in the menu comes back with it
+    /// ([`AppState::system_menu_chosen`]).
+    pub token: u64,
     /// The folder the items are in, or whose own menu it is.
     pub folder: VPath,
     /// The names of the items in it; none for the folder's own menu (the part of a list without
@@ -117,12 +122,15 @@ pub struct SystemMenuAsk {
     pub extended: bool,
 }
 
-/// The system's menu asked for last ([`AppState::system_menu_chosen`]): in pane `side`, of the
-/// items a command acts on there (`items`), or of its folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The system's menu asked for last ([`AppState::system_menu_chosen`]), by its `token`: in pane
+/// `side`, of the items `names` of `folder`, the items a command acts on there as it was asked,
+/// or of the folder itself (no names).
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SystemAsked {
+    token: u64,
     side: usize,
-    items: bool,
+    folder: VPath,
+    names: Vec<OsString>,
 }
 
 /// What the item menu offers for the items it is for, besides what it always has.
@@ -290,46 +298,86 @@ impl AppState {
 
     /// The system's own menu of the items a command acts on in pane `side`, at `place`, with
     /// Shift's commands or not (`extended`): what it is of, copied out for the controller, which
-    /// shows it; what is chosen there comes back to [`AppState::system_menu_chosen`]. With no
-    /// such item, the folder's own menu.
+    /// shows it; what is chosen there comes back to [`AppState::system_menu_chosen`] with its
+    /// token. With no such item, the folder's own menu.
     fn ask_system_menu(&mut self, side: usize, place: MenuPlace, extended: bool) -> Vec<Effect> {
-        let names: Vec<OsString> = self
-            .target_entries(side)
-            .iter()
-            .map(|(_, entry)| entry.name.clone())
-            .collect();
+        let names = self.target_names(side);
         if names.is_empty() {
             return self.ask_folder_menu(side, place, extended);
         }
-        self.shell.system = Some(SystemAsked { side, items: true });
-        vec![Effect::SystemMenu(SystemMenuAsk {
-            folder: self.tab(side).location().clone(),
-            names,
-            place,
-            extended,
-        })]
+        self.system_menu_of(side, names, place, extended)
     }
 
     /// The system's own menu of the folder pane `side` shows, at `place` ([`ask_system_menu`]).
     ///
     /// [`ask_system_menu`]: AppState::ask_system_menu
     fn ask_folder_menu(&mut self, side: usize, place: MenuPlace, extended: bool) -> Vec<Effect> {
-        self.shell.system = Some(SystemAsked { side, items: false });
+        self.system_menu_of(side, Vec::new(), place, extended)
+    }
+
+    /// The ask of the system's menu of the items `names` of pane `side`'s folder (none: the
+    /// folder's own), noted under a new token for its answer.
+    fn system_menu_of(
+        &mut self,
+        side: usize,
+        names: Vec<OsString>,
+        place: MenuPlace,
+        extended: bool,
+    ) -> Vec<Effect> {
+        self.shell.token += 1;
+        let token = self.shell.token;
+        let folder = self.tab(side).location().clone();
+        self.shell.system = Some(SystemAsked {
+            token,
+            side,
+            folder: folder.clone(),
+            names: names.clone(),
+        });
         vec![Effect::SystemMenu(SystemMenuAsk {
-            folder: self.tab(side).location().clone(),
-            names: Vec::new(),
+            token,
+            folder,
+            names,
             place,
             extended,
         })]
     }
 
-    /// What was chosen in the system's menu that the state asked for last: a command the app
-    /// does with its own (이름 바꾸기, the trash or a deletion for good, the clipboard's), for the
-    /// items of that menu, as the same command of the app's menu does it, through the job
-    /// engine and its undo; nothing for a command the system did itself, nothing chosen, or a
-    /// choice no menu is waiting for.
-    pub fn system_menu_chosen(&mut self, choice: SystemMenuChoice) -> Vec<Effect> {
-        let Some(asked) = self.shell.system.take() else {
+    /// The names of the items a command acts on in pane `side`, in the order of its rows.
+    fn target_names(&self, side: usize) -> Vec<OsString> {
+        self.target_entries(side)
+            .iter()
+            .map(|(_, entry)| entry.name.clone())
+            .collect()
+    }
+
+    /// Whether pane `side` still shows the folder of the menu `asked`, and a command there still
+    /// acts on the items it was of, whatever their order (none, for the folder's own menu).
+    fn still_for(&self, asked: &SystemAsked) -> bool {
+        if *self.tab(asked.side).location() != asked.folder {
+            return false;
+        }
+        if asked.names.is_empty() {
+            return true;
+        }
+        let mut now = self.target_names(asked.side);
+        let mut then = asked.names.clone();
+        now.sort_unstable();
+        then.sort_unstable();
+        now == then
+    }
+
+    /// What was chosen in the system's menu of the ask `token`, the one the state asked for
+    /// last: a command the app does with its own (이름 바꾸기, the trash or a deletion for good,
+    /// the clipboard's), for the items of that menu, as the same command of the app's menu does
+    /// it, through the job engine and its undo; nothing for a command the system did itself,
+    /// nothing chosen, or a choice no menu is waiting for (an earlier menu's, or a second one).
+    ///
+    /// The command acts on the items a command acts on now, so it is done only while they are
+    /// still the menu's: the pane shows the same folder, and the same items are chosen (or, for
+    /// the folder's own menu, any). Else a notice says that nothing was done: the selection or
+    /// the folder changed between the ask and the answer (a key, a listing, a folder's watch).
+    pub fn system_menu_chosen(&mut self, token: u64, choice: SystemMenuChoice) -> Vec<Effect> {
+        let Some(asked) = self.shell.system.take_if(|asked| asked.token == token) else {
             return Vec::new();
         };
         let SystemMenuChoice::App(verb) = choice else {
@@ -338,8 +386,11 @@ impl AppState {
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }
+        if !self.still_for(&asked) {
+            return vec![Effect::Notice(words::system_menu_moved().to_owned())];
+        }
         let side = asked.side;
-        match (verb, asked.items) {
+        match (verb, !asked.names.is_empty()) {
             // Into the folder of the menu's row, as the app's menu of a row pastes; the
             // folder's own menu pastes into the folder.
             (AppVerb::Paste, true) => {

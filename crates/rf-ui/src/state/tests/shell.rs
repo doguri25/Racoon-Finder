@@ -456,9 +456,11 @@ fn shift_held() -> DragMods {
     }
 }
 
-/// The system's menu of the items `names` of the left pane's folder (none: the folder's own).
+/// The system's menu of the items `names` of the left pane's folder (none: the folder's own),
+/// with no token: compare it with [`untokened`] effects.
 fn system_menu(names: &[&str], place: MenuPlace, extended: bool) -> Effect {
     Effect::SystemMenu(SystemMenuAsk {
+        token: 0,
         folder: folder("a"),
         names: names.iter().map(OsString::from).collect(),
         place,
@@ -466,18 +468,38 @@ fn system_menu(names: &[&str], place: MenuPlace, extended: bool) -> Effect {
     })
 }
 
+/// `effects` with the token of each ask of the system's menu taken out, to compare with
+/// [`system_menu`].
+fn untokened(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .map(|effect| match effect {
+            Effect::SystemMenu(ask) => Effect::SystemMenu(SystemMenuAsk { token: 0, ..ask }),
+            other => other,
+        })
+        .collect()
+}
+
+/// The token of the ask of the system's menu that `effects` end with.
+fn token_of(effects: &[Effect]) -> u64 {
+    match effects.last() {
+        Some(Effect::SystemMenu(ask)) => ask.token,
+        _ => panic!("an ask of the system's menu, not {effects:?}"),
+    }
+}
+
 #[test]
 fn shift_f10_shows_windows_own_menu_of_the_items_or_of_the_folder() {
     let mut state = with_windows_menu();
     // Nothing chosen: the folder's own menu, by the top of the list, with Shift's commands.
     assert_eq!(
-        press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window"),
+        untokened(press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window")),
         [system_menu(&[], MenuPlace::Folder(LEFT), true)]
     );
     // The selection, by the row the item menu opens by, scrolled to.
     choose(&mut state, &[1, 2]);
     assert_eq!(
-        press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window"),
+        untokened(press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window")),
         [
             Effect::ScrollTo { side: LEFT, row: 2 },
             system_menu(
@@ -498,8 +520,9 @@ fn shift_f10_shows_windows_own_menu_of_the_items_or_of_the_folder() {
     // In the right pane, of its own folder.
     state.activate(RIGHT);
     assert_eq!(
-        run(&mut state, Command::SystemMenu),
+        untokened(run(&mut state, Command::SystemMenu)),
         [Effect::SystemMenu(SystemMenuAsk {
+            token: 0,
             folder: folder("b"),
             names: Vec::new(),
             place: MenuPlace::Folder(RIGHT),
@@ -540,7 +563,7 @@ fn a_right_click_with_shift_or_the_setting_shows_windows_own_menu() {
     // clicked, with Shift's commands; the pane gets the keys.
     state.modifiers_changed(shift_held());
     assert_eq!(
-        state.right_click(LEFT, Some(2)),
+        state.right_click(LEFT, Some(2)).map(untokened),
         Some(vec![
             Effect::FocusPanes,
             system_menu(&["b.txt"], MenuPlace::Shown, true),
@@ -549,10 +572,11 @@ fn a_right_click_with_shift_or_the_setting_shows_windows_own_menu() {
     assert_eq!(selected(&state, LEFT), [2]);
     // On the part of a list without rows: its folder's own, and the pane becomes active.
     assert_eq!(
-        state.right_click(RIGHT, None),
+        state.right_click(RIGHT, None).map(untokened),
         Some(vec![
             Effect::FocusPanes,
             Effect::SystemMenu(SystemMenuAsk {
+                token: 0,
                 folder: folder("b"),
                 names: Vec::new(),
                 place: MenuPlace::Shown,
@@ -566,14 +590,14 @@ fn a_right_click_with_shift_or_the_setting_shows_windows_own_menu() {
     state.modifiers_changed(DragMods::default());
     state.set_system_menu_first(true);
     assert_eq!(
-        state.right_click(LEFT, Some(0)),
+        state.right_click(LEFT, Some(0)).map(untokened),
         Some(vec![
             Effect::FocusPanes,
             system_menu(&["docs"], MenuPlace::Shown, false),
         ])
     );
     assert_eq!(
-        run(&mut state, Command::ContextMenu),
+        untokened(run(&mut state, Command::ContextMenu)),
         [
             Effect::ScrollTo { side: LEFT, row: 0 },
             system_menu(&["docs"], MenuPlace::Row { side: LEFT, row: 0 }, false),
@@ -603,12 +627,12 @@ fn more_options_shows_windows_own_menu_of_what_the_app_s_menu_was_for() {
     let mut state = with_windows_menu();
     state.row_menu(LEFT, 1);
     assert_eq!(
-        state.more_options(false),
+        untokened(state.more_options(false)),
         [system_menu(&["a.txt"], MenuPlace::Shown, false)]
     );
     // The part of the list without items: the folder's own.
     assert_eq!(
-        state.more_options(true),
+        untokened(state.more_options(true)),
         [system_menu(&[], MenuPlace::Shown, false)]
     );
     // Nothing where the system has no menu of its own, or while a window shows.
@@ -622,29 +646,34 @@ fn more_options_shows_windows_own_menu_of_what_the_app_s_menu_was_for() {
 #[test]
 fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
     let mut state = with_windows_menu();
+    // The menu of the rows `rows`, chosen: the token of its ask.
     let ask = |state: &mut AppState, rows: &[usize]| {
         choose(state, rows);
-        let effects = run(state, Command::SystemMenu);
-        assert!(
-            matches!(effects.last(), Some(Effect::SystemMenu(_))),
-            "{effects:?}"
-        );
+        token_of(&run(state, Command::SystemMenu))
     };
-    let chosen = |state: &mut AppState, verb| state.system_menu_chosen(SystemMenuChoice::App(verb));
+    let chosen = |state: &mut AppState, token, verb| {
+        state.system_menu_chosen(token, SystemMenuChoice::App(verb))
+    };
     // 삭제: the trash, through the app's job (the folder's trash is looked for first).
-    ask(&mut state, &[1, 2]);
+    let token = ask(&mut state, &[1, 2]);
     assert_eq!(
-        chosen(&mut state, AppVerb::Delete { permanent: false }),
+        chosen(&mut state, token, AppVerb::Delete { permanent: false }),
         [Effect::CheckTrash {
             folder: folder("a"),
             paths: vec![in_a("a.txt"), in_a("b.txt")],
         }]
     );
     // Once: a second answer, or one no menu is waiting for, does nothing.
-    assert_eq!(chosen(&mut state, AppVerb::Delete { permanent: false }), []);
+    assert_eq!(
+        chosen(&mut state, token, AppVerb::Delete { permanent: false }),
+        []
+    );
     // With Shift, for good: the confirmation first.
-    ask(&mut state, &[1]);
-    assert_eq!(chosen(&mut state, AppVerb::Delete { permanent: true }), []);
+    let token = ask(&mut state, &[1]);
+    assert_eq!(
+        chosen(&mut state, token, AppVerb::Delete { permanent: true }),
+        []
+    );
     assert!(
         matches!(state.modal(), Some(Modal::Confirm(_))),
         "{:?}",
@@ -652,8 +681,8 @@ fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
     );
     state.dialog_cancelled();
     // 이름 바꾸기: the app's name window.
-    ask(&mut state, &[2]);
-    assert_eq!(chosen(&mut state, AppVerb::Rename), []);
+    let token = ask(&mut state, &[2]);
+    assert_eq!(chosen(&mut state, token, AppVerb::Rename), []);
     assert!(
         matches!(state.modal(), Some(Modal::Name(_))),
         "{:?}",
@@ -662,8 +691,8 @@ fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
     state.dialog_cancelled();
     // 잘라내기 and 복사: the system clipboard, through the app's own.
     for (verb, cut) in [(AppVerb::Cut, true), (AppVerb::Copy, false)] {
-        ask(&mut state, &[1, 2]);
-        match the_work(&chosen(&mut state, verb)) {
+        let token = ask(&mut state, &[1, 2]);
+        match the_work(&chosen(&mut state, token, verb)) {
             ClipboardWork::PutFiles {
                 paths, cut: put, ..
             } => {
@@ -691,17 +720,19 @@ fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
         }
     };
     state.row_menu(LEFT, 0);
+    let asked = state.more_options(false);
     assert_eq!(
-        state.more_options(false),
+        untokened(asked.clone()),
         [system_menu(&["docs"], MenuPlace::Shown, false)]
     );
-    let effects = chosen(&mut state, AppVerb::Paste);
+    let effects = chosen(&mut state, token_of(&asked), AppVerb::Paste);
     assert_eq!(pasted_to(&mut state, &effects), in_a("docs"));
+    let asked = state.more_options(true);
     assert_eq!(
-        state.more_options(true),
+        untokened(asked.clone()),
         [system_menu(&[], MenuPlace::Shown, false)]
     );
-    let effects = chosen(&mut state, AppVerb::Paste);
+    let effects = chosen(&mut state, token_of(&asked), AppVerb::Paste);
     assert_eq!(pasted_to(&mut state, &effects), folder("a"));
     // The folder's own menu has none of the items' commands: nothing is renamed or deleted.
     for verb in [
@@ -711,18 +742,66 @@ fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
         AppVerb::Cut,
         AppVerb::Copy,
     ] {
-        state.more_options(true);
-        assert_eq!(chosen(&mut state, verb), [], "{verb:?}");
+        let token = token_of(&state.more_options(true));
+        assert_eq!(chosen(&mut state, token, verb), [], "{verb:?}");
         assert_eq!(state.modal(), None, "{verb:?}");
     }
     // What the system did itself, and nothing chosen: nothing for the app.
     for choice in [SystemMenuChoice::Done, SystemMenuChoice::Nothing] {
-        ask(&mut state, &[1]);
-        assert_eq!(state.system_menu_chosen(choice), [], "{choice:?}");
+        let token = ask(&mut state, &[1]);
+        assert_eq!(state.system_menu_chosen(token, choice), [], "{choice:?}");
         // The menu is answered: a late command of it does nothing.
-        assert_eq!(chosen(&mut state, AppVerb::Rename), []);
+        assert_eq!(chosen(&mut state, token, AppVerb::Rename), []);
         assert_eq!(state.modal(), None);
     }
+}
+
+#[test]
+fn what_windows_own_menu_chose_acts_only_on_what_the_menu_was_for() {
+    let mut state = with_windows_menu();
+    let ask = |state: &mut AppState, rows: &[usize]| {
+        choose(state, rows);
+        token_of(&run(state, Command::SystemMenu))
+    };
+    let trash = AppVerb::Delete { permanent: false };
+    let chosen = |state: &mut AppState, token, verb| {
+        state.system_menu_chosen(token, SystemMenuChoice::App(verb))
+    };
+    let moved = || vec![Effect::Notice(words::system_menu_moved().to_owned())];
+    // The menu was of a.txt; by its answer the selection is b.txt: nothing is trashed, and a
+    // notice says why.
+    let token = ask(&mut state, &[1]);
+    choose(&mut state, &[2]);
+    assert_eq!(chosen(&mut state, token, trash), moved());
+    assert_eq!(state.modal(), None);
+    // The same for 이름 바꾸기, which would rename b.txt, and for more items than the menu's.
+    let token = ask(&mut state, &[1]);
+    choose(&mut state, &[1, 2]);
+    assert_eq!(chosen(&mut state, token, AppVerb::Rename), moved());
+    assert_eq!(state.modal(), None);
+    // The answer of a menu asked before the last one is stale: nothing, and the last one's
+    // answer still comes.
+    let first = ask(&mut state, &[1]);
+    let last = ask(&mut state, &[2]);
+    assert_eq!(chosen(&mut state, first, trash), []);
+    assert_eq!(
+        chosen(&mut state, last, trash),
+        [Effect::CheckTrash {
+            folder: folder("a"),
+            paths: vec![in_a("b.txt")],
+        }]
+    );
+    // The folder's own menu: by its answer the pane shows another folder, where nothing is
+    // pasted.
+    choose(&mut state, &[]);
+    let token = token_of(&run(&mut state, Command::SystemMenu));
+    let effects = state.go_to(folder("b"));
+    assert!(!effects.is_empty(), "{effects:?}");
+    assert_eq!(chosen(&mut state, token, AppVerb::Paste), moved());
+    // Nothing chosen, or a command the system did itself, needs no notice.
+    let token = ask(&mut state, &[]);
+    let _ = state.go_to(folder("a"));
+    assert_eq!(state.system_menu_chosen(token, SystemMenuChoice::Done), []);
 }
 
 #[test]

@@ -101,14 +101,14 @@ fn a_drag_out_that_ends_as_a_move_deletes_nothing() {
         state.press_row(LEFT, 2, false, false);
         let id = state.drag_id();
         assert!(state.drag_leaves_window().is_some(), "{result:?}");
-        let effects = state.drag_out_ended(result);
+        let effects = state.drag_out_ended(id, result);
         assert!(!any_job(&effects), "{result:?}: {effects:?}");
         assert_eq!(effects, Vec::new(), "{result:?}");
         // The drag is over: it drops nowhere any more, not even in the window, and a second
         // end changes nothing either.
         assert_eq!(state.drag(), None, "{result:?}");
         assert_eq!(state.drop_items(id, RIGHT_LIST), Vec::new(), "{result:?}");
-        assert_eq!(state.drag_out_ended(result), Vec::new(), "{result:?}");
+        assert_eq!(state.drag_out_ended(id, result), Vec::new(), "{result:?}");
     }
 }
 
@@ -116,13 +116,39 @@ fn a_drag_out_that_ends_as_a_move_deletes_nothing() {
 fn the_end_of_a_drag_that_never_left_changes_nothing() {
     let mut state = two_panes();
     // Nothing went out: no drag to end.
-    assert_eq!(state.drag_out_ended(Some(DropEffect::Move)), Vec::new());
+    assert_eq!(state.drag_out_ended(1, Some(DropEffect::Move)), Vec::new());
     // A drag readied since, which has not gone out, stays ready.
     state.press_row(LEFT, 2, false, false);
     let id = state.drag_id();
-    assert_eq!(state.drag_out_ended(None), Vec::new());
+    assert_eq!(state.drag_out_ended(id, None), Vec::new());
     assert_eq!(state.drag_id(), id);
     assert!(state.drag().is_some());
+}
+
+#[test]
+fn the_end_of_an_earlier_drag_out_leaves_the_drag_after_it() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let first = state
+        .drag_leaves_window()
+        .expect("the first drag goes out")
+        .ours;
+    // Before its end comes back, a new drag is readied and goes out too.
+    state.press_row(LEFT, 1, false, false);
+    let second = state
+        .drag_leaves_window()
+        .expect("the second drag goes out")
+        .ours;
+    assert_ne!(first, second);
+    // The end of the first is stale: the second stays the window's, and drops in it should it
+    // come back.
+    assert_eq!(state.drag_out_ended(first, None), Vec::new());
+    assert_eq!(state.drag_id(), second);
+    assert!(state.drag().is_some());
+    // Its own end is over it.
+    assert_eq!(state.drag_out_ended(second, None), Vec::new());
+    assert_eq!(state.drag(), None);
+    assert_eq!(state.drop_items(second, RIGHT_LIST), Vec::new());
 }
 
 #[test]
@@ -165,7 +191,10 @@ fn a_drag_out_that_comes_back_moves_once_as_a_drag_in_the_window() {
         )
     );
     // Then the system's drag ends: nothing more happens, once or twice.
-    assert_eq!(state.drag_out_ended(None), Vec::new());
-    assert_eq!(state.drag_out_ended(Some(DropEffect::Move)), Vec::new());
+    assert_eq!(state.drag_out_ended(out.ours, None), Vec::new());
+    assert_eq!(
+        state.drag_out_ended(out.ours, Some(DropEffect::Move)),
+        Vec::new()
+    );
     assert_eq!(state.drop_items(out.ours, RIGHT_LIST), Vec::new());
 }

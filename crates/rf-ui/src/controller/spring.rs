@@ -1,8 +1,8 @@
 //! 머무르면 열기 (DND-08): the place a drag rests on opens once the drag has stayed there for
 //! [`SPRING_DELAY`]. Each hover over a place that takes the drag tells where it is
-//! ([`Spring::hover`]); a new place, or the same one holding another folder now (the rows of a
-//! folder came under a still pointer, a list scrolled under it), counts the time from the start,
-//! and the time runs on while the drag stays. A place that takes nothing stops it, and so does
+//! ([`Spring::hover`]); a new place, or the same one holding another folder now (a list
+//! scrolled under it), counts the time from the start, and the time runs on while the drag
+//! stays. A place that takes nothing stops it, and so does
 //! the end of the drag ([`Spring::stop`]: its drop, `drag-finished`, the left button let go,
 //! the pointer gone from the window, and later the leave and the drop of a drag of another app).
 //! What a rest opens is the state's ([`AppState::drag_rests`](crate::state::AppState::drag_rests)),

@@ -195,6 +195,12 @@ pub fn drop_moved() -> &'static str {
     "목록이 바뀌어 놓을 곳이 달라졌습니다. 다시 끌어다 놓으세요"
 }
 
+/// The notice of a command chosen in Windows' own menu that the app did not do: the items a
+/// command acts on (or the folder of the pane) are no longer the ones the menu was for.
+pub fn system_menu_moved() -> &'static str {
+    "목록이 바뀌어 Windows 메뉴에서 고른 명령을 하지 않았습니다. 메뉴를 다시 띄워 고르세요"
+}
+
 /// The notice when the folder `name` a pane showed is gone and the pane went to the nearest
 /// folder above it that is left (`to_parent`), or home when none is.
 pub fn folder_vanished(name: &str, to_parent: bool) -> String {

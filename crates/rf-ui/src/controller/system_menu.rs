@@ -119,7 +119,7 @@ impl Controller {
                 SystemMenuChoice::Nothing
             }
         };
-        self.update(|state| state.system_menu_chosen(choice));
+        self.update(|state| state.system_menu_chosen(ask.token, choice));
     }
 
     /// Shows the system's picker of the ways to share `paths` (macOS) on the next turn of the
