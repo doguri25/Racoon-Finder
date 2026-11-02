@@ -36,10 +36,11 @@
 //! thread; none of them needs the main thread. A choice the user cancels (the dialog of
 //! 연결 프로그램, the consent prompt) is no failure: the call returns `Ok`.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io;
-use std::num::NonZeroIsize;
+use std::num::{NonZeroIsize, NonZeroUsize};
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 
 use rf_core::Os;
 
@@ -97,11 +98,23 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
 }
 
-/// The app's window that a dialog of the system belongs to: on Windows its `HWND`, so that the
-/// dialog, and the consent prompt of a program run as administrator, come in front of it.
-/// [`Owner::NONE`] for none; other systems do not use it.
+/// The app's window: on Windows its `HWND`, so that a dialog of the system, and the consent
+/// prompt of a program run as administrator, come in front of it, and the window's drop target
+/// is registered on it ([`crate::dnd::register_drop_target`]); on macOS the `NSView` of its
+/// content, which the drop target covers. [`Owner::NONE`] for none.
+///
+/// It holds the handle as a number, so that it can go to the worker thread of a dialog; only
+/// the thread of the window may use the view it names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Owner(Option<NonZeroIsize>);
+pub struct Owner(Option<Handle>);
+
+/// The handle an [`Owner`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Handle {
+    Hwnd(NonZeroIsize),
+    /// The address of an `NSView`, its provenance exposed ([`Owner::view`]).
+    View(NonZeroUsize),
+}
 
 impl Owner {
     /// No window: a dialog stands on its own.
@@ -109,12 +122,29 @@ impl Owner {
 
     /// The window whose Windows handle (`HWND`) is `hwnd`.
     pub fn hwnd(hwnd: NonZeroIsize) -> Owner {
-        Owner(Some(hwnd))
+        Owner(Some(Handle::Hwnd(hwnd)))
     }
 
-    /// The Windows handle of the window, if there is one.
+    /// The window whose content is the macOS `NSView` at `view`.
+    pub fn view(view: NonNull<c_void>) -> Owner {
+        Owner(Some(Handle::View(view.expose_provenance())))
+    }
+
+    /// The Windows handle of the window, if it has one.
     pub fn raw(self) -> Option<NonZeroIsize> {
-        self.0
+        match self.0 {
+            Some(Handle::Hwnd(hwnd)) => Some(hwnd),
+            Some(Handle::View(_)) | None => None,
+        }
+    }
+
+    /// The macOS `NSView` of the window's content, if it has one. Only the main thread may use
+    /// it, while the window lives.
+    pub fn ns_view(self) -> Option<NonNull<c_void>> {
+        match self.0 {
+            Some(Handle::View(address)) => Some(NonNull::with_exposed_provenance(address)),
+            Some(Handle::Hwnd(_)) | None => None,
+        }
     }
 }
 
@@ -907,5 +937,22 @@ mod tests {
             OpenWith::Unsupported
         };
         assert_eq!(OPEN_WITH, expected);
+    }
+
+    #[test]
+    fn a_window_is_named_by_the_handle_of_its_system() {
+        let hwnd = NonZeroIsize::new(0x1234).expect("not zero");
+        let windows = Owner::hwnd(hwnd);
+        assert_eq!(windows.raw(), Some(hwnd));
+        assert_eq!(windows.ns_view(), None);
+        let mut content = 0u8;
+        let view = NonNull::from(&mut content).cast::<c_void>();
+        let macos = Owner::view(view);
+        assert_eq!(macos.ns_view(), Some(view));
+        assert_eq!(macos.raw(), None);
+        assert_ne!(macos, windows);
+        assert_eq!(Owner::NONE.raw(), None);
+        assert_eq!(Owner::NONE.ns_view(), None);
+        assert_eq!(Owner::default(), Owner::NONE);
     }
 }

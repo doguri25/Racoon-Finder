@@ -592,6 +592,8 @@ export component Pane inherits Rectangle {
     // (-1 below the rows, -2 for none) or its tab (-1 for none).
     in property <int> outside-row: -2;
     in property <int> outside-tab: -1;
+    // A drag of another app is over the pane's list, which scrolls under it near its ends.
+    in property <bool> outside-over;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     // For the keys: how many lines (rows, or columns of 목록) a page key moves, and how many
@@ -1195,6 +1197,7 @@ export component Pane inherits Rectangle {
                 active: root.view.active;
                 drag-data: root.drag-data;
                 outside-row: root.outside-row;
+                outside-over: root.outside-over && root.view.mode == 0;
                 drag-ended => {
                     root.drag-ended();
                 }
@@ -1244,6 +1247,7 @@ export component Pane inherits Rectangle {
                 active: root.view.active;
                 drag-data: root.drag-data;
                 outside-row: root.outside-row;
+                outside-over: root.outside-over && root.view.mode != 0;
                 drag-ended => {
                     root.drag-ended();
                 }

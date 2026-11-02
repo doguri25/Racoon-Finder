@@ -99,6 +99,8 @@ export component FileList inherits Rectangle {
     // The row a drag of another app is over and that takes it, as Rust found it: -1 for the list
     // below the rows, -2 for none. It shows as a drag of rows there shows.
     in property <int> outside-row: -2;
+    // A drag of another app is over the rows (Rust found it there), whether they take it or not.
+    in property <bool> outside-over;
 
     // A click on the head of column `column` (with Shift: `then`).
     callback sort(column: int, then: bool);
@@ -201,11 +203,13 @@ export component FileList inherits Rectangle {
 
     // The rows scroll under a drag held near their top or bottom (DND-08), as the tab strip and
     // the column heads do (`EdgeScroll`), while its pointer stays where this list last saw it
-    // (`DragSeen`), whether the rows take the drag or not. After each step another row is under
-    // the still pointer, which the place there is asked about again (`moved-under`). It stops
-    // at the first or the last row.
+    // (`DragSeen`), whether the rows take the drag or not; and under a drag of another app,
+    // while Rust finds it over the rows (`outside-over`). After each step another row is under
+    // the still pointer, which the place there is asked about again (`moved-under`; the system
+    // asks again about a drag of another app on its own, which it does every few tens of
+    // milliseconds while the drag is still). It stops at the first or the last row.
     drag-seen := DragSeen { }
-    private property <int> scroll-way: !drag-seen.here ? 0
+    private property <int> scroll-way: !drag-seen.here && !root.outside-over ? 0
         : EdgeScroll.way(DragPointer.y - drop.absolute-position.y, drop.height, list.content-y < 0, list.content-y > list.visible-height - list.content-height);
 
     // The steps of `scroll-way`.

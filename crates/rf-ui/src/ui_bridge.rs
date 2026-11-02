@@ -51,10 +51,11 @@ use crate::state::{
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
-    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DropAt, DropPlace, FactRow, FileRow,
-    FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow, MessageView,
-    NameView, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView,
-    PropertiesView, RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem, TreeRow,
+    ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
+    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow,
+    MessageView, NameView, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind,
+    PreviewView, PropertiesView, RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem,
+    TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -809,25 +810,45 @@ pub fn spot_of(place: DropPlace, side: i32, index: i32) -> Option<DropSpot> {
 /// The place under the point `at` of the window's content, for a drag of another app: the
 /// window's `spot-at`, which finds it by the reckoning of each place's own drop area (the rows
 /// and the items of a list, the tabs of a strip). `None` where nothing takes drops, and while a
-/// dialog, quick look or a menu of the window shows over it.
+/// dialog, quick look or a menu of the window shows over it. See [`drop_place`].
+///
+/// # Preconditions
+///
+/// No drag of Slint's (a drag of rows or of a tab) is under way, `DragPointer.over`: over the
+/// tree the window takes one move of the pointer ([`drop_place`]), which Slint would make a
+/// step of that drag. While one is, the tree is not looked at, and its rows give `None`.
+pub fn drop_spot(window: &MainWindow, at: WindowPoint) -> Option<DropSpot> {
+    spot_found(&drop_place(window, at))
+}
+
+/// The place under the point `at` of the window's content, as `spot-at` names it, whether a
+/// drop there takes the drag or not ([`drop_spot`] in the window's words): for the list or the
+/// tree that scrolls under a drag of another app held near its ends (DND-08).
 ///
 /// The rows of the tree differ in height (a head above the first favorite and the first drive,
 /// a drive's space bar), and its list places the rows it has not drawn by their average
 /// height, so no reckoning from outside them finds the one under a point: over the tree, the
-/// pointer moves there first (a `PointerMoved` of the window, which no drag of Slint's is under
-/// way to take), and the row under it says it is the one (`pointed-row`), by Slint's own hit
-/// test. That changes only which row shows the pointer over it, as a move of the mouse there
-/// would.
-pub fn drop_spot(window: &MainWindow, at: WindowPoint) -> Option<DropSpot> {
+/// pointer moves there first (a `PointerMoved` of the window), and the row under it says it is
+/// the one (`pointed-row`), by Slint's own hit test. That changes only which row shows the
+/// pointer over it, as a move of the mouse there would. Not while a drag of Slint's is under
+/// way (see [`drop_spot`]'s preconditions): the tree's row is then -1, none.
+pub fn drop_place(window: &MainWindow, at: WindowPoint) -> DropAt {
     let mut found = window.invoke_spot_at(at.x, at.y);
     if found.found && found.place == DropPlace::Tree {
         window.invoke_forget_tree_pointer();
-        let position = slint::LogicalPosition::new(at.x, at.y);
-        window
-            .window()
-            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        if !window.global::<DragPointer<'_>>().get_over() {
+            let position = slint::LogicalPosition::new(at.x, at.y);
+            window
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        }
         found = window.invoke_spot_at(at.x, at.y);
     }
+    found
+}
+
+/// The place of the state that `found` names ([`spot_of`]); `None` for none.
+pub fn spot_found(found: &DropAt) -> Option<DropSpot> {
     found
         .found
         .then(|| spot_of(found.place, found.side, found.index))
@@ -1002,9 +1023,10 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_open_terminal(key(Command::OpenTerminal));
 }
 
-/// The app's window as the owner of a dialog of the system: its Windows `HWND`, so that the
-/// dialogs and the consent prompt come in front of it. [`Owner::NONE`] on other systems, and
-/// for a window of another backend than winit's (the tests').
+/// The app's window as the owner of a dialog of the system and of the window's drop target: its
+/// Windows `HWND`, so that the dialogs and the consent prompt come in front of it; on macOS the
+/// `NSView` of its content. [`Owner::NONE`] on other systems, for a window of another backend
+/// than winit's (the tests'), and before the window is made.
 pub fn owner_of(window: &MainWindow) -> Owner {
     use slint::winit_030::WinitWindowAccessor;
     use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1013,6 +1035,7 @@ pub fn owner_of(window: &MainWindow) -> Owner {
         .with_winit_window(
             |winit| match winit.window_handle().map(|handle| handle.as_raw()) {
                 Ok(RawWindowHandle::Win32(win32)) => Owner::hwnd(win32.hwnd),
+                Ok(RawWindowHandle::AppKit(appkit)) => Owner::view(appkit.ns_view),
                 _ => Owner::NONE,
             },
         )

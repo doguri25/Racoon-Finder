@@ -89,12 +89,13 @@ fn preferred_drop_effect() -> io::Result<u32> {
     Ok(format)
 }
 
-/// A block of movable global memory that is ours until the clipboard takes it.
-struct Global(HGLOBAL);
+/// A block of movable global memory that is ours until the clipboard (or a drag's data object,
+/// module `dnd`) takes it.
+pub(crate) struct Global(HGLOBAL);
 
 impl Global {
     /// A new block holding `bytes`.
-    fn with(bytes: &[u8]) -> io::Result<Global> {
+    pub(crate) fn with(bytes: &[u8]) -> io::Result<Global> {
         // SAFETY: a plain allocation of `bytes.len()` bytes (at least one: every buffer here
         // ends with a NUL), which `Global` frees unless it is handed over.
         let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }.map_err(|e| to_io(&e))?;
@@ -122,11 +123,21 @@ impl Global {
         // refers to.
         match unsafe { SetClipboardData(format, Some(HANDLE(self.0.0))) } {
             Ok(_) => {
-                std::mem::forget(self);
+                self.given();
                 Ok(())
             }
             Err(error) => Err(to_io(&error)),
         }
+    }
+
+    /// The block, for a call that takes it over once it works ([`Global::given`]).
+    pub(crate) fn handle(&self) -> HGLOBAL {
+        self.0
+    }
+
+    /// The block is the system's now: it is not freed here.
+    pub(crate) fn given(self) {
+        std::mem::forget(self);
     }
 }
 
@@ -176,8 +187,18 @@ fn read(_open: &Opened, format: u32) -> io::Result<Option<Vec<u8>>> {
     let Ok(handle) = (unsafe { GetClipboardData(format) }) else {
         return Ok(None);
     };
-    let global = HGLOBAL(handle.0);
-    // SAFETY: a clipboard block of a format whose data is global memory.
+    // SAFETY: a clipboard block of a format whose data is global memory, which stays valid
+    // while the clipboard is open.
+    unsafe { global_bytes(HGLOBAL(handle.0)) }.map(Some)
+}
+
+/// A copy of the bytes of the block of global memory `global`.
+///
+/// # Safety
+///
+/// `global` is a valid block of global memory, which nobody frees during the call.
+pub(crate) unsafe fn global_bytes(global: HGLOBAL) -> io::Result<Vec<u8>> {
+    // SAFETY: the caller hands a valid block.
     let size = unsafe { GlobalSize(global) };
     // SAFETY: as above; locked once here and unlocked below.
     let source = unsafe { GlobalLock(global) };
@@ -188,18 +209,34 @@ fn read(_open: &Opened, format: u32) -> io::Result<Option<Vec<u8>>> {
     let bytes = unsafe { std::slice::from_raw_parts(source.cast::<u8>(), size) }.to_vec();
     // SAFETY: this thread locked it once above.
     let _ = unsafe { GlobalUnlock(global) };
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
-/// The paths of a narrow (ANSI) `CF_HDROP` list, which only the system can read. The clipboard
-/// must be open on this thread (`_open`).
-fn narrow_paths(_open: &Opened) -> Vec<Vec<u16>> {
-    // SAFETY: the clipboard is open on this thread and has `CF_HDROP` (the caller read it).
-    let Ok(handle) = (unsafe { GetClipboardData(CF_HDROP) }) else {
-        return Vec::new();
-    };
-    let hdrop = HDROP(handle.0);
-    // SAFETY: `hdrop` is the clipboard's `CF_HDROP` block; 0xFFFF_FFFF asks for the count.
+/// The paths of the `CF_HDROP` block `global` (the clipboard's, or a drag's), each as UTF-16
+/// units: a wide list read by [`read_drop_files`], a narrow (ANSI) one read by the system. No
+/// path for a block that holds no list.
+///
+/// # Safety
+///
+/// `global` is a valid `CF_HDROP` block of global memory, which nobody frees during the call.
+pub(crate) unsafe fn hdrop_units(global: HGLOBAL) -> io::Result<Vec<Vec<u16>>> {
+    // SAFETY: the caller hands a valid block.
+    let list = unsafe { global_bytes(global) }?;
+    Ok(match read_drop_files(&list) {
+        Some(DropList::Wide(units)) => units,
+        // SAFETY: as above; `read_drop_files` found the list's end inside the block.
+        Some(DropList::Narrow) => unsafe { narrow_units(HDROP(global.0)) },
+        None => Vec::new(),
+    })
+}
+
+/// The paths of a narrow (ANSI) `CF_HDROP` list, which only the system can read.
+///
+/// # Safety
+///
+/// `hdrop` is a valid `CF_HDROP` block, which nobody frees during the call.
+unsafe fn narrow_units(hdrop: HDROP) -> Vec<Vec<u16>> {
+    // SAFETY: the caller hands a valid block; 0xFFFF_FFFF asks for the count.
     let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
     (0..count)
         .filter_map(|index| {
@@ -237,14 +274,17 @@ pub fn get_files() -> io::Result<Option<ClipboardFiles>> {
     let effect_format = preferred_drop_effect()?;
     let open = open()?;
     let change = u64::from(sequence());
-    let Some(list) = read(&open, CF_HDROP)? else {
+    // SAFETY: the clipboard is open on this thread.
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_err() {
+        return Ok(None);
+    }
+    // SAFETY: as above; the handle stays valid while the clipboard is open and nobody empties
+    // it, which only the owner of an open clipboard can do.
+    let Ok(handle) = (unsafe { GetClipboardData(CF_HDROP) }) else {
         return Ok(None);
     };
-    let units = match read_drop_files(&list) {
-        Some(DropList::Wide(units)) => units,
-        Some(DropList::Narrow) => narrow_paths(&open),
-        None => Vec::new(),
-    };
+    // SAFETY: the clipboard's `CF_HDROP` block, valid while the clipboard stays open (`open`).
+    let units = unsafe { hdrop_units(HGLOBAL(handle.0)) }?;
     if units.is_empty() {
         return Ok(None);
     }

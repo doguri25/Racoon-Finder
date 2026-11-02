@@ -31,9 +31,11 @@
 //! Each borrows the state briefly, and answers that nothing is done when it is borrowed already
 //! (the system may call it from a loop of its own that runs inside the app's code); a drop's
 //! effects are carried out on the next turn of the event loop, once the system has its answer.
-//! Linux has no such drag: winit tells only the files dropped on the window, one by one
-//! (`DroppedFile`, without the pointer or the keys), which go into the folder the active pane
-//! shows, as a copy (`Controller::file_dropped`).
+//! The system tells of it through the window's drop target (`rf_platform::dnd`), which goes on
+//! the window's handle at each show of the window, again for a new handle (module `drops`,
+//! [`window_shown`]). Where the platform has none (Linux, macOS for now), winit tells only the
+//! files dropped on the window, one by one (`DroppedFile`, without the pointer or the keys),
+//! which go into the folder the active pane shows, as a copy (`Controller::file_dropped`).
 //!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
@@ -55,7 +57,7 @@ use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
-use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
+use rf_platform::dnd::{DragMods, DropEffect, DropRegistration, DroppedItems, Effects};
 use rf_platform::shell::{Owner, WindowPoint};
 use slint::language::DragAction;
 use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent as WinitEvent};
@@ -90,6 +92,7 @@ use crate::{
 };
 
 pub mod clipboard;
+mod drops;
 mod matcher;
 mod newest;
 mod persist;
@@ -99,6 +102,7 @@ mod sorter;
 mod spring;
 
 use clipboard::{Clipper, Done, OsClipboard};
+use drops::{DropTarget, WindowDrops};
 use matcher::Matcher;
 use newest::Outcome;
 pub(crate) use persist::theme_number;
@@ -149,6 +153,25 @@ pub fn post_question(question: Question) -> bool {
 /// the thread that looks for such requests.
 pub fn show_requested() {
     post(|c| c.update(AppState::show_asked));
+}
+
+/// The window shows (its first show, its return from the tray): once its winit window is
+/// there, which it is not until the event loop runs at the first show and which may be a new
+/// one after the tray, the window's drop target takes the system's drags on it (DND-05 받기).
+/// Nothing for a window of another backend than winit's (the tests').
+pub fn window_shown(window: &MainWindow) {
+    let weak = window.as_weak();
+    let _ = slint::spawn_local(async move {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        // The winit window is let go at once: a window held this way would stay on screen
+        // after a hide.
+        let made = window.window().winit_window().await.is_ok();
+        if made {
+            with(Controller::follow_window);
+        }
+    });
 }
 
 /// Hands the window `stop`, which the app's end uses as it begins, so that no second start's
@@ -1050,6 +1073,10 @@ pub struct Controller {
     dropped_files: RefCell<Vec<PathBuf>>,
     /// Where in the window the pointer was last, as winit told.
     pointer: Cell<Option<WindowPoint>>,
+    /// The window's drop target for the system's drags, on the window's handle of its last show.
+    drop_target: DropTarget<DropRegistration>,
+    /// What the window said beside the pointer of the drag of another app at its last hover.
+    outside_hint: RefCell<String>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
@@ -1152,6 +1179,10 @@ impl Controller {
             }),
             dropped_files: RefCell::new(Vec::new()),
             pointer: Cell::new(None),
+            drop_target: DropTarget::new(|owner| {
+                rf_platform::dnd::register_drop_target(owner, Rc::new(WindowDrops))
+            }),
+            outside_hint: RefCell::new(String::new()),
             checks: RefCell::new(CopyChecks::default()),
             sorter: sorter::sorter(|outcome| {
                 post(move |c| {
@@ -1508,28 +1539,38 @@ impl Controller {
     /// `hover` of it, which a drop there takes or not (`takes`): what a drop does, or why it does
     /// nothing there, beside the pointer (DND-03); and the time of a rest, which runs while the
     /// drag stays on a place that takes it (DND-08). The place's frame is Slint's own for a drag
-    /// of rows; the caller shows it for a drag of another app.
-    fn show_hover(&self, window: &MainWindow, spot: DropSpot, hover: &Hover, takes: bool) {
+    /// of rows; the caller shows it for a drag of another app. What shows beside the pointer.
+    fn show_hover(
+        &self,
+        window: &MainWindow,
+        spot: DropSpot,
+        hover: &Hover,
+        takes: bool,
+    ) -> String {
         let hint = match hover {
             Hover::Takes(offer) => words::drop_badge(offer.choice, &folder_label(&offer.folder)),
             Hover::Refused(validity) => words::drop_refused(*validity),
             Hover::NoPaths => words::drop_no_paths().to_owned(),
             Hover::Nothing => String::new(),
         };
-        window.invoke_drop_hint(hint.into(), !takes);
+        window.invoke_drop_hint(hint.as_str().into(), !takes);
         let rest = match hover {
             Hover::Takes(offer) if takes => Some((spot, offer.folder.clone())),
             _ => None,
         };
         self.spring.hover(rest);
+        hint
     }
 
     /// A drag of another app (or of this app's rows, through the system's drag) carrying `items`,
     /// with the keys `mods` held and allowing `allowed`, is over the point `at` of the window: what
     /// a drop there would do, for the system's pointer, or `None`. The window shows it as it shows
     /// a drag of rows: what a drop does or why not beside the pointer, the frame of the place
-    /// that takes it, the time of a rest there. `None` too, at once, while the state is borrowed
-    /// (the system calls this from a loop of its own inside the app's code).
+    /// that takes it, the time of a rest there; and the list or the tree under it scrolls when
+    /// it is held near their ends (DND-08: `outside-over`, a step at each of their timer's turns
+    /// while the system tells the same point, which it does every few tens of milliseconds).
+    /// `None` too, at once, while the state is borrowed (the system calls this from a loop of its
+    /// own inside the app's code).
     pub fn outside_over(
         &self,
         at: WindowPoint,
@@ -1537,11 +1578,13 @@ impl Controller {
         mods: DragMods,
         allowed: Effects,
     ) -> Option<DropEffect> {
+        self.outside_hint.borrow_mut().clear();
         if self.state.try_borrow_mut().is_err() {
             return None;
         }
         let window = self.window.upgrade()?;
-        let spot = ui_bridge::drop_spot(&window, at);
+        let place = ui_bridge::drop_place(&window, at);
+        let spot = ui_bridge::spot_found(&place);
         let hover = match self.state.try_borrow_mut().ok()?.as_mut() {
             Some(state) => state.outside_hover(spot, items, mods, allowed),
             None => Hover::Nothing,
@@ -1552,13 +1595,21 @@ impl Controller {
         pointer.set_y(at.y);
         let shown = spot.filter(|_| effect.is_some());
         window.set_outside_drop(ui_bridge::drop_at(shown));
+        window.set_outside_over(place);
         if let Some(spot) = spot {
-            self.show_hover(&window, spot, &hover, effect.is_some());
+            let hint = self.show_hover(&window, spot, &hover, effect.is_some());
+            *self.outside_hint.borrow_mut() = hint;
         } else {
             window.invoke_drop_hint("".into(), false);
             self.spring.stop();
         }
         effect
+    }
+
+    /// What the window said beside the pointer of the drag of another app at its last hover
+    /// ([`Controller::outside_over`]), for the system to show under its own; empty for nothing.
+    pub fn outside_hint(&self) -> String {
+        self.outside_hint.borrow().clone()
     }
 
     /// The drag of another app was dropped at the point `at` of the window, with the right
@@ -1581,6 +1632,7 @@ impl Controller {
         let window = self.window.upgrade()?;
         let spot = ui_bridge::drop_spot(&window, at);
         self.drag_gone();
+        self.outside_hint.borrow_mut().clear();
         let pointer = window.global::<DragPointer<'_>>();
         pointer.set_x(at.x);
         pointer.set_y(at.y);
@@ -1591,6 +1643,7 @@ impl Controller {
     /// and nothing it rested on opens.
     pub fn outside_leave(&self) {
         self.drag_gone();
+        self.outside_hint.borrow_mut().clear();
         if let Ok(mut state) = self.state.try_borrow_mut()
             && let Some(state) = state.as_mut()
         {
@@ -2596,6 +2649,12 @@ impl Controller {
             .follow(state.tray_view(rf_core::identity::DISPLAY_NAME));
     }
 
+    /// The window's drop target goes on the handle the window has now, unless it is there
+    /// already ([`DropTarget::follow`]).
+    fn follow_window(&self) {
+        self.drop_target.follow(self.owner());
+    }
+
     /// The app's window, for the dialogs of the system to belong to ([`ui_bridge::owner_of`]).
     fn owner(&self) -> Owner {
         self.window
@@ -2642,6 +2701,7 @@ impl Controller {
                     winit.set_minimized(false);
                     winit.focus_window();
                 });
+                window_shown(&window);
             }
             _ => {}
         }

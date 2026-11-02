@@ -51,6 +51,9 @@ mod other;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub(crate) use self::windows::{Global, global_bytes, hdrop_units};
+
 /// What a paste of files does with them, as the clipboard says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DropEffect {
@@ -156,7 +159,7 @@ pub fn is_device_path(path: &Path) -> bool {
     }
 }
 
-/// `CF_UNICODETEXT`, from `Win32::System::Ole`, whose feature the build leaves out.
+/// `CF_UNICODETEXT`, as `Win32::System::Ole` names it, here for the buffers every OS tests.
 #[cfg_attr(
     not(windows),
     allow(dead_code, reason = "used by Windows code; tested on every OS")

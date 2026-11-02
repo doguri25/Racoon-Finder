@@ -240,6 +240,8 @@ export component Sidebar inherits Rectangle {
     in property <int> cursor-row: -1;
     // The row a drag of another app takes, as Rust found it; -1 for none.
     in property <int> outside-row: -1;
+    // A drag of another app is over the rows (Rust found it there), whether they take it or not.
+    in property <bool> outside-over;
     // The row the pointer moved over last, as the rows tell it themselves (Slint's own hit
     // test): the rows differ in height, and the list places the rows it has not drawn by their
     // average height, so no reckoning from outside the rows finds the one under a point. -1 for
@@ -301,9 +303,10 @@ export component Sidebar inherits Rectangle {
 
     // The rows scroll under a drag held near the top or the bottom of the list (DND-08), as the
     // lists of the panes do (`FileList`), while the drag's pointer stays where the tree last saw
-    // it (`DragSeen`); it stops at the first or the last row.
+    // it (`DragSeen`), or a drag of another app is over it (`outside-over`); it stops at the
+    // first or the last row.
     drag-seen := DragSeen { }
-    private property <int> scroll-way: !drag-seen.here ? 0
+    private property <int> scroll-way: !drag-seen.here && !root.outside-over ? 0
         : EdgeScroll.way(DragPointer.y - list.absolute-position.y, list.height, list.content-y < 0, list.content-y > list.visible-height - list.content-height);
 
     // The steps of `scroll-way`; a scroll of its own ends the wait for a row to show.

@@ -162,8 +162,10 @@ export component FileGrid inherits Rectangle {
     out property <int> page-lines: root.columnar ? max(1, floor(columns-view.visible-width / root.tile-w)) : max(1, floor(icons.visible-height / root.tile-h));
     // The payload of a drag of the items (as `FileList` has it).
     in property <data-transfer> drag-data;
-    // The item a drag of another app is over and that takes it, as `FileList` has it.
+    // The item a drag of another app is over and that takes it, and whether such a drag is over
+    // the items, as `FileList` has them.
     in property <int> outside-row: -2;
+    in property <bool> outside-over;
 
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
@@ -240,10 +242,10 @@ export component FileGrid inherits Rectangle {
 
     // The list scrolls under a drag held near its ends (DND-08) as 자세히 does (`FileList`):
     // the icons at the top and the bottom, 목록 at the left and the right, while the drag's
-    // pointer stays where this list last saw it (`DragSeen`); it stops at the first or the last
-    // item.
+    // pointer stays where this list last saw it (`DragSeen`), or a drag of another app is over
+    // it (`outside-over`); it stops at the first or the last item.
     drag-seen := DragSeen { }
-    private property <int> scroll-way: !drag-seen.here ? 0
+    private property <int> scroll-way: !drag-seen.here && !root.outside-over ? 0
         : root.columnar ? EdgeScroll.way(DragPointer.x - drop.absolute-position.x, drop.width, columns-view.content-x < 0, columns-view.content-x > columns-view.visible-width - columns-view.content-width)
         : EdgeScroll.way(DragPointer.y - drop.absolute-position.y, drop.height, icons.content-y < 0, icons.content-y > icons.visible-height - icons.content-height);
 

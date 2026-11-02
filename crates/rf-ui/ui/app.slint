@@ -372,6 +372,10 @@ export component MainWindow inherits Window {
     // shows as the place a drag of rows takes does. Not `found` while it takes none; the drag's
     // end (`drag-gone`) clears it.
     in-out property <DropAt> outside-drop;
+    // The place a drag of another app is over, as Rust found it (`spot-at`), whether it takes the
+    // drag or not: the list or the tree there scrolls under it near its ends, as under a drag of
+    // rows (DND-08). The drag's end (`drag-gone`) clears it.
+    in-out property <DropAt> outside-over;
 
     // The place under the point (`x`, `y`) of the window's content (logical pixels from its top
     // left corner), as a drag of rows there names it (`drop-check`), for a drag of another app:
@@ -572,6 +576,7 @@ export component MainWindow inherits Window {
         root.hint = "";
         root.hint-told = false;
         root.outside-drop = { found: false, place: DropPlace.list, side: 0, index: -1 };
+        root.outside-over = { found: false, place: DropPlace.list, side: 0, index: -1 };
         DragPointer.gone();
     }
 
@@ -1088,6 +1093,7 @@ export component MainWindow inherits Window {
                         cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
                         accepts-drops: true;
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.tree ? root.outside-drop.index : -1;
+                        outside-over: root.outside-over.found && root.outside-over.place == DropPlace.tree;
                         row-clicked(index) => {
                             root.tree-clicked(index);
                             keys.focus();
@@ -1138,6 +1144,7 @@ export component MainWindow inherits Window {
                         tab-drag-data: root.tab-drag-data;
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 0 ? root.outside-drop.index : -2;
                         outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 0 ? root.outside-drop.index : -1;
+                        outside-over: root.outside-over.found && root.outside-over.place == DropPlace.list && root.outside-over.side == 0;
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();
@@ -1281,6 +1288,7 @@ export component MainWindow inherits Window {
                         tab-drag-data: root.tab-drag-data;
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 1 ? root.outside-drop.index : -2;
                         outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 1 ? root.outside-drop.index : -1;
+                        outside-over: root.outside-over.found && root.outside-over.place == DropPlace.list && root.outside-over.side == 1;
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();

@@ -6712,3 +6712,111 @@ fn the_place_a_drag_of_another_app_takes_shows_as_a_drag_of_rows_does() {
     assert!(!window.get_outside_drop().found);
     assert!(!ui_bridge::drop_at(None).found);
 }
+
+/// A step of a drag of another app over `at`, as the controller shows it
+/// (`Controller::outside_over`): the pointer is there, and the place under it, whether it takes
+/// the drag or not, scrolls when the drag is held near its ends.
+fn outside_step(window: &MainWindow, at: LogicalPosition) {
+    let pointer = window.global::<DragPointer<'_>>();
+    pointer.set_x(at.x);
+    pointer.set_y(at.y);
+    window.set_outside_over(ui_bridge::drop_place(
+        window,
+        WindowPoint { x: at.x, y: at.y },
+    ));
+}
+
+#[test]
+fn a_drag_of_another_app_held_at_the_ends_of_a_list_or_the_tree_scrolls_them() {
+    let (window, _calls, models, tree_rows) = drag_window();
+    let asked = count_moved_under(&window);
+    window.set_right_pane(models[1].view(&long_pane(60), false));
+    let (top, bottom) = top_and_bottom(&element_of(&window, "FileList::list", true));
+    assert!(shows(&window, "f000"));
+    assert!(!shows(&window, "f059"));
+
+    // DND-08: held within 24px of the bottom, the list scrolls a step at a time to its last
+    // row, as under a drag of rows; no drag of Slint's is under way.
+    outside_step(&window, bottom);
+    assert!(!window.global::<DragPointer<'_>>().get_over());
+    assert!(scroll_cue_shows(&window));
+    run_for(6000);
+    assert!(shows(&window, "f059"));
+    assert!(!shows(&window, "f000"));
+    assert!(asked.get() > 10, "{}", asked.get());
+    // At the end it stops; held at the top, it goes back to the first row.
+    assert!(!scroll_cue_shows(&window));
+    outside_step(&window, top);
+    run_for(6000);
+    assert!(shows(&window, "f000"));
+    assert!(!shows(&window, "f059"));
+    // Away from the ends it stays.
+    outside_step(
+        &window,
+        LogicalPosition::new(top.x, f32::midpoint(top.y, bottom.y)),
+    );
+    assert!(!scroll_cue_shows(&window));
+    // The drag leaves the window, or drops: it stops.
+    outside_step(&window, bottom);
+    run_for(300);
+    assert!(scroll_cue_shows(&window));
+    window.invoke_drag_gone();
+    assert!(!scroll_cue_shows(&window));
+    // A step that was due may still go; then none.
+    run_for(30);
+    let steps = asked.get();
+    run_for(1000);
+    assert_eq!(asked.get(), steps);
+    // Nothing scrolls under a drag that a dialog over the window takes from it.
+    window.set_dialog(DialogKind::Confirm);
+    outside_step(&window, bottom);
+    assert!(!scroll_cue_shows(&window));
+    window.set_dialog(DialogKind::None);
+    window.invoke_drag_gone();
+
+    // The tree, at its bottom and its top.
+    let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
+    let mut tree = Tree::new(VisibilityFilter::default());
+    tree.set_roots((0..60).map(|i| (format!("r{i:02}"), home.clone())));
+    tree_rows.sync(&tree, &[]);
+    let (top, bottom) = top_and_bottom(&element_of(&window, "Sidebar::list", false));
+    assert!(shows(&window, "r00"));
+    assert!(!shows(&window, "r59"));
+    outside_step(&window, bottom);
+    run_for(6000);
+    assert!(shows(&window, "r59"));
+    assert!(!shows(&window, "r00"));
+    outside_step(&window, top);
+    run_for(6000);
+    assert!(shows(&window, "r00"));
+    window.invoke_drag_gone();
+    assert!(!scroll_cue_shows(&window));
+}
+
+#[test]
+fn the_tree_is_not_looked_at_while_a_drag_of_the_window_is_under_way() {
+    let (window, calls, _tree) = drop_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let documents = centre_of(&window, "문서", AccessibleRole::ListItem);
+    assert_eq!(found_at(&window, documents), Some(DropSpot::Tree(1)));
+    // While a drag of rows is under way, the pointer move that finds the tree's row would be a
+    // step of that drag (a hover over the tree): none goes to the window, and the tree's rows
+    // give nothing. The lists are found as ever.
+    drag_to(&window, x_txt, backup);
+    assert!(window.global::<DragPointer<'_>>().get_over());
+    calls.checks.borrow_mut().clear();
+    assert_eq!(found_at(&window, documents), None);
+    assert_eq!(
+        found_at(&window, backup),
+        Some(DropSpot::Pane {
+            side: 1,
+            row: Some(0)
+        })
+    );
+    assert!(calls.checks.borrow().is_empty());
+    pointer(&window, "release", backup);
+    calls.drops.borrow_mut().clear();
+    assert!(!window.global::<DragPointer<'_>>().get_over());
+    assert_eq!(found_at(&window, documents), Some(DropSpot::Tree(1)));
+}

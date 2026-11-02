@@ -146,9 +146,10 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     }
     // The loop runs until the controller ends it (the app's end, `controller::quit`): the
     // window hides while its jobs go on behind the tray icon, which must not end it.
-    let result = window
-        .show()
-        .and_then(|()| slint::run_event_loop_until_quit());
+    let result = window.show().and_then(|()| {
+        controller::window_shown(&window);
+        slint::run_event_loop_until_quit()
+    });
     let _ = window.hide();
     // `None` when the end through the close button has taken them already.
     let last = controller.final_settings();
