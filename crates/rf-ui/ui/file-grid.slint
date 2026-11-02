@@ -8,12 +8,14 @@
 // An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
 // same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
 // place to drop on, as in 자세히: an item of a folder takes the items into that folder, any other
-// place into the pane's folder.
+// place into the pane's folder. Held near an end of the list, a drag scrolls it (DND-08): the
+// icons up and down, 목록 sideways.
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
+import { ScrollCue, EdgeScroll } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, ListSettle, ListScroll } from "list-parts.slint";
 
 // What the pointer did to an item.
@@ -217,6 +219,45 @@ export component FileGrid inherits Rectangle {
         return line >= 0 && place >= 0 && place < root.per-row && index < root.rows.length ? index : -1;
     }
 
+    // The list scrolls under a drag held near its ends (DND-08) as 자세히 does (`FileList`):
+    // the icons at the top and the bottom, 목록 at the left and the right, while the drag's
+    // pointer stays where this list last saw it; it stops at the first or the last item.
+    private property <length> seen-x;
+    private property <length> seen-y;
+    private property <bool> seen;
+    private property <bool> dragging: DragPointer.over;
+    changed dragging => {
+        if (!root.dragging) {
+            root.seen = false;
+        }
+    }
+    private property <bool> drag-here: root.seen && DragPointer.over && DragPointer.x == root.seen-x && DragPointer.y == root.seen-y;
+    private property <int> scroll-way: !root.drag-here ? 0
+        : root.columnar ? EdgeScroll.way(DragPointer.x - drop.absolute-position.x, drop.width, columns-view.content-x < 0, columns-view.content-x > columns-view.visible-width - columns-view.content-width)
+        : EdgeScroll.way(DragPointer.y - drop.absolute-position.y, drop.height, icons.content-y < 0, icons.content-y > icons.visible-height - icons.content-height);
+
+    // The drag's pointer is over the list, where `DragPointer` has just been told it is.
+    function saw-drag() {
+        root.seen-x = DragPointer.x;
+        root.seen-y = DragPointer.y;
+        root.seen = true;
+    }
+
+    // The steps of `scroll-way`; another item is under the still pointer after each.
+    Timer {
+        interval: EdgeScroll.interval;
+        running: root.scroll-way != 0;
+        triggered => {
+            if (root.columnar) {
+                columns-view.content-x = clamp(columns-view.content-x + root.scroll-way * EdgeScroll.step, min(0px, columns-view.visible-width - columns-view.content-width), 0px);
+            } else {
+                settle.stop();
+                icons.content-y = clamp(icons.content-y + root.scroll-way * EdgeScroll.step, min(0px, icons.visible-height - icons.content-height), 0px);
+            }
+            DragPointer.moved-under();
+        }
+    }
+
     // Scrolls as little as needed to show item `index` whole (the icons keep the place while
     // their list settles after a long jump, `ListSettle`).
     public function scroll-to(index: int) {
@@ -261,6 +302,7 @@ export component FileGrid inherits Rectangle {
             let index = root.index-at(event.position.x, event.position.y);
             self.target = index >= 0 && root.rows[index].is-dir ? index : -1;
             DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+            root.saw-drag();
             return root.drop-check(event.data, index);
         }
         dropped(event) => {
@@ -372,6 +414,16 @@ export component FileGrid inherits Rectangle {
         width: parent.width;
         height: parent.height;
         frame: drop.has-drag && drop.target < 0;
+    }
+
+    // The end the list scrolls toward under a drag held there (`scroll-way`).
+    scroll-cue := ScrollCue {
+        x: root.columnar && root.scroll-way < 0 ? parent.width - self.width : 0px;
+        y: !root.columnar && root.scroll-way < 0 ? parent.height - self.height : 0px;
+        width: root.columnar ? EdgeScroll.edge : parent.width;
+        height: root.columnar ? parent.height : EdgeScroll.edge;
+        vertical: !root.columnar;
+        way: root.scroll-way;
     }
 
     key-menus := KeyMenus {

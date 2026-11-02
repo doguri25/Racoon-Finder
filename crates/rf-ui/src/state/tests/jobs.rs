@@ -349,6 +349,7 @@ fn the_toast(effects: &[Effect]) -> (u64, String, String) {
                 token,
                 text,
                 action,
+                ..
             } => Some((*token, text.clone(), action.clone())),
             _ => None,
         })

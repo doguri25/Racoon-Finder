@@ -18,10 +18,11 @@ use rf_platform::dnd::{DragMods, DropEffect};
 use rf_platform::shell::Owner;
 use rf_vfs::{SortKey, SortOrder};
 use slint::language::DragAction;
+use slint::winit_030::winit::dpi::PhysicalPosition;
 use slint::winit_030::winit::keyboard::ModifiersState;
 use slint::{
-    ComponentHandle, DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, SharedString,
-    VecModel,
+    ComponentHandle, DataTransfer, Model, ModelNotify, ModelRc, ModelTracker, PhysicalSize,
+    SharedString, VecModel,
 };
 
 use crate::controller::{self, Controller};
@@ -848,6 +849,16 @@ pub fn drag_mods(state: ModifiersState) -> DragMods {
         alt: state.alt_key(),
         logo: state.super_key(),
     }
+}
+
+/// Whether the pointer at `position` (winit's, in physical pixels of the window's content) is
+/// beyond an edge of the window of `size`: a drag holds the pointer, so the window hears of it
+/// there, though nothing in the window is under it.
+pub fn outside_window(position: PhysicalPosition<f64>, size: PhysicalSize) -> bool {
+    position.x < 0.0
+        || position.y < 0.0
+        || position.x >= f64::from(size.width)
+        || position.y >= f64::from(size.height)
 }
 
 /// The number of `default` among the items of 보기 ▸ 설정 ▸ 끌어 놓기 기본 동작: 0 이동, 1 복사,
@@ -2337,6 +2348,25 @@ mod tests {
                 ..DragMods::default()
             }
         );
+    }
+
+    #[test]
+    fn a_pointer_past_an_edge_of_the_window_is_outside_it() {
+        let size = PhysicalSize::new(900, 560);
+        let outside = |x, y| outside_window(PhysicalPosition::new(x, y), size);
+        assert!(!outside(0.0, 0.0));
+        assert!(!outside(899.5, 559.5));
+        assert!(!outside(450.0, 280.0));
+        // A drag holds the pointer, so the window hears of it beyond its edges.
+        for (x, y) in [
+            (-1.0, 10.0),
+            (10.0, -0.5),
+            (900.0, 10.0),
+            (10.0, 560.0),
+            (-50.0, 900.0),
+        ] {
+            assert!(outside(x, y), "({x}, {y})");
+        }
     }
 
     #[test]

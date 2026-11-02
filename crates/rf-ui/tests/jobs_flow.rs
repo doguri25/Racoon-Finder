@@ -18,7 +18,7 @@ use rf_ui::jobs::{JobEffect, Jobs};
 use rf_ui::loader::{LoadEvent, LoadTicket, Loader};
 use rf_ui::pane::LoadStatus;
 use rf_ui::resolver::{Asked, Question, UiResolver};
-use rf_ui::state::{AppState, Effect, LEFT, Paging, RIGHT};
+use rf_ui::state::{AppState, DropSpot, Effect, LEFT, MOVE_TOAST_TIME, Paging, RIGHT};
 use rf_vfs::Vfs;
 use slint::platform::Key;
 use tempfile::TempDir;
@@ -556,6 +556,7 @@ fn move_then_undo_restores() {
         token,
         text,
         action,
+        time,
     }) = seen
         .iter()
         .find(|effect| matches!(effect, Effect::Toast { .. }))
@@ -563,8 +564,8 @@ fn move_then_undo_restores() {
         panic!("a toast: {seen:?}");
     };
     assert_eq!(
-        (text.as_str(), action.as_str()),
-        ("항목 1개를 이동했습니다", "되돌리기")
+        (text.as_str(), action.as_str(), *time),
+        ("항목 1개를 이동했습니다", "되돌리기", None)
     );
     assert!(state.can_undo());
 
@@ -583,6 +584,54 @@ fn move_then_undo_restores() {
     );
     assert!(!state.can_undo());
     assert!(state.can_redo());
+}
+
+#[test]
+fn a_dragged_move_offers_its_undo_for_a_moment() {
+    let (_dir, left, right) = folders();
+    write(&left.join("m.txt"), "M");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+
+    // A drag of `m.txt` dropped on the right pane's list.
+    let row = state.panes()[LEFT]
+        .active_tab()
+        .visible()
+        .iter()
+        .position(|entry| entry.name == "m.txt")
+        .expect("m.txt is listed");
+    state.press_row(LEFT, row, false, false);
+    let id = state.drag_id();
+    let list = DropSpot::Pane {
+        side: RIGHT,
+        row: None,
+    };
+    assert!(state.drop_offer(id, list).is_some());
+    let effects = state.drop_items(id, list);
+    let seen = harness.run(&mut state, effects);
+    assert!(!left.join("m.txt").exists());
+    assert_eq!(read(&right.join("m.txt")), "M");
+    // DND-07: for 5 seconds, a toast says what the drag moved, and its button undoes it.
+    let Some(Effect::Toast {
+        token,
+        text,
+        action,
+        time,
+    }) = seen
+        .iter()
+        .find(|effect| matches!(effect, Effect::Toast { .. }))
+    else {
+        panic!("a toast: {seen:?}");
+    };
+    assert_eq!(
+        (text.as_str(), action.as_str(), *time),
+        ("항목 1개를 옮겼습니다", "되돌리기", Some(MOVE_TOAST_TIME))
+    );
+    let effects = state.toast_clicked(*token);
+    assert_eq!(effects, [Effect::Job(JobEffect::Undo)]);
+    harness.run(&mut state, effects);
+    assert_eq!(read(&left.join("m.txt")), "M");
+    assert!(!right.join("m.txt").exists());
 }
 
 #[test]

@@ -12,7 +12,7 @@ import { Icon } from "icons.slint";
 import { FileList, FileRow, ColumnView } from "file-list.slint";
 import { FileGrid } from "file-grid.slint";
 import { Shortcuts } from "shortcuts.slint";
-import { ScrollCue } from "widgets.slint";
+import { ScrollCue, EdgeScroll } from "widgets.slint";
 import { DragPointer } from "list-parts.slint";
 
 // A row of a list of folder names of the address bar: a folder, or a link that leads to one.
@@ -316,6 +316,10 @@ component TabButton inherits Rectangle {
     DragArea {
         data: root.drag-data;
         allow-move: true;
+        // It may have hovered a list, which scrolls while a drag is over it.
+        drag-finished(action) => {
+            DragPointer.gone();
+        }
 
         menu := ContextMenuArea {
             Menu {
@@ -751,18 +755,15 @@ export component Pane inherits Rectangle {
         return clamp(floor((x - tabs-view.x - tabs-view.content-x + step / 2) / step), 0, root.tab-count);
     }
 
-    // While a dragged tab is held within `edge` of an end of the strip that has tabs out of view
-    // beyond it, the strip scrolls that way (1 to the right, -1 to the left), a step at a time,
-    // so that every place can be reached; it stops when the drag leaves, ends, or the strip
-    // reaches that end.
-    private property <length> edge: 24px;
+    // While a dragged tab is held near an end of the strip that has tabs out of view beyond it
+    // (`EdgeScroll`), the strip scrolls that way (1 to the right, -1 to the left), a step at a
+    // time, so that every place can be reached; it stops when the drag leaves, ends, or the
+    // strip reaches that end.
     // Tabs are out of view left of the strip, or right of it.
     private property <bool> more-left: tabs-view.content-x < 0;
     private property <bool> more-right: tabs-view.content-x > tabs-view.width - root.tabs-width;
     private property <int> scroll-way: !strip-drop.has-drag ? 0
-        : strip-drop.hover-x < tabs-view.x + root.edge && root.more-left ? 1
-        : strip-drop.hover-x > tabs-view.x + tabs-view.width - root.edge && root.more-right ? -1
-        : 0;
+        : EdgeScroll.way(strip-drop.hover-x - tabs-view.x, tabs-view.width, root.more-left, root.more-right);
 
     // Scrolls the strip as little as needed to show the tab that shows whole.
     function show-active-tab() {
@@ -786,10 +787,10 @@ export component Pane inherits Rectangle {
 
     // The steps of `scroll-way`; the place under the still pointer changes with each.
     Timer {
-        interval: 30ms;
+        interval: EdgeScroll.interval;
         running: root.scroll-way != 0;
         triggered => {
-            tabs-view.content-x = clamp(tabs-view.content-x + root.scroll-way * 12px, tabs-view.width - root.tabs-width, 0px);
+            tabs-view.content-x = clamp(tabs-view.content-x + root.scroll-way * EdgeScroll.step, tabs-view.width - root.tabs-width, 0px);
             strip-drop.slot = root.slot-at(strip-drop.hover-x);
             strip-drop.answer = root.tab-move-check(strip-drop.hover-data, strip-drop.slot);
         }
@@ -819,6 +820,7 @@ export component Pane inherits Rectangle {
                 property <length> hover-x;
                 property <data-transfer> hover-data;
                 can-drop(event) => {
+                    DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
                     self.hover-x = event.position.x;
                     self.hover-data = event.data;
                     self.slot = root.slot-at(event.position.x);
@@ -896,7 +898,7 @@ export component Pane inherits Rectangle {
             scroll-cue := ScrollCue {
                 x: root.scroll-way > 0 ? tabs-view.x : tabs-view.x + tabs-view.width - self.width;
                 y: tabs-view.y;
-                width: root.edge;
+                width: EdgeScroll.edge;
                 height: tabs-view.height;
                 way: root.scroll-way;
             }

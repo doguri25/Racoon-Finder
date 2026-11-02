@@ -7,16 +7,30 @@ import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
 
 // Where the pointer of a drag is, in the window: every place that takes drops (a list, a tab, a
-// row of the tree) tells it at each move and at the drop, for what shows beside the pointer
-// (DND-03) and the menu of 놓을 때 묻기, which shows where the drop was.
+// row of the tree, the window under them) tells it at each move and at the drop, for what shows
+// beside the pointer (DND-03), the menu of 놓을 때 묻기, which shows where the drop was, and the
+// lists that scroll under a drag held at their ends (DND-08), which scroll while the pointer is
+// still where they last saw it.
 export global DragPointer {
     in-out property <length> x;
     in-out property <length> y;
+    // A drag is over the window: from its first move there until it ends or leaves (`gone`).
+    in-out property <bool> over;
+
+    // A list scrolled under the still pointer of a drag: what is under it changed, so Rust has
+    // the window ask the place there again, as a move of the pointer would.
+    callback moved-under();
 
     // The pointer is at (`x`, `y`) of the window.
     public function at(x: length, y: length) {
         DragPointer.x = x;
         DragPointer.y = y;
+        DragPointer.over = true;
+    }
+
+    // The drag ended, or left the window.
+    public function gone() {
+        DragPointer.over = false;
     }
 }
 

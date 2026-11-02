@@ -10,12 +10,13 @@
 // any other row and the part below the rows into the pane's folder. A place that takes them
 // shows an accent frame; one that does not shows nothing, and the pointer says so. What a drop
 // would do shows beside the pointer (the main window's badge), which the list tells where it is
-// (`DragPointer`).
+// (`DragPointer`). Held near the top or the bottom of the rows, a drag scrolls them (DND-08).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
+import { ScrollCue, EdgeScroll } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, ListSettle, ListScroll } from "list-parts.slint";
 
 export { ColumnView }
@@ -176,6 +177,42 @@ export component FileList inherits Rectangle {
         return row >= 0 && row < root.rows.length ? row : -1;
     }
 
+    // The rows scroll under a drag held near their top or bottom (DND-08), as the tab strip and
+    // the column heads do (`EdgeScroll`), while its pointer stays where this list last saw it
+    // (`DragPointer` has not moved on to another place, nor ended), whether the rows take the
+    // drag or not. After each step another row is under the still pointer, which the place
+    // there is asked about again (`moved-under`). It stops at the first or the last row.
+    private property <length> seen-x;
+    private property <length> seen-y;
+    private property <bool> seen;
+    private property <bool> dragging: DragPointer.over;
+    changed dragging => {
+        if (!root.dragging) {
+            root.seen = false;
+        }
+    }
+    private property <bool> drag-here: root.seen && DragPointer.over && DragPointer.x == root.seen-x && DragPointer.y == root.seen-y;
+    private property <int> scroll-way: !root.drag-here ? 0
+        : EdgeScroll.way(DragPointer.y - drop.absolute-position.y, drop.height, list.content-y < 0, list.content-y > list.visible-height - list.content-height);
+
+    // The drag's pointer is over the rows, where `DragPointer` has just been told it is.
+    function saw-drag() {
+        root.seen-x = DragPointer.x;
+        root.seen-y = DragPointer.y;
+        root.seen = true;
+    }
+
+    // The steps of `scroll-way`.
+    Timer {
+        interval: EdgeScroll.interval;
+        running: root.scroll-way != 0;
+        triggered => {
+            settle.stop();
+            list.content-y = clamp(list.content-y + root.scroll-way * EdgeScroll.step, min(0px, list.visible-height - list.content-height), 0px);
+            DragPointer.moved-under();
+        }
+    }
+
     VerticalLayout {
         head := FileHead {
             columns: root.columns;
@@ -214,6 +251,7 @@ export component FileList inherits Rectangle {
                     let row = root.row-at(event.position.y);
                     self.target-row = row >= 0 && root.rows[row].is-dir ? row : -1;
                     DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
+                    root.saw-drag();
                     return root.drop-check(event.data, row);
                 }
                 dropped(event) => {
@@ -361,6 +399,15 @@ export component FileList inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 frame: drop.has-drag && drop.target-row < 0;
+            }
+
+            // The end the rows scroll toward under a drag held there (`scroll-way`).
+            scroll-cue := ScrollCue {
+                y: root.scroll-way > 0 ? 0px : parent.height - self.height;
+                width: parent.width;
+                height: EdgeScroll.edge;
+                vertical: true;
+                way: root.scroll-way;
             }
         }
 

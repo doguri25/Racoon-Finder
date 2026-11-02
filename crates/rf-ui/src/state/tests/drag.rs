@@ -385,13 +385,9 @@ fn only_the_payload_of_the_last_drag_drops_and_only_on_the_main_window() {
     assert!(state.drop_offer(second, RIGHT_LIST).is_some());
 }
 
-#[test]
-fn a_dragged_move_tells_what_it_moved_and_offers_its_undo() {
-    let mut state = two_panes();
-    state.press_row(LEFT, 2, false, false);
-    let id = state.drag_id();
-    let (spec, origin) = the_submit(&state.drop_items(id, RIGHT_LIST));
-    let record = UndoRecord::Moved {
+/// The record of a move of `x.txt` from `a` into `b`.
+fn moved_x() -> UndoRecord {
+    UndoRecord::Moved {
         moves: vec![rf_jobs::MovedItem {
             from: in_a("x.txt"),
             to: in_b("x.txt"),
@@ -400,39 +396,285 @@ fn a_dragged_move_tells_what_it_moved_and_offers_its_undo() {
         removed_dirs: Vec::new(),
         overwritten: 0,
         copied_dirs: Vec::new(),
-    };
+    }
+}
+
+/// The engine starts the job `effects` submit as job `id`, which ends as `finish` leaves its
+/// report (it moved `x.txt` from `a` into `b`, and its record is the next one to undo): the
+/// effects of its end.
+fn run_move(
+    state: &mut AppState,
+    effects: &[Effect],
+    id: JobId,
+    finish: impl FnOnce(&mut JobReport),
+) -> Vec<Effect> {
+    let (spec, origin) = the_submit(effects);
     state.set_history(History {
-        top: Some(record.clone()),
+        top: Some(moved_x()),
         can_redo: false,
     });
     state.track(Started {
-        id: JobId(1),
+        id,
         spec: Some(Arc::new(spec.clone())),
         work: JobWork::Move,
         origin,
         via_history: false,
     });
-    let mut report = JobReport::new(JobId(1), &spec);
-    report.undo = Some(record);
-    let effects = state.job_event(rf_jobs::JobEvent::Finished {
-        id: JobId(1),
+    let mut report = JobReport::new(id, &spec);
+    report.undo = Some(moved_x());
+    finish(&mut report);
+    state.job_event(rf_jobs::JobEvent::Finished {
+        id,
         report: Arc::new(report),
-    });
-    // DND-07: the toast says what moved, and its button undoes it.
-    let toast = effects.iter().find_map(|effect| match effect {
-        Effect::Toast {
-            token,
-            text,
-            action,
-        } => Some((*token, text.clone(), action.clone())),
-        _ => None,
-    });
-    let (token, text, action) = toast.expect("a toast");
+    })
+}
+
+/// The toasts among `effects`: their tokens, texts, buttons and times.
+fn toasts(effects: &[Effect]) -> Vec<(u64, String, String, Option<Duration>)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Toast {
+                token,
+                text,
+                action,
+                time,
+            } => Some((*token, text.clone(), action.clone(), *time)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_dragged_move_tells_what_it_moved_and_offers_its_undo() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let dropped = state.drop_items(id, RIGHT_LIST);
+    let effects = run_move(&mut state, &dropped, JobId(1), |_| {});
+    // DND-07: for 5 seconds the toast says what the drag moved, and its button undoes it with
+    // the record the history keeps (which checks for later changes as every undo does).
+    let shown = toasts(&effects);
+    let [(token, text, action, time)] = shown.as_slice() else {
+        panic!("one toast: {effects:?}");
+    };
     assert_eq!(
-        (text.as_str(), action.as_str()),
-        ("항목 1개를 이동했습니다", "되돌리기")
+        (text.as_str(), action.as_str(), *time),
+        ("항목 1개를 옮겼습니다", "되돌리기", Some(MOVE_TOAST_TIME))
     );
-    assert_eq!(state.toast_clicked(token), [Effect::Job(JobEffect::Undo)]);
+    assert_eq!(MOVE_TOAST_TIME, Duration::from_secs(5));
+    assert_eq!(state.toast_clicked(*token), [Effect::Job(JobEffect::Undo)]);
+
+    // A move that no drag made tells it as before, for the window's usual time.
+    state.activate(LEFT);
+    press(&mut state, &special(Key::Escape), NONE);
+    let _ = state.click_row(LEFT, 2, false, false);
+    let picked = state.transfer(
+        LEFT,
+        TransferMode::Move,
+        &folder("b"),
+        rf_jobs::TransferOptions::default(),
+    );
+    let effects = run_move(&mut state, &picked, JobId(2), |_| {});
+    let shown = toasts(&effects);
+    let [(_, text, action, time)] = shown.as_slice() else {
+        panic!("one toast: {effects:?}");
+    };
+    assert_eq!(
+        (text.as_str(), action.as_str(), *time),
+        ("항목 1개를 이동했습니다", "되돌리기", None)
+    );
+}
+
+#[test]
+fn a_dragged_move_offers_no_undo_when_the_setting_is_off() {
+    let mut state = two_panes();
+    assert!(state.move_undo_toast());
+    state.set_move_undo_toast(false);
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let dropped = state.drop_items(id, RIGHT_LIST);
+    let effects = run_move(&mut state, &dropped, JobId(1), |_| {});
+    assert_eq!(toasts(&effects), [], "{effects:?}");
+    // Ctrl+Z still undoes it.
+    assert!(state.can_undo());
+}
+
+#[test]
+fn a_dragged_move_with_a_failure_offers_no_undo_and_tells_the_failure() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 0, true, false);
+    state.press_row(LEFT, 2, true, false);
+    let id = state.drag_id();
+    let dropped = state.drop_items(id, RIGHT_LIST);
+    let effects = run_move(&mut state, &dropped, JobId(1), |report| {
+        report.outcome = rf_jobs::Outcome::CompletedWithErrors;
+        report.failures.push(rf_jobs::ItemFailure {
+            source: Some(in_a("docs")),
+            target: Some(in_b("docs")),
+            stage: rf_jobs::Stage::Write,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        });
+    });
+    // The report of the job's end tells the failure (M1-06), and nothing offers the undo.
+    let shown = toasts(&effects);
+    let [(_, text, action, time)] = shown.as_slice() else {
+        panic!("one toast: {effects:?}");
+    };
+    assert_eq!(
+        (text.as_str(), action.as_str(), *time),
+        ("항목 1개를 처리하지 못했습니다", "자세히", None)
+    );
+}
+
+#[test]
+fn a_drag_resting_on_a_folder_row_opens_it_and_drops_by_its_rows() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let id = state.drag_id();
+    let backup = DropSpot::Pane {
+        side: RIGHT,
+        row: Some(0),
+    };
+    assert_eq!(offer(&mut state, backup), Some(in_b("백업")));
+    // DND-08: the right pane opens the folder; the drag goes on, and the left pane keeps the
+    // keys.
+    let request = the_load(&state.drag_rests(backup));
+    assert_eq!(request.path, in_b("백업"));
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), in_b("백업"));
+    assert_eq!(state.drag_id(), id);
+    assert_eq!(state.active(), LEFT);
+    // A drop goes by the rows of the folder opened: its folder `old`, or the folder itself
+    // below them.
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("old"), file("z.txt")],
+    });
+    let old = in_b("백업").join("old").expect("a plain name");
+    assert_eq!(offer(&mut state, backup), Some(old));
+    assert_eq!(offer(&mut state, RIGHT_LIST), Some(in_b("백업")));
+    let (spec, _) = the_submit(&state.drop_items(id, RIGHT_LIST));
+    let JobSpec::Transfer(transfer) = spec else {
+        panic!("a transfer: {spec:?}");
+    };
+    assert_eq!(
+        transfer.items,
+        [TransferItem {
+            source: in_a("x.txt"),
+            target: in_b("백업").join("x.txt").expect("a plain name"),
+        }]
+    );
+}
+
+#[test]
+fn a_drag_resting_on_a_tab_shows_it_and_on_a_closed_tree_folder_opens_it() {
+    let mut state = two_panes();
+    // The tree shows the place 임시 (which holds both panes' folders) open on a, b and c.
+    let mut effects = state.set_places(&[nav::drive("임시", &nav::temp())]);
+    effects.extend(state.follow_active());
+    let request = nav::the_tree_load(&effects);
+    let _ = state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("a"), dir("b"), dir("c")],
+    });
+    // The right pane's second tab shows `c`; its first one shows.
+    let _ = state.add_tab(RIGHT);
+    let request = the_load(&state.go_to(folder("c")));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![],
+    });
+    let _ = state.select_tab(RIGHT, 0);
+    state.press_row(LEFT, 2, false, false);
+
+    let second = DropSpot::Tab {
+        side: RIGHT,
+        index: 1,
+    };
+    assert_eq!(state.drag_rests(second), []);
+    assert_eq!(state.panes()[RIGHT].active(), 1);
+    assert_eq!(state.active(), LEFT);
+    // The tab that shows already stays.
+    assert_eq!(state.drag_rests(second), []);
+    assert_eq!(state.panes()[RIGHT].active(), 1);
+
+    // The tree's closed `b` opens, and its folders are listed.
+    let expanded = |state: &AppState, row: usize| state.tree().rows()[row].expanded;
+    assert_eq!(state.tree().rows()[2].label, "b");
+    assert!(!expanded(&state, 2));
+    let request = nav::the_tree_load(&state.drag_rests(DropSpot::Tree(2)));
+    assert_eq!(request.path, folder("b"));
+    assert!(expanded(&state, 2));
+    // An open folder stays open.
+    assert!(expanded(&state, 0));
+    assert_eq!(state.drag_rests(DropSpot::Tree(0)), []);
+    assert!(expanded(&state, 0));
+    // `a`, where the items are, takes nothing, and does not open.
+    assert_eq!(state.tree().rows()[1].label, "a");
+    assert_eq!(state.drag_rests(DropSpot::Tree(1)), []);
+    assert!(!expanded(&state, 1));
+}
+
+#[test]
+fn a_drag_resting_where_its_items_cannot_go_or_on_no_folder_opens_nothing() {
+    let mut state = two_panes();
+    let on_right = |row| DropSpot::Pane {
+        side: RIGHT,
+        row: Some(row),
+    };
+    // No drag yet.
+    assert_eq!(state.drag_rests(on_right(0)), []);
+    state.press_row(LEFT, 0, false, false);
+    // The folder dragged, a row that is no folder, and the list below the rows.
+    let docs = DropSpot::Pane {
+        side: LEFT,
+        row: Some(0),
+    };
+    assert_eq!(state.drag_rests(docs), []);
+    assert_eq!(state.drag_rests(on_right(1)), []);
+    assert_eq!(state.drag_rests(RIGHT_LIST), []);
+    assert_eq!(*state.panes()[LEFT].active_tab().location(), folder("a"));
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), folder("b"));
+    // A tab of the folder the items are in.
+    let _ = state.add_tab(RIGHT);
+    let request = the_load(&state.go_to(folder("a")));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("docs")],
+    });
+    let _ = state.select_tab(RIGHT, 0);
+    state.press_row(LEFT, 0, false, false);
+    let tab_of_a = DropSpot::Tab {
+        side: RIGHT,
+        index: 1,
+    };
+    assert_eq!(state.drag_rests(tab_of_a), []);
+    assert_eq!(state.panes()[RIGHT].active(), 0);
+    // A folder inside the one dragged: the right pane shows `a/docs`, which holds `inner`.
+    state.activate(RIGHT);
+    let request = the_load(&state.go_to(in_a("docs")));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("inner")],
+    });
+    state.press_row(LEFT, 0, false, false);
+    assert_eq!(state.drag_rests(on_right(0)), []);
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), in_a("docs"));
+
+    // While a window shows over the main window, nothing opens.
+    state.activate(RIGHT);
+    let request = the_load(&state.go_to(folder("b")));
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("백업")],
+    });
+    state.press_row(LEFT, 2, false, false);
+    state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
+    assert!(matches!(state.modal(), Some(Modal::Name(_))));
+    assert_eq!(state.drag_rests(on_right(0)), []);
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), folder("b"));
 }
 
 #[test]

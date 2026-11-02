@@ -24,10 +24,16 @@
 //! follow carries all of it; the release, when no drag came of the press, then does what the
 //! click does ([`AppState::release_row`]). A press on a row that is not selected is the click
 //! at once.
+//!
+//! A drag that rests on a place that takes it for [`SPRING_DELAY`] opens it (DND-08,
+//! [`AppState::drag_rests`]): the controller's timer counts the rest, and the drag goes on. A
+//! move a drop submits is noted with how many items it carries (`AppState::drop_transfer`),
+//! so that its end offers its undo for [`MOVE_TOAST_TIME`] (DND-07, module `jobs`).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{ConflictPolicy, JobSpec, TransferMode, TransferOptions, TransferSpec};
@@ -41,6 +47,12 @@ use crate::pick::{PickRequest, Validity, validate};
 use crate::places::PlaceKind;
 use crate::settings::DragDefault;
 use crate::words;
+
+/// How long a drag rests on a place before the place opens ([`AppState::drag_rests`]).
+pub const SPRING_DELAY: Duration = Duration::from_millis(1000);
+
+/// How long the toast that offers to undo a dragged move shows (DND-07).
+pub const MOVE_TOAST_TIME: Duration = Duration::from_secs(5);
 
 /// The items a drag from a pane carries, as they were when the press readied it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,7 +322,7 @@ impl AppState {
             });
             return vec![Effect::ShowMenu(MenuShown::AskDrop)];
         };
-        transfer_into(mode, &drag.request.sources, &offer.folder, drag.side)
+        self.drop_transfer(mode, &drag.request.sources, &offer.folder, drag.side)
     }
 
     /// The menu of 놓을 때 묻기 chose `mode` (여기로 이동, 여기로 복사), or nothing (취소): the drop
@@ -320,9 +332,88 @@ impl AppState {
     pub fn drop_menu_chosen(&mut self, mode: Option<TransferMode>) -> Vec<Effect> {
         match (self.asked_drop.take(), mode) {
             (Some(asked), Some(mode)) if !self.quitting => {
-                transfer_into(mode, &asked.sources, &asked.folder, asked.side)
+                self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits:
+    /// it asks about a name that is taken. A move is noted with how many items it carries, so
+    /// that its end offers its undo ([`AppState::track`], DND-07).
+    pub(super) fn drop_transfer(
+        &mut self,
+        mode: TransferMode,
+        sources: &[VPath],
+        folder: &VPath,
+        side: usize,
+    ) -> Vec<Effect> {
+        let options = TransferOptions {
+            conflict: ConflictPolicy::Ask,
+            ..TransferOptions::default()
+        };
+        match TransferSpec::into_dir(mode, sources, folder, options) {
+            Ok(spec) => {
+                let spec = JobSpec::Transfer(spec);
+                if mode == TransferMode::Move {
+                    self.drag_submits.push((spec.clone(), sources.len()));
+                }
+                vec![submit(spec, Some(side))]
+            }
+            Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
+        }
+    }
+
+    /// The drag readied last has rested on `spot` for [`SPRING_DELAY`] (머무르면 열기, DND-08),
+    /// as the controller's timer tells: the row of a folder opens that folder in its pane (in a
+    /// new tab beside a pinned one), a tab shows, a closed folder of the tree opens. The drag
+    /// goes on, and a drop goes by what shows then; the pane with the keys keeps them. Nothing
+    /// where a drop would not take the items ([`AppState::drop_offer`] is `None`: one of them or
+    /// a folder inside one, the folder they are in, while a window shows over the main window
+    /// or the app ends), on a row that is no folder or below the rows, on a tab that shows
+    /// already, or on a folder of the tree that is open or has no folders.
+    pub fn drag_rests(&mut self, spot: DropSpot) -> Vec<Effect> {
+        let id = self.drag_id();
+        if self.drop_offer(id, spot).is_none() {
+            return Vec::new();
+        }
+        match spot {
+            DropSpot::Pane {
+                side,
+                row: Some(row),
+            } => {
+                let tab = self.tab(side);
+                let folder = tab
+                    .visible()
+                    .get(row)
+                    .filter(|entry| entry.kind == EntryKind::Dir)
+                    .and_then(|entry| tab.location().join(&entry.name).ok());
+                folder
+                    .and_then(|folder| self.navigate_shown(side, folder))
+                    .map(Effect::Load)
+                    .into_iter()
+                    .collect()
+            }
+            DropSpot::Pane { row: None, .. } => Vec::new(),
+            DropSpot::Tab { side, index } => {
+                let pane = &mut self.panes[side];
+                if pane.active() != index {
+                    pane.select_tab(index);
+                }
+                Vec::new()
+            }
+            DropSpot::Tree(row) => {
+                // A closed row with a chevron, as the sidebar shows it.
+                let opens = self.tree.rows().get(row).is_some_and(|row| {
+                    !row.expanded && (row.has_children_unknown || row.has_children)
+                });
+                match self.tree.node_at(row) {
+                    Some(node) if opens => {
+                        self.with_tree(|tree| tree.toggle(node).into_iter().collect())
+                    }
+                    _ => Vec::new(),
+                }
+            }
         }
     }
 
@@ -350,23 +441,5 @@ impl AppState {
                 self.tree.node(id).map(|node| node.path.clone())
             }
         }
-    }
-}
-
-/// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits: it
-/// asks about a name that is taken.
-fn transfer_into(
-    mode: TransferMode,
-    sources: &[VPath],
-    folder: &VPath,
-    side: usize,
-) -> Vec<Effect> {
-    let options = TransferOptions {
-        conflict: ConflictPolicy::Ask,
-        ..TransferOptions::default()
-    };
-    match TransferSpec::into_dir(mode, sources, folder, options) {
-        Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(side))],
-        Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
     }
 }

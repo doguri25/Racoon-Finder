@@ -46,7 +46,7 @@ use rf_platform::KnownFolder;
 use rf_platform::dnd::DragMods;
 use rf_platform::shell::Owner;
 use slint::language::DragAction;
-use slint::winit_030::winit::event::WindowEvent as WinitEvent;
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent as WinitEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
@@ -84,6 +84,7 @@ mod persist;
 mod previewer;
 mod properties;
 mod sorter;
+mod spring;
 
 use clipboard::{Clipper, Done, OsClipboard};
 use matcher::Matcher;
@@ -94,6 +95,7 @@ use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
 pub use previewer::Previewer;
 use properties::{Hasher, Measurer};
 use sorter::Sorter;
+use spring::Spring;
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -523,6 +525,19 @@ fn connect_drops(window: &MainWindow) {
             });
         }
     });
+    // 머무르면 열기 (DND-08) and the lists that scroll under a drag.
+    window.on_drag_ended(|| {
+        with(Controller::drag_gone);
+    });
+    window.on_drag_hovers_nothing(|| {
+        with(|c| c.spring.stop());
+    });
+    window.global::<DragPointer<'_>>().on_moved_under(|| {
+        // After the step of the list is drawn, outside Slint's timer.
+        slint::Timer::single_shot(Duration::ZERO, || {
+            with(Controller::hover_again);
+        });
+    });
 }
 
 /// The callbacks of the properties window: an algorithm chosen, the 중지 of the count and of
@@ -759,12 +774,35 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 
 /// Looks at the events of the window's winit window before Slint does, and passes each on: the
 /// modifier keys, which Slint's drop events do not tell and a drop's action follows
-/// ([`Controller::modifiers_changed`]).
+/// ([`Controller::modifiers_changed`]); and the end of a drag over the window, which Slint does
+/// not tell when the row the drag started on is gone (a folder that opened under it, DND-08) or
+/// when the pointer is past the window's edges ([`Controller::drag_gone`]).
 fn watch_winit_events(window: &MainWindow) {
-    window.window().on_winit_window_event(|_, event| {
-        if let WinitEvent::ModifiersChanged(modifiers) = event {
-            let mods = ui_bridge::drag_mods(modifiers.state());
-            with(|c| c.modifiers_changed(mods));
+    window.window().on_winit_window_event(|window, event| {
+        match event {
+            WinitEvent::ModifiersChanged(modifiers) => {
+                let mods = ui_bridge::drag_mods(modifiers.state());
+                with(|c| c.modifiers_changed(mods));
+            }
+            WinitEvent::CursorLeft { .. } => {
+                with(Controller::drag_maybe_gone);
+            }
+            WinitEvent::CursorMoved { position, .. }
+                if ui_bridge::outside_window(*position, window.size()) =>
+            {
+                with(Controller::drag_maybe_gone);
+            }
+            WinitEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Once Slint has taken the release: its drop, or the end of the drag.
+                slint::Timer::single_shot(Duration::ZERO, || {
+                    with(Controller::drag_maybe_gone);
+                });
+            }
+            _ => {}
         }
         EventResult::Propagate
     });
@@ -1002,6 +1040,8 @@ pub struct Controller {
     save_failure_told: Cell<bool>,
     /// The id of the drag whose payload the window holds.
     shown_drag: Cell<u64>,
+    /// The time of a drag's rest on a place, which then opens (머무르면 열기, DND-08).
+    spring: Spring,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
@@ -1099,6 +1139,9 @@ impl Controller {
             save_timer: slint::Timer::default(),
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
+            spring: Spring::new(|spot| {
+                with(|c| c.spring_due(spot));
+            }),
             checks: RefCell::new(CopyChecks::default()),
             sorter: sorter::sorter(|outcome| {
                 post(move |c| {
@@ -1447,7 +1490,7 @@ impl Controller {
         let Some(window) = self.window.upgrade() else {
             return DragAction::None;
         };
-        let (hint, action) = match (offer, refused) {
+        let (hint, action) = match (&offer, refused) {
             (Some(offer), _) => (
                 words::drop_badge(offer.choice, &folder_label(&offer.folder)),
                 ui_bridge::drop_action(offer.choice),
@@ -1456,6 +1499,11 @@ impl Controller {
             (None, None) => (String::new(), DragAction::None),
         };
         window.invoke_drop_hint(hint.into(), action == DragAction::None);
+        // The time of a rest runs while the drag stays on a place that takes it.
+        let rest = offer
+            .filter(|_| action != DragAction::None)
+            .map(|offer| (spot, offer.folder));
+        self.spring.hover(rest);
         action
     }
 
@@ -1467,6 +1515,7 @@ impl Controller {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
+        self.spring.stop();
         let mut done = DragAction::None;
         self.update(|state| {
             let effects = state.drop_items(id, spot);
@@ -1476,11 +1525,46 @@ impl Controller {
         done
     }
 
+    /// The drag has rested on `spot` for [`SPRING_DELAY`](crate::state::SPRING_DELAY): the
+    /// place opens, as the state says (a folder, a tab, a folder of the tree). What is under the
+    /// still pointer may be another place then, which the window asks about again.
+    fn spring_due(&self, spot: DropSpot) {
+        self.update(|state| state.drag_rests(spot));
+        slint::Timer::single_shot(Duration::ZERO, || {
+            with(Controller::hover_again);
+        });
+    }
+
+    /// The drag over the window is over: it ended, dropped or not (`drag-finished` of a drag of
+    /// rows, the left button let go), or it left the window; later also the leave and the drop
+    /// of a drag of another app. Nothing it rested on opens, nothing shows beside its pointer,
+    /// and the lists stop scrolling under it.
+    fn drag_gone(&self) {
+        self.spring.stop();
+        if let Some(window) = self.window.upgrade() {
+            window.invoke_drag_gone();
+        }
+    }
+
+    /// [`Controller::drag_gone`] when a drag is over the window (`DragPointer.over`): the left
+    /// button was let go (and Slint has taken the release), or the pointer is past the window's
+    /// edges, where nothing tells the window of it. Nor does Slint tell the end of a drag whose
+    /// row is gone (a folder opened under it, a list scrolled it away).
+    fn drag_maybe_gone(&self) {
+        let over = self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.global::<DragPointer<'_>>().get_over());
+        if over {
+            self.drag_gone();
+        }
+    }
+
     /// The modifier keys changed: the state chooses a drop's action with them from now on.
-    /// While a drag hovers over a place (something shows beside its pointer), the window asks
-    /// again where the pointer is, on the next turn of the event loop, so that the pointer and
-    /// what shows beside it follow the keys without a move of the mouse. Slint asks again at the
-    /// press of a key itself, but winit may tell the keys held after that press.
+    /// While a drag hovers over the window, the window asks again where the pointer is, on the
+    /// next turn of the event loop, so that the pointer and what shows beside it follow the keys
+    /// without a move of the mouse. Slint asks again at the press of a key itself, but winit may
+    /// tell the keys held after that press.
     fn modifiers_changed(&self, mods: DragMods) {
         if let Some(state) = self.state.borrow_mut().as_mut() {
             state.modifiers_changed(mods);
@@ -1488,7 +1572,7 @@ impl Controller {
         if self
             .window
             .upgrade()
-            .is_some_and(|window| window.get_hint_shown())
+            .is_some_and(|window| window.global::<DragPointer<'_>>().get_over())
         {
             slint::Timer::single_shot(Duration::ZERO, || {
                 with(Controller::hover_again);
@@ -1496,16 +1580,17 @@ impl Controller {
         }
     }
 
-    /// The pointer of the drag that hovers moves to where it is, so that the place under it
-    /// answers again ([`Controller::drop_check`]).
+    /// The pointer of the drag that hovers over the window moves to where it is, so that the
+    /// place under it answers again ([`Controller::drop_check`]): the keys changed, a list
+    /// scrolled under it, a place opened under it.
     fn hover_again(&self) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        if !window.get_hint_shown() {
+        let pointer = window.global::<DragPointer<'_>>();
+        if !pointer.get_over() {
             return;
         }
-        let pointer = window.global::<DragPointer<'_>>();
         let position = slint::LogicalPosition::new(pointer.get_x(), pointer.get_y());
         window
             .window()
@@ -2054,11 +2139,18 @@ impl Controller {
                 token,
                 text,
                 action,
+                time,
             } => {
                 if let Some(window) = self.window.upgrade() {
                     // A token past the range of a Slint int has no button to click.
                     let token = i32::try_from(token).unwrap_or(0);
-                    window.invoke_show_toast(text.into(), action.into(), token);
+                    match time {
+                        Some(time) => {
+                            let ms = i64::try_from(time.as_millis()).unwrap_or(i64::MAX);
+                            window.invoke_show_toast_for(text.into(), action.into(), token, ms);
+                        }
+                        None => window.invoke_show_toast(text.into(), action.into(), token),
+                    }
                 }
             }
             Effect::Busy { token, text } => {

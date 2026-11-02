@@ -1104,7 +1104,17 @@ fn name_of(path: &VPath) -> String {
 /// item it went through (`done` made, `skipped` left out): `항목 3개 중 1개를 복사했습니다 ·
 /// 2개 건너뜀`, or `항목 3개를 건너뛰었습니다` when it made none.
 pub fn items_done(work: JobWork, count: usize, done: u64, skipped: u64) -> String {
-    let made = work.phrases().done;
+    done_with(work.phrases().done, count, done, skipped)
+}
+
+/// The notice of a move that a drag made and that ended without failures (DND-07), as
+/// [`items_done`] says the others: `항목 3개를 옮겼습니다`.
+pub fn dragged_move_done(count: usize, done: u64, skipped: u64) -> String {
+    done_with("옮겼", count, done, skipped)
+}
+
+/// [`items_done`] with the stem `made` of what was done (`이동했`, `옮겼`).
+fn done_with(made: &str, count: usize, done: u64, skipped: u64) -> String {
     match (done, skipped) {
         (_, 0) => format!("항목 {count}개를 {made}습니다"),
         (0, skipped) => format!("항목 {skipped}개를 건너뛰었습니다"),
@@ -2938,6 +2948,17 @@ mod tests {
             drop_badge(DropChoice::Refuse(Refusal::NotAllowed), "백업"),
             "여기에는 놓을 수 없습니다"
         );
+    }
+
+    #[test]
+    fn a_dragged_move_says_what_it_moved() {
+        assert_eq!(dragged_move_done(3, 7, 0), "항목 3개를 옮겼습니다");
+        // What it skipped, as the other jobs say it.
+        assert_eq!(
+            dragged_move_done(3, 1, 2),
+            "항목 3개 중 1개를 옮겼습니다 · 2개 건너뜀"
+        );
+        assert_eq!(dragged_move_done(2, 0, 2), "항목 2개를 건너뛰었습니다");
     }
 
     #[test]

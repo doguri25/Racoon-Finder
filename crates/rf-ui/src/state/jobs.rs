@@ -6,6 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::slice;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
@@ -13,7 +14,7 @@ use rf_jobs::{
     JobSpec, LanePolicy, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 
-use super::{AppState, Effect, RIGHT, ToastAction};
+use super::{AppState, Effect, MOVE_TOAST_TIME, RIGHT, ToastAction};
 use crate::dialogs::{
     Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
     NameCheck, NameDialog, NamePurpose, PreflightQuestion, Recovery,
@@ -76,8 +77,18 @@ impl AppState {
         self.quitting
     }
 
-    /// Follows the job the engine started for an [`Effect::Job`].
+    /// Follows the job the engine started for an [`Effect::Job`]. A move a drop submitted is
+    /// noted under its job, for the toast of its end (DND-07).
     pub fn track(&mut self, started: Started) {
+        if let Some(spec) = started.spec.as_deref().filter(|_| !started.via_history)
+            && let Some(at) = self
+                .drag_submits
+                .iter()
+                .position(|(submitted, _)| submitted == spec)
+        {
+            let (_, count) = self.drag_submits.remove(at);
+            self.dragged_moves.insert(started.id, count);
+        }
         let marks = self
             .panes
             .iter()
@@ -441,6 +452,8 @@ impl AppState {
             report,
             ..
         } = ended;
+        // A move a drop made, and how many items it carried.
+        let dragged = self.dragged_moves.remove(&report.id);
         let touched = touched_folders(&report.spec, &report.outputs);
         let mut effects = self.folders_changed(&touched);
         // A move a paste submitted empties the clipboard once it has moved everything.
@@ -524,10 +537,16 @@ impl AppState {
             effects.extend(self.copies_refused(&record, refused, &failures, &report));
             return effects;
         }
+        // A move a drop made that moved everything offers its undo for a moment (DND-07); one
+        // that was cut short, or copied for want of rights on the source, is told as others are.
+        let moved_by_drag = dragged
+            .filter(|_| report.outcome == Outcome::Completed && !report.copied_instead_of_moved);
         if !failures.is_empty() {
             effects.push(self.failure_notice(work, &failures, &report));
         } else if work == JobWork::Trash {
             effects.extend(self.trash_toast(&report));
+        } else if let Some(count) = moved_by_drag {
+            effects.extend(self.dragged_toast(count, &report));
         } else {
             effects.extend(self.done_toast(work, &report));
         }
@@ -615,6 +634,21 @@ impl AppState {
         Some(self.toast(words::and_gone(text, gone), action))
     }
 
+    /// The toast of a move of `count` items that a drop made and that moved them without
+    /// failures (DND-07): what it moved, for [`MOVE_TOAST_TIME`], with a button that undoes it
+    /// (as the history's record, whose undo checks for later changes). None while 보기 ▸ 설정
+    /// has it off: Ctrl+Z undoes the move then.
+    fn dragged_toast(&mut self, count: usize, report: &JobReport) -> Option<Effect> {
+        if !self.move_undo_toast {
+            return None;
+        }
+        let done = report.done.files.saturating_add(report.done.dirs);
+        let text = words::dragged_move_done(count, done, report.skipped);
+        let action = report.undo.clone().map(ToastAction::Undo);
+        let gone = deleted_for_good(report).count();
+        Some(self.toast_for(words::and_gone(text, gone), action, Some(MOVE_TOAST_TIME)))
+    }
+
     /// Selects `outputs`, the items a create, a rename, an undo or a paste made, in pane `side`:
     /// those in the folder it still shows, now if their rows are there, else as they come. Not
     /// when the user has changed the selection of that tab since the job was submitted, as
@@ -659,6 +693,16 @@ impl AppState {
 
     /// A toast with `text`, whose button does `action`, replacing the one on screen.
     pub(super) fn toast(&mut self, text: String, action: Option<ToastAction>) -> Effect {
+        self.toast_for(text, action, None)
+    }
+
+    /// [`AppState::toast`] for `time`, or for the window's usual time (`None`).
+    pub(super) fn toast_for(
+        &mut self,
+        text: String,
+        action: Option<ToastAction>,
+        time: Option<Duration>,
+    ) -> Effect {
         self.toast_token += 1;
         let token = self.toast_token;
         let label = match &action {
@@ -671,6 +715,7 @@ impl AppState {
             token,
             text,
             action: label.to_owned(),
+            time,
         }
     }
 

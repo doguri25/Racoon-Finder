@@ -185,19 +185,47 @@ export component ProgressBar inherits Rectangle {
     }
 }
 
-// The end of a strip that scrolls under a drag held there (the tab strip, the column heads):
-// the accent colour fading in toward that end. `way` is 1 for the left end (the strip scrolls
-// right, to show what is left of it), -1 for the right end, 0 for none. It shows why the strip
-// moves, and it makes the window draw again as the drag comes into the end. Slint starts the
-// timer that scrolls the strip only as the window takes in an event or draws, so a pointer held
-// perfectly still that changed nothing on screen would wait for the next event.
+// How a strip or a list scrolls under a drag held near one of its ends (M1-06's tab strip and
+// column heads; the lists and the tree, DND-08): within `edge` of an end that has more beyond it,
+// a `step` every `interval`, until the drag ends, moves away from the end, or the end shows.
+export global EdgeScroll {
+    out property <length> edge: 24px;
+    out property <duration> interval: 30ms;
+    out property <length> step: 12px;
+
+    // The way to scroll with the pointer at `at` along a view `size` long: 1 at its start (the
+    // content moves toward the end, to show what is before), while there is more `before`; -1
+    // at its end, while there is more `after`; 0 elsewhere.
+    public pure function way(at: length, size: length, before: bool, after: bool) -> int {
+        if (at < EdgeScroll.edge && before) {
+            return 1;
+        }
+        if (at > size - EdgeScroll.edge && after) {
+            return -1;
+        }
+        return 0;
+    }
+}
+
+// The end of a strip or a list that scrolls under a drag held there (`EdgeScroll`): the accent
+// colour fading in toward that end. `way` is 1 for the left end (the strip scrolls right, to
+// show what is left of it), or the top one when `vertical`, -1 for the right or the bottom end,
+// 0 for none. It shows why the strip moves, and it makes the window draw again as the drag comes
+// into the end. Slint starts the timer that scrolls the strip only as the window takes in an
+// event or draws, so a pointer held perfectly still that changed nothing on screen would wait
+// for the next event.
 export component ScrollCue inherits Rectangle {
     in property <int> way;
+    in property <bool> vertical;
 
     opacity: root.way == 0 ? 0 : 1;
-    background: root.way > 0
-        ? @linear-gradient(90deg, Theme.accent.with-alpha(0.35) 0%, Theme.accent.with-alpha(0) 100%)
-        : @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.35) 100%);
+    background: root.vertical
+        ? (root.way > 0
+            ? @linear-gradient(180deg, Theme.accent.with-alpha(0.35) 0%, Theme.accent.with-alpha(0) 100%)
+            : @linear-gradient(180deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.35) 100%))
+        : (root.way > 0
+            ? @linear-gradient(90deg, Theme.accent.with-alpha(0.35) 0%, Theme.accent.with-alpha(0) 100%)
+            : @linear-gradient(90deg, Theme.accent.with-alpha(0) 0%, Theme.accent.with-alpha(0.35) 100%));
 }
 
 // Text-only button on the dark toast background.

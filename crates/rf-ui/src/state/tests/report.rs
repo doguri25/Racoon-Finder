@@ -211,6 +211,7 @@ fn a_log_is_saved_where_the_picker_chooses_and_the_notice_says_where() {
             token: state_toast_token(&effects),
             text: "로그를 저장했습니다: job-copy-20261030-143207.log".to_owned(),
             action: String::new(),
+            time: None,
         }]
     );
     let effects = state.log_saved(Err(ErrorKind::PermissionDenied));

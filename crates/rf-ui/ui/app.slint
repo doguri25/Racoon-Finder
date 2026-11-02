@@ -375,6 +375,11 @@ export component MainWindow inherits Window {
     callback drop-items(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
     // The menu of 놓을 때 묻기 chose `name`: `move`, `copy` or `cancel`.
     callback drop-menu-chosen(name: string);
+    // A drag moved where nothing takes drops (the toolbar, the gap between the panes), or a
+    // place refused it: nothing it rested on opens (DND-08).
+    callback drag-hovers-nothing();
+    // A drag of rows from a pane ended, dropped or not.
+    callback drag-ended();
 
     // The filter box takes the keys, all its text selected.
     public function focus-filter() {
@@ -526,6 +531,14 @@ export component MainWindow inherits Window {
         root.hint-told = refused && text != "";
     }
 
+    // The drag is over, or gone from the window: nothing shows beside its pointer, and the
+    // lists stop scrolling under it.
+    public function drag-gone() {
+        root.hint = "";
+        root.hint-told = false;
+        DragPointer.gone();
+    }
+
     // The menu of 놓을 때 묻기, where the drop was.
     public function show-drop-menu() {
         drop-menu.show({ x: DragPointer.x, y: DragPointer.y });
@@ -535,8 +548,6 @@ export component MainWindow inherits Window {
     private property <bool> hint-refused;
     // A place has refused the drag in the move that is under way, and said why.
     private property <bool> hint-told;
-    // Something shows beside the pointer of a drag.
-    out property <bool> hint-shown: root.hint != "";
 
     // Scrolls the tree so that row `index` shows.
     public function tree-scroll-to(index: int) {
@@ -558,8 +569,13 @@ export component MainWindow inherits Window {
     }
 
     // A notice with the button `action` (empty for none), whose click and end come back with
-    // `token`.
+    // `token`, for 8 seconds.
     public function show-toast(text: string, action: string, token: int) {
+        root.show-toast-for(text, action, token, 8s);
+    }
+
+    // `show-toast` for `time` (the undo of a dragged move shows for 5 seconds, DND-07).
+    public function show-toast-for(text: string, action: string, token: int, time: duration) {
         if (root.notice != "" && root.notice-token != token) {
             root.notice-closed(root.notice-token);
         }
@@ -567,6 +583,7 @@ export component MainWindow inherits Window {
         root.notice-action-text = action;
         root.notice-token = token;
         root.notice-lasting = false;
+        root.notice-time = time;
         notice-timer.start();
         notice-timer.restart();
     }
@@ -589,6 +606,8 @@ export component MainWindow inherits Window {
     }
 
     private property <string> notice;
+    // How long the notice shows, its time running.
+    private property <duration> notice-time: 8s;
     private property <string> notice-action-text;
     private property <int> notice-token;
     private property <bool> notice-lasting;
@@ -668,15 +687,17 @@ export component MainWindow inherits Window {
     }
 
     // Under everything, so a move of a drag reaches it last, and only when no place above took
-    // the drag: a place that refuses it has said why (`drop-refused`) in the same move, and the
+    // the drag: a place that refuses it has said why (`drop-hint`) in the same move, and the
     // reason stays; a move over nothing that takes drops (the toolbar, the gap between the
-    // panes) takes it away.
+    // panes) takes it away. Either way the pointer is told, and nothing it rests on opens.
     DropArea {
         can-drop(event) => {
+            DragPointer.at(self.absolute-position.x + event.position.x, self.absolute-position.y + event.position.y);
             if (!root.hint-told) {
                 root.hint = "";
             }
             root.hint-told = false;
+            root.drag-hovers-nothing();
             return DragAction.none;
         }
         dropped(event) => {
@@ -1067,7 +1088,8 @@ export component MainWindow inherits Window {
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
                         drag-ended => {
-                            root.hint = "";
+                            root.drag-gone();
+                            root.drag-ended();
                         }
                         activated => {
                             root.pane-activated(0);
@@ -1207,7 +1229,8 @@ export component MainWindow inherits Window {
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
                         drag-ended => {
-                            root.hint = "";
+                            root.drag-gone();
+                            root.drag-ended();
                         }
                         activated => {
                             root.pane-activated(1);
@@ -1577,7 +1600,7 @@ export component MainWindow inherits Window {
     }
 
     notice-timer := Timer {
-        interval: 8s;
+        interval: root.notice-time;
         running: false;
         triggered => {
             root.notice = "";

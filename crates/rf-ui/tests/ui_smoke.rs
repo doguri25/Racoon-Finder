@@ -3266,6 +3266,246 @@ fn a_refused_place_says_why_while_the_drag_stays_over_it() {
     assert!(!shown());
 }
 
+/// A pane listing the files `f000`, `f001`, … up to `count` of them.
+fn long_pane(count: usize) -> Pane {
+    listed_pane(
+        (0..count)
+            .map(|i| entry(&format!("f{i:03}"), EntryKind::File, 1))
+            .collect(),
+    )
+}
+
+/// Runs the event loop's timers for `ms` milliseconds, in the steps it would take between
+/// events.
+fn run_for(ms: u64) {
+    for _ in 0..ms.div_ceil(30) {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(30));
+        slint::platform::update_timers_and_animations();
+    }
+}
+
+/// The element `id` (`Component::id`) furthest right (or left) in the window, as a pane's.
+fn element_of(window: &MainWindow, id: &str, right: bool) -> ElementHandle {
+    let mut found: Vec<ElementHandle> = ElementHandle::find_by_element_id(window, id).collect();
+    found.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
+    let element = if right {
+        found.pop()
+    } else {
+        found.into_iter().next()
+    };
+    element.unwrap_or_else(|| panic!("{id} in the window"))
+}
+
+/// The points just inside the top and the bottom edges of `element`, across its middle.
+fn top_and_bottom(element: &ElementHandle) -> (LogicalPosition, LogicalPosition) {
+    let (at, size) = (element.absolute_position(), element.size());
+    let x = at.x + size.width / 2.0;
+    (
+        LogicalPosition::new(x, at.y + 6.0),
+        LogicalPosition::new(x, at.y + size.height - 6.0),
+    )
+}
+
+/// Whether the window shows the item `label` (a row of a list, an icon, a row of the tree).
+fn shows(window: &MainWindow, label: &str) -> bool {
+    !labelled(window, label, AccessibleRole::ListItem).is_empty()
+}
+
+/// Counts the times the window asks Rust to look again under the still pointer of a drag.
+fn count_moved_under(window: &MainWindow) -> Rc<std::cell::Cell<usize>> {
+    let count = Rc::new(std::cell::Cell::new(0));
+    let noted = Rc::clone(&count);
+    window
+        .global::<DragPointer<'_>>()
+        .on_moved_under(move || noted.set(noted.get() + 1));
+    count
+}
+
+#[test]
+fn a_drag_held_at_the_bottom_or_the_top_of_a_list_scrolls_it_to_its_end() {
+    let (window, _calls, models, _tree) = drag_window();
+    let asked = count_moved_under(&window);
+    // The right pane lists 60 files, more than it shows.
+    window.set_right_pane(models[1].view(&long_pane(60), false));
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let (top, bottom) = top_and_bottom(&element_of(&window, "FileList::list", true));
+    assert!(shows(&window, "f000"));
+    assert!(!shows(&window, "f059"));
+
+    // DND-08: held within 24px of the bottom, the list scrolls a step at a time, and asks Rust
+    // to look again under the still pointer after each, until it shows its last row.
+    drag_to(&window, x_txt, bottom);
+    assert!(scroll_cue_shows(&window));
+    run_for(6000);
+    assert!(shows(&window, "f059"));
+    assert!(!shows(&window, "f000"));
+    let steps = asked.get();
+    assert!(steps > 10, "{steps}");
+    // At the end it stops.
+    assert!(!scroll_cue_shows(&window));
+    run_for(1000);
+    assert_eq!(asked.get(), steps);
+    // Held at the top, it goes back up to the first row.
+    pointer(&window, "move", top);
+    run_for(6000);
+    assert!(shows(&window, "f000"));
+    assert!(!shows(&window, "f059"));
+    // Away from the edges it stays.
+    let middle = LogicalPosition::new(top.x, f32::midpoint(top.y, bottom.y));
+    pointer(&window, "move", middle);
+    let steps = asked.get();
+    run_for(1000);
+    assert_eq!(asked.get(), steps);
+    // The end of the drag stops it too.
+    pointer(&window, "move", bottom);
+    run_for(300);
+    pointer(&window, "release", bottom);
+    let steps = asked.get();
+    run_for(1000);
+    assert_eq!(asked.get(), steps);
+    assert!(!scroll_cue_shows(&window));
+}
+
+#[test]
+fn the_list_the_items_are_in_scrolls_under_their_drag_too() {
+    let (window, _calls, models, _tree) = drag_window();
+    // The left pane, whose list takes nothing here (the items are in its folder), lists 60
+    // files.
+    window.set_left_pane(models[0].view(&long_pane(60), true));
+    let first = centre_of(&window, "f001", AccessibleRole::ListItem);
+    let (_, bottom) = top_and_bottom(&element_of(&window, "FileList::list", false));
+    drag_to(&window, first, bottom);
+    run_for(6000);
+    assert!(shows(&window, "f059"));
+
+    // A drag that moves on to where nothing takes drops (the toolbar) stops it.
+    let (top, _) = top_and_bottom(&element_of(&window, "FileList::list", false));
+    pointer(&window, "move", top);
+    run_for(300);
+    pointer(&window, "move", LogicalPosition::new(top.x, 20.0));
+    assert!(!scroll_cue_shows(&window));
+    let before = shows(&window, "f040");
+    run_for(2000);
+    assert_eq!(shows(&window, "f040"), before);
+    pointer(&window, "release", LogicalPosition::new(top.x, 20.0));
+}
+
+#[test]
+fn icons_scroll_up_and_down_and_the_list_view_sideways_under_a_drag() {
+    let (window, _calls, models, _tree) = drag_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    for mode in [ViewMode::MediumIcons, ViewMode::List] {
+        let mut pane = long_pane(200);
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_right_pane(models[1].view(&pane, false));
+        let grid = element_of(&window, "FileGrid::drop", true);
+        let (at, size) = (grid.absolute_position(), grid.size());
+        // The bottom edge for the icons; the right edge for 목록, which scrolls sideways.
+        let edge = if mode == ViewMode::List {
+            LogicalPosition::new(at.x + size.width - 6.0, at.y + size.height / 2.0)
+        } else {
+            LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height - 6.0)
+        };
+        assert!(shows(&window, "f000"), "{mode:?}");
+        assert!(!shows(&window, "f199"), "{mode:?}");
+        // Held there, it scrolls to the last item.
+        drag_to(&window, x_txt, edge);
+        run_for(16_000);
+        assert!(!shows(&window, "f000"), "{mode:?}");
+        assert!(shows(&window, "f199"), "{mode:?}");
+        pointer(&window, "release", edge);
+    }
+}
+
+#[test]
+fn a_drag_held_at_the_bottom_of_the_tree_scrolls_it() {
+    let (window, _calls, _models, tree_rows) = drag_window();
+    let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
+    let mut tree = Tree::new(VisibilityFilter::default());
+    tree.set_roots((0..60).map(|i| (format!("r{i:02}"), home.clone())));
+    tree_rows.sync(&tree, &[]);
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let (top, bottom) = top_and_bottom(&element_of(&window, "Sidebar::list", false));
+    assert!(shows(&window, "r00"));
+    assert!(!shows(&window, "r59"));
+    drag_to(&window, x_txt, bottom);
+    run_for(6000);
+    assert!(shows(&window, "r59"));
+    assert!(!shows(&window, "r00"));
+    pointer(&window, "move", top);
+    run_for(6000);
+    assert!(shows(&window, "r00"));
+    pointer(&window, "release", top);
+}
+
+#[test]
+fn the_window_tells_rust_where_a_drag_hovers_nothing_and_when_it_ends() {
+    let (window, _calls, _models, _tree) = drag_window();
+    let told = Calls::default();
+    let record = told.clone();
+    window.on_drag_hovers_nothing(move || record.note("nothing"));
+    let record = told.clone();
+    window.on_drag_ended(move || record.note("ended"));
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let over = || window.global::<DragPointer<'_>>().get_over();
+    assert!(!over());
+
+    // Over a place that takes the drag, Rust hears of it there alone.
+    drag_to(&window, x_txt, backup);
+    assert!(over());
+    told.take();
+    pointer(&window, "move", backup);
+    assert_eq!(told.take(), Vec::<String>::new());
+    // Over the toolbar, where nothing takes drops, the window says so; the pointer is still
+    // told.
+    let toolbar = LogicalPosition::new(backup.x, 20.0);
+    pointer(&window, "move", toolbar);
+    assert_eq!(told.take(), ["nothing"]);
+    let at = window.global::<DragPointer<'_>>();
+    assert_eq!(LogicalPosition::new(at.get_x(), at.get_y()), toolbar);
+    // The end of the drag is told once.
+    pointer(&window, "release", toolbar);
+    assert_eq!(told.take(), ["ended"]);
+    assert!(!over());
+
+    // Rust ends a drag that the window does not see end (it left the window).
+    drag_to(&window, x_txt, backup);
+    assert!(over());
+    assert!(!labelled(&window, "List 0", AccessibleRole::Text).is_empty());
+    window.invoke_drag_gone();
+    assert!(!over());
+    assert!(labelled(&window, "List 0", AccessibleRole::Text).is_empty());
+    pointer(&window, "release", backup);
+}
+
+#[test]
+fn a_toast_can_show_for_a_time_of_its_own() {
+    let window = window();
+    let closed = Calls::default();
+    let record = closed.clone();
+    window.on_notice_closed(move |token| record.note(token.to_string()));
+    let shown = || !labelled(&window, "항목 1개를 옮겼습니다", AccessibleRole::Text).is_empty();
+    // DND-07: the undo of a dragged move is offered for 5 seconds.
+    window.invoke_show_toast_for("항목 1개를 옮겼습니다".into(), "되돌리기".into(), 4, 5000);
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(4900));
+    assert!(shown());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+    assert!(!shown());
+    assert_eq!(closed.take(), ["4"]);
+    // The next toast has the usual 8 seconds again.
+    window.invoke_show_toast("항목 1개를 옮겼습니다".into(), "".into(), 5);
+    slint::platform::update_timers_and_animations();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(7000));
+    assert!(shown());
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1200));
+    assert!(!shown());
+}
+
 #[test]
 fn a_drag_carries_the_payload_its_press_made() {
     let (window, calls, _models, _tree) = drag_window();
@@ -3590,10 +3830,16 @@ fn a_tab_held_at_an_end_of_a_full_strip_scrolls_it_that_way() {
 /// Whether a strip of the window (of tabs or of column heads) shows the end it scrolls toward
 /// under a drag held there.
 fn scroll_cue_shows(window: &MainWindow) -> bool {
-    ["Pane::scroll-cue", "FileHead::scroll-cue"]
-        .into_iter()
-        .flat_map(|id| ElementHandle::find_by_element_id(window, id))
-        .any(|cue| cue.computed_opacity() > 0.5)
+    [
+        "Pane::scroll-cue",
+        "FileHead::scroll-cue",
+        "FileList::scroll-cue",
+        "FileGrid::scroll-cue",
+        "Sidebar::scroll-cue",
+    ]
+    .into_iter()
+    .flat_map(|id| ElementHandle::find_by_element_id(window, id))
+    .any(|cue| cue.computed_opacity() > 0.5)
 }
 
 #[test]

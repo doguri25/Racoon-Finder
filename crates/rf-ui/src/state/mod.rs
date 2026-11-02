@@ -6,8 +6,9 @@
 //! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
 //! window that shows over the main window (a [`Modal`]), the destination picker's folder
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
-//! ([`AppState::drag`]) and what its drop does (the keys held and the choices of 보기 ▸ 설정,
-//! module `drop_rule`), the address bar's lists (module `address`: a folder's subfolders
+//! ([`AppState::drag`]), what its drop does (the keys held and the choices of 보기 ▸ 설정,
+//! module `drop_rule`), what a rest of it opens and the moves it made (module `drag`), the
+//! address bar's lists (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
 //! tools, listing a folder again and the extensions shown or not (module `select`), the
@@ -33,7 +34,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use rf_core::{ErrorKind, Os, VPath};
-use rf_jobs::{CreatedItem, TransferMode, UndoRecord};
+use rf_jobs::{CreatedItem, JobId, JobSpec, TransferMode, UndoRecord};
 use rf_platform::dnd::DragMods;
 use rf_vfs::{SortKey, VisibilityFilter};
 
@@ -79,7 +80,7 @@ pub use clipboard::{
     CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
 };
 pub use copies::copy_origins;
-pub use drag::{Drag, DropOffer, DropSpot};
+pub use drag::{Drag, DropOffer, DropSpot, MOVE_TOAST_TIME, SPRING_DELAY};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use panel::PanelButton;
@@ -239,11 +240,13 @@ pub enum Effect {
     /// order they come, and hands the answer to the method the request names.
     Clipboard(ClipboardWork),
     /// Show a toast with the message `text` and the button `action`, whose click comes back
-    /// to [`AppState::toast_clicked`] with `token`.
+    /// to [`AppState::toast_clicked`] with `token`, for `time`, or for the window's usual time
+    /// (`None`).
     Toast {
         token: u64,
         text: String,
         action: String,
+        time: Option<Duration>,
     },
     /// Show `text` where the toasts show, without a button, until [`Effect::NotBusy`] with
     /// `token` comes or a toast takes its place: a worker is at something the user waits for.
@@ -333,7 +336,7 @@ pub struct AppState {
     /// For each job under way, how far the user had changed the selection of each tab when it
     /// was submitted (the tab's id and [`Tab::selection_epoch`]): the item the job makes is
     /// selected when it ends only in a tab whose selection the user has not changed since.
-    selections_at_submit: HashMap<rf_jobs::JobId, Vec<(u64, u64)>>,
+    selections_at_submit: HashMap<JobId, Vec<(u64, u64)>>,
     /// The copies an undo of a copy could not trash, and where they came from.
     copies: copies::Copies,
     /// The items the last press on a row readied a drag of, under the id its payload carries.
@@ -350,6 +353,12 @@ pub struct AppState {
     system_menu_first: bool,
     /// The drop that waits for the menu of 놓을 때 묻기 to choose.
     asked_drop: Option<drag::AskedDrop>,
+    /// The moves drops submitted that the engine has not started yet, with how many items each
+    /// carries ([`AppState::track`] notes each under its job).
+    drag_submits: Vec<(JobSpec, usize)>,
+    /// The moves drops made, by job, with how many items each carries: the end of one offers to
+    /// undo it (DND-07).
+    dragged_moves: HashMap<JobId, usize>,
     /// The list of a folder's subfolders that the `›` after a piece of a path row opened.
     subfolders: Option<Subfolders>,
     /// The completion list of the path field being edited.
@@ -473,6 +482,8 @@ impl AppState {
             move_undo_toast: true,
             system_menu_first: false,
             asked_drop: None,
+            drag_submits: Vec::new(),
+            dragged_moves: HashMap::new(),
             subfolders: None,
             completion: None,
             environment: Environment::default(),
