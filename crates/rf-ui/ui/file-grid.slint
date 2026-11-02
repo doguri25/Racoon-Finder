@@ -224,7 +224,7 @@ export component FileGrid inherits Rectangle {
     }
 
     // The folder item a drag of another app would go into (`FileList`).
-    private property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
+    out property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
 
     // The item at (`x`, `y`) of the list, or -1 where there is none.
     pure function index-at(x: length, y: length) -> int {

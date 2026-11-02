@@ -847,6 +847,18 @@ pub fn drop_place(window: &MainWindow, at: WindowPoint) -> DropAt {
     found
 }
 
+/// The pointer that [`drop_place`] moved over the tree leaves the window again (a
+/// `PointerExited`, as when the mouse leaves it), so that no row of the tree stays shown as
+/// under the mouse after a drag of another app has passed over it. Not while a drag of Slint's
+/// is under way, to which no move of `drop_place` went.
+pub fn leave_tree(window: &MainWindow) {
+    if !window.global::<DragPointer<'_>>().get_over() {
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerExited);
+    }
+}
+
 /// The place of the state that `found` names ([`spot_of`]); `None` for none.
 pub fn spot_found(found: &DropAt) -> Option<DropSpot> {
     found

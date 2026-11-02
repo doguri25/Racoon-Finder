@@ -383,10 +383,10 @@ export component MainWindow inherits Window {
     // reckoning of its own drop area. Not `found` where nothing takes drops (the toolbar, the
     // path row, the column heads, between the panes), on the pane that one-pane layout hides or
     // the tree put away, and while a dialog, quick look or a list of the window shows over it
-    // (the menu of 놓을 때 묻기, a folder's subfolders, the path's completions). The tree's rows
-    // tell which of them the pointer is over themselves (`Sidebar.pointed-row`).
+    // (`drops-blocked`). The tree's rows tell which of them the pointer is over themselves
+    // (`Sidebar.pointed-row`).
     public pure function spot-at(x: length, y: length) -> DropAt {
-        if (root.dialog != DialogKind.none || root.quick-look || root.drop-asking || root.subfolders.open || root.completing >= 0) {
+        if (root.drops-blocked()) {
             return { found: false, place: DropPlace.list, side: 0, index: -1 };
         }
         if (root.show-tree) {
@@ -409,6 +409,19 @@ export component MainWindow inherits Window {
         }
         return { found: false, place: DropPlace.list, side: 0, index: -1 };
     }
+
+    // Whether a drag of another app is refused wherever it is: while a dialog, quick look or a
+    // list the window knows of shows over the panes (the menu of 놓을 때 묻기, a folder's
+    // subfolders, the path's completions). `spot-at` finds no place then, and the files winit
+    // tells were dropped (Linux) are not taken. The menus Slint opens itself (보기, 선택, the
+    // right-click menus) tell nothing of being open, so they are not among them.
+    public pure function drops-blocked() -> bool {
+        return root.dialog != DialogKind.none || root.quick-look || root.drop-asking || root.subfolders.open || root.completing >= 0;
+    }
+
+    // What the list of the place a drag of another app takes frames, as the frame shows it: a
+    // folder row (its index), the list itself for the pane's folder (-1), or nothing (-2).
+    out property <int> outside-target: root.outside-drop.side == 1 ? right.outside-target : left.outside-target;
 
     // The tree's rows forget which one the pointer moved over last (`spot-at`).
     public function forget-tree-pointer() {

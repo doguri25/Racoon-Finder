@@ -594,6 +594,8 @@ export component Pane inherits Rectangle {
     in property <int> outside-tab: -1;
     // A drag of another app is over the pane's list, which scrolls under it near its ends.
     in property <bool> outside-over;
+    // What the list frames for the drag of another app it takes (`FileList.outside-target`).
+    out property <int> outside-target: root.view.mode == 0 ? files.outside-target : grid.outside-target;
     // The path row shows a text field instead of the crumbs.
     out property <bool> editing;
     // For the keys: how many lines (rows, or columns of 목록) a page key moves, and how many

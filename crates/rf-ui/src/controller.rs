@@ -1077,6 +1077,9 @@ pub struct Controller {
     drop_target: DropTarget<DropRegistration>,
     /// What the window said beside the pointer of the drag of another app at its last hover.
     outside_hint: RefCell<String>,
+    /// Whether the window moved its pointer over the tree for the drag of another app
+    /// ([`Controller::leave_tree`]).
+    moved_over_tree: Cell<bool>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
@@ -1183,6 +1186,7 @@ impl Controller {
                 rf_platform::dnd::register_drop_target(owner, Rc::new(WindowDrops))
             }),
             outside_hint: RefCell::new(String::new()),
+            moved_over_tree: Cell::new(false),
             checks: RefCell::new(CopyChecks::default()),
             sorter: sorter::sorter(|outcome| {
                 post(move |c| {
@@ -1584,6 +1588,11 @@ impl Controller {
         }
         let window = self.window.upgrade()?;
         let place = ui_bridge::drop_place(&window, at);
+        if place.found && place.place == DropPlace::Tree {
+            self.moved_over_tree.set(true);
+        } else {
+            self.leave_tree(&window);
+        }
         let spot = ui_bridge::spot_found(&place);
         let hover = match self.state.try_borrow_mut().ok()?.as_mut() {
             Some(state) => state.outside_hover(spot, items, mods, allowed),
@@ -1630,7 +1639,12 @@ impl Controller {
             return None;
         }
         let window = self.window.upgrade()?;
-        let spot = ui_bridge::drop_spot(&window, at);
+        let place = ui_bridge::drop_place(&window, at);
+        if place.found && place.place == DropPlace::Tree {
+            self.moved_over_tree.set(true);
+        }
+        self.leave_tree(&window);
+        let spot = ui_bridge::spot_found(&place);
         self.drag_gone();
         self.outside_hint.borrow_mut().clear();
         let pointer = window.global::<DragPointer<'_>>();
@@ -1642,12 +1656,24 @@ impl Controller {
     /// The drag of another app left the window without a drop: nothing shows of it any more,
     /// and nothing it rested on opens.
     pub fn outside_leave(&self) {
+        if let Some(window) = self.window.upgrade() {
+            self.leave_tree(&window);
+        }
         self.drag_gone();
         self.outside_hint.borrow_mut().clear();
         if let Ok(mut state) = self.state.try_borrow_mut()
             && let Some(state) = state.as_mut()
         {
             state.outside_leave();
+        }
+    }
+
+    /// The pointer that the window moved over the tree to find the row under a drag of another
+    /// app ([`ui_bridge::drop_place`]) leaves it, once the drag has moved on, left or dropped: no
+    /// row of the tree stays shown as under the mouse, which the system's drag does not move.
+    fn leave_tree(&self, window: &MainWindow) {
+        if self.moved_over_tree.replace(false) {
+            ui_bridge::leave_tree(window);
         }
     }
 
@@ -1692,8 +1718,17 @@ impl Controller {
     /// of a drop's action chooses without a key: winit tells neither where the pointer was nor
     /// the keys held, nor whether the app they came from allows a move, so only a copy is
     /// allowed. The menu of 놓을 때 묻기 (the setting 매번 묻기) shows where the pointer was last.
+    /// Nothing while a dialog, quick look or a list of the window shows over the panes
+    /// (`drops-blocked`), as a drag of another app finds no place then.
     fn files_dropped(&self) {
         let paths = self.dropped_files.take();
+        if self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.invoke_drops_blocked())
+        {
+            return;
+        }
         let Some(active) = self.state.borrow().as_ref().map(AppState::active) else {
             return;
         };

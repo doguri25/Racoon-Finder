@@ -6691,7 +6691,7 @@ fn spot_at_finds_the_items_of_the_icon_views_as_their_drag_does() {
 }
 
 #[test]
-fn the_place_a_drag_of_another_app_takes_shows_as_a_drag_of_rows_does() {
+fn the_place_a_drag_of_another_app_takes_is_kept_until_the_drag_is_gone() {
     let (window, _calls, _tree) = drop_window();
     // Rust names the place, or none; the window keeps it until the drag is gone.
     let spot = DropSpot::Pane {
@@ -6711,6 +6711,70 @@ fn the_place_a_drag_of_another_app_takes_shows_as_a_drag_of_rows_does() {
     window.invoke_drag_gone();
     assert!(!window.get_outside_drop().found);
     assert!(!ui_bridge::drop_at(None).found);
+}
+
+#[test]
+fn a_list_frames_the_place_a_drag_of_another_app_takes_as_a_drag_of_rows_does() {
+    let (window, _calls, _tree) = drop_window();
+    // What the list of the place frames (`outside-target`): a folder row, the list itself (for a
+    // file row and below the rows: the pane's folder), or nothing.
+    let target = |spot: Option<DropSpot>| {
+        window.set_outside_drop(ui_bridge::drop_at(spot));
+        window.get_outside_target()
+    };
+    let pane = |side: usize, row: Option<usize>| Some(DropSpot::Pane { side, row });
+    for mode in [ViewMode::Details, ViewMode::List, ViewMode::LargeIcons] {
+        let mut view = window.get_right_pane();
+        view.mode = mode.number();
+        window.set_right_pane(view);
+        // The right pane: the folder `백업`, then `y.txt`.
+        assert_eq!(target(pane(1, Some(0))), 0, "{mode:?}");
+        assert_eq!(target(pane(1, Some(1))), -1, "{mode:?}");
+        assert_eq!(target(pane(1, None)), -1, "{mode:?}");
+        // A row it does not have counts as the list.
+        assert_eq!(target(pane(1, Some(7))), -1, "{mode:?}");
+        // The left pane: the folder `docs`, then `x.txt`.
+        assert_eq!(target(pane(0, Some(0))), 0, "{mode:?}");
+        assert_eq!(target(pane(0, Some(1))), -1, "{mode:?}");
+        // A tab, a row of the tree, or no place: no list frames anything.
+        assert_eq!(
+            target(Some(DropSpot::Tab { side: 1, index: 0 })),
+            -2,
+            "{mode:?}"
+        );
+        assert_eq!(target(Some(DropSpot::Tree(0))), -2, "{mode:?}");
+        assert_eq!(target(None), -2, "{mode:?}");
+        target(pane(1, Some(0)));
+        window.invoke_drag_gone();
+        assert_eq!(window.get_outside_target(), -2, "{mode:?}");
+    }
+}
+
+#[test]
+fn drops_are_refused_while_a_window_or_a_list_shows_over_the_panes() {
+    let (window, _calls, _tree) = drop_window();
+    let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
+    let taken = Some(DropSpot::Pane {
+        side: 1,
+        row: Some(0),
+    });
+    let refused = |window: &MainWindow| (window.invoke_drops_blocked(), found_at(window, backup));
+    assert_eq!(refused(&window), (false, taken));
+    // `drops-blocked` is what `spot-at` refuses by, and what the drop of winit's files (Linux)
+    // asks.
+    window.set_dialog(DialogKind::Confirm);
+    assert_eq!(refused(&window), (true, None));
+    window.set_dialog(DialogKind::None);
+    window.set_quick_look(true);
+    assert_eq!(refused(&window), (true, None));
+    window.set_quick_look(false);
+    window.set_subfolders(folder_menu(&["docs", "src"], -1, ""));
+    assert_eq!(refused(&window), (true, None));
+    window.set_subfolders(FolderMenuView::default());
+    window.invoke_show_drop_menu();
+    assert_eq!(refused(&window), (true, None));
+    press(&window, Key::Escape);
+    assert_eq!(refused(&window), (false, taken));
 }
 
 /// A step of a drag of another app over `at`, as the controller shows it

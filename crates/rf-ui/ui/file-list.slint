@@ -199,7 +199,7 @@ export component FileList inherits Rectangle {
 
     // The folder row a drag of another app would go into, as `drop.target-row` is a drag of
     // rows': -1 for the pane's folder, -2 for none.
-    private property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
+    out property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
 
     // The rows scroll under a drag held near their top or bottom (DND-08), as the tab strip and
     // the column heads do (`EdgeScroll`), while its pointer stays where this list last saw it

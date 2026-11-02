@@ -526,6 +526,12 @@ fn a_rest_of_a_drag_from_another_app_opens_only_the_folder_it_showed() {
         entries: vec![dir("deep")],
     });
     assert_eq!(
+        state.outside_over(Some(BACKUP), &dragged, link_keys(), both()),
+        None
+    );
+    assert_eq!(state.drag_rests(BACKUP), []);
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), in_b("old"));
+    assert_eq!(
         state.outside_over(Some(BACKUP), &dragged, plain(), both()),
         Some(DropEffect::Move)
     );

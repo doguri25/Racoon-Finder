@@ -91,12 +91,7 @@ impl AppState {
                 }
                 return Hover::Nothing;
             };
-            return match self.offer_with(id, spot, mods, allowed) {
-                Some(offer) => Hover::Takes(offer),
-                None => self
-                    .drop_refused(id, spot)
-                    .map_or(Hover::Nothing, Hover::Refused),
-            };
+            return self.hover_with(id, spot, mods, allowed);
         }
         let sources = self
             .outside

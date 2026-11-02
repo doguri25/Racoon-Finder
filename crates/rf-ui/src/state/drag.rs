@@ -281,7 +281,20 @@ impl AppState {
     /// What the place `spot` makes of the drag readied last, whose payload carries `id`, for the
     /// window to show ([`AppState::drop_offer`], else [`AppState::drop_refused`]).
     pub fn drop_hover(&mut self, id: u64, spot: DropSpot) -> Hover {
-        match self.drop_offer(id, spot) {
+        self.hover_with(id, spot, self.drag_mods, Effects::COPY | Effects::MOVE)
+    }
+
+    /// [`AppState::drop_hover`] with the keys `mods` and a drag that `allowed` these: a drag of
+    /// rows that went out of the window and came back through the system's drag tells its own
+    /// (module `outside`).
+    pub(super) fn hover_with(
+        &mut self,
+        id: u64,
+        spot: DropSpot,
+        mods: DragMods,
+        allowed: Effects,
+    ) -> Hover {
+        match self.offer_with(id, spot, mods, allowed) {
             Some(offer) => Hover::Takes(offer),
             None => self
                 .drop_refused(id, spot)
