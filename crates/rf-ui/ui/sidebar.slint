@@ -9,7 +9,7 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
-import { DragPointer } from "list-parts.slint";
+import { DragPointer, DragSeen } from "list-parts.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
 
 // The head above a row: the first favorite starts "즐겨찾기", the first drive "이 PC".
@@ -265,26 +265,10 @@ export component Sidebar inherits Rectangle {
 
     // The rows scroll under a drag held near the top or the bottom of the list (DND-08), as the
     // lists of the panes do (`FileList`), while the drag's pointer stays where the tree last saw
-    // it; it stops at the first or the last row.
-    private property <length> seen-x;
-    private property <length> seen-y;
-    private property <bool> seen;
-    private property <bool> dragging: DragPointer.over;
-    changed dragging => {
-        if (!root.dragging) {
-            root.seen = false;
-        }
-    }
-    private property <bool> drag-here: root.seen && DragPointer.over && DragPointer.x == root.seen-x && DragPointer.y == root.seen-y;
-    private property <int> scroll-way: !root.drag-here ? 0
+    // it (`DragSeen`); it stops at the first or the last row.
+    drag-seen := DragSeen { }
+    private property <int> scroll-way: !drag-seen.here ? 0
         : EdgeScroll.way(DragPointer.y - list.absolute-position.y, list.height, list.content-y < 0, list.content-y > list.visible-height - list.content-height);
-
-    // The drag's pointer is over the tree, where `DragPointer` has just been told it is.
-    function saw-drag() {
-        root.seen-x = DragPointer.x;
-        root.seen-y = DragPointer.y;
-        root.seen = true;
-    }
 
     // The steps of `scroll-way`; a scroll of its own ends the wait for a row to show.
     Timer {
@@ -313,7 +297,7 @@ export component Sidebar inherits Rectangle {
         enabled: root.accepts-drops;
         can-drop(event) => {
             DragPointer.at(self.absolute-position, event.position);
-            root.saw-drag();
+            drag-seen.saw();
             return DragAction.none;
         }
     }
@@ -343,7 +327,7 @@ export component Sidebar inherits Rectangle {
                 root.row-toggled(i);
             }
             drop-check(data) => {
-                root.saw-drag();
+                drag-seen.saw();
                 return root.drop-check(data, i);
             }
             dropped(data) => {

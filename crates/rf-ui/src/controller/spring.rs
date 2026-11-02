@@ -5,7 +5,9 @@
 //! and the time runs on while the drag stays. A place that takes nothing stops it, and so does
 //! the end of the drag ([`Spring::stop`]: its drop, `drag-finished`, the left button let go,
 //! the pointer gone from the window, and later the leave and the drop of a drag of another app).
-//! What a rest opens is the state's ([`AppState::drag_rests`](crate::state::AppState::drag_rests)).
+//! What a rest opens is the state's ([`AppState::drag_rests`](crate::state::AppState::drag_rests)),
+//! which opens only the folder the last hover showed: rows that changed under a still pointer
+//! during the second, which no hover asked about, open nothing.
 
 use std::cell::RefCell;
 use std::rc::Rc;

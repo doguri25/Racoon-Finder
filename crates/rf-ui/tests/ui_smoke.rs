@@ -3422,6 +3422,49 @@ fn the_list_the_items_are_in_scrolls_under_their_drag_too() {
 }
 
 #[test]
+fn the_list_the_items_are_in_scrolls_under_their_drag_on_a_scaled_screen() {
+    let (window, _calls, models, _tree) = drag_window();
+    // 125%, and the left pane at 40% of the room: the right pane starts at a fraction of a
+    // pixel, where a place's position plus an event's and the window's own position of one
+    // pointer may differ in the last bit.
+    window
+        .window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.25 });
+    window.set_split_share(0.4);
+    // The items are in the right pane's folder this time: its list takes nothing.
+    window.on_drop_check(|_, _, _, _| DragAction::None);
+    window.set_right_pane(models[1].view(&long_pane(60), false));
+    let first = centre_of(&window, "f001", AccessibleRole::ListItem);
+    let list = element_of(&window, "FileList::list", true);
+    let (at, size) = (list.absolute_position(), list.size());
+    assert!(at.x.fract() != 0.0, "the right pane starts at {at:?}");
+    let middle = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+    drag_to(&window, first, middle);
+    assert!(!scroll_cue_shows(&window));
+    // Held anywhere along its bottom edge, at fractions of a pixel, the list scrolls.
+    let mut missed = Vec::new();
+    for step in 0..200_u16 {
+        let step = f32::from(step);
+        let held = LogicalPosition::new(
+            at.x + 12.0 + step * 1.37,
+            at.y + size.height - 3.0 - (step % 9.0) * 2.11,
+        );
+        pointer(&window, "move", held);
+        slint::platform::update_timers_and_animations();
+        if !scroll_cue_shows(&window) {
+            missed.push(held);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "the list did not scroll at {} of 200 places, as {:?}",
+        missed.len(),
+        &missed[..missed.len().min(3)]
+    );
+    pointer(&window, "release", middle);
+}
+
+#[test]
 fn icons_scroll_up_and_down_and_the_list_view_sideways_under_a_drag() {
     let (window, _calls, models, _tree) = drag_window();
     let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);

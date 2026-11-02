@@ -41,7 +41,7 @@ use rf_platform::dnd::{DragMods, DropEffect, Effects};
 
 use super::drop_rule::{self, DropChoice};
 use super::jobs::submit;
-use super::{AppState, Effect, MenuShown};
+use super::{AppState, Effect, MenuShown, load};
 use crate::pane::next_generation;
 use crate::pick::{PickRequest, Validity, validate};
 use crate::places::PlaceKind;
@@ -366,34 +366,34 @@ impl AppState {
     /// The drag readied last has rested on `spot` for [`SPRING_DELAY`] (머무르면 열기, DND-08),
     /// as the controller's timer tells: the row of a folder opens that folder in its pane (in a
     /// new tab beside a pinned one), a tab shows, a closed folder of the tree opens. The drag
-    /// goes on, and a drop goes by what shows then; the pane with the keys keeps them. Nothing
-    /// where a drop would not take the items ([`AppState::drop_offer`] is `None`: one of them or
-    /// a folder inside one, the folder they are in, while a window shows over the main window
-    /// or the app ends), on a row that is no folder or below the rows, on a tab that shows
-    /// already, or on a folder of the tree that is open or has no folders.
+    /// goes on, and a drop goes by what shows then; the pane with the keys keeps them.
+    ///
+    /// Only the folder the last hover showed opens, the one the timer counted for: the rows under
+    /// a still pointer may have changed since (a watch, a job that ended, a listing that came, a
+    /// folder of the tree above that opened), and another folder at `spot` now opens nothing, as
+    /// a drop there would not be made ([`AppState::drop_items`]). Nothing either where a drop
+    /// would not take the items ([`AppState::drop_offer`] is `None`: one of them or a folder
+    /// inside one, the folder they are in, while a window shows over the main window or the app
+    /// ends), on a row that is no folder or below the rows, on a tab that shows already, or on a
+    /// folder of the tree that is open or has no folders.
     pub fn drag_rests(&mut self, spot: DropSpot) -> Vec<Effect> {
         let id = self.drag_id();
+        let shown = self.drag.as_ref().and_then(|drag| drag.shown.clone());
+        let Some(folder) = self
+            .spot_folder(spot)
+            .filter(|folder| Some(folder) == shown.as_ref())
+        else {
+            return Vec::new();
+        };
         if self.drop_offer(id, spot).is_none() {
             return Vec::new();
         }
         match spot {
-            DropSpot::Pane {
-                side,
-                row: Some(row),
-            } => {
-                let tab = self.tab(side);
-                let folder = tab
-                    .visible()
-                    .get(row)
-                    .filter(|entry| entry.kind == EntryKind::Dir)
-                    .and_then(|entry| tab.location().join(&entry.name).ok());
-                folder
-                    .and_then(|folder| self.navigate_shown(side, folder))
-                    .map(Effect::Load)
-                    .into_iter()
-                    .collect()
+            // The folder of a row that is no folder's is the pane's own, which shows already.
+            DropSpot::Pane { side, row: Some(_) } if folder != *self.tab(side).location() => {
+                load(self.navigate_shown(side, folder))
             }
-            DropSpot::Pane { row: None, .. } => Vec::new(),
+            DropSpot::Pane { .. } => Vec::new(),
             DropSpot::Tab { side, index } => {
                 let pane = &mut self.panes[side];
                 if pane.active() != index {

@@ -1,7 +1,8 @@
 // Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
 // `file-grid.slint`): the menu of an item and of the part without items, what a drag over the
-// list shows, where in the window the pointer of a drag is and the menu of a drop that asks,
-// and how a list keeps the place it scrolled to after a long jump.
+// list shows, where in the window the pointer of a drag is (and whether it is still where a list
+// saw it) and the menu of a drop that asks, and how a list keeps the place it scrolled to after
+// a long jump.
 
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
@@ -32,6 +33,38 @@ export global DragPointer {
     // The drag ended, or left the window.
     public function gone() {
         DragPointer.over = false;
+    }
+}
+
+// Whether the pointer of a drag is still where a list last saw it (`saw`, from the list's own
+// drop areas), and over the window (DND-08): a list scrolls under a drag held near its ends only
+// then, whether its rows take the drop or not, and stops once the pointer has moved on to
+// another place or the drag has ended. The places that see one pointer reach the window's
+// coordinates by different sums (an area's `absolute-position` plus its event's `position`, or
+// the window's own, under everything), which differ in the last bit at fractions of a pixel (a
+// scaled screen, a pane that starts mid-pixel): positions within half a pixel are one.
+export component DragSeen {
+    width: 0px;
+    height: 0px;
+
+    out property <bool> here: root.seen && DragPointer.over && abs(DragPointer.x - root.seen-x) < 0.5px && abs(DragPointer.y - root.seen-y) < 0.5px;
+
+    private property <length> seen-x;
+    private property <length> seen-y;
+    private property <bool> seen;
+    // A drag that ended leaves nothing seen for the next one.
+    private property <bool> dragging: DragPointer.over;
+    changed dragging => {
+        if (!root.dragging) {
+            root.seen = false;
+        }
+    }
+
+    // The list sees the pointer where `DragPointer` has just been told it is.
+    public function saw() {
+        root.seen-x = DragPointer.x;
+        root.seen-y = DragPointer.y;
+        root.seen = true;
     }
 }
 

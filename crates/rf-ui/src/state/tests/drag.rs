@@ -620,32 +620,66 @@ fn a_drag_resting_on_a_tab_shows_it_and_on_a_closed_tree_folder_opens_it() {
     let _ = state.select_tab(RIGHT, 0);
     state.press_row(LEFT, 2, false, false);
 
+    // The timer counts only after a hover there, which shows where a drop goes.
+    let rest = |state: &mut AppState, spot: DropSpot| {
+        let _ = offer(state, spot);
+        state.drag_rests(spot)
+    };
     let second = DropSpot::Tab {
         side: RIGHT,
         index: 1,
     };
-    assert_eq!(state.drag_rests(second), []);
+    assert_eq!(rest(&mut state, second), []);
     assert_eq!(state.panes()[RIGHT].active(), 1);
     assert_eq!(state.active(), LEFT);
     // The tab that shows already stays.
-    assert_eq!(state.drag_rests(second), []);
+    assert_eq!(rest(&mut state, second), []);
     assert_eq!(state.panes()[RIGHT].active(), 1);
 
     // The tree's closed `b` opens, and its folders are listed.
     let expanded = |state: &AppState, row: usize| state.tree().rows()[row].expanded;
     assert_eq!(state.tree().rows()[2].label, "b");
     assert!(!expanded(&state, 2));
-    let request = nav::the_tree_load(&state.drag_rests(DropSpot::Tree(2)));
+    let request = nav::the_tree_load(&rest(&mut state, DropSpot::Tree(2)));
     assert_eq!(request.path, folder("b"));
     assert!(expanded(&state, 2));
     // An open folder stays open.
     assert!(expanded(&state, 0));
-    assert_eq!(state.drag_rests(DropSpot::Tree(0)), []);
+    assert_eq!(rest(&mut state, DropSpot::Tree(0)), []);
     assert!(expanded(&state, 0));
     // `a`, where the items are, takes nothing, and does not open.
     assert_eq!(state.tree().rows()[1].label, "a");
-    assert_eq!(state.drag_rests(DropSpot::Tree(1)), []);
+    assert_eq!(rest(&mut state, DropSpot::Tree(1)), []);
     assert!(!expanded(&state, 1));
+}
+
+#[test]
+fn a_rest_opens_only_the_folder_its_time_was_counted_for() {
+    let mut state = two_panes();
+    state.press_row(LEFT, 2, false, false);
+    let first_row = DropSpot::Pane {
+        side: RIGHT,
+        row: Some(0),
+    };
+    // The timer starts for `백업`, which the hover shows.
+    assert_eq!(offer(&mut state, first_row), Some(in_b("백업")));
+    // A folder comes before it under the still pointer (a watch, a job that ended): its row is
+    // another folder's when the time is up, which no hover showed, and nothing opens.
+    let generation = state.panes()[RIGHT].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Upsert(dir("old"))],
+    });
+    assert_eq!(rows(&state, RIGHT)[0], "old");
+    assert_eq!(state.drag_rests(first_row), []);
+    assert_eq!(*state.panes()[RIGHT].active_tab().location(), folder("b"));
+    // Without a hover nothing opens either; once one shows `old` there, its own time opens it.
+    let mut fresh = two_panes();
+    fresh.press_row(LEFT, 2, false, false);
+    assert_eq!(fresh.drag_rests(first_row), []);
+    assert_eq!(offer(&mut state, first_row), Some(in_b("old")));
+    let request = the_load(&state.drag_rests(first_row));
+    assert_eq!(request.path, in_b("old"));
 }
 
 #[test]
@@ -655,17 +689,22 @@ fn a_drag_resting_where_its_items_cannot_go_or_on_no_folder_opens_nothing() {
         side: RIGHT,
         row: Some(row),
     };
+    // Each rest comes after a hover there, as the timer counts only then.
+    let rest = |state: &mut AppState, spot: DropSpot| {
+        let _ = offer(state, spot);
+        state.drag_rests(spot)
+    };
     // No drag yet.
-    assert_eq!(state.drag_rests(on_right(0)), []);
+    assert_eq!(rest(&mut state, on_right(0)), []);
     state.press_row(LEFT, 0, false, false);
     // The folder dragged, a row that is no folder, and the list below the rows.
     let docs = DropSpot::Pane {
         side: LEFT,
         row: Some(0),
     };
-    assert_eq!(state.drag_rests(docs), []);
-    assert_eq!(state.drag_rests(on_right(1)), []);
-    assert_eq!(state.drag_rests(RIGHT_LIST), []);
+    assert_eq!(rest(&mut state, docs), []);
+    assert_eq!(rest(&mut state, on_right(1)), []);
+    assert_eq!(rest(&mut state, RIGHT_LIST), []);
     assert_eq!(*state.panes()[LEFT].active_tab().location(), folder("a"));
     assert_eq!(*state.panes()[RIGHT].active_tab().location(), folder("b"));
     // A tab of the folder the items are in.
@@ -681,7 +720,7 @@ fn a_drag_resting_where_its_items_cannot_go_or_on_no_folder_opens_nothing() {
         side: RIGHT,
         index: 1,
     };
-    assert_eq!(state.drag_rests(tab_of_a), []);
+    assert_eq!(rest(&mut state, tab_of_a), []);
     assert_eq!(state.panes()[RIGHT].active(), 0);
     // A folder inside the one dragged: the right pane shows `a/docs`, which holds `inner`.
     state.activate(RIGHT);
@@ -691,7 +730,7 @@ fn a_drag_resting_where_its_items_cannot_go_or_on_no_folder_opens_nothing() {
         entries: vec![dir("inner")],
     });
     state.press_row(LEFT, 0, false, false);
-    assert_eq!(state.drag_rests(on_right(0)), []);
+    assert_eq!(rest(&mut state, on_right(0)), []);
     assert_eq!(*state.panes()[RIGHT].active_tab().location(), in_a("docs"));
 
     // While a window shows over the main window, nothing opens.
@@ -702,6 +741,7 @@ fn a_drag_resting_where_its_items_cannot_go_or_on_no_folder_opens_nothing() {
         entries: vec![dir("백업")],
     });
     state.press_row(LEFT, 2, false, false);
+    assert_eq!(offer(&mut state, on_right(0)), Some(in_b("백업")));
     state.key(Command::NewFolder, NONE, Paging::rows(1), Instant::now());
     assert!(matches!(state.modal(), Some(Modal::Name(_))));
     assert_eq!(state.drag_rests(on_right(0)), []);
