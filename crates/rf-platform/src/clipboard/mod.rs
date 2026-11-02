@@ -52,7 +52,7 @@ mod other;
 mod windows;
 
 #[cfg(target_os = "macos")]
-pub(crate) use self::macos::{file_paths, file_url_type, item as file_item};
+pub(crate) use self::macos::{file_paths, file_url_type, item as file_item, url as file_url};
 #[cfg(windows)]
 pub(crate) use self::windows::{Global, global_bytes, hdrop_units};
 

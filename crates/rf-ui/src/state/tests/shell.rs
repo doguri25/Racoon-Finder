@@ -2,10 +2,15 @@
 //! OPS-11): what the menu offers for what is chosen, what each command asks of the system, the
 //! menu of the apps that can open a file (macOS), and the item menu from the keyboard.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use rf_platform::shell::App;
+use rf_jobs::JobSpec;
+use rf_platform::clipboard::DropEffect;
+use rf_platform::dnd::DragMods;
+use rf_platform::shell::{App, AppVerb, SystemMenuChoice};
 
+use super::clipboard::{files, the_submit, the_work};
 use super::*;
 use crate::words::ShellAction;
 
@@ -290,8 +295,14 @@ fn the_keys_open_the_item_menu_by_the_cursor_or_the_folder_s_menu() {
     let mut state = listed();
     // Nothing chosen: the folder's menu.
     assert_eq!(
-        press(&mut state, &special(Key::F10), SHIFT).expect("the menu key"),
+        press(&mut state, &special(Key::Menu), NONE).expect("the menu key"),
         [Effect::ShowMenu(MenuShown::Folder(LEFT))]
+    );
+    // Linux's Shift+F10 too (Windows' shows its own menu: below).
+    let shift_f10 = keys::command_for(&special(Key::F10), SHIFT, Os::Other).expect("a key");
+    assert_eq!(
+        state.key(shift_f10, SHIFT, Paging::rows(10), Instant::now()),
+        Some(vec![Effect::ShowMenu(MenuShown::Folder(LEFT))])
     );
     assert_eq!(state.item_menu(), MenuFacts::default());
     // The selection, by the row of the cursor among it.
@@ -428,4 +439,306 @@ fn a_batch_file_runs_as_administrator_only_at_a_path_cmd_takes_as_it_is() {
         run(&mut state, Command::RunAsAdmin),
         [Effect::Notice(words::batch_path_refused().to_owned())]
     );
+}
+
+/// The left pane of [`listed`], where the system has a menu of its own (Windows), as the
+/// controller tells the state there.
+fn with_windows_menu() -> AppState {
+    let mut state = listed();
+    state.offer_system_menu(true);
+    state
+}
+
+fn shift_held() -> DragMods {
+    DragMods {
+        shift: true,
+        ..DragMods::default()
+    }
+}
+
+/// The system's menu of the items `names` of the left pane's folder (none: the folder's own).
+fn system_menu(names: &[&str], place: MenuPlace, extended: bool) -> Effect {
+    Effect::SystemMenu(SystemMenuAsk {
+        folder: folder("a"),
+        names: names.iter().map(OsString::from).collect(),
+        place,
+        extended,
+    })
+}
+
+#[test]
+fn shift_f10_shows_windows_own_menu_of_the_items_or_of_the_folder() {
+    let mut state = with_windows_menu();
+    // Nothing chosen: the folder's own menu, by the top of the list, with Shift's commands.
+    assert_eq!(
+        press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window"),
+        [system_menu(&[], MenuPlace::Folder(LEFT), true)]
+    );
+    // The selection, by the row the item menu opens by, scrolled to.
+    choose(&mut state, &[1, 2]);
+    assert_eq!(
+        press(&mut state, &special(Key::F10), SHIFT).expect("a key of the window"),
+        [
+            Effect::ScrollTo { side: LEFT, row: 2 },
+            system_menu(
+                &["a.txt", "b.txt"],
+                MenuPlace::Row { side: LEFT, row: 2 },
+                true
+            ),
+        ]
+    );
+    // The menu key shows the app's menu, which ends with 더 많은 옵션 표시.
+    assert_eq!(
+        press(&mut state, &special(Key::Menu), NONE).expect("a key of the window"),
+        [
+            Effect::ScrollTo { side: LEFT, row: 2 },
+            Effect::ShowMenu(MenuShown::Item { side: LEFT, row: 2 }),
+        ]
+    );
+    // In the right pane, of its own folder.
+    state.activate(RIGHT);
+    assert_eq!(
+        run(&mut state, Command::SystemMenu),
+        [Effect::SystemMenu(SystemMenuAsk {
+            folder: folder("b"),
+            names: Vec::new(),
+            place: MenuPlace::Folder(RIGHT),
+            extended: false,
+        })]
+    );
+    // While a window shows over the main one, nothing.
+    state.activate(LEFT);
+    run(&mut state, Command::Properties);
+    assert_eq!(run(&mut state, Command::SystemMenu), []);
+    // Where the system has no menu of its own, the app's menu.
+    let mut linux = listed();
+    choose(&mut linux, &[1]);
+    assert_eq!(
+        run(&mut linux, Command::SystemMenu),
+        [
+            Effect::ScrollTo { side: LEFT, row: 1 },
+            Effect::ShowMenu(MenuShown::Item { side: LEFT, row: 1 }),
+        ]
+    );
+}
+
+#[test]
+fn a_right_click_with_shift_or_the_setting_shows_windows_own_menu() {
+    let mut state = with_windows_menu();
+    choose(&mut state, &[1]);
+    // The setting off and no Shift: the app's menus take the click and the menu key.
+    assert_eq!(state.right_click(LEFT, Some(2)), None);
+    assert_eq!(state.right_click(LEFT, None), None);
+    assert_eq!(
+        run(&mut state, Command::ContextMenu),
+        [
+            Effect::ScrollTo { side: LEFT, row: 1 },
+            Effect::ShowMenu(MenuShown::Item { side: LEFT, row: 1 }),
+        ]
+    );
+    // Shift: Windows' own of the row clicked, which a right click chooses, where it was
+    // clicked, with Shift's commands; the pane gets the keys.
+    state.modifiers_changed(shift_held());
+    assert_eq!(
+        state.right_click(LEFT, Some(2)),
+        Some(vec![
+            Effect::FocusPanes,
+            system_menu(&["b.txt"], MenuPlace::Shown, true),
+        ])
+    );
+    assert_eq!(selected(&state, LEFT), [2]);
+    // On the part of a list without rows: its folder's own, and the pane becomes active.
+    assert_eq!(
+        state.right_click(RIGHT, None),
+        Some(vec![
+            Effect::FocusPanes,
+            Effect::SystemMenu(SystemMenuAsk {
+                folder: folder("b"),
+                names: Vec::new(),
+                place: MenuPlace::Shown,
+                extended: true,
+            }),
+        ])
+    );
+    assert_eq!(state.active(), RIGHT);
+    // The setting on: the menu key and a right click show Windows' own without Shift, and
+    // without Shift's commands.
+    state.modifiers_changed(DragMods::default());
+    state.set_system_menu_first(true);
+    assert_eq!(
+        state.right_click(LEFT, Some(0)),
+        Some(vec![
+            Effect::FocusPanes,
+            system_menu(&["docs"], MenuPlace::Shown, false),
+        ])
+    );
+    assert_eq!(
+        run(&mut state, Command::ContextMenu),
+        [
+            Effect::ScrollTo { side: LEFT, row: 0 },
+            system_menu(&["docs"], MenuPlace::Row { side: LEFT, row: 0 }, false),
+        ]
+    );
+    // While a window or quick look shows over the main one, the click is left alone.
+    run(&mut state, Command::Properties);
+    assert_eq!(state.right_click(LEFT, Some(1)), None);
+    // Where the system has no menu of its own, neither Shift nor the setting changes a thing
+    // (a settings file from Windows).
+    let mut linux = listed();
+    linux.set_system_menu_first(true);
+    linux.modifiers_changed(shift_held());
+    assert_eq!(linux.right_click(LEFT, Some(1)), None);
+    choose(&mut linux, &[1]);
+    assert_eq!(
+        run(&mut linux, Command::ContextMenu),
+        [
+            Effect::ScrollTo { side: LEFT, row: 1 },
+            Effect::ShowMenu(MenuShown::Item { side: LEFT, row: 1 }),
+        ]
+    );
+}
+
+#[test]
+fn more_options_shows_windows_own_menu_of_what_the_app_s_menu_was_for() {
+    let mut state = with_windows_menu();
+    state.row_menu(LEFT, 1);
+    assert_eq!(
+        state.more_options(false),
+        [system_menu(&["a.txt"], MenuPlace::Shown, false)]
+    );
+    // The part of the list without items: the folder's own.
+    assert_eq!(
+        state.more_options(true),
+        [system_menu(&[], MenuPlace::Shown, false)]
+    );
+    // Nothing where the system has no menu of its own, or while a window shows.
+    let mut linux = listed();
+    linux.row_menu(LEFT, 1);
+    assert_eq!(linux.more_options(false), []);
+    run(&mut state, Command::Properties);
+    assert_eq!(state.more_options(false), []);
+}
+
+#[test]
+fn what_windows_own_menu_chose_the_app_does_with_its_own_commands() {
+    let mut state = with_windows_menu();
+    let ask = |state: &mut AppState, rows: &[usize]| {
+        choose(state, rows);
+        let effects = run(state, Command::SystemMenu);
+        assert!(
+            matches!(effects.last(), Some(Effect::SystemMenu(_))),
+            "{effects:?}"
+        );
+    };
+    let chosen = |state: &mut AppState, verb| state.system_menu_chosen(SystemMenuChoice::App(verb));
+    // 삭제: the trash, through the app's job (the folder's trash is looked for first).
+    ask(&mut state, &[1, 2]);
+    assert_eq!(
+        chosen(&mut state, AppVerb::Delete { permanent: false }),
+        [Effect::CheckTrash {
+            folder: folder("a"),
+            paths: vec![in_a("a.txt"), in_a("b.txt")],
+        }]
+    );
+    // Once: a second answer, or one no menu is waiting for, does nothing.
+    assert_eq!(chosen(&mut state, AppVerb::Delete { permanent: false }), []);
+    // With Shift, for good: the confirmation first.
+    ask(&mut state, &[1]);
+    assert_eq!(chosen(&mut state, AppVerb::Delete { permanent: true }), []);
+    assert!(
+        matches!(state.modal(), Some(Modal::Confirm(_))),
+        "{:?}",
+        state.modal()
+    );
+    state.dialog_cancelled();
+    // 이름 바꾸기: the app's name window.
+    ask(&mut state, &[2]);
+    assert_eq!(chosen(&mut state, AppVerb::Rename), []);
+    assert!(
+        matches!(state.modal(), Some(Modal::Name(_))),
+        "{:?}",
+        state.modal()
+    );
+    state.dialog_cancelled();
+    // 잘라내기 and 복사: the system clipboard, through the app's own.
+    for (verb, cut) in [(AppVerb::Cut, true), (AppVerb::Copy, false)] {
+        ask(&mut state, &[1, 2]);
+        match the_work(&chosen(&mut state, verb)) {
+            ClipboardWork::PutFiles {
+                paths, cut: put, ..
+            } => {
+                assert_eq!(paths, [in_a("a.txt"), in_a("b.txt")], "{verb:?}");
+                assert_eq!(put, cut, "{verb:?}");
+            }
+            other => panic!("{verb:?}: a put, not {other:?}"),
+        }
+    }
+    // 붙여넣기 in the menu of a folder: into it, as the app's menu of the folder pastes; in the
+    // folder's own menu, into the pane's folder.
+    let pasted_to = |state: &mut AppState, effects: &[Effect]| -> VPath {
+        let ClipboardWork::ReadFiles { token } = the_work(effects) else {
+            panic!("a read, not {effects:?}");
+        };
+        let elsewhere =
+            VPath::local(std::env::temp_dir().join("c").join("z.txt")).expect("a local path");
+        let effects = state.clipboard_read(
+            token,
+            Ok(Some(files(&[elsewhere], Some(DropEffect::Copy), 1))),
+        );
+        match the_submit(&effects).0 {
+            JobSpec::Transfer(spec) => spec.items[0].target.parent().expect("a folder"),
+            other => panic!("a transfer, not {other:?}"),
+        }
+    };
+    state.row_menu(LEFT, 0);
+    assert_eq!(
+        state.more_options(false),
+        [system_menu(&["docs"], MenuPlace::Shown, false)]
+    );
+    let effects = chosen(&mut state, AppVerb::Paste);
+    assert_eq!(pasted_to(&mut state, &effects), in_a("docs"));
+    assert_eq!(
+        state.more_options(true),
+        [system_menu(&[], MenuPlace::Shown, false)]
+    );
+    let effects = chosen(&mut state, AppVerb::Paste);
+    assert_eq!(pasted_to(&mut state, &effects), folder("a"));
+    // The folder's own menu has none of the items' commands: nothing is renamed or deleted.
+    for verb in [
+        AppVerb::Rename,
+        AppVerb::Delete { permanent: false },
+        AppVerb::Delete { permanent: true },
+        AppVerb::Cut,
+        AppVerb::Copy,
+    ] {
+        state.more_options(true);
+        assert_eq!(chosen(&mut state, verb), [], "{verb:?}");
+        assert_eq!(state.modal(), None, "{verb:?}");
+    }
+    // What the system did itself, and nothing chosen: nothing for the app.
+    for choice in [SystemMenuChoice::Done, SystemMenuChoice::Nothing] {
+        ask(&mut state, &[1]);
+        assert_eq!(state.system_menu_chosen(choice), [], "{choice:?}");
+        // The menu is answered: a late command of it does nothing.
+        assert_eq!(chosen(&mut state, AppVerb::Rename), []);
+        assert_eq!(state.modal(), None);
+    }
+}
+
+#[test]
+fn share_hands_the_items_a_command_acts_on_to_the_system_s_picker() {
+    let mut state = listed();
+    state.row_menu(LEFT, 1);
+    assert_eq!(state.share(), [Effect::Share(vec![in_a("a.txt")])]);
+    choose(&mut state, &[0, 2]);
+    assert_eq!(
+        state.share(),
+        [Effect::Share(vec![in_a("docs"), in_a("b.txt")])]
+    );
+    // Nothing chosen, or a window over the main one: nothing.
+    choose(&mut state, &[]);
+    assert_eq!(state.share(), []);
+    choose(&mut state, &[1]);
+    run(&mut state, Command::Properties);
+    assert_eq!(state.share(), []);
 }

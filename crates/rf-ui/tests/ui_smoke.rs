@@ -5808,6 +5808,133 @@ fn the_item_menu_offers_the_system_s_ways_to_open_an_item() {
 }
 
 #[test]
+fn the_menus_end_with_windows_own_on_windows_and_the_item_menu_shares_on_macos() {
+    use slint::platform::PointerEventButton;
+    let (window, _calls, _models, _tree) = drag_window();
+    let commands = Calls::default();
+    let record = commands.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let shows = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .is_some()
+    };
+    let top = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {title}"))
+            .absolute_position()
+            .y
+    };
+    let row_menu = || {
+        labelled(&window, "x.txt", AccessibleRole::ListItem)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    let blank_menu = || {
+        labelled(&window, "항목 목록", AccessibleRole::List)
+            .remove(0)
+            .mock_single_click(PointerEventButton::Right);
+    };
+    let more = "더 많은 옵션 표시  (Shift+F10)";
+
+    // Windows: 더 많은 옵션 표시 with File Explorer's key, at the end of both menus.
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    offer(&window, ONE_FILE);
+    row_menu();
+    assert!(!shows("공유…"), "macOS's");
+    assert!(top("OS 속성 창 열기") < top(more));
+    choose_item(&window, more);
+    assert_eq!(commands.take(), ["more-options"]);
+    blank_menu();
+    assert!(top("속성") < top(more));
+    choose_item(&window, more);
+    assert_eq!(commands.take(), ["folder-more-options"]);
+
+    // macOS: no menu of the system's own; 공유… where the system shares, by 경로 복사.
+    ui_bridge::show_shortcuts(&window, Os::MacOs);
+    window.global::<ItemMenu<'_>>().set_shares(true);
+    row_menu();
+    assert!(!shows("더 많은 옵션 표시"));
+    assert!(top("경로 복사") < top("공유…") && top("공유…") < top("열기  (⌘↓)"));
+    choose_item(&window, "공유…");
+    assert_eq!(commands.take(), ["share"]);
+    blank_menu();
+    assert!(!shows("더 많은 옵션 표시"));
+    assert!(!shows("공유…"), "for items alone");
+    choose_item(&window, "새로 고침  (⌘R)");
+    assert_eq!(commands.take(), ["refresh"]);
+
+    // Linux: neither.
+    ui_bridge::show_shortcuts(&window, Os::Other);
+    window.global::<ItemMenu<'_>>().set_shares(false);
+    row_menu();
+    assert!(!shows("더 많은 옵션 표시"));
+    assert!(!shows("공유…"));
+    choose_item(&window, "열기  (Enter)");
+    assert_eq!(commands.take(), ["open"]);
+}
+
+#[test]
+fn windows_own_menu_shows_from_the_keys_where_the_app_s_menus_do() {
+    let (window, _calls, models, _tree) = drag_window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let noted = || {
+        let menu = window.global::<ItemMenu<'_>>();
+        (menu.get_at_x(), menu.get_at_y())
+    };
+    let inside = |pane: &str, (x, y): (f32, f32)| {
+        let pane = labelled(&window, pane, AccessibleRole::Groupbox).remove(0);
+        let (origin, size) = (pane.absolute_position(), pane.size());
+        x > origin.x && x < origin.x + size.width && y > origin.y && y < origin.y + size.height
+    };
+    for mode in [ViewMode::Details, ViewMode::MediumIcons, ViewMode::List] {
+        left_in(&window, &models, mode);
+        // By row 1 (x.txt), where the item menu shows from the keys.
+        let place = window.invoke_item_menu_place(0, 1);
+        window.invoke_show_item_menu(0, 1);
+        assert_eq!((place.x, place.y), noted(), "{mode:?}");
+        choose_item(&window, "열기  (Enter)");
+        // By the top of the list, where the folder's menu shows from the keys: noted too, for
+        // its 더 많은 옵션 표시.
+        let place = window.invoke_blank_menu_place(0);
+        window.invoke_show_blank_menu(0);
+        assert_eq!((place.x, place.y), noted(), "{mode:?}");
+        assert!(inside("왼쪽 패널", noted()), "{mode:?}: {:?}", noted());
+        choose_item(&window, "새로 고침  (F5)");
+    }
+    // The right pane's places are in the right pane.
+    let place = window.invoke_item_menu_place(1, 1);
+    assert!(inside("오른쪽 패널", (place.x, place.y)), "{place:?}");
+    let place = window.invoke_blank_menu_place(1);
+    assert!(inside("오른쪽 패널", (place.x, place.y)), "{place:?}");
+}
+
+#[test]
+fn the_panes_take_the_keys_once_windows_own_menu_has_closed() {
+    let window = window();
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_tree_key(move |_, _, _, _, _| {
+        record.note("tree");
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    window.invoke_focus_tree();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["tree"]);
+    window.invoke_menu_closed();
+    settle();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+}
+
+#[test]
 fn the_keys_open_the_item_menu_by_its_row_and_the_folder_s_menu() {
     let (window, _calls, models, _tree) = drag_window();
     let commands = Calls::default();
@@ -5821,7 +5948,7 @@ fn the_keys_open_the_item_menu_by_its_row_and_the_folder_s_menu() {
     };
     for mode in [ViewMode::Details, ViewMode::MediumIcons, ViewMode::List] {
         left_in(&window, &models, mode);
-        // Row 1 (x.txt), as Shift+F10 asks for it.
+        // Row 1 (x.txt), as the menu key asks for it.
         window.invoke_show_item_menu(0, 1);
         choose_item(&window, "연결 프로그램으로 열기…");
         assert_eq!(commands.take(), ["open-with"], "{mode:?}");

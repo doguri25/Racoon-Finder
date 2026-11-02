@@ -93,7 +93,7 @@ pub use preview::{
     preview_width,
 };
 pub use select::{MATCH_STRETCH, MatchRequest, Matched};
-pub use shell::{MenuFacts, MenuShown, ShellWork, menu_facts};
+pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
 pub use tray::TrayCommand;
 pub use view::{
     Chosen, Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
@@ -166,6 +166,13 @@ pub enum Effect {
     Shell(ShellWork),
     /// Show a menu that no click opened: from the keys, or once a worker found what it lists.
     ShowMenu(MenuShown),
+    /// Show the system's own menu of items (Windows' shell menu, OPS-05) on the next turn of the
+    /// event loop, with no borrow of the state held; what is chosen there goes to
+    /// [`AppState::system_menu_chosen`].
+    SystemMenu(SystemMenuAsk),
+    /// Show the system's picker of the ways to share these items (macOS, 공유…) where the item
+    /// menu showed, on the next turn of the event loop.
+    Share(Vec<VPath>),
     /// Show a notice in the corner of the window.
     Notice(String),
     /// Show the path of pane `side` as text to edit.
@@ -707,6 +714,7 @@ impl AppState {
             Command::CopyPath => self.copy_paths(side, PathForm::of_key(Os::CURRENT)),
             Command::Properties => self.open_properties(side),
             Command::ContextMenu => self.context_menu(side),
+            Command::SystemMenu => self.system_menu_key(side, mods.shift),
             Command::OpenWith => self.open_with(side),
             Command::RunAsAdmin => self.run_as_admin(side),
             Command::OpenTerminal => self.open_terminal(side),

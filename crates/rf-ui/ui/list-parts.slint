@@ -126,8 +126,8 @@ export component DropMenu inherits ContextMenuArea {
 }
 
 // What the item menu offers for the items it opens for, besides what it always has: Rust sets it
-// (`AppState::item_menu`) before the menu shows. And where an item menu showed last, in the
-// window, for the menu of the apps that can open a file (macOS), which shows there after it.
+// (`AppState::item_menu`) before the menu shows. And where a menu of a list showed last, in the
+// window, for the menus and the picker that show there after it.
 export global ItemMenu {
     // One file: 연결 프로그램으로 열기….
     in property <bool> one-file;
@@ -137,10 +137,16 @@ export global ItemMenu {
     in property <bool> one-folder;
     // One item: OS 속성 창 열기.
     in property <bool> one-item;
+    // The system shares items through a picker of its own (macOS): 공유….
+    in property <bool> shares;
     // Whether Undo and Redo can start: something to undo (to do again), and no undo or redo
     // under way. The toolbar's 되돌리기 and the folder's menu follow them.
     in property <bool> can-undo;
     in property <bool> can-redo;
+    // Where a menu of a list showed last, in the window: the item menu, the folder's, or a
+    // right press on a list (Rust notes it where the system has a menu of its own). The menu of
+    // the apps (macOS), the system's own menu of 더 많은 옵션 표시 (Windows) and the picker of
+    // 공유… (macOS) show there.
     in-out property <length> at-x;
     in-out property <length> at-y;
 
@@ -151,7 +157,7 @@ export global ItemMenu {
     // false and they stay on.
     pure callback no-files-to-paste() -> bool;
 
-    // An item menu shows at (`x`, `y`) of the window.
+    // A menu of a list shows at (`x`, `y`) of the window.
     public function showing(x: length, y: length) {
         ItemMenu.at-x = x;
         ItemMenu.at-y = y;
@@ -166,12 +172,14 @@ export global ItemMenu {
 // else into the pane's folder; they are off while the clipboard holds no files. The system's
 // ways to open an item (OPS-04, OPS-06, OPS-11) show for the items they act on (`ItemMenu`):
 // 관리자 권한으로 실행 and 연결 프로그램으로 열기… by 열기 for one file, 터미널에서 열기 for one
-// folder, OS 속성 창 열기 after 속성 for one item.
+// folder, OS 속성 창 열기 after 속성 for one item. 공유… shows where the system shares items
+// (macOS, after Finder's, by 복사), and 더 많은 옵션 표시, the system's own menu of the items, at
+// the end where the system has one (Windows 11 File Explorer's item and key, Shift+F10).
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
-    // copy-files, paste-into, paste-move-into, copy-path-<form>, open, run-as-admin, open-with,
-    // quick-look, open-terminal, rename, delete, delete-permanently, properties,
-    // system-properties).
+    // copy-files, paste-into, paste-move-into, copy-path-<form>, share, open, run-as-admin,
+    // open-with, quick-look, open-terminal, rename, delete, delete-permanently, properties,
+    // system-properties, more-options).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -226,6 +234,12 @@ export component RowMenu inherits ContextMenuArea {
                 activated => {
                     root.command("copy-path-\{i}");
                 }
+            }
+        }
+        if ItemMenu.shares: MenuItem {
+            title: "공유…";
+            activated => {
+                root.command("share");
             }
         }
         MenuSeparator { }
@@ -292,17 +306,25 @@ export component RowMenu inherits ContextMenuArea {
                 root.command("system-properties");
             }
         }
+        if Shortcuts.system-menu != "": MenuSeparator { }
+        if Shortcuts.system-menu != "": MenuItem {
+            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            activated => {
+                root.command("more-options");
+            }
+        }
     }
 }
 
 // The menu of the part of a list without items: a new folder there, a paste into the folder
 // (off while the clipboard holds no files), 되돌리기 and 다시 실행 (off while there is nothing
 // to undo or to do again), the folder listed again (NAV-13), each with its key (KEY-03), a
-// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer. It wraps
-// that part of the list.
+// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer; at the end the
+// system's own menu of the folder (더 많은 옵션 표시), where the system has one. It wraps that
+// part of the list.
 export component BlankMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (new-folder, paste,
-    // paste-move, undo, redo, refresh, folder-terminal, folder-properties).
+    // paste-move, undo, redo, refresh, folder-terminal, folder-properties, folder-more-options).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -368,12 +390,19 @@ export component BlankMenu inherits ContextMenuArea {
                 root.command("folder-properties");
             }
         }
+        if Shortcuts.system-menu != "": MenuSeparator { }
+        if Shortcuts.system-menu != "": MenuItem {
+            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            activated => {
+                root.command("folder-more-options");
+            }
+        }
     }
 }
 
-// The item menu and the folder's menu of a list, shown from the keyboard (Shift+F10, the menu
-// key, macOS ⌃↩) where the list says: they have no room, so they take no click, and a right
-// click still reaches the menus of the rows and of the part without them.
+// The item menu and the folder's menu of a list, shown from the keyboard (the menu key, Linux's
+// Shift+F10, macOS ⌃↩) where the list says: they have no room, so they take no click, and a
+// right click still reaches the menus of the rows and of the part without them.
 export component KeyMenus {
     // An item of either menu: the name of the window's command it runs.
     callback command(name: string);

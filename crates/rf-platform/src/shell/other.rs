@@ -1,14 +1,18 @@
 //! Systems other than Windows and macOS (Linux, for development): a terminal starts in the
-//! folder, as `$TERMINAL` or `x-terminal-emulator`; nothing else is supported.
+//! folder, as `$TERMINAL` or `x-terminal-emulator`; nothing else is supported (no menu of the
+//! system's own, no sharing).
 
+use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{App, Launch, OpenWith, Owner, find_program};
+use super::{App, Launch, OpenWith, Owner, SystemMenuChoice, WindowPoint, find_program};
 
 pub const OPEN_WITH: OpenWith = OpenWith::Unsupported;
 pub const RUNS_AS_ADMIN: bool = false;
+pub const SYSTEM_MENU: bool = false;
+pub const SHARES: bool = false;
 
 fn unsupported(what: &str) -> io::Error {
     io::Error::new(
@@ -30,7 +34,7 @@ pub fn start_terminal(launches: &[Launch], _owner: Owner) -> io::Result<()> {
 }
 
 /// [`start_terminal`] with the folders of `PATH` given.
-fn start_first(launches: &[Launch], dirs: &[std::path::PathBuf]) -> io::Result<()> {
+fn start_first(launches: &[Launch], dirs: &[PathBuf]) -> io::Result<()> {
     let mut failed = None;
     for launch in launches {
         let Some(program) = find_program(&launch.program, dirs.iter().cloned(), Path::is_file)
@@ -83,6 +87,20 @@ pub fn open_with_app(_path: &Path, _app: &Path) -> io::Result<()> {
 
 pub fn run_as_admin(_path: &Path, _owner: Owner) -> io::Result<()> {
     Err(unsupported("running a program as administrator"))
+}
+
+pub fn system_menu(
+    _owner: Owner,
+    _folder: &Path,
+    _names: &[OsString],
+    _at: WindowPoint,
+    _extended: bool,
+) -> io::Result<SystemMenuChoice> {
+    Err(unsupported("the system's own menu of items"))
+}
+
+pub fn share(_owner: Owner, _paths: &[PathBuf], _at: WindowPoint) -> io::Result<()> {
+    Err(unsupported("sharing items"))
 }
 
 #[cfg(all(test, target_os = "linux"))]

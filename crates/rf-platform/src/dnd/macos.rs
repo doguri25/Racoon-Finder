@@ -103,8 +103,9 @@ impl Drop for Registration {
 }
 
 /// The view of the window `owner`'s content (winit's), retained, on the main thread, which it
-/// needs; `InvalidInput` for an owner without one.
-fn content_view(owner: Owner) -> io::Result<(MainThreadMarker, Retained<NSView>)> {
+/// needs; `InvalidInput` for an owner without one. The picker of 공유… shows by it too
+/// (`crate::shell`).
+pub(crate) fn content_view(owner: Owner) -> io::Result<(MainThreadMarker, Retained<NSView>)> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| io::Error::other("the window's view is the main thread's"))?;
     let content = owner

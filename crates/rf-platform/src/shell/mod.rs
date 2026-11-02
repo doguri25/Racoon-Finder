@@ -78,6 +78,56 @@ pub const OPEN_WITH: OpenWith = imp::OPEN_WITH;
 /// Whether this system runs a program as administrator ([`run_as_admin`]): Windows alone.
 pub const RUNS_AS_ADMIN: bool = imp::RUNS_AS_ADMIN;
 
+/// Whether this system has a menu of its own of items that the app shows ([`system_menu`]):
+/// Windows alone, its shell's.
+pub const SYSTEM_MENU: bool = imp::SYSTEM_MENU;
+
+/// Whether this system shares items through a picker of its own ([`share`]): macOS alone.
+pub const SHARES: bool = imp::SHARES;
+
+/// What the user chose in the system's menu of items ([`system_menu`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SystemMenuChoice {
+    /// Nothing: the menu closed without a command.
+    Nothing,
+    /// A command the system carried out itself (the shell's own, or an extension's).
+    Done,
+    /// A command the app does with its own ([`app_verb`]); the system was not asked to do it.
+    App(AppVerb),
+}
+
+/// A command of the system's menu that the app does with its own commands, as File Explorer's
+/// view does these itself: 이름 바꾸기, the trash or a deletion for good (through the app's job
+/// engine, which undoes them), and the clipboard's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AppVerb {
+    Rename,
+    /// To the trash, or for good (`permanent`: chosen with Shift held, as File Explorer does).
+    Delete {
+        permanent: bool,
+    },
+    Cut,
+    Copy,
+    Paste,
+}
+
+/// The app's own command for a command of the system's menu whose verb (the shell's canonical
+/// name of it, `GetCommandString(GCS_VERBW)`) is `verb`, chosen with Shift held or not
+/// (`shift`), whatever the case of its letters: `rename`, `delete` (for good with Shift), `cut`,
+/// `copy`, `paste`. `None` for every other verb (`properties`, `open`, `link`, an extension's),
+/// which the system does.
+pub fn app_verb(verb: &str, shift: bool) -> Option<AppVerb> {
+    [
+        ("rename", AppVerb::Rename),
+        ("delete", AppVerb::Delete { permanent: shift }),
+        ("cut", AppVerb::Cut),
+        ("copy", AppVerb::Copy),
+        ("paste", AppVerb::Paste),
+    ]
+    .into_iter()
+    .find_map(|(name, app)| verb.eq_ignore_ascii_case(name).then_some(app))
+}
+
 /// An app that can open a file, as [`apps_for`] finds it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct App {
@@ -467,6 +517,82 @@ pub fn run_as_admin(path: &Path, owner: Owner) -> io::Result<()> {
             io::ErrorKind::InvalidInput,
             "only a program runs as administrator",
         )),
+    }
+}
+
+/// Shows the system's own menu of the items `names` of the folder at `folder` (with no names,
+/// the folder's own menu, as its part without items shows it) at the point `at` of the window
+/// `owner`, with the commands the system keeps for Shift (`extended`), and carries out what the
+/// user chooses there: the system's command, or none of it for one the app does itself
+/// ([`SystemMenuChoice::App`], [`app_verb`]), whose items are the ones of the menu. It returns
+/// once the menu has closed and the command is done.
+///
+/// Windows alone ([`SYSTEM_MENU`]): the shell's menu of the items (`IContextMenu`), its
+/// submenus (보내기, 연결 프로그램) and its extensions' items filled as they open, which runs a
+/// loop of the system's own on the calling thread while it shows. Call it on the window's
+/// thread, with nothing borrowed that the window's drop target or the app's callbacks need,
+/// never from inside one of them. A command's own failure is its handler's to tell (File
+/// Explorer leaves it to it); a failure before the menu shows is an error. `InvalidInput` for a
+/// folder that is not an absolute path, a name that is not one plain name, and an owner without
+/// a window handle; `Unsupported` elsewhere.
+pub fn system_menu(
+    owner: Owner,
+    folder: &Path,
+    names: &[OsString],
+    at: WindowPoint,
+    extended: bool,
+) -> io::Result<SystemMenuChoice> {
+    check_path(Os::CURRENT, folder)?;
+    if !names.iter().all(|name| plain_name(name)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an item of a folder is named by one plain name",
+        ));
+    }
+    imp::system_menu(owner, folder, names, at, extended)
+}
+
+/// Shows the system's picker of the ways to share the files and folders at `paths` (`AirDrop`,
+/// 메일, 메시지…) at the point `at` of the window `owner`'s content, and returns: the picker
+/// goes on by itself. macOS alone ([`SHARES`]): `NSSharingServicePicker` with the items' file
+/// URLs, byte for byte as the clipboard writes them, by that point of the window's view. Call it
+/// on the main thread (the window's). `InvalidInput` for no paths, a path that is not absolute
+/// and an owner without a view; `Unsupported` elsewhere.
+pub fn share(owner: Owner, paths: &[PathBuf], at: WindowPoint) -> io::Result<()> {
+    if paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to share",
+        ));
+    }
+    for path in paths {
+        check_path(Os::CURRENT, path)?;
+    }
+    imp::share(owner, paths, at)
+}
+
+/// Whether `name` is one plain name of an item in a folder: not empty, no `.` or `..`, no
+/// separator of a path and no NUL.
+fn plain_name(name: &OsStr) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(part)), None) if part == name
+    ) && !name.as_encoded_bytes().contains(&0)
+}
+
+/// The point `at` of the window's content as a macOS view `view_height` points high names it:
+/// as it is in a view whose y grows downward (`flipped`, winit's), else from its bottom.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "used by macOS code; tested on every OS")
+)]
+fn view_point(at: WindowPoint, view_height: f64, flipped: bool) -> (f64, f64) {
+    let (x, y) = (f64::from(at.x), f64::from(at.y));
+    if flipped {
+        (x, y)
+    } else {
+        (x, view_height - y)
     }
 }
 
@@ -937,6 +1063,121 @@ mod tests {
             OpenWith::Unsupported
         };
         assert_eq!(OPEN_WITH, expected);
+    }
+
+    #[test]
+    fn the_app_does_the_verbs_it_has_commands_for() {
+        assert_eq!(app_verb("rename", false), Some(AppVerb::Rename));
+        assert_eq!(
+            app_verb("delete", false),
+            Some(AppVerb::Delete { permanent: false })
+        );
+        // Shift deletes for good, as in File Explorer.
+        assert_eq!(
+            app_verb("delete", true),
+            Some(AppVerb::Delete { permanent: true })
+        );
+        for shift in [false, true] {
+            assert_eq!(app_verb("cut", shift), Some(AppVerb::Cut));
+            assert_eq!(app_verb("copy", shift), Some(AppVerb::Copy));
+            assert_eq!(app_verb("paste", shift), Some(AppVerb::Paste));
+            assert_eq!(app_verb("rename", shift), Some(AppVerb::Rename));
+        }
+        // Whatever the case of the letters.
+        assert_eq!(app_verb("Rename", false), Some(AppVerb::Rename));
+        assert_eq!(
+            app_verb("DELETE", true),
+            Some(AppVerb::Delete { permanent: true })
+        );
+        assert_eq!(app_verb("CoPy", false), Some(AppVerb::Copy));
+        // The rest is the system's.
+        for verb in [
+            "properties",
+            "open",
+            "link",
+            "runas",
+            "openas",
+            "pastelink",
+            "copyaspath",
+            "7-zip.add",
+            "",
+            " delete",
+            "delete ",
+            "renamed",
+            "cut2",
+        ] {
+            for shift in [false, true] {
+                assert_eq!(app_verb(verb, shift), None, "{verb:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_system_s_menu_and_sharing_are_where_the_system_has_them() {
+        assert_eq!(SYSTEM_MENU, cfg!(windows));
+        assert_eq!(SHARES, cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn the_system_s_menu_takes_plain_names_in_an_absolute_folder() {
+        let at = WindowPoint::default();
+        let folder = std::env::temp_dir();
+        let refused = |folder: &Path, names: &[&str]| {
+            let names: Vec<OsString> = names.iter().map(OsString::from).collect();
+            system_menu(Owner::NONE, folder, &names, at, false)
+                .expect_err("refused")
+                .kind()
+        };
+        for names in [
+            &[""][..],
+            &["."],
+            &[".."],
+            &["a/b"],
+            &["ok", "a/b"],
+            &["a\0b"],
+        ] {
+            assert_eq!(
+                refused(&folder, names),
+                io::ErrorKind::InvalidInput,
+                "{names:?}"
+            );
+        }
+        assert_eq!(
+            refused(Path::new("relative"), &["a"]),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(plain_name(OsStr::new("보고서 (1).txt")));
+        assert!(plain_name(OsStr::new("a;b & $HOME")));
+        assert!(!plain_name(OsStr::new("a\0b")));
+        if !SYSTEM_MENU {
+            // Plain names: the system has no such menu.
+            assert_eq!(refused(&folder, &["a.txt"]), io::ErrorKind::Unsupported);
+            assert_eq!(refused(&folder, &[]), io::ErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn sharing_takes_absolute_paths() {
+        let at = WindowPoint::default();
+        let error = share(Owner::NONE, &[], at).expect_err("nothing to share");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = share(Owner::NONE, &[PathBuf::from("relative")], at).expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        if !SHARES {
+            let error = share(Owner::NONE, &[std::env::temp_dir()], at).expect_err("none");
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn a_point_of_the_window_is_named_as_a_macos_view_names_it() {
+        let at = |x, y| WindowPoint { x, y };
+        // winit's view: y grows downward, as the window's content names it.
+        assert_eq!(view_point(at(120.5, 40.0), 600.0, true), (120.5, 40.0));
+        // A view whose y grows upward from its bottom.
+        assert_eq!(view_point(at(120.5, 40.0), 600.0, false), (120.5, 560.0));
+        assert_eq!(view_point(at(0.0, 0.0), 812.5, false), (0.0, 812.5));
+        assert_eq!(view_point(at(10.0, 812.5), 812.5, false), (10.0, 0.0));
     }
 
     #[test]

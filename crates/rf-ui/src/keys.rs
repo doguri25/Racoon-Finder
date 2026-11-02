@@ -5,7 +5,8 @@
 //! The rules: an action the system's file manager has keeps its key there (File Explorer on
 //! Windows, Finder on macOS); an action only a dual-pane file manager has gets a key neither
 //! uses; no Ctrl+Alt key on Windows and Linux, where it is `AltGr` on European layouts and
-//! types characters. Linux, a system for development only, takes the Windows table.
+//! types characters. Linux, a system for development only, takes the Windows table, but for the
+//! keys of the item menu: it has no menu of the system's, which Windows' Shift+F10 shows.
 //!
 //! Slint hands a key press to `FocusScope.key-pressed` as `event.text`: the typed text for a
 //! printable key (the shifted letter with Shift, `"N"`), or one character of the private-use
@@ -135,8 +136,12 @@ pub enum Command {
     /// Open the 보기 menu.
     ViewMenu,
     /// Open the menu of the selected items, as a right click on them does; with none, the menu
-    /// of the pane's folder.
+    /// of the pane's folder. Windows' own menu instead where 보기 ▸ 설정 says so (OPS-05).
     ContextMenu,
+    /// Open the system's own menu of the selected items (Windows' shell menu, OPS-05), as
+    /// Shift+F10 and a right click with Shift do in File Explorer of Windows 11; with none, the
+    /// menu of the pane's folder. Where the system has none, the app's menu.
+    SystemMenu,
     /// Choose the app that opens the file (연결 프로그램으로 열기…): the system's dialog, or a
     /// menu of the apps that can open it.
     OpenWith,
@@ -173,8 +178,8 @@ pub enum Command {
 
 impl Command {
     /// Whether the command starts a program of the system or opens one of its windows (a
-    /// terminal, 연결 프로그램, a program run as administrator, the system's properties window):
-    /// a held key does it once, and its repeats nothing.
+    /// terminal, 연결 프로그램, a program run as administrator, the system's properties window,
+    /// its menu of items): a held key does it once, and its repeats nothing.
     pub fn launches(&self) -> bool {
         matches!(
             self,
@@ -182,6 +187,7 @@ impl Command {
                 | Command::OpenWith
                 | Command::RunAsAdmin
                 | Command::SystemProperties
+                | Command::SystemMenu
         )
     }
 
@@ -221,6 +227,7 @@ impl Command {
                 | Command::CopyPath
                 | Command::Properties
                 | Command::ContextMenu
+                | Command::SystemMenu
                 | Command::OpenWith
                 | Command::RunAsAdmin
                 | Command::OpenTerminal
@@ -475,13 +482,18 @@ pub fn quick_look_key(text: &str, mods: Mods, os: Os) -> Option<QuickLookKey> {
 }
 
 /// The shortcuts of `os`, in the table's order: a command's first one is the one its menu
-/// item and tooltip show.
+/// item and tooltip show. Windows and Linux share one table but for the keys of the item
+/// menus.
 pub fn bindings(os: Os) -> impl Iterator<Item = (Chord, &'static Command)> {
-    let table: &'static [(Chord, Command)] = match os {
-        Os::MacOs => MACOS,
-        Os::Windows | Os::Other => WINDOWS,
+    let (table, menus): (Table, Table) = match os {
+        Os::MacOs => (MACOS, &[]),
+        Os::Windows => (WINDOWS, WINDOWS_MENUS),
+        Os::Other => (WINDOWS, LINUX_MENUS),
     };
-    table.iter().map(|(chord, command)| (*chord, command))
+    table
+        .iter()
+        .chain(menus)
+        .map(|(chord, command)| (*chord, command))
 }
 
 /// How `os` writes the first shortcut of `command` ("Ctrl+Shift+N", "⇧⌘N"); `None` for a
@@ -663,8 +675,12 @@ const fn c(c: char, mods: Mods) -> Chord {
 
 use Command as C;
 
+/// A table of shortcuts: each key with its command, a command's first key first.
+type Table = &'static [(Chord, Command)];
+
 /// Windows, after File Explorer; and Linux. A command's first key is the one its menu item and
-/// tooltip show.
+/// tooltip show. The keys of the item menus follow, each system's own (`WINDOWS_MENUS`,
+/// `LINUX_MENUS`).
 static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::Tab, NONE), C::SwitchPane),
     (k(Key::Tab, SHIFT), C::SwitchPane),
@@ -751,8 +767,8 @@ static WINDOWS: &[(Chord, Command)] = &[
     (c('=', CTRL_SHIFT), C::FitColumns),
     (c('+', CTRL), C::FitColumns),
     (k(Key::F10, NONE), C::ViewMenu),
-    (k(Key::F10, SHIFT), C::ContextMenu),
-    (k(Key::Menu, NONE), C::ContextMenu),
+    // The keys of the item menus (Shift+F10, the menu key) are each system's own:
+    // `WINDOWS_MENUS`, `LINUX_MENUS`.
     // File Explorer has no key for a terminal; Dolphin's 터미널 열기 is Shift+F4, a key File
     // Explorer does not use (F4 alone is its address bar's).
     (k(Key::F4, SHIFT), C::OpenTerminal),
@@ -767,6 +783,21 @@ static WINDOWS: &[(Chord, Command)] = &[
     (k(Key::F12, NONE), C::ToggleDualPane),
     (k(Key::F12, SHIFT), C::ToggleSplit),
     (c('u', CTRL), C::SwapPanes),
+];
+
+/// The keys of the item menus on Windows, after File Explorer of Windows 11: the menu key shows
+/// the app's menu, which ends with Windows' own (더 많은 옵션 표시); Shift+F10 shows Windows'
+/// own at once, as File Explorer's does. The menu key first, which the app's menu stands for.
+static WINDOWS_MENUS: &[(Chord, Command)] = &[
+    (k(Key::Menu, NONE), C::ContextMenu),
+    (k(Key::F10, SHIFT), C::SystemMenu),
+];
+
+/// The keys of the item menu on Linux, which has no menu of the system's: both show the app's,
+/// Shift+F10 first.
+static LINUX_MENUS: &[(Chord, Command)] = &[
+    (k(Key::F10, SHIFT), C::ContextMenu),
+    (k(Key::Menu, NONE), C::ContextMenu),
 ];
 
 /// macOS, after Finder. A command's first key is the one its menu item and tooltip show.
@@ -1019,8 +1050,6 @@ mod tests {
             (key(Key::Home), CTRL, C::CursorHome),
             (key(Key::End), CTRL, C::CursorEnd),
             (key(Key::F10), NONE, C::ViewMenu),
-            (key(Key::F10), SHIFT, C::ContextMenu),
-            (key(Key::Menu), NONE, C::ContextMenu),
             // Dolphin's 터미널 열기; File Explorer has no key for it.
             (key(Key::F4), SHIFT, C::OpenTerminal),
             (text("p"), ALT, C::TogglePreview),
@@ -1389,12 +1418,13 @@ mod tests {
     #[test]
     fn the_app_s_own_keys_keep_clear_of_the_file_managers() {
         // 터미널 열기 is in neither file manager; the item menu's ⌃↩ is not Finder's either.
+        // The menus' keys of Windows and Linux are File Explorer's own, for the same menus.
         for (os, taken) in [
             (Os::Windows, explorer_keys()),
             (Os::Other, explorer_keys()),
             (Os::MacOs, finder_keys()),
         ] {
-            for command in [C::OpenTerminal, C::ContextMenu] {
+            for command in [C::OpenTerminal, C::ContextMenu, C::SystemMenu] {
                 for (chord, _) in bindings(os).filter(|(_, bound)| *bound == &command) {
                     let ours = command == C::OpenTerminal || os == Os::MacOs;
                     assert!(
@@ -1405,6 +1435,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_item_menus_open_by_the_keys_of_each_system() {
+        // Windows 11's File Explorer: Shift+F10 shows Windows' own menu (its "더 많은 옵션
+        // 표시"), the menu key the app's, which ends with that item.
+        assert_eq!(
+            command_for(&key(Key::F10), SHIFT, Os::Windows),
+            Some(C::SystemMenu)
+        );
+        assert_eq!(
+            command_for(&key(Key::Menu), NONE, Os::Windows),
+            Some(C::ContextMenu)
+        );
+        assert!(explorer_keys().contains(&named(Key::F10, SHIFT)));
+        // Linux has no menu of the system's: both keys show the app's, as before.
+        assert_eq!(
+            command_for(&key(Key::F10), SHIFT, Os::Other),
+            Some(C::ContextMenu)
+        );
+        assert_eq!(
+            command_for(&key(Key::Menu), NONE, Os::Other),
+            Some(C::ContextMenu)
+        );
+        // macOS keeps ⌃↩, and has no menu of the system's to open.
+        assert_eq!(
+            command_for(&key(Key::Return), CTL, Os::MacOs),
+            Some(C::ContextMenu)
+        );
+        for os in [Os::MacOs, Os::Other] {
+            assert!(
+                bindings(os).all(|(_, command)| *command != C::SystemMenu),
+                "{os:?}"
+            );
+        }
+        // Shift+F10 is the only key of Windows' menu.
+        let system: Vec<Chord> = bindings(Os::Windows)
+            .filter(|(_, command)| **command == C::SystemMenu)
+            .map(|(chord, _)| chord)
+            .collect();
+        assert_eq!(system, [named(Key::F10, SHIFT)]);
     }
 
     #[test]
@@ -1475,10 +1546,30 @@ mod tests {
     }
 
     #[test]
-    fn linux_uses_the_windows_table() {
-        let windows: Vec<(Chord, &Command)> = bindings(Os::Windows).collect();
-        let linux: Vec<(Chord, &Command)> = bindings(Os::Other).collect();
-        assert_eq!(windows, linux);
+    fn linux_uses_the_windows_table_but_for_windows_own_menu() {
+        // Linux has the app's menu where Windows has its own: the same keys, the same order
+        // of every other command.
+        let as_linux = |command: &Command| match command {
+            C::SystemMenu => C::ContextMenu,
+            other => other.clone(),
+        };
+        let menus = [named(Key::F10, SHIFT), named(Key::Menu, NONE)];
+        let others = |os| -> Vec<(Chord, Command)> {
+            bindings(os)
+                .filter(|(chord, _)| !menus.contains(chord))
+                .map(|(chord, command)| (chord, as_linux(command)))
+                .collect()
+        };
+        assert_eq!(others(Os::Windows), others(Os::Other));
+        for chord in menus {
+            let found = |os| {
+                bindings(os)
+                    .find(|(bound, _)| *bound == chord)
+                    .map(|(_, command)| as_linux(command))
+            };
+            assert_eq!(found(Os::Windows), Some(C::ContextMenu), "{chord:?}");
+            assert_eq!(found(Os::Other), Some(C::ContextMenu), "{chord:?}");
+        }
     }
 
     #[test]
@@ -1529,7 +1620,6 @@ mod tests {
             (C::CursorLeft, Some("←"), Some("←")),
             // Space first; ⌘Y, Finder's other key, is macOS's second.
             (C::QuickLook, Some("Space"), Some("Space")),
-            (C::ContextMenu, Some("Shift+F10"), Some("⌃↩")),
             (C::OpenTerminal, Some("Shift+F4"), Some("⇧F4")),
             // Neither file manager has a key for them: the item menu has them.
             (C::OpenWith, None, None),
@@ -1547,6 +1637,24 @@ mod tests {
             assert_eq!(
                 shortcut(&command, Os::Other).as_deref(),
                 windows,
+                "{command:?}"
+            );
+            assert_eq!(shortcut(&command, Os::MacOs).as_deref(), mac, "{command:?}");
+        }
+        // The item menus' keys differ between Windows and Linux: Windows' Shift+F10 is its own
+        // menu's, which 더 많은 옵션 표시 shows beside its title.
+        for (command, windows, linux, mac) in [
+            (C::ContextMenu, Some("Menu"), Some("Shift+F10"), Some("⌃↩")),
+            (C::SystemMenu, Some("Shift+F10"), None, None),
+        ] {
+            assert_eq!(
+                shortcut(&command, Os::Windows).as_deref(),
+                windows,
+                "{command:?}"
+            );
+            assert_eq!(
+                shortcut(&command, Os::Other).as_deref(),
+                linux,
                 "{command:?}"
             );
             assert_eq!(shortcut(&command, Os::MacOs).as_deref(), mac, "{command:?}");
@@ -1684,6 +1792,7 @@ mod tests {
             C::QuickLook,
             C::SwitchPane,
             C::ContextMenu,
+            C::SystemMenu,
             C::OpenWith,
             C::RunAsAdmin,
             C::OpenTerminal,
@@ -1727,6 +1836,7 @@ mod tests {
             C::OpenWith,
             C::RunAsAdmin,
             C::SystemProperties,
+            C::SystemMenu,
         ] {
             assert!(command.launches(), "{command:?}");
         }

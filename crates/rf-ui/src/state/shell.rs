@@ -2,7 +2,7 @@
 //! menu from the keyboard. A child of [`state`](super), so these methods see the fields of
 //! [`AppState`].
 //!
-//! The item menu (a right click on a row, or Shift+F10, the menu key and macOS ⌃↩) offers
+//! The item menu (a right click on a row, or the menu key, Linux's Shift+F10 and macOS ⌃↩) offers
 //! 연결 프로그램으로 열기… for one file, 관리자 권한으로 실행 for one program where the system
 //! runs one as administrator (not for a batch file at a path `cmd.exe` would read as a
 //! command), 터미널에서 열기 for one folder, all three for one link (the worker finds where it
@@ -21,13 +21,27 @@
 //!
 //! None of them changes a file: they act on the items a command acts on ([`AppState::targets`]:
 //! the selection, or the row the user put the cursor on), as the item menu does.
+//!
+//! The system's own menu of items (Windows' shell menu, OPS-05) shows in the place of the app's
+//! for Shift+F10 ([`AppState::system_menu_key`]) and a right click with Shift
+//! ([`AppState::right_click`]), as in File Explorer of Windows 11; for the menu key and any right
+//! click too while 보기 ▸ 설정 says to show it first; and from 더 많은 옵션 표시 at the end of the
+//! app's menus ([`AppState::more_options`]). The state copies out what it is of
+//! ([`SystemMenuAsk`]: the folder, the names of the items or none for the folder's own menu, its
+//! place), and the controller shows it on the next turn of the event loop with no borrow held.
+//! What the user chose there comes back to [`AppState::system_menu_chosen`]: the commands the app
+//! has itself (이름 바꾸기, the trash or a deletion for good, 잘라내기, 복사, 붙여넣기) are the app's,
+//! through its job engine and undo; the system carried out the rest. Where the system has no
+//! such menu (macOS, Linux), the keys show the app's menu. macOS shares the items through its
+//! own picker instead ([`AppState::share`], 공유… in the item menu).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
-use rf_platform::shell::{App, Elevation, can_run_as_admin, elevation};
+use rf_platform::shell::{App, AppVerb, Elevation, SystemMenuChoice, can_run_as_admin, elevation};
 
-use super::{AppState, Effect};
+use super::{AppState, Effect, RIGHT};
 use crate::words::{self, ShellAction};
 
 /// What a worker is to ask of the system (`crate::open::shell`).
@@ -62,10 +76,10 @@ impl ShellWork {
 /// A menu that no click opened ([`Effect::ShowMenu`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuShown {
-    /// The item menu of pane `side` by row `row` (Shift+F10), offering what
+    /// The item menu of pane `side` by row `row` (the menu key), offering what
     /// [`AppState::item_menu`] says.
     Item { side: usize, row: usize },
-    /// The menu of the folder of pane `side`, by the top of its list (Shift+F10 with nothing
+    /// The menu of the folder of pane `side`, by the top of its list (the menu key with nothing
     /// chosen).
     Folder(usize),
     /// The menu of the apps that can open a file, with these titles, where the item menu
@@ -74,6 +88,41 @@ pub enum MenuShown {
     /// The menu of 놓을 때 묻기 where a drag was dropped (여기로 이동, 여기로 복사, 취소); what it
     /// chooses goes to [`AppState::drop_menu_chosen`].
     AskDrop,
+}
+
+/// Where the system's own menu of items shows ([`SystemMenuAsk`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MenuPlace {
+    /// By row `row` of pane `side`, where the item menu shows from the keys (Shift+F10).
+    Row { side: usize, row: usize },
+    /// By the top of pane `side`'s list, where the folder's menu shows from the keys.
+    Folder(usize),
+    /// Where the last menu of a list showed (`ItemMenu.at`): where the right button went down,
+    /// or where the app's menu showed whose 더 많은 옵션 표시 asks for it.
+    Shown,
+}
+
+/// The system's own menu of items to show (Windows' shell menu, OPS-05), with what it is of,
+/// copied out of the state: the controller shows it on the next turn of the event loop, with no
+/// borrow of the state held (`rf_platform::shell::system_menu`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemMenuAsk {
+    /// The folder the items are in, or whose own menu it is.
+    pub folder: VPath,
+    /// The names of the items in it; none for the folder's own menu (the part of a list without
+    /// items).
+    pub names: Vec<OsString>,
+    pub place: MenuPlace,
+    /// With the commands the system keeps for Shift (a right click or Shift+F10 with it).
+    pub extended: bool,
+}
+
+/// The system's menu asked for last ([`AppState::system_menu_chosen`]): in pane `side`, of the
+/// items a command acts on there (`items`), or of its folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SystemAsked {
+    side: usize,
+    items: bool,
 }
 
 /// What the item menu offers for the items it is for, besides what it always has.
@@ -136,6 +185,10 @@ pub(super) struct ShellState {
     /// The apps of the menu that shows them last, and their file.
     apps: Option<(VPath, Vec<App>)>,
     token: u64,
+    /// Whether the system has a menu of its own of items (Windows): the controller says so.
+    system_offered: bool,
+    /// The system's menu asked for last, until what was chosen there comes back.
+    system: Option<SystemAsked>,
 }
 
 impl AppState {
@@ -162,17 +215,190 @@ impl AppState {
         );
     }
 
-    /// Shift+F10, the menu key (macOS ⌃↩): the menu of the items a command acts on in pane
-    /// `side`, by the row of the cursor when it is one of them (else the first of them),
-    /// scrolled to; with none, the menu of the pane's folder.
+    /// Whether the system has a menu of its own of items that the app shows (Windows,
+    /// `rf_platform::shell::SYSTEM_MENU`): the controller tells the state as it starts.
+    pub fn offer_system_menu(&mut self, offered: bool) {
+        self.shell.system_offered = offered;
+    }
+
+    /// Shift+F10 (Windows): the system's own menu of the items a command acts on in pane
+    /// `side`, by the row the item menu opens by from the keys, scrolled to, with the commands
+    /// the system keeps for Shift when it is held (`extended`); with none, the folder's own.
+    /// Where the system has no menu of its own, the app's menu ([`AppState::context_menu`]).
+    pub(super) fn system_menu_key(&mut self, side: usize, extended: bool) -> Vec<Effect> {
+        if !self.shell.system_offered {
+            return self.app_menu(side);
+        }
+        match self.menu_row(side) {
+            Some(row) => {
+                let mut effects = vec![Effect::ScrollTo { side, row }];
+                effects.extend(self.ask_system_menu(side, MenuPlace::Row { side, row }, extended));
+                effects
+            }
+            None => self.ask_folder_menu(side, MenuPlace::Folder(side), extended),
+        }
+    }
+
+    /// Whether the system's own menu shows in the place of the app's for a right click and the
+    /// menu key: the system has one, and Shift is held (`shift`) or 보기 ▸ 설정 says to show it
+    /// first.
+    fn system_menu_now(&self, shift: bool) -> bool {
+        self.shell.system_offered && (shift || self.system_menu_first)
+    }
+
+    /// The right button went down on row `row` of pane `side`'s list (`None`: on the part of
+    /// it without rows), with the keys the window told last held. `Some`, with its effects, when
+    /// the system's own menu shows there in the place of the app's: the system has one, and
+    /// Shift is held or 보기 ▸ 설정 says to show it first, and no window or quick look shows
+    /// over the main one. The row is chosen as a right click chooses it, and the pane gets the
+    /// keys. `None` leaves the press to the app's own menus.
+    pub fn right_click(&mut self, side: usize, row: Option<usize>) -> Option<Vec<Effect>> {
+        let shift = self.drag_mods.shift;
+        if self.modal.is_some()
+            || self.quitting
+            || self.quick_look_open()
+            || !self.system_menu_now(shift)
+        {
+            return None;
+        }
+        let side = side.min(RIGHT);
+        let mut effects = vec![Effect::FocusPanes];
+        if let Some(row) = row {
+            self.row_menu(side, row);
+            effects.extend(self.ask_system_menu(side, MenuPlace::Shown, shift));
+        } else {
+            self.activate(side);
+            effects.extend(self.ask_folder_menu(side, MenuPlace::Shown, shift));
+        }
+        Some(effects)
+    }
+
+    /// 더 많은 옵션 표시 at the end of the item menu, or of the menu of the part of a list without
+    /// items (`blank`): the system's own menu of the same items (or folder), where that menu
+    /// showed, in the active pane, which its choice has made active.
+    pub fn more_options(&mut self, blank: bool) -> Vec<Effect> {
+        if self.modal.is_some() || self.quitting || !self.shell.system_offered {
+            return Vec::new();
+        }
+        let side = self.active;
+        if blank {
+            self.ask_folder_menu(side, MenuPlace::Shown, false)
+        } else {
+            self.ask_system_menu(side, MenuPlace::Shown, false)
+        }
+    }
+
+    /// The system's own menu of the items a command acts on in pane `side`, at `place`, with
+    /// Shift's commands or not (`extended`): what it is of, copied out for the controller, which
+    /// shows it; what is chosen there comes back to [`AppState::system_menu_chosen`]. With no
+    /// such item, the folder's own menu.
+    fn ask_system_menu(&mut self, side: usize, place: MenuPlace, extended: bool) -> Vec<Effect> {
+        let names: Vec<OsString> = self
+            .target_entries(side)
+            .iter()
+            .map(|(_, entry)| entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            return self.ask_folder_menu(side, place, extended);
+        }
+        self.shell.system = Some(SystemAsked { side, items: true });
+        vec![Effect::SystemMenu(SystemMenuAsk {
+            folder: self.tab(side).location().clone(),
+            names,
+            place,
+            extended,
+        })]
+    }
+
+    /// The system's own menu of the folder pane `side` shows, at `place` ([`ask_system_menu`]).
+    ///
+    /// [`ask_system_menu`]: AppState::ask_system_menu
+    fn ask_folder_menu(&mut self, side: usize, place: MenuPlace, extended: bool) -> Vec<Effect> {
+        self.shell.system = Some(SystemAsked { side, items: false });
+        vec![Effect::SystemMenu(SystemMenuAsk {
+            folder: self.tab(side).location().clone(),
+            names: Vec::new(),
+            place,
+            extended,
+        })]
+    }
+
+    /// What was chosen in the system's menu that the state asked for last: a command the app
+    /// does with its own (이름 바꾸기, the trash or a deletion for good, the clipboard's), for the
+    /// items of that menu, as the same command of the app's menu does it, through the job
+    /// engine and its undo; nothing for a command the system did itself, nothing chosen, or a
+    /// choice no menu is waiting for.
+    pub fn system_menu_chosen(&mut self, choice: SystemMenuChoice) -> Vec<Effect> {
+        let Some(asked) = self.shell.system.take() else {
+            return Vec::new();
+        };
+        let SystemMenuChoice::App(verb) = choice else {
+            return Vec::new();
+        };
+        if self.modal.is_some() || self.quitting {
+            return Vec::new();
+        }
+        let side = asked.side;
+        match (verb, asked.items) {
+            // Into the folder of the menu's row, as the app's menu of a row pastes; the
+            // folder's own menu pastes into the folder.
+            (AppVerb::Paste, true) => {
+                self.activate(side);
+                self.paste_from_menu(false)
+            }
+            (AppVerb::Paste, false) => self.paste(side, false),
+            (AppVerb::Rename, true) => self.rename(side),
+            (AppVerb::Delete { permanent: false }, true) => self.trash(side),
+            (AppVerb::Delete { permanent: true }, true) => self.delete_permanently(side),
+            (AppVerb::Cut, true) => self.put_on_clipboard(side, true),
+            (AppVerb::Copy, true) => self.put_on_clipboard(side, false),
+            // A folder's own menu has none of the items' commands: none of them acts on the
+            // items chosen in it.
+            (AppVerb::Rename | AppVerb::Delete { .. } | AppVerb::Cut | AppVerb::Copy, false) => {
+                Vec::new()
+            }
+        }
+    }
+
+    /// 공유… in the item menu (macOS): the system's picker of the ways to share the items a
+    /// command acts on in the active pane, where the menu showed.
+    pub fn share(&mut self) -> Vec<Effect> {
+        if self.modal.is_some() || self.quitting {
+            return Vec::new();
+        }
+        let paths: Vec<VPath> = self
+            .targets(self.active)
+            .into_iter()
+            .filter(|path| path.as_local().is_some())
+            .collect();
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        vec![Effect::Share(paths)]
+    }
+
+    /// The menu key (Linux's Shift+F10, macOS ⌃↩): the menu of the items a command acts on in
+    /// pane `side`, by the row of the cursor when it is one of them (else the first of them),
+    /// scrolled to; with none, the menu of the pane's folder. Where 보기 ▸ 설정 says to show the
+    /// system's own menu first (Windows), that one: by [`AppState::system_menu_key`], without
+    /// Shift's commands.
     pub(super) fn context_menu(&mut self, side: usize) -> Vec<Effect> {
+        if self.system_menu_now(false) {
+            return self.system_menu_key(side, false);
+        }
+        self.app_menu(side)
+    }
+
+    /// The row the item menu of pane `side` opens by from the keys: the cursor's when it is one
+    /// of the items a command acts on, else the first of them; `None` for none.
+    fn menu_row(&self, side: usize) -> Option<usize> {
         let tab = self.tab(side);
         let chosen = tab.selection().indices(tab.visible());
         let cursor = tab
             .selection()
             .user_cursor()
             .filter(|&row| row < tab.visible().len());
-        let row = match (chosen.first(), cursor) {
+        match (chosen.first(), cursor) {
             (None, cursor) => cursor,
             (Some(&first), Some(cursor)) => Some(if chosen.contains(&cursor) {
                 cursor
@@ -180,8 +406,12 @@ impl AppState {
                 first
             }),
             (Some(&first), None) => Some(first),
-        };
-        let Some(row) = row else {
+        }
+    }
+
+    /// The app's item menu of pane `side` from the keys ([`AppState::context_menu`]).
+    fn app_menu(&mut self, side: usize) -> Vec<Effect> {
+        let Some(row) = self.menu_row(side) else {
             self.shell.menu = MenuFacts::default();
             return vec![Effect::ShowMenu(MenuShown::Folder(side))];
         };

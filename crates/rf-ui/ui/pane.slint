@@ -677,7 +677,7 @@ export component Pane inherits Rectangle {
         }
     }
 
-    // The item menu by row `index` of the view (Shift+F10, the menu key, macOS ⌃↩).
+    // The item menu by row `index` of the view (the menu key, Linux's Shift+F10, macOS ⌃↩).
     public function show-item-menu(index: int) {
         if (root.view.mode == 0) {
             files.show-item-menu(index);
@@ -693,6 +693,14 @@ export component Pane inherits Rectangle {
         } else {
             grid.show-blank-menu();
         }
+    }
+
+    // Where those two show, in the window, for the system's own menu (Windows' Shift+F10).
+    public pure function item-menu-place(index: int) -> Point {
+        return root.view.mode == 0 ? files.item-menu-place(index) : grid.item-menu-place(index);
+    }
+    public pure function blank-menu-place() -> Point {
+        return root.view.mode == 0 ? files.blank-menu-place() : grid.blank-menu-place();
     }
 
     // 자세히 scrolls a step sideways (← and →), as far as its columns reach.

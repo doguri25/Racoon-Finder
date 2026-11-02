@@ -490,7 +490,7 @@ export component MainWindow inherits Window {
         root.open-view-menu();
     }
 
-    // The item menu of pane `side` by row `row` (Shift+F10, the menu key, macOS ⌃↩).
+    // The item menu of pane `side` by row `row` (the menu key, Linux's Shift+F10, macOS ⌃↩).
     public function show-item-menu(side: int, row: int) {
         if (side == 0) {
             left.show-item-menu(row);
@@ -506,6 +506,22 @@ export component MainWindow inherits Window {
         } else {
             right.show-blank-menu();
         }
+    }
+
+    // Where those two show, in the window: the system's own menu of the same items shows there
+    // from the keys (Windows' Shift+F10).
+    public pure function item-menu-place(side: int, row: int) -> Point {
+        return side == 0 ? left.item-menu-place(row) : right.item-menu-place(row);
+    }
+    public pure function blank-menu-place(side: int) -> Point {
+        return side == 0 ? left.blank-menu-place() : right.blank-menu-place();
+    }
+
+    // The system's own menu (Windows') has closed: the keys go back to the panes, as after a
+    // choice in one of the window's menus.
+    public function menu-closed() {
+        root.give-quick-look-keys();
+        pane-menu-keys-later.running = true;
     }
 
     // The menu of the apps that can open a file (`open-with-apps`), where the item menu showed.

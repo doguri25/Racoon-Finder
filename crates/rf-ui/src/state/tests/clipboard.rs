@@ -43,7 +43,7 @@ fn names(list: &[&str]) -> HashSet<OsString> {
 }
 
 /// The one request to the clipboard's worker among `effects`.
-fn the_work(effects: &[Effect]) -> ClipboardWork {
+pub(super) fn the_work(effects: &[Effect]) -> ClipboardWork {
     let work: Vec<&ClipboardWork> = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -58,7 +58,7 @@ fn the_work(effects: &[Effect]) -> ClipboardWork {
 }
 
 /// The one job `effects` submit, and the pane that asked for it.
-fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
+pub(super) fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
     let submits: Vec<(JobSpec, Option<usize>)> = effects
         .iter()
         .filter_map(|effect| match effect {
@@ -98,7 +98,7 @@ fn paste(state: &mut AppState, side: usize) -> u64 {
     }
 }
 
-fn files(paths: &[VPath], effect: Option<DropEffect>, change: u64) -> ClipboardFiles {
+pub(super) fn files(paths: &[VPath], effect: Option<DropEffect>, change: u64) -> ClipboardFiles {
     ClipboardFiles {
         paths: paths.iter().map(local).collect(),
         effect,

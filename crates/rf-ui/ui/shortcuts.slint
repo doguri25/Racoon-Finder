@@ -62,6 +62,9 @@ export global Shortcuts {
     in property <string> properties;
     // 터미널에서 열기 (OPS-11).
     in property <string> open-terminal;
+    // The system's own menu of items (Windows' Shift+F10, OPS-05); none where the system has no
+    // such menu, whose 더 많은 옵션 표시 the app's menus then leave out.
+    in property <string> system-menu;
 
     // A menu item's title with its key after it, or the title alone for a command without
     // one. A menu of a window (not of the menu bar) has no column for keys.

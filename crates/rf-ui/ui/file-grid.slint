@@ -288,18 +288,43 @@ export component FileGrid inherits Rectangle {
         icons.content-y = y;
     }
 
-    // The item menu by item `index`, from the keyboard (Shift+F10, the menu key, macOS ⌃↩);
-    // Rust has scrolled the item into view. The menu shows over its lower part.
+    // The item menu by item `index`, from the keyboard (the menu key, Linux's Shift+F10, macOS
+    // ⌃↩); Rust has scrolled the item into view. The menu shows over its lower part.
     public function show-item-menu(index: int) {
-        let x = root.columnar ? root.pad + floor(index / root.per-column) * root.tile-w + columns-view.content-x + 24px : root.pad + Math.mod(index, root.per-row) * root.tile-w + 24px;
-        let y = root.columnar ? root.pad + (Math.mod(index, root.per-column) + 0.75) * root.tile-h : (floor(index / root.per-row) + 0.75) * root.tile-h + icons.content-y;
-        ItemMenu.showing(root.absolute-position.x + x, root.absolute-position.y + y);
-        key-menus.item(x, y);
+        let at = root.item-menu-at(index);
+        ItemMenu.showing(root.absolute-position.x + at.x, root.absolute-position.y + at.y);
+        key-menus.item(at.x, at.y);
     }
 
     // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
     public function show-blank-menu() {
-        key-menus.blank(root.pad + 24px, root.pad + 16px);
+        let at = root.blank-menu-at();
+        ItemMenu.showing(root.absolute-position.x + at.x, root.absolute-position.y + at.y);
+        key-menus.blank(at.x, at.y);
+    }
+
+    // Where those two show, in the window: the system's own menu of the same items shows there
+    // from the keys (Windows' Shift+F10).
+    public pure function item-menu-place(index: int) -> Point {
+        let at = root.item-menu-at(index);
+        return { x: root.absolute-position.x + at.x, y: root.absolute-position.y + at.y };
+    }
+    public pure function blank-menu-place() -> Point {
+        let at = root.blank-menu-at();
+        return { x: root.absolute-position.x + at.x, y: root.absolute-position.y + at.y };
+    }
+
+    // Where the item menu by item `index` shows from the keyboard, in the list.
+    pure function item-menu-at(index: int) -> Point {
+        return {
+            x: root.columnar ? root.pad + floor(index / root.per-column) * root.tile-w + columns-view.content-x + 24px : root.pad + Math.mod(index, root.per-row) * root.tile-w + 24px,
+            y: root.columnar ? root.pad + (Math.mod(index, root.per-column) + 0.75) * root.tile-h : (floor(index / root.per-row) + 0.75) * root.tile-h + icons.content-y,
+        };
+    }
+
+    // Where the folder's menu shows from the keyboard, in the list.
+    pure function blank-menu-at() -> Point {
+        return { x: root.pad + 24px, y: root.pad + 16px };
     }
 
     settle := ListSettle { }

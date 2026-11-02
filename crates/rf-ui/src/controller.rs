@@ -47,6 +47,10 @@
 //! it ends ([`AppState::drag_out_ended`]). Where the system takes no such drag (Linux), the drag
 //! stays Slint's.
 //!
+//! The system's own menu of items (Windows' shell menu, OPS-05) and its picker of the ways to
+//! share them (macOS) run on the UI thread, on the next turn of the event loop after they are
+//! asked for, with no borrow of the state held (module `system_menu`).
+//!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
 //! hidden and the jobs go on behind the tray icon (XFER-15), the icon follows the state at each
@@ -112,6 +116,7 @@ mod previewer;
 mod properties;
 mod sorter;
 mod spring;
+mod system_menu;
 
 use clipboard::{Clipper, Done, OsClipboard};
 use drops::{DropTarget, WindowDrops};
@@ -242,7 +247,10 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     // The layout of the last run from the start, before the panes' folders are known.
     show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
-    window.set_system_menu_offered(Os::CURRENT == Os::Windows);
+    window.set_system_menu_offered(rf_platform::shell::SYSTEM_MENU);
+    window
+        .global::<ItemMenu<'_>>()
+        .set_shares(rf_platform::shell::SHARES);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     *controller.log_dir.borrow_mut() = log_dir;
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
@@ -844,8 +852,9 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// [`Controller::pointer_outside`]), and the left button it needs held; the files another
 /// app dropped on the window, where winit's own drop target takes them (X11, macOS's title bar:
 /// [`Controller::file_dropped`]; nothing shows while they hover, `HoveredFile`, since winit
-/// tells neither where nor the keys); and where the pointer was last, for the menu of a drop
-/// that asks without telling where it was.
+/// tells neither where nor the keys); where the pointer was last, for the menu of a drop that
+/// asks without telling where it was; and a right press that shows Windows' own menu in the
+/// place of the app's (OPS-05, [`Controller::right_pressed`]), which Slint then never sees.
 fn watch_winit_events(window: &MainWindow) {
     window.window().on_winit_window_event(|window, event| {
         match event {
@@ -878,6 +887,17 @@ fn watch_winit_events(window: &MainWindow) {
                 ..
             } => {
                 with(|c| c.left_down.set(true));
+            }
+            WinitEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // Windows' own menu in the place of the app's (OPS-05): Slint never sees the
+                // press, whose menu would show too.
+                if with(Controller::right_pressed).unwrap_or(false) {
+                    return EventResult::PreventDefault;
+                }
             }
             WinitEvent::MouseInput {
                 state: ElementState::Released,
@@ -1331,6 +1351,7 @@ impl Controller {
             state.set_move_undo_toast(settings.move_undo_toast);
             state.set_system_menu_first(settings.system_menu_first);
         }
+        state.offer_system_menu(rf_platform::shell::SYSTEM_MENU);
         state.settle_views(&mut effects);
         if !self.saver.writable() {
             effects.push(Effect::Notice(words::settings_unreadable().to_owned()));
@@ -2127,6 +2148,9 @@ impl Controller {
             "paste-into" => return self.update(|state| state.paste_from_menu(false)),
             "folder-properties" => return self.update(AppState::folder_properties),
             "folder-terminal" => return self.update(AppState::folder_terminal),
+            "more-options" => return self.update(|state| state.more_options(false)),
+            "folder-more-options" => return self.update(|state| state.more_options(true)),
+            "share" => return self.update(AppState::share),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
             "toggle-move-undo-toast" => {
                 return self.update(|state| {
@@ -2302,6 +2326,8 @@ impl Controller {
                 | Effect::ScrollTree(_)
                 | Effect::ScrollPickTree(_)
                 | Effect::ShowMenu(_)
+                | Effect::SystemMenu(_)
+                | Effect::Share(_)
                 | Effect::Toast { .. }
                 | Effect::Busy { .. }
                 | Effect::NotBusy(_) => {
@@ -2464,6 +2490,8 @@ impl Controller {
             | Effect::OpenFile(_)
             | Effect::Shell(_)
             | Effect::ShowMenu(_)
+            | Effect::SystemMenu(_)
+            | Effect::Share(_)
             | Effect::ReloadLater { .. }
             | Effect::Notice(_)
             | Effect::EditPath(_)
@@ -2576,6 +2604,8 @@ impl Controller {
                 }
             }
             Effect::ShowMenu(menu) => self.show_menu(menu),
+            Effect::SystemMenu(ask) => self.ask_system_menu(ask),
+            Effect::Share(paths) => self.ask_share(paths),
             // Carried out by `apply`.
             Effect::Load(_)
             | Effect::Sort(_)

@@ -71,6 +71,16 @@ pub(crate) fn item(path: &Path, text: Option<&str>) -> io::Result<Retained<NSPas
     Ok(item)
 }
 
+/// The file URL of the item at `path`, byte for byte as the pasteboard item has it
+/// (`file_url_of`), as an `NSURL`: for what takes URLs rather than pasteboard items, the picker
+/// of 공유… (`crate::shell`).
+pub(crate) fn url(path: &Path) -> io::Result<Retained<NSURL>> {
+    NSURL::URLWithString(&NSString::from_str(&file_url_of(
+        path.as_os_str().as_bytes(),
+    )))
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file URL names the path"))
+}
+
 pub fn put_files(paths: &[PathBuf], _effect: DropEffect) -> io::Result<u64> {
     autoreleasepool(|_| {
         let lines: Vec<String> = paths

@@ -58,6 +58,9 @@ mod other;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+pub(crate) use self::macos::content_view;
+
 /// What a drop does with the items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DropEffect {
@@ -318,6 +321,33 @@ pub fn client_point(screen: (i32, i32), client_origin: (i32, i32), scale: f64) -
         x: along(screen.0, client_origin.0),
         y: along(screen.1, client_origin.1),
     }
+}
+
+/// The screen point, in physical pixels, of the point `at` of the window's content (its logical
+/// pixels), for content whose top left corner is at `client_origin` on the screen, shown at
+/// `scale` physical pixels for each logical one: the other way round of [`client_point`], to
+/// the nearest pixel, where the system wants a place on the screen (a menu of its own). The far
+/// ends of the screen stay within `i32`; a `scale` that is not a positive number counts as 1,
+/// and a point that is no number as 0.
+pub fn screen_point(at: WindowPoint, client_origin: (i32, i32), scale: f64) -> (i32, i32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let along = |at: f32, origin: i32| {
+        let logical = if at.is_nan() { 0.0 } else { f64::from(at) };
+        // In f64, which holds every `i32` exactly; `as` keeps the far ends at `i32`'s.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to i32's range first; `as` saturates the infinite ends"
+        )]
+        let physical = (logical * scale + f64::from(origin))
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+        physical
+    };
+    (along(at.x, client_origin.0), along(at.y, client_origin.1))
 }
 
 /// The point `point` of a macOS view `view_height` points high, whose y grows upward from its
@@ -728,6 +758,67 @@ mod tests {
         assert_eq!(
             at((i32::MAX, i32::MIN), (i32::MIN, i32::MAX), 1.0),
             (4_294_967_295.0, -4_294_967_295.0)
+        );
+    }
+
+    #[test]
+    fn a_point_of_the_window_s_content_is_named_in_physical_pixels_of_the_screen() {
+        let at = |x, y| WindowPoint { x, y };
+        assert_eq!(screen_point(at(200.0, 150.0), (100, 50), 1.0), (300, 200));
+        // 125% and 150%: the content's origin is where the system says, already in pixels.
+        assert_eq!(screen_point(at(200.0, 200.0), (250, 125), 1.25), (500, 375));
+        assert_eq!(screen_point(at(400.0, 200.0), (150, 150), 1.5), (750, 450));
+        // A monitor left of the main one, and one above it: negative screen coordinates.
+        assert_eq!(
+            screen_point(at(400.0, 100.0), (-1600, 150), 1.5),
+            (-1000, 300)
+        );
+        assert_eq!(
+            screen_point(at(960.0, 320.0), (-1700, -600), 1.25),
+            (-500, -200)
+        );
+        assert_eq!(screen_point(at(0.0, 0.0), (-10, -10), 1.0), (-10, -10));
+        // A fraction of a logical pixel goes to the nearest physical one.
+        assert_eq!(screen_point(at(10.3, 10.7), (0, 0), 1.0), (10, 11));
+        assert_eq!(screen_point(at(10.2, 10.6), (0, 0), 1.25), (13, 13));
+        // The other way round of `client_point`, at every scale and on every monitor.
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            for origin in [(0, 0), (-1920, 0), (-2560, -1440), (1920, 200)] {
+                for point in [
+                    at(0.0, 0.0),
+                    at(12.0, 34.0),
+                    at(799.2, 599.6),
+                    at(-8.0, -8.0),
+                ] {
+                    let screen = screen_point(point, origin, scale);
+                    let back = client_point(screen, origin, scale);
+                    let pixel = 1.0 / scale;
+                    assert!(
+                        f64::from((back.x - point.x).abs()) <= pixel / 2.0 + 1e-4
+                            && f64::from((back.y - point.y).abs()) <= pixel / 2.0 + 1e-4,
+                        "{point:?} {origin:?} {scale}: {screen:?} {back:?}"
+                    );
+                }
+            }
+        }
+        // A scale the system did not tell counts as 1, and no number as 0.
+        assert_eq!(screen_point(at(200.0, 150.0), (100, 50), 0.0), (300, 200));
+        assert_eq!(
+            screen_point(at(200.0, 150.0), (100, 50), f64::NAN),
+            (300, 200)
+        );
+        assert_eq!(
+            screen_point(at(f32::NAN, 150.0), (100, 50), 1.0),
+            (100, 200)
+        );
+        // The far ends of the screen stay within its numbers.
+        assert_eq!(
+            screen_point(at(f32::MAX, -f32::MAX), (i32::MAX, i32::MIN), 1.0),
+            (i32::MAX, i32::MIN)
+        );
+        assert_eq!(
+            screen_point(at(f32::INFINITY, f32::NEG_INFINITY), (0, 0), 1.5),
+            (i32::MAX, i32::MIN)
         );
     }
 

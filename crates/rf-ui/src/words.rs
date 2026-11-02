@@ -1009,6 +1009,10 @@ pub enum ShellAction {
     Terminal,
     /// OS 속성 창 열기.
     SystemProperties,
+    /// The system's own menu of items (Windows': Shift+F10, 더 많은 옵션 표시).
+    SystemMenu,
+    /// 공유… (macOS).
+    Share,
 }
 
 /// The notice when the system did not do `action` on `os`: it does not do it there
@@ -1029,6 +1033,12 @@ pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
         (ShellAction::SystemProperties, ErrorKind::Unsupported) => {
             "이 시스템에서는 OS 속성 창을 지원하지 않습니다".to_owned()
         }
+        (ShellAction::SystemMenu, ErrorKind::Unsupported) => {
+            "이 시스템에는 Windows 메뉴가 없습니다".to_owned()
+        }
+        (ShellAction::Share, ErrorKind::Unsupported) => {
+            "이 시스템에서는 공유를 지원하지 않습니다".to_owned()
+        }
         (ShellAction::SystemProperties, ErrorKind::PermissionDenied) if os == Os::MacOs => {
             "Finder를 제어할 권한이 없어 정보 창을 열지 못했습니다. 시스템 설정 ▸ 개인정보 보호 및 \
              보안 ▸ 자동화에서 허용해 주세요"
@@ -1040,6 +1050,8 @@ pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
                 ShellAction::RunAsAdmin => "관리자 권한으로 실행하지 못했습니다",
                 ShellAction::Terminal => "터미널을 열지 못했습니다",
                 ShellAction::SystemProperties => "OS 속성 창을 열지 못했습니다",
+                ShellAction::SystemMenu => "Windows 메뉴를 띄우지 못했습니다",
+                ShellAction::Share => "공유하지 못했습니다",
             };
             format!("{what}: {}", error_kind(kind))
         }
@@ -3030,7 +3042,31 @@ mod tests {
             shell_failed(A::RunAsAdmin, ErrorKind::Other, Os::Windows),
             "관리자 권한으로 실행하지 못했습니다: 알 수 없는 오류가 났습니다"
         );
-        for action in [A::OpenWith, A::RunAsAdmin, A::Terminal, A::SystemProperties] {
+        // Windows' own menu, and 공유… of macOS.
+        assert_eq!(
+            shell_failed(A::SystemMenu, ErrorKind::NotFound, Os::Windows),
+            "Windows 메뉴를 띄우지 못했습니다: 찾을 수 없습니다"
+        );
+        assert_eq!(
+            shell_failed(A::SystemMenu, ErrorKind::Unsupported, Os::Other),
+            "이 시스템에는 Windows 메뉴가 없습니다"
+        );
+        assert_eq!(
+            shell_failed(A::Share, ErrorKind::Other, Os::MacOs),
+            "공유하지 못했습니다: 알 수 없는 오류가 났습니다"
+        );
+        assert_eq!(
+            shell_failed(A::Share, ErrorKind::Unsupported, Os::Other),
+            "이 시스템에서는 공유를 지원하지 않습니다"
+        );
+        for action in [
+            A::OpenWith,
+            A::RunAsAdmin,
+            A::Terminal,
+            A::SystemProperties,
+            A::SystemMenu,
+            A::Share,
+        ] {
             for kind in ERROR_KINDS {
                 for os in [Os::Windows, Os::MacOs, Os::Other] {
                     let words = shell_failed(action, kind, os);

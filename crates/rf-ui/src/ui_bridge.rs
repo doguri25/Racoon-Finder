@@ -1033,6 +1033,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_copy_path_form(PathForm::of_key(os).number());
     shown.set_properties(key(Command::Properties));
     shown.set_open_terminal(key(Command::OpenTerminal));
+    shown.set_system_menu(key(Command::SystemMenu));
 }
 
 /// The app's window as the owner of a dialog of the system and of the window's drop target: its

@@ -1,5 +1,11 @@
+#![allow(
+    unsafe_code,
+    reason = "the share picker's items are an untyped array of AppKit's"
+)]
+
 //! macOS: the apps that can open a file and the one chosen to open it (`NSWorkspace`), Terminal
-//! (`open -a Terminal`), and Finder's 정보 가져오기 window (`osascript`).
+//! (`open -a Terminal`), Finder's 정보 가져오기 window (`osascript`), and the picker of the ways
+//! to share items (`NSSharingServicePicker`, 공유…).
 //!
 //! `NSWorkspace` is not bound to the main thread (objc2-app-kit asks for no `MainThreadMarker`
 //! for it, and Swift imports it without `@MainActor`), so these calls run on the caller's worker
@@ -11,6 +17,12 @@
 //! one argument ([`info_window_launch`]). The first time, macOS asks the user whether the app may
 //! control Finder (개인정보 보호 및 보안 ▸ 자동화; the bundle's `NSAppleEventsUsageDescription`
 //! says why); a refusal comes back as `PermissionDenied`.
+//!
+//! The picker of 공유… is `AppKit`'s, on the main thread ([`share`]): the items' file URLs, byte
+//! for byte as the clipboard writes them, by the point of the window's content view (winit's)
+//! the menu showed at ([`view_point`]), below it. It shows its menu of services and returns;
+//! `AppKit` keeps it until the user has chosen. There is no menu of the system's own of items
+//! here (Windows' alone).
 
 use std::ffi::OsString;
 use std::io;
@@ -21,16 +33,27 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
+use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
-use objc2_foundation::{NSArray, NSError, NSFileManager, NSString, NSURL};
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{
+    NSRunningApplication, NSSharingServicePicker, NSWorkspace, NSWorkspaceOpenConfiguration,
+};
+use objc2_foundation::{
+    NSArray, NSError, NSFileManager, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL,
+};
 
 use super::{
-    App, Launch, OpenWith, Owner, arrange_apps, info_window_launch, open_failure, osascript_failure,
+    App, Launch, OpenWith, Owner, SystemMenuChoice, WindowPoint, arrange_apps, info_window_launch,
+    open_failure, osascript_failure, view_point,
 };
+use crate::clipboard::file_url as exact_url;
+use crate::dnd::content_view;
 
 pub const OPEN_WITH: OpenWith = OpenWith::Apps;
 pub const RUNS_AS_ADMIN: bool = false;
+pub const SYSTEM_MENU: bool = false;
+pub const SHARES: bool = true;
 
 /// How long an open waits for the system to say that the app opened the file. An app that
 /// takes longer to start is not a failure: the wait just ends.
@@ -146,6 +169,48 @@ pub fn run_as_admin(_path: &Path, _owner: Owner) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "no program runs as administrator on macOS",
     ))
+}
+
+pub fn system_menu(
+    _owner: Owner,
+    _folder: &Path,
+    _names: &[OsString],
+    _at: WindowPoint,
+    _extended: bool,
+) -> io::Result<SystemMenuChoice> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the menu of items is Windows' own",
+    ))
+}
+
+pub fn share(owner: Owner, paths: &[PathBuf], at: WindowPoint) -> io::Result<()> {
+    let (_main, view) = content_view(owner)?;
+    autoreleasepool(|_| {
+        let items = paths
+            .iter()
+            .map(|path| exact_url(path).map(|url| url.into_super().into_super()))
+            .collect::<io::Result<Vec<Retained<AnyObject>>>>()?;
+        let items = NSArray::from_retained_slice(&items);
+        // SAFETY: the items are file URLs (`NSURL`), which the picker takes.
+        let picker = unsafe {
+            NSSharingServicePicker::initWithItems(NSSharingServicePicker::alloc(), &items)
+        };
+        let flipped = view.isFlipped();
+        let (x, y) = view_point(at, view.bounds().size.height, flipped);
+        // Below the point, as a menu opens there.
+        let below = if flipped {
+            NSRectEdge::MaxY
+        } else {
+            NSRectEdge::MinY
+        };
+        picker.showRelativeToRect_ofView_preferredEdge(
+            NSRect::new(NSPoint::new(x, y), NSSize::new(1.0, 1.0)),
+            &view,
+            below,
+        );
+        Ok(())
+    })
 }
 
 #[cfg(test)]
