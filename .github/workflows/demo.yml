@@ -1,6 +1,7 @@
 # Builds the demo app for each OS and uploads one downloadable package per platform
-# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.3.0`) also
-# publishes the four packages as a GitHub release, with docs/releases/<tag>.md as its notes.
+# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.3.0`), or a
+# manual run with "release" ticked, also publishes the four packages as the GitHub release
+# v<workspace version>, with docs/releases/<tag>.md as its notes.
 name: Demo build
 
 on:
@@ -8,6 +9,11 @@ on:
     branches: [main, "feat/**"]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish the packages as the release v<workspace version> (creates the tag on this commit)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -120,12 +126,13 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # A version tag publishes the packages of this run as a pre-release (a demo, not 1.0).
-  # The tag must name the workspace version, and its notes must exist.
+  # A version tag, or a manual run with "release", publishes the packages of this run as a
+  # pre-release (a demo, not 1.0). The tag names the workspace version, and its notes must exist;
+  # a manual run creates the tag on the commit it built.
   release:
     name: release
     needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -133,15 +140,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Check the tag
+        id: tag
         shell: bash
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version"
             exit 1
           fi
-          test -f "docs/releases/$GITHUB_REF_NAME.md" || { echo "::error::docs/releases/$GITHUB_REF_NAME.md is missing"; exit 1; }
+          test -f "docs/releases/$tag.md" || { echo "::error::docs/releases/$tag.md is missing"; exit 1; }
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
       # The packages were uploaded unzipped (archive: false), which download-artifact v8 keeps.
       - uses: actions/download-artifact@v8
         with:
@@ -159,7 +169,9 @@ jobs:
             echo "::error::expected 4 packages, found ${#files[@]}"
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" "${files[@]}" \
-            --verify-tag --prerelease \
-            --title "Racoon Finder ${GITHUB_REF_NAME#v} (데모)" \
-            --notes-file "docs/releases/$GITHUB_REF_NAME.md"
+          tag="${{ steps.tag.outputs.name }}"
+          # A pushed tag is used as it is; a manual run tags the commit it built.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then where=(--verify-tag); else where=(--target "$GITHUB_SHA"); fi
+          gh release create "$tag" "${files[@]}" "${where[@]}" --prerelease \
+            --title "Racoon Finder ${tag#v} (데모)" \
+            --notes-file "docs/releases/$tag.md"
