@@ -14,6 +14,9 @@ Windows 11과 macOS 15에서 쓰는 듀얼 패널 파일 관리자입니다. 아
 
 ### 내려받기
 
+버전 태그가 붙은 데모(0.3.0부터)는 저장소의 **Releases**에서도 같은 네 파일을 내려받을 수 있습니다
+([v0.3.0](https://github.com/doguri25/Racoon-Finder/releases/tag/v0.3.0)). 개발 중인 최신 빌드는 아래처럼 Actions에서 받습니다.
+
 1. GitHub에 로그인합니다. Actions 산출물은 로그인해야 내려받을 수 있습니다.
 2. 이 저장소의 **Actions** 탭 → 왼쪽 목록의 **Demo build** → 초록 체크 표시가 붙은 최근 실행을 엽니다. 0.3.0 데모는
    `feat/m1-core` 브랜치(합친 뒤에는 `main`)의 실행입니다. 실행 제목 옆의 브랜치 이름으로 고릅니다.
