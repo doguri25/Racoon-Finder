@@ -38,10 +38,14 @@
 //! the next ones for [`TIMED_OUT_FOR`]), and a new worker takes the stuck one's place. The stuck
 //! thread cannot be stopped; it is left to end when the call returns, and what it made then is
 //! dropped. With [`MAX_STUCK`] such threads alive no more are started, and what is asked fails
-//! at once until some return. Each worker is a plain thread of its
+//! at once until some return. The watchdog's clock runs only while the provider or the decoder
+//! works: a file waiting for one of the [`DECODES`] decode permits is not timed (its clock
+//! starts when it holds the permit), and that wait is bounded on its own by [`PERMIT_WAIT`]:
+//! past it the request fails without being marked as timed out, and a later ask tries it again. Each worker is a plain thread of its
 //! own (never a pool's): Windows' provider needs a thread that can join a single-threaded COM
 //! apartment.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
@@ -76,6 +80,9 @@ pub const DECODES: usize = 2;
 /// How many stuck threads (calls the watchdog gave up on that have not returned) a pool lives
 /// with before it stops starting workers.
 pub const MAX_STUCK: usize = 8;
+/// How long a file may wait for a decode permit; past it that request fails (and is asked for
+/// again later: it is not marked as timed out).
+pub const PERMIT_WAIT: Duration = Duration::from_secs(20);
 /// How long a file that timed out is not asked for again, in any listing.
 pub const TIMED_OUT_FOR: Duration = Duration::from_secs(60);
 
@@ -154,6 +161,9 @@ struct Inner {
     workers: usize,
     timeout: Duration,
     max_stuck: usize,
+    /// The decode permits to wait for, and how long.
+    permits: &'static Permits,
+    permit_wait: Duration,
 }
 
 struct State {
@@ -162,8 +172,9 @@ struct State {
     /// The tasks not started, the first on screen first.
     queue: VecDeque<Task>,
     /// The tasks under way, by the id of their worker. A worker the watchdog gave up on is no
-    /// longer here: it ends when its call returns.
-    running: HashMap<u64, (Task, Instant)>,
+    /// longer here: it ends when its call returns. The time is when the call started, `None`
+    /// while it waits for a decode permit (the watchdog does not time that).
+    running: HashMap<u64, (Task, Option<Instant>)>,
     ready: Vec<Done>,
     /// The last thumbnails made or read, by key, with the time of their last use (a count).
     memory: HashMap<String, (Pixels, u64)>,
@@ -243,6 +254,8 @@ impl ThumbPool {
                 workers: workers.max(1),
                 timeout,
                 max_stuck,
+                permits: &DECODING,
+                permit_wait: PERMIT_WAIT,
             }),
         }
     }
@@ -421,7 +434,9 @@ fn work(inner: &Arc<Inner>, id: u64) {
                     return;
                 }
                 if let Some(task) = state.queue.pop_front() {
-                    state.running.insert(id, (task.clone(), Instant::now()));
+                    state
+                        .running
+                        .insert(id, (task.clone(), Some(Instant::now())));
                     break task;
                 }
                 state = inner
@@ -432,7 +447,10 @@ fn work(inner: &Arc<Inner>, id: u64) {
         };
         // What an older listing's task made is in memory: not made again.
         let known = inner.lock().remember(&task.key);
-        let made = known.or_else(|| make(inner, &task.want, &task.key));
+        let made = match known {
+            Some(pixels) => Made::Pixels(pixels),
+            None => make(inner, id, &task.want, &task.key),
+        };
         let mut state = inner.lock();
         if state.running.remove(&id).is_none() {
             // Given up on: another worker has taken this one's place.
@@ -441,12 +459,17 @@ fn work(inner: &Arc<Inner>, id: u64) {
         }
         let current = task.generation == state.generation;
         match &made {
-            Some(pixels) => state.keep(task.key, pixels.clone()),
-            None if current => {
+            Made::Pixels(pixels) => state.keep(task.key, pixels.clone()),
+            Made::Nothing if current => {
                 state.none.insert(task.key);
             }
-            None => {}
+            // Not known to have none: a later ask tries it again.
+            Made::Nothing | Made::Busy => {}
         }
+        let pixels = match made {
+            Made::Pixels(pixels) => Some(pixels),
+            Made::Nothing | Made::Busy => None,
+        };
         if current {
             state.ready.push(Done {
                 generation: task.generation,
@@ -454,7 +477,7 @@ fn work(inner: &Arc<Inner>, id: u64) {
                 size: task.want.size,
                 len: task.want.len,
                 mtime: task.want.mtime,
-                pixels: made,
+                pixels,
             });
         }
     }
@@ -482,7 +505,7 @@ fn watch(inner: &Arc<Inner>) {
         let stuck: Vec<u64> = state
             .running
             .iter()
-            .filter(|(_, (_, started))| started.elapsed() >= inner.timeout)
+            .filter(|(_, (_, started))| started.is_some_and(|at| at.elapsed() >= inner.timeout))
             .map(|(id, _)| *id)
             .collect();
         if stuck.is_empty() {
@@ -512,13 +535,49 @@ fn watch(inner: &Arc<Inner>) {
     }
 }
 
+/// What making a file's thumbnail came to.
+enum Made {
+    Pixels(Pixels),
+    /// Nothing makes one.
+    Nothing,
+    /// No decode permit came in time: not known to have none.
+    Busy,
+}
+
+impl Inner {
+    /// Sets the clock of the call of worker `id`: `None` stops it (the worker waits for a
+    /// permit), `Some` starts it now. Nothing when the watchdog gave up on the call.
+    fn set_clock(&self, id: u64, running: bool) {
+        if let Some((_, started)) = self.lock().running.get_mut(&id) {
+            *started = running.then(Instant::now);
+        }
+    }
+}
+
 /// The thumbnail of `want`: from the disk cache, or the provider (guarded), or the app's own
-/// decoder; written to the disk cache when it was made here. `None` when nothing makes one.
-fn make(inner: &Inner, want: &ThumbWant, key: &str) -> Option<Pixels> {
+/// decoder; written to the disk cache when it was made here. The watchdog's clock of worker `id`
+/// stops while the decoder waits for a permit and starts again when it holds it.
+fn make(inner: &Inner, id: u64, want: &ThumbWant, key: &str) -> Made {
+    match make_pixels(inner, id, want, key) {
+        Ok(Some(pixels)) => Made::Pixels(pixels),
+        Ok(None) => Made::Nothing,
+        Err(Busy) => Made::Busy,
+    }
+}
+
+/// No decode permit came in time.
+struct Busy;
+
+fn make_pixels(
+    inner: &Inner,
+    id: u64,
+    want: &ThumbWant,
+    key: &str,
+) -> Result<Option<Pixels>, Busy> {
     let file = cache_path(&inner.cache, want.size, key);
     if file.is_file() {
         match preview::guarded(|| read_cached(&file, want.size)).flatten() {
-            Some(pixels) => return Some(pixels),
+            Some(pixels) => return Ok(Some(pixels)),
             // A broken file is made again.
             None => {
                 let _ = fs::remove_file(&file);
@@ -526,25 +585,44 @@ fn make(inner: &Inner, want: &ThumbWant, key: &str) -> Option<Pixels> {
         }
     }
     let provider = Arc::clone(&inner.provider);
-    let picture = match preview::guarded(|| provider(&want.path, want.size))? {
+    let Some(outcome) = preview::guarded(|| provider(&want.path, want.size)) else {
+        return Ok(None);
+    };
+    let picture = match outcome {
         ThumbOutcome::Made(thumb) => RgbaImage::from_raw(thumb.width, thumb.height, thumb.rgba)
             .and_then(|image| fitted(&image, want.size)),
         ThumbOutcome::None | ThumbOutcome::Failed(_) => None,
     };
-    let picture = match picture {
-        Some(picture) => picture,
-        None => preview::guarded(|| decoded(&want.path, want.len, want.size)).flatten()?,
+    let picture = if let Some(picture) = picture {
+        picture
+    } else {
+        let busy = Cell::new(false);
+        let acquire = || {
+            inner.set_clock(id, false);
+            let permit = inner.permits.acquire_within(inner.permit_wait);
+            inner.set_clock(id, true);
+            busy.set(permit.is_none());
+            permit
+        };
+        let decoded = preview::guarded(|| decoded(&want.path, want.len, want.size, &acquire));
+        if busy.get() {
+            return Err(Busy);
+        }
+        match decoded.flatten() {
+            Some(picture) => picture,
+            None => return Ok(None),
+        }
     };
     if write_cached(&file, &picture)
         && WRITTEN.fetch_add(1, Ordering::Relaxed) % PRUNE_EVERY == PRUNE_EVERY - 1
     {
         prune_in_background(&inner.cache);
     }
-    Some(Pixels::clone_from_slice(
+    Ok(Some(Pixels::clone_from_slice(
         picture.as_raw(),
         picture.width(),
         picture.height(),
-    ))
+    )))
 }
 
 /// `image` shrunk to fit `size` × `size` in its ratio (as it is when it fits); `None` for one
@@ -561,14 +639,20 @@ fn fitted(image: &RgbaImage, size: u32) -> Option<RgbaImage> {
 }
 
 /// The app's own thumbnail of the picture at `path` (`len` bytes), by its extension; `None` for
-/// a file that is not a picture it decodes, or is over the preview's file-size cap.
-fn decoded(path: &Path, len: u64, size: u32) -> Option<RgbaImage> {
+/// a file that is not a picture it decodes, or is over the preview's file-size cap, or when
+/// `acquire` gives no decode permit.
+fn decoded(
+    path: &Path,
+    len: u64,
+    size: u32,
+    acquire: &dyn Fn() -> Option<Permit>,
+) -> Option<RgbaImage> {
     let format = preview::image_format(path.file_name()?)?;
     if len > preview::MAX_IMAGE_BYTES {
         return None;
     }
     let reader = BufReader::new(File::open(path).ok()?);
-    let _permit = DECODING.acquire();
+    let _permit = acquire()?;
     let image = preview::decode_thumbnail_source(reader, format, &CancelToken::new()).ok()?;
     let rgba = RgbaImage::from_raw(
         image.pixels.width(),
@@ -632,10 +716,20 @@ fn prune_in_background(cache: &Path) {
     let spawned = std::thread::Builder::new()
         .name("rf-ui-thumbs-prune".to_owned())
         .spawn(move || {
+            // Lets the next pruning start even if this one panics.
+            let _done = PruningDone;
             prune(&cache, CACHE_CAP);
-            PRUNING.store(false, Ordering::Release);
         });
     if spawned.is_err() {
+        PRUNING.store(false, Ordering::Release);
+    }
+}
+
+/// Ends the running pruning when dropped, on a panic too.
+struct PruningDone;
+
+impl Drop for PruningDone {
+    fn drop(&mut self) {
         PRUNING.store(false, Ordering::Release);
     }
 }
@@ -655,17 +749,23 @@ static DECODING: Permits = Permits {
 };
 
 impl Permits {
-    /// Waits for a permit.
-    fn acquire(&'static self) -> Permit {
+    /// Waits up to `wait` for a permit; `None` when none came.
+    fn acquire_within(&'static self, wait: Duration) -> Option<Permit> {
+        let deadline = Instant::now() + wait;
         let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
         while *free == 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
             free = self
                 .freed
-                .wait(free)
-                .unwrap_or_else(PoisonError::into_inner);
+                .wait_timeout(free, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         *free -= 1;
-        Permit(self)
+        Some(Permit(self))
     }
 }
 
@@ -1088,25 +1188,27 @@ mod tests {
         std::thread::sleep(QUIET);
         pool.want(2, vec![want(dir.path(), "f.dat", 0)]);
         let again = collect(&pool, 1);
-        assert_eq!(again.len(), 1, "{again:?}");
+        // Made, not shed.
+        assert_eq!(again, [("f.dat".to_owned(), 2, Some((8, 8)))]);
     }
 
     #[test]
     fn a_picture_over_the_preview_s_size_cap_is_not_decoded() {
+        let permit = || DECODING.acquire_within(WAIT);
         let dir = tempfile::tempdir().unwrap();
         let big = dir.path().join("big.png");
         File::create(&big)
             .unwrap()
             .set_len(preview::MAX_IMAGE_BYTES + 1)
             .unwrap();
-        assert!(decoded(&big, preview::MAX_IMAGE_BYTES + 1, 96).is_none());
+        assert!(decoded(&big, preview::MAX_IMAGE_BYTES + 1, 96, &permit).is_none());
         let small = dir.path().join("small.png");
         RgbaImage::from_pixel(30, 30, image::Rgba([1, 2, 3, 255]))
             .save(&small)
             .unwrap();
         let len = fs::metadata(&small).unwrap().len();
         assert_eq!(
-            decoded(&small, len, 96).map(|image| image.dimensions()),
+            decoded(&small, len, 96, &permit).map(|image| image.dimensions()),
             Some((30, 30))
         );
     }
@@ -1117,15 +1219,104 @@ mod tests {
             free: Mutex::new(1),
             freed: Condvar::new(),
         };
-        let first = PERMITS.acquire();
+        let first = PERMITS.acquire_within(WAIT).unwrap();
         let (done, waited) = mpsc::channel();
         std::thread::spawn(move || {
-            let _second = PERMITS.acquire();
+            let _second = PERMITS.acquire_within(WAIT);
             let _ = done.send(());
         });
         assert!(waited.recv_timeout(QUIET).is_err(), "waits for the first");
         drop(first);
         assert!(waited.recv_timeout(WAIT).is_ok());
+    }
+
+    /// A pool whose decoder waits on `permits` for `permit_wait`, with the watchdog at `timeout`,
+    /// and a PNG `pic.png` in `dir` that the provider (which has none) leaves to the decoder.
+    fn decoding_pool(
+        dir: &Path,
+        permits: &'static Permits,
+        timeout: Duration,
+        permit_wait: Duration,
+    ) -> ThumbPool {
+        RgbaImage::from_pixel(30, 30, image::Rgba([1, 2, 3, 255]))
+            .save(dir.join("pic.png"))
+            .unwrap();
+        let provider: ThumbProvider = Arc::new(|_: &Path, _: u32| ThumbOutcome::None);
+        let mut pool = ThumbPool::with_limits(1, dir.to_owned(), provider, timeout, 8);
+        let inner = Arc::get_mut(&mut pool.inner).unwrap();
+        inner.permits = permits;
+        inner.permit_wait = permit_wait;
+        pool
+    }
+
+    fn want_pic(dir: &Path) -> ThumbWant {
+        ThumbWant {
+            path: dir.join("pic.png"),
+            size: 48,
+            mtime: None,
+            len: fs::metadata(dir.join("pic.png")).unwrap().len(),
+            visible_rank: 0,
+        }
+    }
+
+    #[test]
+    fn a_wait_for_a_decode_permit_is_not_timed_by_the_watchdog() {
+        static PERMITS: Permits = Permits {
+            free: Mutex::new(0),
+            freed: Condvar::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let pool = decoding_pool(
+            dir.path(),
+            &PERMITS,
+            Duration::from_millis(200),
+            Duration::from_secs(30),
+        );
+        pool.want(1, vec![want_pic(dir.path())]);
+        // Longer than the watchdog's timeout, with a permit short.
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(pool.take_ready().is_empty());
+        *PERMITS.free.lock().unwrap() += 1;
+        PERMITS.freed.notify_one();
+        assert_eq!(
+            collect(&pool, 1),
+            [("pic.png".to_owned(), 1, Some((30, 30)))]
+        );
+        let state = pool.inner.lock();
+        assert!(state.timed_out.is_empty());
+        assert_eq!(state.stuck, 0);
+    }
+
+    #[test]
+    fn a_permit_wait_that_runs_out_fails_the_request_without_marking_it() {
+        static PERMITS: Permits = Permits {
+            free: Mutex::new(0),
+            freed: Condvar::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let pool = decoding_pool(
+            dir.path(),
+            &PERMITS,
+            Duration::from_secs(30),
+            Duration::from_millis(200),
+        );
+        pool.want(1, vec![want_pic(dir.path())]);
+        assert_eq!(collect(&pool, 1), [("pic.png".to_owned(), 1, None)]);
+        {
+            let state = pool.inner.lock();
+            assert!(state.timed_out.is_empty());
+            assert!(state.none.is_empty(), "a later ask in this listing retries");
+            assert_eq!(state.stuck, 0);
+            assert_eq!(state.alive, 1);
+        }
+        // A permit is free now: asked again, it is made.
+        *PERMITS.free.lock().unwrap() += 1;
+        PERMITS.freed.notify_one();
+        pool.want(1, vec![want_pic(dir.path())]);
+        assert_eq!(
+            collect(&pool, 1),
+            [("pic.png".to_owned(), 1, Some((30, 30)))]
+        );
     }
 
     #[test]
