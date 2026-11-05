@@ -342,6 +342,7 @@ impl Controller {
             let state = state.as_ref()?;
             settings.set_session(&state.session());
             settings.set_recent(state.recent_targets());
+            state.save_sidebar(&mut settings);
             settings.set_views(state.views());
             settings.drag_default = state.drag_default();
             settings.move_undo_toast = state.move_undo_toast();

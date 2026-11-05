@@ -268,6 +268,16 @@ pub enum TreeKey {
     /// The key that gave the tree the keys (F6): on to the next part of the window, the job
     /// panel while it shows ([`PanelKey`]), else back to the active pane.
     Next,
+    /// The menu key, Shift+F10 (macOS ⌃↩): the menu of the favorite the cursor is on; on any
+    /// other row, the menu of the sidebar's empty part.
+    Menu,
+    /// F2: rename the favorite the cursor is on.
+    Rename,
+    /// ↩ on macOS, where Finder's sidebar renames with it: rename the favorite the cursor is on;
+    /// on any other row, open its folder (`Open`).
+    OpenOrRename,
+    /// Delete: take the favorite the cursor is on out of the list, without asking.
+    Remove,
 }
 
 /// What `text`, held with `mods`, does in the sidebar's tree on `os`; `None` for a key that is
@@ -281,9 +291,18 @@ pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
             (Key::DownArrow, TreeKey::Down),
             (Key::RightArrow, TreeKey::Expand),
             (Key::LeftArrow, TreeKey::Collapse),
-            (Key::Return, TreeKey::Open),
+            // ↩ renames a favorite on macOS, as in Finder's sidebar; a row that is none opens.
+            (
+                Key::Return,
+                if os == Os::MacOs {
+                    TreeKey::OpenOrRename
+                } else {
+                    TreeKey::Open
+                },
+            ),
             (Key::Escape, TreeKey::Leave),
             (Key::Tab, TreeKey::Leave),
+            (Key::Delete, TreeKey::Remove),
         ];
         let found = plain
             .into_iter()
@@ -300,6 +319,10 @@ pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
     match command_for(text, mods, os)? {
         Command::Open => Some(TreeKey::Open),
         Command::FocusTree => Some(TreeKey::Next),
+        Command::ContextMenu | Command::SystemMenu => Some(TreeKey::Menu),
+        Command::Rename => Some(TreeKey::Rename),
+        // The keys that put an item in the trash take a favorite out of the list.
+        Command::Trash => Some(TreeKey::Remove),
         _ => None,
     }
 }
@@ -1747,14 +1770,22 @@ mod tests {
                 (Key::DownArrow, TreeKey::Down),
                 (Key::RightArrow, TreeKey::Expand),
                 (Key::LeftArrow, TreeKey::Collapse),
-                (Key::Return, TreeKey::Open),
                 (Key::Escape, TreeKey::Leave),
                 (Key::Tab, TreeKey::Leave),
                 // F6, which gave the tree the keys, goes on to the next part of the window.
                 (Key::F6, TreeKey::Next),
+                // Delete takes a favorite out of the list.
+                (Key::Delete, TreeKey::Remove),
             ] {
                 assert_eq!(t(os, &key(k), NONE), Some(wanted), "{os:?} {k:?}");
             }
+            // ↩ opens a folder, but renames a favorite on macOS, as Finder's sidebar does.
+            let enter = if os == Os::MacOs {
+                TreeKey::OpenOrRename
+            } else {
+                TreeKey::Open
+            };
+            assert_eq!(t(os, &key(Key::Return), NONE), Some(enter), "{os:?}");
             assert_eq!(t(os, &key(Key::Tab), SHIFT), Some(TreeKey::Leave));
             assert_eq!(t(os, &key(Key::Backtab), SHIFT), Some(TreeKey::Leave));
             // Other keys are the window's.
@@ -1762,7 +1793,7 @@ mod tests {
                 (text("b"), CTRL),
                 (text("a"), NONE),
                 (key(Key::UpArrow), SHIFT),
-                (key(Key::Delete), NONE),
+                (key(Key::Delete), SHIFT),
                 (key(Key::F12), NONE),
             ] {
                 assert_eq!(t(os, &text, mods), None, "{os:?} {text:?} {mods:?}");
@@ -1771,6 +1802,38 @@ mod tests {
         // The system's own key to open opens too.
         assert_eq!(t(Os::MacOs, &key(Key::DownArrow), CMD), Some(TreeKey::Open));
         assert_eq!(t(Os::MacOs, "o", CMD), Some(TreeKey::Open));
+    }
+
+    #[test]
+    fn the_tree_keeps_the_favorites_from_the_keyboard() {
+        let t = |os: Os, text: &str, mods: Mods| tree_key(text, mods, os);
+        let menu_keys = |os: Os| match os {
+            // Slint reports macOS's Control as `meta`.
+            Os::MacOs => vec![(key(Key::Return), META)],
+            _ => vec![(key(Key::Menu), NONE), (key(Key::F10), SHIFT)],
+        };
+        for os in [Os::Windows, Os::Other, Os::MacOs] {
+            for (k, mods) in menu_keys(os) {
+                assert_eq!(t(os, &k, mods), Some(TreeKey::Menu), "{os:?} {k:?}");
+            }
+            // F2 renames; on macOS ↩ does, where the row is a favorite, and else opens.
+            if os == Os::MacOs {
+                assert_eq!(t(os, &key(Key::Return), NONE), Some(TreeKey::OpenOrRename));
+            } else {
+                assert_eq!(t(os, &key(Key::F2), NONE), Some(TreeKey::Rename), "{os:?}");
+            }
+            assert_eq!(
+                t(os, &key(Key::Delete), NONE),
+                Some(TreeKey::Remove),
+                "{os:?}"
+            );
+        }
+        // The keys that trash an item take a favorite out too.
+        assert_eq!(t(Os::Windows, "d", CTRL), Some(TreeKey::Remove));
+        assert_eq!(
+            t(Os::MacOs, &key(Key::Backspace), CMD),
+            Some(TreeKey::Remove)
+        );
     }
 
     #[test]

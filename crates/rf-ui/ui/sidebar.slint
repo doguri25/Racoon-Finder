@@ -5,10 +5,19 @@
 // folder of the row under the pointer (`accepts-drops`), tells where the pointer is
 // (`DragPointer`), and scrolls under a drag held near its top or bottom (DND-08); the picker's
 // takes none.
+//
+// The favorites are the user's to keep (NAV-05, DND-01): a folder dropped between two favorites,
+// or on the empty part of the list, is added there, shown by a line between the rows (or the
+// list's frame for the empty part); a favorite dragged by its row moves in the list; and a
+// favorite has a menu of its own, which a right click, the menu key and Shift+F10 open. Under the
+// favorites lies the group "최근 폴더", which folds: its head and its folders are rows of the same
+// list that are no folders of the tree (`RowKind`), so Rust numbers the tree's rows apart
+// (`TreeRow.row`).
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { Shortcuts } from "shortcuts.slint";
 import { DragPointer, DragSeen, DropPlace, DropAt } from "list-parts.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
 
@@ -17,6 +26,14 @@ export enum SectionHead {
     none,
     favorites,
     drives,
+}
+
+// What a row is: a folder of the tree (a place, or a folder below one), the head of the group of
+// recent folders (it folds the group), or one of those folders.
+export enum RowKind {
+    folder,
+    recent-head,
+    recent,
 }
 
 // One row of the tree, as Rust makes it. A place (a root) is a favorite or a drive; a drive
@@ -41,10 +58,99 @@ export struct TreeRow {
     dimmed: bool,
     // A hidden folder, which shows at half strength, as in the file list.
     hidden: bool,
+    kind: RowKind,
+    // The number the tree gives the row (the callbacks about drops use it); the rows of the
+    // group of recent folders have none (-1), and the rows of the picker's tree are numbered in
+    // their order.
+    row: int,
+    // A favorite (a place under "즐겨찾기"): `favorite` is its place in the list, `favorite-last`
+    // says it is the last one, and `can-up` and `can-down` say it can move.
+    is-favorite: bool,
+    favorite: int,
+    favorite-last: bool,
+    can-up: bool,
+    can-down: bool,
+    // A recent folder's place in the group.
+    recent: int,
+}
+
+// The menu of a favorite (NAV-05): its folder opens here or in the other pane, it gets another
+// name, leaves the list, or moves in it. Its items come back as `command` (open, open-other,
+// rename, remove, up, down).
+component FavoriteMenu inherits ContextMenuArea {
+    in property <bool> can-up: true;
+    in property <bool> can-down: true;
+    callback command(name: string);
+
+    // What the menu is of (before the menu: see `RowMenu`).
+    @children
+
+    Menu {
+        MenuItem {
+            title: "열기";
+            activated => {
+                root.command("open");
+            }
+        }
+        MenuItem {
+            title: "반대 패널에 열기";
+            activated => {
+                root.command("open-other");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
+            activated => {
+                root.command("rename");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("즐겨찾기에서 제거", Shortcuts.trash);
+            activated => {
+                root.command("remove");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "위로";
+            enabled: root.can-up;
+            activated => {
+                root.command("up");
+            }
+        }
+        MenuItem {
+            title: "아래로";
+            enabled: root.can-down;
+            activated => {
+                root.command("down");
+            }
+        }
+    }
+}
+
+// The menu of the sidebar's empty part: the folder of the active pane joins the favorites. Its
+// item comes back as `command` (add-current).
+component FavoritesBlankMenu inherits ContextMenuArea {
+    callback command(name: string);
+
+    // What the menu is of (before the menu: see `RowMenu`).
+    @children
+
+    Menu {
+        MenuItem {
+            title: "현재 폴더를 즐겨찾기에 추가";
+            activated => {
+                root.command("add-current");
+            }
+        }
+    }
 }
 
 component TreeItem inherits Rectangle {
     in property <TreeRow> item;
+    // The row's place in the list, recent folders among the rows (the tree's own number is
+    // `item.row`).
     in property <int> index;
     // Whether the row takes dragged rows into its folder.
     in property <bool> accepts-drops;
@@ -52,24 +158,70 @@ component TreeItem inherits Rectangle {
     in property <bool> cursor;
     // A drag of another app over the row, which it takes into the row's folder.
     in property <bool> outside-here;
+    // The gap of the list of favorites a drag of another app is over: the line between the rows
+    // shows there. -2 for none.
+    in property <int> outside-gap: -2;
+    // What dragging a favorite by this row carries (Rust readies it as the press shows it), and
+    // whether a favorite is being dragged: the rows then take it by halves.
+    in property <data-transfer> drag-data;
+    in property <bool> reordering;
     // A click on the row.
     callback clicked();
-    // The pointer moved over the row (`Sidebar.pointed-row`).
-    callback pointed();
+    // The pointer moved over the row (`Sidebar.pointed-row`): in the gap of the list of favorites
+    // `gap` that the row's edge stands for, or -2 in none.
+    callback pointed(gap: int);
     // A click on the chevron.
     callback toggled();
     // A drag with the payload `data` over the row: what a drop into the row's folder does (Rust
     // chooses it), or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer) -> DragAction;
     callback dropped(data: data-transfer) -> DragAction;
+    // The same over the gap `gap` of the list of favorites that the edge of a favorite's row
+    // stands for: a drop there keeps the folder as a favorite there.
+    callback gap-check(data: data-transfer, gap: int) -> DragAction;
+    callback gap-dropped(data: data-transfer, gap: int) -> DragAction;
+    // A drag is over the row, whether the row takes it or not.
+    callback on-row();
+    // The left button went down on a favorite's row, which a drag of it may follow.
+    callback favorite-pressed();
+    // Dragging this favorite began or ended.
+    callback reorder-changed(dragging: bool);
+    // An item of the favorite's menu.
+    callback menu-command(name: string);
 
     // The head takes more room above the drives, which come after the favorites.
     private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.index > 0 ? 36px : 24px;
     // Deep folders stop moving right at the eighth level, so their names stay readable in a
     // sidebar of 220 to 280px.
     private property <length> indent: min(root.item.depth, 8) * 16px;
+    // The head of the group of recent folders is a line of its own, like a section's head.
+    private property <bool> is-head: root.item.kind == RowKind.recent-head;
+    private property <length> body-height: root.item.is-drive ? 56px : Theme.row-height;
+    // The edges of a favorite's row stand for the gaps before and after it: a drop at the top
+    // edge is between this favorite and the one above, at the bottom edge between it and the one
+    // below (not while its folders show below it). While a favorite is dragged, the halves do.
+    // 0 for the middle: a drop there goes into the folder.
+    pure function zone-at(y: length) -> int {
+        if (!root.item.is-favorite || !root.accepts-drops) {
+            return 0;
+        }
+        if (root.reordering) {
+            return y < root.body-height / 2 ? 1 : 2;
+        }
+        if (y < 6px) {
+            return 1;
+        }
+        if (y > root.body-height - 6px && !root.item.expanded) {
+            return 2;
+        }
+        return 0;
+    }
+    // The gap a zone stands for.
+    pure function gap-of(zone: int) -> int {
+        return zone == 1 ? root.item.favorite : root.item.favorite + 1;
+    }
 
-    height: root.head-height + (root.item.is-drive ? 56px : Theme.row-height);
+    height: root.is-head ? (root.index > 0 ? 36px : 24px) : root.head-height + root.body-height;
 
     if root.item.head != SectionHead.none: Text {
         x: 18px;
@@ -80,26 +232,88 @@ component TreeItem inherits Rectangle {
         color: Theme.muted;
     }
 
-    Rectangle {
+    // The head of the group of recent folders: a click folds it or opens it.
+    if root.is-head: Rectangle {
+        accessible-role: list-item;
+        accessible-label: root.item.label;
+        accessible-item-index: root.index;
+        accessible-expandable: true;
+        accessible-expanded: root.item.expanded;
+        accessible-action-default => {
+            root.clicked();
+        }
+        accessible-action-expand => {
+            root.clicked();
+        }
+
+        Text {
+            x: 18px;
+            y: parent.height - self.height - 4px;
+            text: root.item.label;
+            font-size: Theme.font-small;
+            font-weight: 700;
+            color: Theme.muted;
+            accessible-role: none;
+        }
+        Icon {
+            x: parent.width - 30px;
+            y: parent.height - self.height - 6px;
+            width: 14px;
+            height: 14px;
+            name: root.item.expanded ? "chevron-down" : "chevron-right";
+            color: Theme.muted;
+        }
+        if root.cursor: Rectangle {
+            x: 8px;
+            y: parent.height - 28px;
+            width: parent.width - 16px;
+            height: 28px;
+            border-radius: Theme.radius;
+            border-width: 2px;
+            border-color: Theme.accent;
+        }
+        TouchArea {
+            clicked => {
+                root.clicked();
+            }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.move) {
+                    root.pointed(-2);
+                }
+            }
+        }
+        // A drag over it is seen as over a row, which takes nothing.
+        DropArea {
+            enabled: root.accepts-drops;
+            can-drop(event) => {
+                DragPointer.at(self.absolute-position, event.position);
+                root.on-row();
+                return DragAction.none;
+            }
+        }
+    }
+
+    if !root.is-head: Rectangle {
         x: 8px;
         y: root.head-height;
         width: parent.width - 16px;
         height: parent.height - root.head-height;
         border-radius: Theme.radius;
-        background: root.item.selected ? Theme.selection : root.item.dimmed ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+        background: root.item.selected ? Theme.selection : root.item.dimmed && root.item.kind == RowKind.folder ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
         accessible-role: list-item;
         accessible-label: root.item.label;
         accessible-description: root.item.info;
         // A dimmed folder of the picker's tree takes no click, as a quick target that cannot be
         // chosen: it is not selectable. It stays enabled, so that a screen reader can still
-        // open it (its chevron does) to reach the folders below it.
+        // open it (its chevron does) to reach the folders below it. A recent folder that is
+        // gone is dimmed too, but its click says so.
         accessible-item-index: root.index;
-        accessible-item-selectable: !root.item.dimmed;
+        accessible-item-selectable: !root.item.dimmed || root.item.kind == RowKind.recent;
         accessible-item-selected: root.item.selected;
         accessible-expandable: root.item.expandable;
         accessible-expanded: root.item.expanded;
         accessible-action-default => {
-            if (!root.item.dimmed) {
+            if (!root.item.dimmed || root.item.kind == RowKind.recent) {
                 root.clicked();
             }
         }
@@ -109,41 +323,83 @@ component TreeItem inherits Rectangle {
         }
 
         drop := DropArea {
+            // Where in the row the drag last was: 0 in the middle, 1 and 2 at the edges.
+            property <int> zone;
             enabled: root.accepts-drops;
             can-drop(event) => {
                 DragPointer.at(self.absolute-position, event.position);
+                root.on-row();
+                if (root.item.kind != RowKind.folder) {
+                    return DragAction.none;
+                }
+                self.zone = root.zone-at(event.position.y);
+                if (self.zone != 0) {
+                    return root.gap-check(event.data, root.gap-of(self.zone));
+                }
                 return root.drop-check(event.data);
             }
             dropped(event) => {
                 DragPointer.at(self.absolute-position, event.position);
+                let zone = root.zone-at(event.position.y);
+                if (zone != 0) {
+                    return root.gap-dropped(event.data, root.gap-of(zone));
+                }
                 return root.dropped(event.data);
             }
         }
 
-        touch := TouchArea {
-            clicked => {
-                if (!root.item.dimmed) {
-                    root.clicked();
-                }
+        // A favorite is dragged by its row to another place in the list.
+        DragArea {
+            enabled: root.item.is-favorite && root.accepts-drops;
+            data: root.drag-data;
+            allow-move: true;
+            drag-finished(action) => {
+                DragPointer.gone();
             }
-            pointer-event(event) => {
-                if (event.kind == PointerEventKind.move) {
-                    root.pointed();
-                }
+            changed dragging => {
+                root.reorder-changed(self.dragging);
             }
 
-            // The chevron takes its own clicks: it only opens or closes the row. Inside the
-            // row's area, so that the row keeps its hover.
-            TouchArea {
-                x: root.indent;
-                width: 24px;
-                enabled: root.item.expandable;
-                clicked => {
-                    root.toggled();
+            menu := FavoriteMenu {
+                enabled: root.item.is-favorite && root.accepts-drops;
+                can-up: root.item.can-up;
+                can-down: root.item.can-down;
+                command(name) => {
+                    root.menu-command(name);
                 }
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.move) {
-                        root.pointed();
+
+                touch := TouchArea {
+                    clicked => {
+                        if (!root.item.dimmed || root.item.kind == RowKind.recent) {
+                            root.clicked();
+                        }
+                    }
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.move) {
+                            root.pointed(root.item.is-favorite ? (root.zone-at(self.mouse-y) == 0 ? -2 : root.gap-of(root.zone-at(self.mouse-y))) : -2);
+                        }
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left && root.item.is-favorite) {
+                            root.favorite-pressed();
+                        }
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && root.item.is-favorite && root.accepts-drops) {
+                            menu.show({ x: self.mouse-x, y: self.mouse-y });
+                        }
+                    }
+
+                    // The chevron takes its own clicks: it only opens or closes the row. Inside
+                    // the row's area, so that the row keeps its hover.
+                    TouchArea {
+                        x: root.indent;
+                        width: 24px;
+                        enabled: root.item.expandable;
+                        clicked => {
+                            root.toggled();
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.move) {
+                                root.pointed(-2);
+                            }
+                        }
                     }
                 }
             }
@@ -220,58 +476,112 @@ component TreeItem inherits Rectangle {
             }
         }
 
-        // The row's folder takes the drag; or the keyboard cursor is on it.
-        if drop.has-drag || root.cursor || root.outside-here: Rectangle {
+        // The row's folder takes the drag (not at an edge, where the drag is between two
+        // favorites); or the keyboard cursor is on it.
+        if (drop.has-drag && drop.zone == 0) || root.cursor || root.outside-here: Rectangle {
             border-radius: Theme.radius;
             border-width: 2px;
             border-color: Theme.accent;
+        }
+
+        // Where a folder dropped on the list of favorites would go: a line between this favorite
+        // and the one above it, or below it (the line after the last one shows under it).
+        if root.item.is-favorite && ((drop.has-drag && drop.zone == 1) || (root.outside-gap >= 0 && root.outside-gap == root.item.favorite)): Rectangle {
+            x: 2px;
+            y: -1px;
+            width: parent.width - 4px;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent;
+            accessible-role: image;
+            accessible-label: "끼워 넣을 자리";
+        }
+        if root.item.is-favorite && ((drop.has-drag && drop.zone == 2) || (root.item.favorite-last && root.outside-gap > root.item.favorite)): Rectangle {
+            x: 2px;
+            y: parent.height - 1px;
+            width: parent.width - 4px;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent;
+            accessible-role: image;
+            accessible-label: "끼워 넣을 자리";
         }
     }
 }
 
 export component Sidebar inherits Rectangle {
-    // The places and the folders open below them, in order.
+    // The places and the folders open below them, in order; the group of recent folders lies
+    // between the favorites and the drives.
     in property <[TreeRow]> rows;
     // The list's name for screen readers.
     in property <string> label: "폴더 트리";
     // Whether the rows take dragged rows into their folders.
     in property <bool> accepts-drops;
-    // The row of the keyboard cursor, while the tree has the keys; -1 for none.
+    // The row of the keyboard cursor (its place in the list), while the tree has the keys; -1
+    // for none.
     in property <int> cursor-row: -1;
-    // The row a drag of another app takes, as Rust found it; -1 for none.
+    // The row a drag of another app takes (by the tree's number of the row), as Rust found it;
+    // -1 for none.
     in property <int> outside-row: -1;
+    // The gap of the list of favorites a drag of another app takes, as Rust found it: -2 for
+    // none, -1 for the empty part (the list's frame shows), `n` before favorite `n` (a line).
+    in property <int> outside-gap: -2;
     // A drag of another app is over the rows (Rust found it there), whether they take it or not.
     in property <bool> outside-over;
+    // What dragging a favorite carries (Rust readies it as the press on its row shows it).
+    in property <data-transfer> favorite-drag-data;
     // The row the pointer moved over last, as the rows tell it themselves (Slint's own hit
     // test): the rows differ in height, and the list places the rows it has not drawn by their
-    // average height, so no reckoning from outside the rows finds the one under a point. -1 for
-    // none (a head, the margins), which Rust sets before it moves the pointer there to ask
-    // (`ui_bridge::drop_spot`).
+    // average height, so no reckoning from outside the rows finds the one under a point. By the
+    // tree's number of the row; -1 for none (a head, the margins), which Rust sets before it
+    // moves the pointer there to ask (`ui_bridge::drop_spot`); -2 for a row that is no folder of
+    // the tree (a recent folder).
     in-out property <int> pointed-row: -1;
-    // A click on row `index`: show its folder in the active pane.
+    // The gap of the list of favorites the pointer moved over last, at the edge of a favorite's
+    // row; -2 for none.
+    in-out property <int> pointed-gap: -2;
+    // A click on row `index` (its place in the list): show its folder in the active pane.
     callback row-clicked(index: int);
     // A click on the chevron of row `index`: open or close it.
     callback row-toggled(index: int);
-    // A drag over row `index`, and its drop (`accepts-drops` only): what a drop into its folder
-    // does.
+    // A drag over the row `index` of the tree, and its drop (`accepts-drops` only): what a drop
+    // into its folder does.
     callback drop-check(data: data-transfer, index: int) -> DragAction;
     callback dropped(data: data-transfer, index: int) -> DragAction;
+    // A drag over the gap `gap` of the list of favorites (-1 for the empty part), and its drop:
+    // what a drop there does.
+    callback favorites-check(data: data-transfer, gap: int) -> DragAction;
+    callback favorites-dropped(data: data-transfer, gap: int) -> DragAction;
+    // The left button went down on favorite `index`.
+    callback favorite-pressed(index: int);
+    // An item of the menu of favorite `index`, or of the menu of the empty part.
+    callback favorite-command(index: int, name: string);
+    callback blank-command(name: string);
 
     // The place of the tree under the point (`x`, `y`) of the window: in its list, the row the
-    // pointer moved over last (`pointed-row`); not `found` off the list, or in a tree that takes
-    // no drops.
+    // pointer moved over last (`pointed-row`), the gap of the list of favorites at its edge, or
+    // the empty part of the list (no row: the heads, the margins); not `found` off the list, over
+    // a recent folder, or in a tree that takes no drops.
     public pure function spot-at(x: length, y: length) -> DropAt {
         let dx = x - list.absolute-position.x;
         let dy = y - list.absolute-position.y;
+        let inside = root.accepts-drops && dx >= 0 && dy >= 0 && dx < list.width && dy < list.height;
+        if (root.pointed-gap >= 0) {
+            return { found: inside, place: DropPlace.favorites, side: 0, index: root.pointed-gap };
+        }
+        if (root.pointed-row == -1) {
+            return { found: inside, place: DropPlace.favorites, side: 0, index: -1 };
+        }
         return {
-            found: root.accepts-drops && dx >= 0 && dy >= 0 && dx < list.width && dy < list.height,
+            found: inside && root.pointed-row >= 0,
             place: DropPlace.tree,
             side: 0,
             index: root.pointed-row,
         };
     }
 
-    // Scrolls row `index` to the middle of the list, unless it shows already.
+    // Scrolls row `index` (its place in the list) to the middle of the list, unless it shows
+    // already.
     //
     // The rows differ in height (a place with a head or a space bar is taller), and the list
     // places the rows it has not drawn by their average height, which it measures again each
@@ -285,8 +595,33 @@ export component Sidebar inherits Rectangle {
         settle.restart();
     }
 
+    // The menu of favorite `index`, from the keyboard, by row `row` (its place in the list).
+    public function show-favorite-menu(index: int, row: int) {
+        root.menu-favorite = index;
+        favorite-key-menu.show({ x: 24px, y: root.row-y(row) });
+    }
+
+    // The menu of the empty part, from the keyboard.
+    public function show-blank-menu() {
+        blank-key-menu.show({ x: 24px, y: 24px });
+    }
+
+    // Where row `row` lies in the sidebar, as far as the list tells (by the rows' average
+    // height); kept inside the list.
+    pure function row-y(row: int) -> length {
+        let row-height = root.rows.length > 0 ? list.content-height / root.rows.length : Theme.row-height;
+        return clamp(root.list-y + row * row-height + list.content-y + row-height / 2, root.list-y, root.list-y + list.height - 4px);
+    }
+
     // The row `scroll-to` brings into view while the list settles; -1 for none.
     private property <int> scroll-target: -1;
+    // The favorite whose menu shows from the keyboard.
+    private property <int> menu-favorite: -1;
+    // Where the list lies in the sidebar.
+    private property <length> list-x: 1px;
+    private property <length> list-y: 8px;
+    // A favorite is dragged by its row: the rows take it by halves.
+    private property <bool> reordering;
 
     function bring-into-view() {
         if (root.scroll-target < 0 || root.scroll-target >= root.rows.length) {
@@ -306,6 +641,9 @@ export component Sidebar inherits Rectangle {
     // it (`DragSeen`), or a drag of another app is over it (`outside-over`); it stops at the
     // first or the last row.
     drag-seen := DragSeen { }
+    // The same for the rows: a drag the rows saw (whether they take it or not) is over a row,
+    // not over the empty part of the list.
+    rows-seen := DragSeen { }
     private property <int> scroll-way: !drag-seen.here && !root.outside-over ? 0
         : EdgeScroll.way(DragPointer.y - list.absolute-position.y, list.height, list.content-y < 0, list.content-y > list.visible-height - list.content-height);
 
@@ -321,68 +659,132 @@ export component Sidebar inherits Rectangle {
     }
 
     background: Theme.panel;
-    border-width: 1px;
-    border-color: Theme.border;
+    // The frame is the accent while a drop on the empty part of the list would add the folder.
+    border-width: behind.has-drag || root.outside-gap == -1 ? 2px : 1px;
+    border-color: behind.has-drag || root.outside-gap == -1 ? Theme.accent : Theme.border;
     border-radius: Theme.radius-large;
     clip: true;
 
-    // Behind the rows: a drag over the parts of the list that take no drop (the heads, the
-    // margins, a row that refuses it) is seen there too. It takes nothing itself.
-    DropArea {
-        x: list.x;
-        y: list.y;
+    // Behind the rows: a drag over the parts of the list that are no row (the heads, the margins,
+    // the room under the rows) is seen there, and the folders it carries join the favorites
+    // there (at the end). A row that refuses the drag lets it fall through to here, so a drag
+    // the rows saw at this very point is none of this area's.
+    behind := DropArea {
+        x: root.list-x;
+        y: root.list-y;
         width: list.width;
         height: list.height;
         enabled: root.accepts-drops;
         can-drop(event) => {
             DragPointer.at(self.absolute-position, event.position);
             drag-seen.saw();
-            return DragAction.none;
+            if (rows-seen.here) {
+                return DragAction.none;
+            }
+            return root.favorites-check(event.data, -1);
+        }
+        dropped(event) => {
+            DragPointer.at(self.absolute-position, event.position);
+            if (rows-seen.here) {
+                return DragAction.none;
+            }
+            return root.favorites-dropped(event.data, -1);
         }
     }
 
-    list := ListView {
-        x: 1px;
-        y: 8px;
+    // The menu of the empty part of the list, from the keyboard: it takes no click.
+    blank-key-menu := FavoritesBlankMenu {
+        enabled: false;
+        command(name) => {
+            root.blank-command(name);
+        }
+    }
+
+    // The menu of a favorite from the keyboard: it takes no click either.
+    favorite-key-menu := FavoriteMenu {
+        enabled: false;
+        command(name) => {
+            root.favorite-command(root.menu-favorite, name);
+        }
+    }
+
+    // A right click on the part of the list that is no row opens the menu of the empty part.
+    FavoritesBlankMenu {
+        x: root.list-x;
+        y: root.list-y;
         width: parent.width - 2px;
         height: parent.height - 16px;
-        accessible-label: root.label;
-        changed content-height => {
-            root.bring-into-view();
-        }
-        scrolled => {
-            root.scroll-target = -1;
+        enabled: root.accepts-drops;
+        command(name) => {
+            root.blank-command(name);
         }
 
-        for row[i] in root.rows: TreeItem {
-            item: row;
-            index: i;
-            accepts-drops: root.accepts-drops;
-            cursor: i == root.cursor-row;
-            outside-here: i == root.outside-row;
-            clicked => {
-                root.row-clicked(i);
+        list := ListView {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            accessible-label: root.label;
+            changed content-height => {
+                root.bring-into-view();
             }
-            pointed => {
-                root.pointed-row = i;
+            scrolled => {
+                root.scroll-target = -1;
             }
-            toggled => {
-                root.row-toggled(i);
-            }
-            drop-check(data) => {
-                drag-seen.saw();
-                return root.drop-check(data, i);
-            }
-            dropped(data) => {
-                return root.dropped(data, i);
+
+            for row[i] in root.rows: TreeItem {
+                item: row;
+                index: i;
+                accepts-drops: root.accepts-drops;
+                cursor: i == root.cursor-row;
+                outside-here: row.kind == RowKind.folder && row.row == root.outside-row;
+                outside-gap: root.outside-gap;
+                drag-data: root.favorite-drag-data;
+                reordering: root.reordering;
+                clicked => {
+                    root.row-clicked(i);
+                }
+                pointed(gap) => {
+                    root.pointed-row = row.kind == RowKind.folder ? row.row : -2;
+                    root.pointed-gap = gap;
+                }
+                toggled => {
+                    root.row-toggled(i);
+                }
+                drop-check(data) => {
+                    drag-seen.saw();
+                    return root.drop-check(data, row.row);
+                }
+                dropped(data) => {
+                    return root.dropped(data, row.row);
+                }
+                gap-check(data, gap) => {
+                    drag-seen.saw();
+                    return root.favorites-check(data, gap);
+                }
+                gap-dropped(data, gap) => {
+                    return root.favorites-dropped(data, gap);
+                }
+                on-row => {
+                    rows-seen.saw();
+                }
+                favorite-pressed => {
+                    root.favorite-pressed(row.favorite);
+                }
+                reorder-changed(dragging) => {
+                    root.reordering = dragging;
+                }
+                menu-command(name) => {
+                    root.favorite-command(row.favorite, name);
+                }
             }
         }
     }
 
     // The end the rows scroll toward under a drag held there (`scroll-way`).
     scroll-cue := ScrollCue {
-        x: list.x;
-        y: root.scroll-way > 0 ? list.y : list.y + list.height - self.height;
+        x: root.list-x;
+        y: root.scroll-way > 0 ? root.list-y : root.list-y + list.height - self.height;
         width: list.width;
         height: EdgeScroll.edge;
         vertical: true;

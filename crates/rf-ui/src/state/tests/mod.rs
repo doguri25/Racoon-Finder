@@ -21,6 +21,7 @@ mod copies;
 mod drag;
 mod drag_out;
 mod drop_rule;
+mod favorites;
 mod jobs;
 mod layout;
 mod nav;

@@ -173,6 +173,21 @@ impl AppState {
             return Vec::new();
         };
         text.clone_into(&mut dialog.text);
+        // A favorite's name is a label the state keeps: no job renames anything.
+        if let NamePurpose::Favorite { index } = dialog.purpose {
+            return match dialog.check() {
+                NameCheck::Ready => {
+                    let name = dialog.text.clone();
+                    self.close();
+                    self.favorite_rename(index, &name)
+                }
+                NameCheck::Unchanged => {
+                    self.close();
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+        }
         let for_picker = matches!(dialog.purpose, NamePurpose::PickFolder { .. });
         match (dialog.check(), dialog.job()) {
             (_, Ok(Some((spec, origin)))) => {

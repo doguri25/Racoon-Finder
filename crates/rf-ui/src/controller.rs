@@ -97,12 +97,14 @@ use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
+use crate::state::drop_rule::{DropChoice, Refusal};
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, MenuShown, Paging,
-    PathForm, RIGHT, ShellWork, Subfolders, dropped_effect, preview_width, start_folders,
+    PathForm, RIGHT, ShellWork, Subfolders, Unkept, dropped_effect, preview_width, start_folders,
 };
 use crate::ui_bridge::{
-    self, PaneModels, PickModels, PreviewModels, PropertiesModels, TreeRows, post,
+    self, PaneModels, PickModels, PreviewModels, PropertiesModels, RecentBlock, RecentFolder,
+    RowSlot, TreeRows, post,
 };
 use crate::{
     DialogKind, DragPointer, DropPlace, FolderMenuRow, ItemMenu, JobRowView, MainWindow,
@@ -550,18 +552,33 @@ fn connect(window: &MainWindow) {
     window.on_retry(|s| {
         with(|c| c.update(|state| state.retry(side(s))));
     });
-    window.on_tree_clicked(|i| {
-        with(|c| c.update_at(i, AppState::open_tree_row));
-    });
-    window.on_tree_toggled(|i| {
-        with(|c| c.update_at(i, AppState::toggle_tree_row));
-    });
+    connect_sidebar(window);
     connect_drops(window);
     connect_tabs(window);
     connect_jobs(window);
     connect_report(window);
     connect_pick(window);
     connect_properties(window);
+}
+
+/// The callbacks of the sidebar: a click on a row or its chevron, and the favorites (the press
+/// that readies a drag of one, the items of the menus).
+fn connect_sidebar(window: &MainWindow) {
+    window.on_tree_clicked(|i| {
+        with(|c| c.tree_clicked(i));
+    });
+    window.on_tree_toggled(|i| {
+        with(|c| c.tree_toggled(i));
+    });
+    window.on_favorite_pressed(|i| {
+        with(|c| c.favorite_pressed(i));
+    });
+    window.on_favorite_command(|i, name| {
+        with(|c| c.update_at(i, |state, i| state.favorite_command(i, &name)));
+    });
+    window.on_favorites_blank_command(|name| {
+        with(|c| c.update(|state| state.favorites_blank_command(&name)));
+    });
 }
 
 /// The callbacks of a drag of rows: a hover over a place and a drop there, the choice of the
@@ -804,12 +821,61 @@ fn tab_command(state: &mut AppState, side: usize, index: usize, name: &str) -> V
     }
 }
 
+/// Looks on a worker thread at which of the recent `folders` are folders still, then tells the
+/// state ([`AppState::recent_checked`]).
+fn check_recent(folders: Vec<VPath>) {
+    spawn_worker("rf-ui-recent", move || {
+        let found: Vec<(VPath, bool)> = folders
+            .into_iter()
+            .map(|folder| {
+                let there = folder
+                    .as_local()
+                    .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()));
+                (folder, there)
+            })
+            .collect();
+        post(move |c| {
+            c.update(|state| {
+                state.recent_checked(&found);
+                Vec::new()
+            });
+        });
+    });
+}
+
+/// The group of recent folders as the sidebar shows it: each folder by its name, with the
+/// name of the folder it is in beside it, dim when a worker found it gone, and marked when the active pane
+/// shows it.
+fn recent_block(state: &AppState) -> RecentBlock {
+    let shown = state.panes()[state.active()].active_tab().location();
+    RecentBlock {
+        folded: state.recent_folded(),
+        folders: state
+            .recent_folders()
+            .iter()
+            .map(|folder| RecentFolder {
+                label: folder_label(folder),
+                place: folder
+                    .parent()
+                    .map(|parent| folder_label(&parent))
+                    .unwrap_or_default(),
+                missing: state.recent_is_missing(folder),
+                selected: folder == shown,
+            })
+            .collect(),
+    }
+}
+
 /// The name of the folder `hover` would put the items into, as the words beside the pointer
 /// show it; empty where no folder takes them.
 fn hover_folder(hover: &Hover) -> String {
     match hover {
         Hover::Takes(offer) => folder_label(&offer.folder),
-        Hover::Refused(_) | Hover::NoPaths | Hover::Nothing => String::new(),
+        Hover::Refused(_)
+        | Hover::NoPaths
+        | Hover::Keeps { .. }
+        | Hover::NoKeep(_)
+        | Hover::Nothing => String::new(),
     }
 }
 
@@ -820,6 +886,12 @@ fn hover_words(hover: &Hover, folder: &str) -> String {
         Hover::Takes(offer) => words::drop_badge(offer.choice, folder),
         Hover::Refused(validity) => words::drop_refused(*validity),
         Hover::NoPaths => words::drop_no_paths().to_owned(),
+        Hover::Keeps { .. } => words::drop_keeps().to_owned(),
+        Hover::NoKeep(Unkept::Files) => words::drop_only_folders().to_owned(),
+        // The keys ask for a link, which is not made: the badge says so.
+        Hover::NoKeep(Unkept::Link) => {
+            words::drop_badge(DropChoice::Refuse(Refusal::NoLinks), folder)
+        }
         Hover::Nothing => String::new(),
     }
 }
@@ -1283,6 +1355,9 @@ impl Controller {
         // The same for a drag of a tab: the press that shows the tab readies its own (id 0 is
         // no tab's).
         window.set_tab_drag_data(ui_bridge::tab_payload(0));
+        // A drag starts only with a payload, and the press on a favorite's row readies its own
+        // after the drag area has looked: this one belongs to no favorite.
+        window.set_favorite_drag_data(ui_bridge::favorite_payload(usize::MAX, ""));
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
@@ -1387,6 +1462,9 @@ impl Controller {
         *self.tz.borrow_mut() = tz.clone();
         let (mut state, mut effects) = AppState::restore(left, right, session, waiting, home);
         state.set_recent_targets(self.settings.borrow().recent());
+        // The favorites the user keeps, the folders visited last and whether their group is
+        // folded.
+        effects.extend(state.restore_sidebar(&self.settings.borrow()));
         // The tabs show the views remembered for their folders, and ask for their listings in
         // their orders.
         state.set_views(self.settings.borrow().views());
@@ -1407,6 +1485,7 @@ impl Controller {
             effects.extend(state.set_places(&places));
         }
         effects.extend(state.follow_active());
+        state.note_visits();
         state.set_history(self.jobs.history());
         state.set_lanes(self.jobs.lanes());
         if let Some(dir) = self.log_dir.borrow_mut().take() {
@@ -1663,12 +1742,81 @@ impl Controller {
         keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
     }
 
+    /// Where a favorite dragged by its row would go, dropped at `place` (the gap `i` of the list
+    /// of favorites, -1 for its end): the favorite's place and its place after the move; `None`
+    /// anywhere else, and where it would stay.
+    fn reorder_target(
+        &self,
+        (from, folder): &(usize, String),
+        place: DropPlace,
+        i: i32,
+    ) -> Option<(usize, usize)> {
+        if place != DropPlace::Favorites {
+            return None;
+        }
+        let state = self.state.borrow();
+        let to = state
+            .as_ref()?
+            .favorite_reorder_to(*from, folder, index(i))?;
+        Some((*from, to))
+    }
+
+    /// The left button went down on favorite `i`: a drag of it, should one follow, carries it.
+    fn favorite_pressed(&self, i: i32) {
+        let Some(i) = index(i) else {
+            return;
+        };
+        let folder = self
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.favorite_folder_text(i));
+        if let (Some(folder), Some(window)) = (folder, self.window.upgrade()) {
+            window.set_favorite_drag_data(ui_bridge::favorite_payload(i, &folder));
+        }
+    }
+
+    /// A click on row `i` of the sidebar's list: a folder of the tree shows in the active pane,
+    /// the head of the group of recent folders folds it or opens it, a recent folder shows in the
+    /// active pane (a notice says so when it is gone).
+    fn tree_clicked(&self, i: i32) {
+        let Some(i) = index(i) else {
+            return;
+        };
+        match self.tree_rows.slot_at(i) {
+            RowSlot::Tree(row) => self.update(|state| state.open_tree_row(row)),
+            RowSlot::RecentHead => self.update(AppState::toggle_recent_fold),
+            RowSlot::Recent(n) => self.update(|state| state.open_recent(n)),
+        }
+    }
+
+    /// A click on the chevron of row `i` of the sidebar's list.
+    fn tree_toggled(&self, i: i32) {
+        let Some(i) = index(i) else {
+            return;
+        };
+        if let RowSlot::Tree(row) = self.tree_rows.slot_at(i) {
+            self.update(|state| state.toggle_tree_row(row));
+        }
+    }
+
     /// A drag with the payload `data` hovers over `place` (pane `side`, row or tab `index`):
     /// what a drop there does with the keys held now and 보기 ▸ 설정, which the pointer shows, or
     /// `none`. What it does, or why it does nothing there, shows beside the pointer. Called at
     /// every move of the pointer (and as the keys change), it changes nothing else and redraws
     /// nothing.
     fn drop_check(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
+        // A favorite dragged by its row goes only to another place of the list.
+        if let Some(dragged) = ui_bridge::favorite_dragged(data) {
+            if let Some(window) = self.window.upgrade() {
+                window.invoke_drop_hint("".into(), false);
+            }
+            self.spring.hover(None);
+            return match self.reorder_target(&dragged, place, i) {
+                Some(_) => DragAction::Move,
+                None => DragAction::None,
+            };
+        }
         let Some(spot) = ui_bridge::spot_of(place, side, i) else {
             return DragAction::None;
         };
@@ -1679,7 +1827,11 @@ impl Controller {
         };
         let action = match &hover {
             Hover::Takes(offer) => ui_bridge::drop_action(offer.choice),
-            Hover::Refused(_) | Hover::NoPaths | Hover::Nothing => DragAction::None,
+            // The folders join the favorites: a copy cursor, a plus, for an addition.
+            Hover::Keeps { .. } => DragAction::Copy,
+            Hover::Refused(_) | Hover::NoPaths | Hover::NoKeep(_) | Hover::Nothing => {
+                DragAction::None
+            }
         };
         if let Some(window) = self.window.upgrade() {
             self.show_hover(&window, spot, &hover, action != DragAction::None);
@@ -1724,7 +1876,7 @@ impl Controller {
         }
         let window = self.window.upgrade()?;
         let place = ui_bridge::drop_place(&window, at);
-        if place.found && place.place == DropPlace::Tree {
+        if place.found && ui_bridge::in_sidebar(place.place) {
             self.moved_over_tree.set(true);
         } else {
             self.leave_tree(&window);
@@ -1781,7 +1933,7 @@ impl Controller {
             .filter(|_| self.state.try_borrow_mut().is_ok())
             .map(|window| {
                 let place = ui_bridge::drop_place(&window, at);
-                if place.found && place.place == DropPlace::Tree {
+                if place.found && ui_bridge::in_sidebar(place.place) {
                     self.moved_over_tree.set(true);
                 }
                 (window, place)
@@ -1919,11 +2071,19 @@ impl Controller {
     /// transfer of its items, or the menu of 놓을 때 묻기 shows, as the state chooses; what the
     /// drop did (a copy, a move), or `none`.
     fn drop_items(&self, data: &DataTransfer, place: DropPlace, side: i32, i: i32) -> DragAction {
+        self.spring.stop();
+        // A favorite dragged by its row moves to the gap it was dropped in.
+        if let Some(dragged) = ui_bridge::favorite_dragged(data) {
+            let Some((from, to)) = self.reorder_target(&dragged, place, i) else {
+                return DragAction::None;
+            };
+            self.update(|state| state.favorite_move(from, to));
+            return DragAction::Move;
+        }
         let Some(spot) = ui_bridge::spot_of(place, side, i) else {
             return DragAction::None;
         };
         let id = ui_bridge::drag_id(data);
-        self.spring.stop();
         let mut done = DragAction::None;
         self.update(|state| {
             let effects = state.drop_items(id, spot);
@@ -2288,6 +2448,7 @@ impl Controller {
             "more-options" => return self.update(|state| state.more_options(false)),
             "folder-more-options" => return self.update(|state| state.more_options(true)),
             "share" => return self.update(AppState::share),
+            "add-favorite" => return self.update(AppState::favorite_add_selected),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
             "toggle-move-undo-toast" => {
                 return self.update(|state| {
@@ -2384,6 +2545,7 @@ impl Controller {
             let mut effects = f(state);
             state.drop_stale_address();
             effects.extend(state.follow_active());
+            state.note_visits();
             state.settle_views(&mut effects);
             effects.extend(state.follow_preview());
             effects.extend(state.follow_properties());
@@ -2420,6 +2582,7 @@ impl Controller {
                 }
                 Effect::CheckTrash { .. }
                 | Effect::CheckCopies { .. }
+                | Effect::CheckRecent(_)
                 | Effect::FindExisting { .. }
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
@@ -2468,6 +2631,7 @@ impl Controller {
                 | Effect::ScrollSideways { .. }
                 | Effect::FitColumns(_)
                 | Effect::ScrollTree(_)
+                | Effect::ScrollRecent(_)
                 | Effect::ScrollPickTree(_)
                 | Effect::ShowMenu(_)
                 | Effect::SystemMenu(_)
@@ -2592,6 +2756,7 @@ impl Controller {
                 });
             }
             Effect::ReadSpace { tabs, drives } => self.read_space(tabs, drives),
+            Effect::CheckRecent(folders) => check_recent(folders),
             Effect::FindExisting { generation, path } => {
                 let loader = self.loader.clone();
                 spawn_worker("rf-ui-vanished", move || {
@@ -2649,6 +2814,7 @@ impl Controller {
             | Effect::ScrollSideways { .. }
             | Effect::FitColumns(_)
             | Effect::ScrollTree(_)
+            | Effect::ScrollRecent(_)
             | Effect::ScrollPickTree(_)
             | Effect::Job(_)
             | Effect::Toast { .. }
@@ -2709,11 +2875,8 @@ impl Controller {
                     window.invoke_fit_columns(side_number(side));
                 }
             }
-            Effect::ScrollTree(row) => {
-                if let Some(window) = self.window.upgrade() {
-                    window.invoke_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
-                }
-            }
+            Effect::ScrollTree(row) => self.scroll_sidebar(self.tree_rows.display_of(row)),
+            Effect::ScrollRecent(at) => self.scroll_sidebar(self.tree_rows.recent_display(at)),
             Effect::ScrollPickTree(row) => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_pick_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
@@ -2771,6 +2934,7 @@ impl Controller {
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
             | Effect::CheckCopies { .. }
+            | Effect::CheckRecent(_)
             | Effect::InspectTarget { .. }
             | Effect::ReadSpace { .. }
             | Effect::SaveLog { .. }
@@ -2799,6 +2963,16 @@ impl Controller {
                 window.invoke_show_open_with();
             }
             MenuShown::AskDrop { moves, copies } => window.invoke_show_drop_menu(moves, copies),
+            MenuShown::Favorite { index } => {
+                let row = self
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(AppState::tree_cursor_row)
+                    .map_or(0, |row| self.tree_rows.display_of(row));
+                window.invoke_show_favorite_menu(number(index), number(row));
+            }
+            MenuShown::FavoritesBlank => window.invoke_show_favorites_blank_menu(),
         }
     }
 
@@ -2826,6 +3000,13 @@ impl Controller {
     fn notice(&self, text: &str) {
         if let Some(window) = self.window.upgrade() {
             window.invoke_show_notice(text.into());
+        }
+    }
+
+    /// Scrolls the sidebar so that its row `display` (its place in the list) shows.
+    fn scroll_sidebar(&self, display: usize) {
+        if let Some(window) = self.window.upgrade() {
+            window.invoke_tree_scroll_to(number(display));
         }
     }
 
@@ -2891,13 +3072,9 @@ impl Controller {
             if self.shown_drag.replace(drag) != drag {
                 window.set_drag_data(ui_bridge::drag_payload(drag));
             }
-            self.tree_rows.sync(state.tree(), &self.places.borrow());
-            window.set_tree_cursor(
-                state
-                    .tree_cursor_row()
-                    .and_then(|row| i32::try_from(row).ok())
-                    .unwrap_or(-1),
-            );
+            self.tree_rows.set_recent(recent_block(state));
+            self.tree_rows.sync(state.tree(), state.places());
+            window.set_tree_cursor(self.sidebar_cursor(state));
             window.set_preview(self.preview.view(
                 state.preview(),
                 state.show_extensions(),
@@ -2912,6 +3089,19 @@ impl Controller {
             self.scroll_to(side, row);
         }
         self.schedule_thumbs();
+    }
+
+    /// The place in the sidebar's list of the keyboard cursor, while it lies on a row of the
+    /// tree or in the group of recent folders; -1 for none.
+    fn sidebar_cursor(&self, state: &AppState) -> i32 {
+        let display = match (state.tree_cursor_row(), state.recent_cursor()) {
+            (Some(row), _) => self.tree_rows.display_of(row),
+            (None, Some(at)) if !state.recent_folders().is_empty() => {
+                self.tree_rows.recent_display(at)
+            }
+            _ => return -1,
+        };
+        i32::try_from(display).unwrap_or(-1)
     }
 
     /// What the measure worker found for the properties window: the window alone is drawn

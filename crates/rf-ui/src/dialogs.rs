@@ -69,6 +69,9 @@ pub enum NamePurpose {
     /// A new folder in `parent`, asked for by the destination picker's 새 폴더, which takes it
     /// as its target once it is made.
     PickFolder { parent: VPath },
+    /// A new name for the favorite at `index` of the sidebar's list, which is a label only: no
+    /// folder is renamed.
+    Favorite { index: usize },
 }
 
 /// The window that asks for a name.
@@ -121,6 +124,17 @@ impl NameDialog {
         }
     }
 
+    /// The window for a new name of the favorite at `index` of the sidebar's list, now called
+    /// `name`: all of the name is selected.
+    pub fn favorite(index: usize, name: &str) -> NameDialog {
+        NameDialog {
+            purpose: NamePurpose::Favorite { index },
+            select_end: name.len(),
+            text: name.to_owned(),
+            initial: name.to_owned(),
+        }
+    }
+
     /// The window for a new name of `from`, a folder when `is_dir`; `None` for a path without
     /// a name (a root).
     pub fn rename(from: VPath, is_dir: bool, origin: usize) -> Option<NameDialog> {
@@ -139,6 +153,7 @@ impl NameDialog {
                 words::new_folder_title()
             }
             NamePurpose::Rename { .. } => words::rename_title(),
+            NamePurpose::Favorite { .. } => words::favorite_rename_title(),
         }
     }
 
@@ -147,10 +162,16 @@ impl NameDialog {
         if self.text.trim().is_empty() {
             return NameCheck::Empty;
         }
-        if let Some(problem) = name_problem(&self.text, Os::CURRENT) {
+        // A favorite's name is a label, not a name in a file system: any text will do.
+        let is_label = matches!(self.purpose, NamePurpose::Favorite { .. });
+        if !is_label && let Some(problem) = name_problem(&self.text, Os::CURRENT) {
             return NameCheck::Invalid(problem);
         }
-        if matches!(self.purpose, NamePurpose::Rename { .. }) && self.text == self.initial {
+        if matches!(
+            self.purpose,
+            NamePurpose::Rename { .. } | NamePurpose::Favorite { .. }
+        ) && self.text == self.initial
+        {
             return NameCheck::Unchanged;
         }
         NameCheck::Ready
@@ -183,6 +204,8 @@ impl NameDialog {
                 },
                 None,
             ))),
+            // A favorite is renamed by the state, with no job: see `AppState::name_confirmed`.
+            NamePurpose::Favorite { .. } => Ok(None),
             NamePurpose::Rename { from, origin } => {
                 let to = from
                     .parent()

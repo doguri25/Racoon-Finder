@@ -7,7 +7,10 @@
 //! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
 //! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07),
 //! whether a right click shows Windows' menu first (`system_menu_first`, OPS-05) and whether the
-//! icon views show thumbnails (`show_thumbnails`, VIEW-09).
+//! icon views show thumbnails (`show_thumbnails`, VIEW-09); and the sidebar's favorites the user
+//! keeps (`[[favorites]]`, NAV-05: none until the user first edits the list, then the whole list),
+//! the last ten folders visited (`recent_folders`) and whether their group is folded
+//! (`recent_folded`).
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -237,6 +240,27 @@ pub struct Settings {
     /// The icon views show the files' thumbnails (VIEW-09); on unless the file says `false`.
     #[serde(deserialize_with = "or_true")]
     pub show_thumbnails: bool,
+    /// The favorites the user keeps under "즐겨찾기" in the sidebar, in order (NAV-05). None until
+    /// the user first edits the list (add, remove, rename, reorder): the sidebar then shows the
+    /// system's well-known folders, and the first edit makes that list the user's own and keeps
+    /// it here. Read as a list: an entry that is no table, or has no folder, is left out. Not
+    /// written when there is none.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "favorites_or_default"
+    )]
+    pub favorites: Vec<Favorite>,
+    /// The user emptied the list of favorites: it stays empty rather than showing the system's
+    /// folders again.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub favorites_emptied: bool,
+    /// The folders visited last, the latest first, at most ten and none twice, as
+    /// `VPath::to_uri`: the sidebar's group "최근 폴더".
+    #[serde(deserialize_with = "or_default")]
+    pub recent_folders: Vec<String>,
+    /// The group "최근 폴더" is folded; a file without the key shows it open.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub recent_folded: bool,
     /// How the window lays out its panes and side panels.
     #[serde(deserialize_with = "or_default")]
     pub layout: LayoutSettings,
@@ -269,11 +293,44 @@ impl Default for Settings {
             move_undo_toast: true,
             system_menu_first: false,
             show_thumbnails: true,
+            favorites: Vec::new(),
+            favorites_emptied: false,
+            recent_folders: Vec::new(),
+            recent_folded: false,
             layout: LayoutSettings::default(),
             panes: Vec::new(),
             folder_views: Vec::new(),
             extra: toml::Table::new(),
         }
+    }
+}
+
+/// One favorite the user keeps in the sidebar: the name its row shows and its folder. A key the
+/// entry lacks, or whose value this version cannot read, is empty; an entry without a folder is
+/// left out.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Favorite {
+    /// The name the row shows.
+    #[serde(deserialize_with = "or_default")]
+    pub name: String,
+    /// The folder, as `VPath::to_uri`.
+    #[serde(deserialize_with = "or_default")]
+    pub path: String,
+}
+
+impl Favorite {
+    /// The favorite that shows `name` and opens `folder`.
+    pub fn new(name: impl Into<String>, folder: &VPath) -> Favorite {
+        Favorite {
+            name: name.into(),
+            path: folder.to_uri(),
+        }
+    }
+
+    /// The folder it opens; `None` when the file's text names none this version can read.
+    pub fn folder(&self) -> Option<VPath> {
+        VPath::parse(&self.path).ok()
     }
 }
 
@@ -511,6 +568,23 @@ where
         .into_iter()
         .filter(toml::Value::is_table)
         .filter_map(|view| view.try_into().ok())
+        .collect())
+}
+
+/// The favorites as a list, without the entries that are no table or name no folder; no list at
+/// all is none.
+fn favorites_or_default<'de, D>(deserializer: D) -> Result<Vec<Favorite>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let toml::Value::Array(favorites) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    Ok(favorites
+        .into_iter()
+        .filter(toml::Value::is_table)
+        .filter_map(|favorite| favorite.try_into::<Favorite>().ok())
+        .filter(|favorite| !favorite.path.is_empty())
         .collect())
 }
 
@@ -761,6 +835,18 @@ impl Settings {
         self.recent_targets = targets.iter().map(VPath::to_uri).collect();
     }
 
+    /// The folders visited last that read back as paths, the latest first.
+    pub fn recent_visits(&self) -> Vec<VPath> {
+        self.recent_folders
+            .iter()
+            .filter_map(|uri| VPath::parse(uri).ok())
+            .collect()
+    }
+
+    pub fn set_recent_visits(&mut self, folders: &[VPath]) {
+        self.recent_folders = folders.iter().map(VPath::to_uri).collect();
+    }
+
     /// The views remembered per folder, with this system's rule of case. A file with more than
     /// the store keeps keeps the ones used last.
     pub fn views(&self) -> ViewStore {
@@ -808,6 +894,10 @@ impl Settings {
             move_undo_toast: self.move_undo_toast,
             system_menu_first: self.system_menu_first,
             show_thumbnails: self.show_thumbnails,
+            favorites: self.favorites.clone(),
+            favorites_emptied: self.favorites_emptied,
+            recent_folders: self.recent_folders.clone(),
+            recent_folded: self.recent_folded,
             layout: self.layout.clone(),
             panes: self.panes.clone(),
             folder_views: Vec::new(),
@@ -1087,6 +1177,13 @@ mod tests {
             layout: odd_layout(),
         });
         settings.set_recent(&[folder(dir, "r1"), folder(dir, "r2")]);
+        settings.favorites = vec![
+            Favorite::new("작업", &folder(dir, "work")),
+            Favorite::new("사진 \"원본\"", &folder(dir, "설계 문서")),
+        ];
+        settings.set_recent_visits(&[folder(dir, "v1"), folder(dir, "v2")]);
+        settings.recent_folded = true;
+        settings.favorites_emptied = true;
         settings
             .extra
             .insert("future_value".to_owned(), toml::Value::Integer(7));
@@ -1294,6 +1391,79 @@ mod tests {
         let loaded = load(dir.path()).settings;
         assert_eq!(drag(&loaded), (DragDefault::Move, true, false));
         assert_eq!(loaded.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn favorites_and_recent_folders_are_kept_and_older_files_lack_them() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let defaults = Settings::default();
+        assert!(defaults.favorites.is_empty() && defaults.recent_folders.is_empty());
+        assert!(!defaults.recent_folded);
+        // Nothing of them is written until the user has something to keep.
+        let text = defaults.to_text().expect("text");
+        assert!(
+            !text.contains("favorites") && !text.contains("recent_folded"),
+            "{text}"
+        );
+
+        let work = folder(dir.path(), "work");
+        let settings = Settings {
+            favorites: vec![
+                Favorite::new("작업", &work),
+                Favorite::new("사진 \"원본\"", &folder(dir.path(), "설계 문서")),
+            ],
+            recent_folders: vec![work.to_uri()],
+            recent_folded: true,
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("read");
+        assert!(text.contains("[[favorites]]"), "{text}");
+        assert!(text.contains("recent_folded = true"), "{text}");
+        let loaded = load(dir.path());
+        assert_eq!(loaded, writable(settings));
+        assert_eq!(loaded.settings.favorites[0].folder(), Some(work.clone()));
+        assert_eq!(loaded.settings.recent_visits(), [work]);
+
+        // A file of the demos before has neither: the sidebar shows the known folders, no
+        // recent folder, and the group open.
+        std::fs::write(&file, "theme = \"dark\"\n").expect("written");
+        let older = load(dir.path()).settings;
+        assert!(older.favorites.is_empty() && older.recent_folders.is_empty());
+        assert!(!older.recent_folded);
+        // Values this version cannot read cost only themselves: an entry that is no table or
+        // names no folder is left out, the rest stays.
+        let ok = toml_string(&folder(dir.path(), "ok").to_uri());
+        let text = format!(
+            "recent_folders = 5\nrecent_folded = \"yes\"\n\
+             favorites = [3, {{ name = \"비었음\" }}, {{ name = 7, path = {ok} }}, \
+             {{ name = \"좋음\", path = {ok} }}]\n"
+        );
+        std::fs::write(&file, text).expect("written");
+        let loaded = load(dir.path()).settings;
+        assert!(loaded.recent_folders.is_empty() && !loaded.recent_folded);
+        assert_eq!(
+            loaded.favorites,
+            [
+                Favorite {
+                    name: String::new(),
+                    path: folder(dir.path(), "ok").to_uri()
+                },
+                Favorite::new("좋음", &folder(dir.path(), "ok")),
+            ]
+        );
+        // A key of another kind altogether is none.
+        std::fs::write(&file, "favorites = \"x\"\n").expect("written");
+        assert_eq!(load(dir.path()).settings.favorites, []);
+        // A list the user emptied is kept as emptied, not as none.
+        let emptied = Settings {
+            favorites_emptied: true,
+            ..Settings::default()
+        };
+        emptied.save(dir.path()).expect("saved");
+        assert!(load(dir.path()).settings.favorites_emptied);
+        assert!(!Settings::default().favorites_emptied);
     }
 
     #[test]

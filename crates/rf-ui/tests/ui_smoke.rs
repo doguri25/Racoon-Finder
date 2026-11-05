@@ -13,9 +13,11 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::state::{Column, DropSpot, FolderView, MenuFacts, ShownColumn, ViewMode};
+use rf_ui::state::{
+    AppState, Column, DropSpot, Effect, FolderView, Hover, MenuFacts, ShownColumn, ViewMode,
+};
 use rf_ui::tree::Tree;
-use rf_ui::ui_bridge::{self, FileRows, PaneModels, TreeRows};
+use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, FactRow, FolderMenuRow,
     FolderMenuView, HashRowView, ItemMenu, JobRowView, JobTray, MainWindow, MessageView, NameView,
@@ -6799,8 +6801,13 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
         tree[1],
         tree[2],
         tree[3],
-        // A drive's head and the margin of the tree, which take nothing.
+        // A drive's head, which is the empty part of the list of favorites, and the top and
+        // bottom edges of the favorites, which are the gaps between them.
         LogicalPosition::new(tree[2].x, tree[2].y - 40.0),
+        LogicalPosition::new(tree[1].x, tree[1].y - 14.0),
+        LogicalPosition::new(tree[1].x, tree[1].y + 14.0),
+        LogicalPosition::new(tree[0].x, tree[0].y - 14.0),
+        // The margin of the tree, which takes nothing.
         LogicalPosition::new(tree[0].x - 100.0, tree[0].y),
         toolbar,
     ];
@@ -6828,7 +6835,6 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
     assert_eq!(spot(tree[0]), Some(DropSpot::Tree(0)));
     assert_eq!(spot(tree[3]), Some(DropSpot::Tree(3)));
     assert_eq!(spot(toolbar), None);
-
     // One pane: the hidden one takes nothing, the one that shows takes its whole room. The tree
     // put away: its room is the panes'.
     window.set_dual_pane(false);
@@ -6859,6 +6865,297 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
             row: Some(0)
         })
     );
+}
+
+/// A state whose left pane lists the folder `docs` and the file `x.txt`, and whose sidebar lists
+/// the known folders `홈` and `문서` and the drives `디스크` and `USB`: the places of
+/// [`drop_window`], with an app state behind them.
+fn favorites_state() -> (AppState, Vec<Place>) {
+    let base = std::env::temp_dir();
+    let place = |label: &str, kind: PlaceKind| Place {
+        label: label.to_owned(),
+        path: VPath::local(base.join(label)).expect("a local path"),
+        kind,
+        space: None,
+    };
+    let places = vec![
+        place("홈", PlaceKind::Favorite(KnownFolder::Home)),
+        place("문서", PlaceKind::Favorite(KnownFolder::Documents)),
+        place("디스크", PlaceKind::Drive),
+        place("USB", PlaceKind::Drive),
+    ];
+    let left = VPath::local(base.join("listed")).expect("a local path");
+    let right = VPath::local(base.join("listed-right")).expect("a local path");
+    let (mut state, effects) = AppState::new(left, right, None);
+    let listings = [
+        vec![
+            entry("docs", EntryKind::Dir, 0),
+            entry("x.txt", EntryKind::File, 10),
+        ],
+        vec![
+            entry("백업", EntryKind::Dir, 0),
+            entry("y.txt", EntryKind::File, 10),
+        ],
+    ];
+    for (effect, entries) in effects.iter().zip(listings) {
+        let Effect::Load(request) = effect else {
+            panic!("a listing: {effect:?}");
+        };
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries,
+        });
+    }
+    state.set_places(&places);
+    (state, places)
+}
+
+#[test]
+fn a_folder_dropped_between_favorites_shows_the_line_and_is_added() {
+    let (window, _calls, tree_rows) = drop_window();
+    let (state, _places) = favorites_state();
+    let state = Rc::new(RefCell::new(state));
+    // The window's drag callbacks answer from the app state, as the controller does.
+    let weak = window.as_weak();
+    let shared = Rc::clone(&state);
+    window.on_row_clicked(move |side, i, ctrl, shift| {
+        let mut state = shared.borrow_mut();
+        state.press_row(
+            usize::from(side == 1),
+            usize::try_from(i).unwrap_or(0),
+            ctrl,
+            shift,
+        );
+        if let Some(window) = weak.upgrade() {
+            window.set_drag_data(ui_bridge::drag_payload(state.drag_id()));
+        }
+    });
+    let shared = Rc::clone(&state);
+    window.on_drop_check(move |data, place, side, i| {
+        let Some(spot) = ui_bridge::spot_of(place, side, i) else {
+            return DragAction::None;
+        };
+        let hover = shared
+            .borrow_mut()
+            .drop_hover(ui_bridge::drag_id(&data), spot);
+        match hover {
+            Hover::Keeps { .. } => DragAction::Copy,
+            Hover::Takes(_) => DragAction::Move,
+            _ => DragAction::None,
+        }
+    });
+    let shared = Rc::clone(&state);
+    let rows = Rc::clone(&tree_rows);
+    window.on_drop_items(move |data, place, side, i| {
+        let Some(spot) = ui_bridge::spot_of(place, side, i) else {
+            return DragAction::None;
+        };
+        let mut state = shared.borrow_mut();
+        state.drop_items(ui_bridge::drag_id(&data), spot);
+        rows.sync(state.tree(), state.places());
+        DragAction::None
+    });
+
+    let docs = centre_of(&window, "docs", AccessibleRole::ListItem);
+    let home = labelled(&window, "홈", AccessibleRole::ListItem);
+    let documents = labelled(&window, "문서", AccessibleRole::ListItem);
+    assert_eq!((home.len(), documents.len()), (1, 1));
+    let top = documents[0].absolute_position();
+    let size = documents[0].size();
+    // The top edge of 문서 is the gap between 홈 and 문서; the middle of the row is the row.
+    let gap = LogicalPosition::new(top.x + size.width / 2.0, top.y + 2.0);
+    let middle = centre(&documents[0]);
+    let line = || labelled(&window, "끼워 넣을 자리", AccessibleRole::Image);
+
+    // Over the middle of a favorite there is no line: the row's own frame shows.
+    drag_to(&window, docs, middle);
+    assert_eq!(line().len(), 0);
+    // Over the gap between two favorites a line shows, between them.
+    pointer(&window, "move", gap);
+    let shown = line();
+    assert_eq!(shown.len(), 1, "one line between the favorites");
+    let at = shown[0].absolute_position();
+    assert!(
+        (at.y - (top.y - 1.0)).abs() < 1.5,
+        "{at:?} at the edge of {top:?}"
+    );
+    // Let go there: the folder is a favorite now, between the two, and nothing was moved.
+    pointer(&window, "release", gap);
+    assert_eq!(line().len(), 0, "the line goes with the drag");
+    let state = state.borrow();
+    let names: Vec<&str> = state.favorites().iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["홈", "docs", "문서"]);
+    assert_eq!(
+        state
+            .places()
+            .iter()
+            .map(|p| p.label.as_str())
+            .collect::<Vec<_>>(),
+        ["홈", "docs", "문서", "디스크", "USB"]
+    );
+    // The window lists them.
+    assert_eq!(
+        labelled(&window, "docs", AccessibleRole::ListItem).len(),
+        2,
+        "the pane's row and the new favorite"
+    );
+    // The pane still lists its rows.
+    assert_eq!(state.panes()[0].active_tab().visible().len(), 2);
+}
+
+#[test]
+fn a_favorite_dragged_by_its_row_names_the_gap_it_is_over() {
+    let (window, _calls, _tree) = drop_window();
+    // Rust readies what the drag of a favorite carries as the press on its row shows it.
+    // (A drag starts only with a payload to carry: this one is no favorite's.)
+    window.set_favorite_drag_data(ui_bridge::favorite_payload(usize::MAX, ""));
+    let weak = window.as_weak();
+    let pressed = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&pressed);
+    window.on_favorite_pressed(move |i| {
+        record.borrow_mut().push(i);
+        if let Some(window) = weak.upgrade() {
+            window.set_favorite_drag_data(ui_bridge::favorite_payload(
+                usize::try_from(i).unwrap_or(0),
+                "folder",
+            ));
+        }
+    });
+    let checks = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&checks);
+    window.on_drop_check(move |data, place, side, i| {
+        record
+            .borrow_mut()
+            .push((ui_bridge::favorite_dragged(&data), place, side, i));
+        DragAction::Move
+    });
+    let documents = labelled(&window, "문서", AccessibleRole::ListItem);
+    let home = centre_of(&window, "홈", AccessibleRole::ListItem);
+    let top = documents[0].absolute_position();
+    let size = documents[0].size();
+    let lower_half = LogicalPosition::new(top.x + size.width / 2.0, top.y + size.height * 0.7);
+    // Dragging a favorite takes the rows by halves: the lower half of 문서 is the gap after it.
+    drag_to(&window, home, lower_half);
+    assert_eq!(pressed.borrow().as_slice(), [0]);
+    let last = checks.borrow().last().cloned().expect("a hover");
+    assert_eq!(
+        last,
+        (Some((0, "folder".to_owned())), DropPlace::Favorites, 0, 2)
+    );
+    // The line shows after 문서, at the bottom of its row.
+    let line = labelled(&window, "끼워 넣을 자리", AccessibleRole::Image);
+    assert_eq!(line.len(), 1);
+    let at = line[0].absolute_position();
+    assert!((at.y - (top.y + size.height - 1.0)).abs() < 1.5, "{at:?}");
+    pointer(&window, "release", lower_half);
+    assert_eq!(
+        labelled(&window, "끼워 넣을 자리", AccessibleRole::Image).len(),
+        0
+    );
+}
+
+#[test]
+fn the_group_of_recent_folders_lies_between_the_favorites_and_the_drives() {
+    let (window, _calls, tree_rows) = drop_window();
+    let (state, _places) = favorites_state();
+    let block = |folded: bool| RecentBlock {
+        folded,
+        folders: ["r1", "r2"]
+            .into_iter()
+            .map(|label| RecentFolder {
+                label: label.to_owned(),
+                place: "/tmp".to_owned(),
+                missing: label == "r2",
+                selected: false,
+            })
+            .collect(),
+    };
+    tree_rows.set_recent(block(false));
+    tree_rows.sync(state.tree(), state.places());
+    let clicked = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&clicked);
+    window.on_tree_clicked(move |index| record.borrow_mut().push(index));
+
+    let y = |label: &str| centre_of(&window, label, AccessibleRole::ListItem).y;
+    let order = ["홈", "문서", "최근 폴더", "r1", "r2", "디스크", "USB"];
+    for pair in order.windows(2) {
+        assert!(y(pair[0]) < y(pair[1]), "{pair:?}");
+    }
+    // The rows of the list count the group's rows; the tree keeps its own numbers.
+    assert_eq!(tree_rows.slot_at(1), RowSlot::Tree(1));
+    assert_eq!(tree_rows.slot_at(2), RowSlot::RecentHead);
+    assert_eq!(tree_rows.slot_at(3), RowSlot::Recent(0));
+    assert_eq!(tree_rows.slot_at(4), RowSlot::Recent(1));
+    assert_eq!(tree_rows.slot_at(5), RowSlot::Tree(2));
+    assert_eq!(tree_rows.display_of(1), 1);
+    assert_eq!(tree_rows.display_of(2), 5);
+    // A click on the head, on a folder and on a folder that is gone (dim) all reach Rust, with
+    // the row's place in the list.
+    for label in ["최근 폴더", "r1", "r2", "디스크"] {
+        let at = centre_of(&window, label, AccessibleRole::ListItem);
+        pointer(&window, "move", at);
+        pointer(&window, "press", at);
+        pointer(&window, "release", at);
+    }
+    assert_eq!(clicked.borrow().as_slice(), [2, 3, 4, 5]);
+    // Folded, only the head is left.
+    tree_rows.set_recent(block(true));
+    tree_rows.sync(state.tree(), state.places());
+    assert_eq!(labelled(&window, "r1", AccessibleRole::ListItem).len(), 0);
+    assert_eq!(
+        labelled(&window, "최근 폴더", AccessibleRole::ListItem).len(),
+        1
+    );
+    assert_eq!(tree_rows.slot_at(3), RowSlot::Tree(2));
+    // No recent folder, no group.
+    tree_rows.set_recent(RecentBlock::default());
+    tree_rows.sync(state.tree(), state.places());
+    assert_eq!(
+        labelled(&window, "최근 폴더", AccessibleRole::ListItem).len(),
+        0
+    );
+    assert_eq!(tree_rows.slot_at(2), RowSlot::Tree(2));
+}
+
+#[test]
+fn spot_at_finds_the_gaps_between_the_favorites_and_the_empty_part_of_their_list() {
+    let (window, calls, _tree) = drop_window();
+    let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
+    let tree: Vec<LogicalPosition> = ["홈", "문서", "디스크", "USB"]
+        .into_iter()
+        .map(|label| centre_of(&window, label, AccessibleRole::ListItem))
+        .collect();
+    let spot = |at| found_at(&window, at);
+    // The edges of the favorites are the gaps between them, the heads and the margins of the
+    // list its empty part: a folder dropped there is kept as a favorite. A drag of rows names
+    // the same.
+    let cases = [
+        (
+            LogicalPosition::new(tree[1].x, tree[1].y - 14.0),
+            DropSpot::Favorites { index: Some(1) },
+        ),
+        (
+            LogicalPosition::new(tree[1].x, tree[1].y + 14.0),
+            DropSpot::Favorites { index: Some(2) },
+        ),
+        (
+            LogicalPosition::new(tree[0].x, tree[0].y - 14.0),
+            DropSpot::Favorites { index: Some(0) },
+        ),
+        (
+            LogicalPosition::new(tree[2].x, tree[2].y - 40.0),
+            DropSpot::Favorites { index: None },
+        ),
+        (tree[1], DropSpot::Tree(1)),
+    ];
+    for (at, wanted) in cases {
+        assert_eq!(spot(at), Some(wanted), "{at:?}");
+        assert_eq!(
+            named_by_a_drag(&window, &calls, x_txt, at),
+            Some(wanted),
+            "{at:?}"
+        );
+    }
 }
 
 #[test]

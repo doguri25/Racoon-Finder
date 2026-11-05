@@ -25,7 +25,7 @@ use rf_jobs::{ConflictPolicy, TransferMode, TransferOptions, TransferSpec};
 use crate::format::{folder_label, short_path};
 use crate::jobs::SharedReport;
 use crate::pane::next_generation;
-use crate::places::{Place, PlaceKind};
+use crate::places::Place;
 use crate::words;
 
 /// How many recent targets the picker offers and the app keeps.
@@ -256,7 +256,7 @@ fn grouped(
             words::pick_favorites(),
             places
                 .iter()
-                .filter(|place| matches!(place.kind, PlaceKind::Favorite(_)))
+                .filter(|place| place.kind.is_favorite())
                 .map(|place| (place.label.clone(), place.path.clone()))
                 .collect(),
         ),
@@ -541,6 +541,7 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::places::PlaceKind;
 
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * MB;

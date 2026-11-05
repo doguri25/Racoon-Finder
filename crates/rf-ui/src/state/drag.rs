@@ -46,6 +46,7 @@ use rf_jobs::{ConflictPolicy, JobSpec, TransferMode, TransferOptions, TransferSp
 use rf_platform::dnd::{DragMods, DropEffect, Effects};
 
 use super::drop_rule::{self, DropChoice};
+use super::favorites::Unkept;
 use super::jobs::submit;
 use super::{AppState, Effect, MenuShown, load};
 use crate::jobs::JobEffect;
@@ -103,6 +104,11 @@ pub enum DropSpot {
     Tab { side: usize, index: usize },
     /// Row `row` of the folder tree: into its folder.
     Tree(usize),
+    /// The list of favorites, between its items: the gap `index` (before favorite `index`;
+    /// `None`: after the last one, which is also where the empty part of the list drops). A drop
+    /// there keeps the folders as favorites and moves nothing (DND-01); a favorite dragged
+    /// within the list is moved there.
+    Favorites { index: Option<usize> },
 }
 
 /// What a place a drag is over would do with the items.
@@ -138,6 +144,11 @@ pub enum Hover {
     /// The drag of another app carries paths, none of which is one to take (a device's, a
     /// relative one).
     NoPaths,
+    /// The gap `index` of the list of favorites (`None`: its end) takes the `count` folders as
+    /// favorites: a drop there adds them and moves nothing.
+    Keeps { index: Option<usize>, count: usize },
+    /// The list of favorites does not take the drag, for this reason.
+    NoKeep(Unkept),
     /// Nothing here takes drops; or the drag is none the window knows, or a window shows over
     /// the main one.
     Nothing,
@@ -149,7 +160,14 @@ impl Hover {
     /// copy.
     pub fn effect(&self, allowed: Effects) -> Option<DropEffect> {
         let Hover::Takes(offer) = self else {
-            return None;
+            // An addition to the favorites shows as a link where the drag allows one (File
+            // Explorer's "pin"), else as a copy: never as a move, which the other app would
+            // finish by deleting what it dragged.
+            return match self {
+                Hover::Keeps { .. } if allowed.contains(DropEffect::Link) => Some(DropEffect::Link),
+                Hover::Keeps { .. } if allowed.contains(DropEffect::Copy) => Some(DropEffect::Copy),
+                _ => None,
+            };
         };
         match offer.choice {
             DropChoice::Do(effect @ (DropEffect::Copy | DropEffect::Move)) => Some(effect),
@@ -324,6 +342,9 @@ impl AppState {
         mods: DragMods,
         allowed: Effects,
     ) -> Hover {
+        if let DropSpot::Favorites { index } = spot {
+            return self.keep_hover_rows(id, index, mods, allowed);
+        }
         match self.offer_with(id, spot, mods, allowed) {
             Some(offer) => Hover::Takes(offer),
             None => self
@@ -444,6 +465,9 @@ impl AppState {
         allowed: Effects,
         ask: bool,
     ) -> Vec<Effect> {
+        if let DropSpot::Favorites { index } = spot {
+            return self.keep_dropped_rows(id, index, mods, allowed);
+        }
         let shown = self
             .drag
             .as_ref()
@@ -565,7 +589,7 @@ impl AppState {
             DropSpot::Pane { side, row: Some(_) } if folder != *self.tab(side).location() => {
                 load(self.navigate_shown(side, folder))
             }
-            DropSpot::Pane { .. } => Vec::new(),
+            DropSpot::Pane { .. } | DropSpot::Favorites { .. } => Vec::new(),
             DropSpot::Tab { side, index } => {
                 let pane = &mut self.panes[side];
                 if pane.active() != index {
@@ -662,6 +686,8 @@ impl AppState {
                 let id = self.tree.node_at(row)?;
                 self.tree.node(id).map(|node| node.path.clone())
             }
+            // Not a folder the items go into: they are kept as favorites.
+            DropSpot::Favorites { .. } => None,
         }
     }
 }

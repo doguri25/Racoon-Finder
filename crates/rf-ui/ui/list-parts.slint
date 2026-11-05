@@ -7,16 +7,19 @@
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
 
-// What a drag is over: a pane's list, a pane's tab, or a row of the tree.
+// What a drag is over: a pane's list, a pane's tab, a row of the tree, or the list of favorites
+// between its items (or its empty part).
 export enum DropPlace {
     list,
     tab,
     tree,
+    favorites,
 }
 
 // The place under a point of the window, as a drag there names it (`MainWindow.spot-at`): row
-// `index` of pane `side`'s list (-1 below the rows), tab `index` of pane `side`, or row `index`
-// of the tree (`side` 0; -1 over a head or a margin of the tree, where no row is). `found` is
+// `index` of pane `side`'s list (-1 below the rows), tab `index` of pane `side`, row `index` of the
+// tree (`side` 0), or the gap `index` of the list of favorites (`side` 0; -1 for its empty part,
+// where the heads, the margins and the room under the rows are). `found` is
 // false where nothing takes drops: `DropPlace` gets no value for nothing, so its default stays
 // what it was.
 export struct DropAt {
@@ -177,15 +180,15 @@ export global ItemMenu {
 // 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
 // else into the pane's folder; they are off while the clipboard holds no files. The system's
 // ways to open an item (OPS-04, OPS-06, OPS-11) show for the items they act on (`ItemMenu`):
-// 관리자 권한으로 실행 and 연결 프로그램으로 열기… by 열기 for one file, 터미널에서 열기 for one
-// folder, OS 속성 창 열기 after 속성 for one item. 공유… shows where the system shares items
+// 관리자 권한으로 실행 and 연결 프로그램으로 열기… by 열기 for one file, 터미널에서 열기 and
+// 즐겨찾기에 추가 (NAV-05) for one folder, OS 속성 창 열기 after 속성 for one item. 공유… shows where the system shares items
 // (macOS, after Finder's, by 복사), and 더 많은 옵션 표시, the system's own menu of the items, at
 // the end where the system has one (Windows 11 File Explorer's item and key, Shift+F10).
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
     // copy-files, paste-into, paste-move-into, copy-path-<form>, share, open, run-as-admin,
-    // open-with, quick-look, open-terminal, rename, delete, delete-permanently, properties,
-    // system-properties, more-options).
+    // open-with, quick-look, open-terminal, add-favorite, rename, delete, delete-permanently,
+    // properties, system-properties, more-options).
     callback command(name: string);
 
     // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
@@ -277,6 +280,12 @@ export component RowMenu inherits ContextMenuArea {
             title: Shortcuts.titled("터미널에서 열기", Shortcuts.open-terminal);
             activated => {
                 root.command("open-terminal");
+            }
+        }
+        if ItemMenu.one-folder: MenuItem {
+            title: "즐겨찾기에 추가";
+            activated => {
+                root.command("add-favorite");
             }
         }
         MenuItem {

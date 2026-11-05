@@ -1747,6 +1747,32 @@ pub fn drop_no_paths() -> &'static str {
     "여기에 놓을 수 없습니다: 받을 수 있는 경로가 없습니다"
 }
 
+/// The head of the sidebar's group of the folders visited last.
+pub fn recent_folders() -> &'static str {
+    "최근 폴더"
+}
+
+/// What a drop between the favorites, or in the empty part of their list, would do, beside the
+/// pointer (NAV-05, DND-01): the folders are kept as favorites, and nothing is moved.
+pub fn drop_keeps() -> &'static str {
+    "즐겨찾기에 추가"
+}
+
+/// Why the list of favorites takes the drag: it holds files, and the list takes folders only.
+pub fn drop_only_folders() -> &'static str {
+    "폴더만 즐겨찾기에 추가할 수 있습니다"
+}
+
+/// The notice for a folder the user asked to keep as a favorite that is one already.
+pub fn favorite_already(name: &str) -> String {
+    format!("이미 즐겨찾기에 있습니다: {name}")
+}
+
+/// The title of the window that asks for a favorite's new name.
+pub fn favorite_rename_title() -> &'static str {
+    "즐겨찾기 이름 바꾸기"
+}
+
 /// What the window says while a drag of items hovers over a place that does not take them
 /// (the pointer says so too): why, for the reason `validity` gives.
 pub fn drop_refused(validity: Validity) -> String {

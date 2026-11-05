@@ -91,6 +91,13 @@ pub enum MenuShown {
     /// (`moves`), 여기로 복사 where it allows a copy (`copies`), and 취소; what it chooses goes
     /// to [`AppState::drop_menu_chosen`].
     AskDrop { moves: bool, copies: bool },
+    /// The menu of favorite `index` of the sidebar, by its row (the menu key on it): 열기, 반대
+    /// 패널에 열기, 이름 바꾸기, 즐겨찾기에서 제거, 위로, 아래로; what it chooses goes to
+    /// [`AppState::favorite_command`].
+    Favorite { index: usize },
+    /// The menu of the sidebar's empty part (the menu key on any other row): 현재 폴더를
+    /// 즐겨찾기에 추가; what it chooses goes to [`AppState::favorites_blank_command`].
+    FavoritesBlank,
 }
 
 /// Where the system's own menu of items shows ([`SystemMenuAsk`]).

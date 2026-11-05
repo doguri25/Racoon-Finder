@@ -54,6 +54,9 @@ pub(super) struct Outside {
     /// The folder the last hover showed the items would go into; `None` after a hover where
     /// nothing takes them. This app's own drag keeps it in its [`Drag`](super::Drag).
     shown: Option<VPath>,
+    /// Whether every one of the paths is a folder, once a hover over the list of favorites
+    /// asked (a path tells nothing of it, so the disk is looked at, once for each drag).
+    only_folders: Option<bool>,
 }
 
 impl AppState {
@@ -102,7 +105,12 @@ impl AppState {
             .filter(|_| !items.paths.is_empty() || items.skipped > 0)
             .map(|outside| outside.sources.clone());
         let hover = if let (Some(spot), Some(sources)) = (spot, sources) {
-            self.foreign_hover(&sources, spot, mods, allowed)
+            match spot {
+                DropSpot::Favorites { index } => {
+                    self.foreign_keep_hover(&sources, index, mods, allowed)
+                }
+                _ => self.foreign_hover(&sources, spot, mods, allowed),
+            }
         } else {
             Hover::Nothing
         };
@@ -160,6 +168,20 @@ impl AppState {
             let told = (left_out > 0).then(|| Effect::Notice(words::dropped_skipped(left_out)));
             return (None, told.into_iter().collect());
         }
+        // The list of favorites keeps folders and moves nothing: the other app is told that
+        // nothing was done, so it deletes nothing.
+        if let DropSpot::Favorites { index } = spot {
+            let verdict =
+                self.keep_verdict(only_folders(&sources), sources.len(), index, mods, allowed);
+            if !matches!(verdict, Hover::Keeps { .. }) {
+                return (None, Vec::new());
+            }
+            let mut effects = self.keep_folders(sources, index);
+            if left_out > 0 {
+                effects.push(Effect::Notice(words::dropped_left_out(left_out)));
+            }
+            return (None, effects);
+        }
         let shown = hovered.and_then(|outside| outside.shown);
         let offer = match self.foreign_hover(&sources, spot, mods, allowed) {
             Hover::Takes(offer) if shown.as_ref().is_none_or(|shown| *shown == offer.folder) => {
@@ -178,7 +200,7 @@ impl AppState {
         };
         let side = match spot {
             DropSpot::Pane { side, .. } | DropSpot::Tab { side, .. } => side,
-            DropSpot::Tree(_) => self.active,
+            DropSpot::Tree(_) | DropSpot::Favorites { .. } => self.active,
         };
         let DropOffer { folder, .. } = offer;
         // The items already there stay where they are (DND-09).
@@ -280,9 +302,33 @@ impl AppState {
                     mods,
                     allowed,
                     shown: None,
+                    only_folders: None,
                 });
             }
         }
+    }
+
+    /// What the gap `index` of the list of favorites makes of `sources`, the paths of another
+    /// app's drag that the app takes. Whether they are folders is found once for the drag.
+    fn foreign_keep_hover(
+        &mut self,
+        sources: &[VPath],
+        index: Option<usize>,
+        mods: DragMods,
+        allowed: Effects,
+    ) -> Hover {
+        if self.modal.is_some() || self.quitting {
+            return Hover::Nothing;
+        }
+        let known = self
+            .outside
+            .as_ref()
+            .and_then(|outside| outside.only_folders);
+        let only_folders = known.unwrap_or_else(|| only_folders(sources));
+        if let Some(outside) = self.outside.as_mut() {
+            outside.only_folders = Some(only_folders);
+        }
+        self.keep_verdict(only_folders, sources.len(), index, mods, allowed)
     }
 
     /// What the place `spot` makes of `sources`, the paths of another app's drag that the app
@@ -309,6 +355,18 @@ impl AppState {
         let choice = self.drop_choice(first, &folder, mods, allowed);
         Hover::Takes(DropOffer { folder, choice })
     }
+}
+
+/// Whether every one of `sources` is a folder (a link to one counts), and there is one. A path
+/// tells nothing of it, so the disk is looked at: local paths only, and no further than the first
+/// that is not.
+fn only_folders(sources: &[VPath]) -> bool {
+    !sources.is_empty()
+        && sources.iter().all(|source| {
+            source
+                .as_local()
+                .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()))
+        })
 }
 
 /// Why `folder` does not take `sources`: one of them is it or holds it, or all of them are in it

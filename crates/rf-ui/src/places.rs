@@ -7,15 +7,42 @@
 use rf_core::VPath;
 use rf_platform::{DiskSpace, KnownFolder};
 
+use crate::tree::TreeRowData;
 use crate::words;
 
 /// What kind of place a sidebar row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaceKind {
-    /// One of the user's well-known folders, under "즐겨찾기".
+    /// One of the user's well-known folders, under "즐겨찾기", as long as the user has not
+    /// edited the list.
     Favorite(KnownFolder),
+    /// A folder the user keeps under "즐겨찾기" (NAV-05), once they have edited the list: added,
+    /// dropped in, renamed or moved.
+    Kept,
     /// A drive or mounted volume, under "이 PC".
     Drive,
+}
+
+impl PlaceKind {
+    /// Whether the place is listed under "즐겨찾기": a well-known folder or one the user keeps.
+    pub fn is_favorite(self) -> bool {
+        matches!(self, PlaceKind::Favorite(_) | PlaceKind::Kept)
+    }
+}
+
+/// The position among the `rows` of the sidebar's folder tree, whose roots are `places`, where
+/// the group "최근 폴더" shows: right before the first row of a place that is no favorite (the
+/// drives, under "이 PC"), else after the last row. The group is made of rows that are no folders
+/// of the tree, so the tree's own rows keep their numbers and the window's list has the group's
+/// rows between them.
+pub fn recent_slot(rows: &[TreeRowData], places: &[Place]) -> usize {
+    rows.iter()
+        .position(|row| {
+            row.root
+                .and_then(|root| places.get(root))
+                .is_some_and(|place| !place.kind.is_favorite())
+        })
+        .unwrap_or(rows.len())
 }
 
 /// One row of the sidebar.

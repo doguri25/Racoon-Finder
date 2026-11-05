@@ -40,14 +40,14 @@ use crate::jobs::{JobRow, RecentRow};
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, validate};
-use crate::places::{Place, PlaceKind};
+use crate::places::{Place, PlaceKind, recent_slot};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
 use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
-    Column, Completion, DropSpot, LEFT, MenuFacts, Names, PathForm, PreviewShown, RIGHT,
+    Column, Completion, DropSpot, LEFT, MenuFacts, Names, PathForm, PreviewShown, RIGHT, RecentAt,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
@@ -55,8 +55,8 @@ use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
     FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow,
     MessageView, NameView, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind,
-    PreviewView, PropertiesView, RecentRowView, RecoveryView, SectionHead, Shortcuts, TabItem,
-    TreeRow,
+    PreviewView, PropertiesView, RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts,
+    TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -636,13 +636,61 @@ fn tell(notify: &ModelNotify, changes: Option<Vec<RowChange>>) {
 /// position and draws only the rows on screen, however many folders are open.
 /// [`TreeRows::show`] shows rows made elsewhere: the picker's, marked for its items, or what
 /// its filter found, flat.
+///
+/// The sidebar's rows hold the group of recent folders ([`TreeRows::set_recent`]) too, between
+/// the favorites and the drives: a head and the folders, which are no rows of the tree. The tree
+/// keeps its own numbers for its rows (`TreeRow.row`), and the window's list counts the group's
+/// rows among them: [`TreeRows::display_of`] and [`TreeRows::slot_at`] go from one to the other.
 #[derive(Default)]
 pub struct TreeRows {
     rows: RefCell<Vec<(NodeId, TreeRow)>>,
     notify: ModelNotify,
     /// The [`Tree::revision`] of the rows shown.
     revision: Cell<Option<u64>>,
+    /// The group of recent folders the rows hold.
+    recent: RefCell<RecentBlock>,
+    /// Where the group starts among the rows (the row of the tree it lies before), and how many
+    /// rows it has (none while it is empty).
+    block: Cell<(usize, usize)>,
 }
+
+/// The group of recent folders as the sidebar shows it ([`TreeRows::set_recent`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecentBlock {
+    /// Only its head shows.
+    pub folded: bool,
+    /// The folders, the latest visited first.
+    pub folders: Vec<RecentFolder>,
+}
+
+/// One folder of the group of recent folders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentFolder {
+    /// The folder's name.
+    pub label: String,
+    /// The name of the folder it is in: it tells folders of one name apart.
+    pub place: String,
+    /// A worker found it gone: its row dims.
+    pub missing: bool,
+    /// It is the folder of the active pane.
+    pub selected: bool,
+}
+
+/// What a row of the sidebar's list is: a row of the tree, or a part of the group of recent
+/// folders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowSlot {
+    /// Row `n` of the tree.
+    Tree(usize),
+    /// The head of the group of recent folders.
+    RecentHead,
+    /// Recent folder `n`.
+    Recent(usize),
+}
+
+/// The key a model of rows gives the head of the group of recent folders: no node of a tree has
+/// it, and a folder of the group has the keys below it.
+const RECENT_KEY: NodeId = NodeId::MAX;
 
 impl fmt::Debug for TreeRows {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -662,7 +710,10 @@ impl TreeRows {
         if self.revision.replace(revision) == revision {
             return;
         }
-        self.replace(tree_rows(&tree.rows(), places));
+        let data = tree.rows();
+        let mut rows = tree_rows(&data, places);
+        self.hold_recent(&mut rows, recent_slot(&data, places));
+        self.replace(rows);
     }
 
     /// Has the next [`TreeRows::sync`] draw its tree again, whatever its revision: the places
@@ -671,12 +722,98 @@ impl TreeRows {
         self.revision.set(None);
     }
 
+    /// Makes `block` the group of recent folders the rows hold, from the next
+    /// [`TreeRows::sync`] on.
+    pub fn set_recent(&self, block: RecentBlock) {
+        if *self.recent.borrow() != block {
+            *self.recent.borrow_mut() = block;
+            self.revision.set(None);
+        }
+    }
+
     /// Makes the rows `rows`, whatever a tree's revision says (the picker's tree, marked for
     /// its items, or what its filter found), and tells the list what changed.
     pub fn show(&self, rows: Vec<(NodeId, TreeRow)>) {
         // The next `sync` draws its tree again, whatever its revision.
         self.revision.set(None);
+        self.block.set((rows.len(), 0));
         self.replace(rows);
+    }
+
+    /// Puts the group of recent folders into `rows` before the tree's row `slot`.
+    fn hold_recent(&self, rows: &mut Vec<(NodeId, TreeRow)>, slot: usize) {
+        let recent = self.recent.borrow();
+        if recent.folders.is_empty() {
+            self.block.set((slot, 0));
+            return;
+        }
+        let head = TreeRow {
+            label: words::recent_folders().into(),
+            kind: RowKind::RecentHead,
+            row: -1,
+            recent: -1,
+            expandable: true,
+            expanded: !recent.folded,
+            ..TreeRow::default()
+        };
+        let shown = if recent.folded {
+            0
+        } else {
+            recent.folders.len()
+        };
+        let folders = recent
+            .folders
+            .iter()
+            .take(shown)
+            .enumerate()
+            .map(|(i, folder)| {
+                let row = TreeRow {
+                    label: folder.label.as_str().into(),
+                    // One level in, under the head.
+                    depth: 1,
+                    info: folder.place.as_str().into(),
+                    kind: RowKind::Recent,
+                    row: -1,
+                    recent: i32::try_from(i).unwrap_or(i32::MAX),
+                    selected: folder.selected,
+                    dimmed: folder.missing,
+                    ..TreeRow::default()
+                };
+                (RECENT_KEY - 1 - i, row)
+            });
+        let block: Vec<(NodeId, TreeRow)> =
+            std::iter::once((RECENT_KEY, head)).chain(folders).collect();
+        self.block.set((slot, block.len()));
+        rows.splice(slot..slot, block);
+    }
+
+    /// The place in the list of row `row` of the tree.
+    pub fn display_of(&self, row: usize) -> usize {
+        let (slot, len) = self.block.get();
+        if row < slot { row } else { row + len }
+    }
+
+    /// The place in the list of the part `at` of the group of recent folders.
+    pub fn recent_display(&self, at: RecentAt) -> usize {
+        let (slot, _) = self.block.get();
+        match at {
+            RecentAt::Head => slot,
+            RecentAt::Item(i) => slot + 1 + i,
+        }
+    }
+
+    /// What row `display` of the list is.
+    pub fn slot_at(&self, display: usize) -> RowSlot {
+        let (slot, len) = self.block.get();
+        if display < slot {
+            RowSlot::Tree(display)
+        } else if display == slot && len > 0 {
+            RowSlot::RecentHead
+        } else if display < slot + len {
+            RowSlot::Recent(display - slot - 1)
+        } else {
+            RowSlot::Tree(display - len)
+        }
     }
 
     fn replace(&self, new: Vec<(NodeId, TreeRow)>) {
@@ -712,8 +849,14 @@ impl Model for TreeRows {
 pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow)> {
     // Whether the last place was a drive.
     let mut last_drive = None;
+    // The last favorite's place in the list of favorites, to say which one is the last.
+    let favorites = places
+        .iter()
+        .filter(|place| place.kind.is_favorite())
+        .count();
     rows.iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(number, row)| {
             let place = row.root.and_then(|root| places.get(root));
             let is_drive = place.is_some_and(|place| place.kind == PlaceKind::Drive);
             let head = match place {
@@ -725,6 +868,17 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
             if place.is_some() {
                 last_drive = Some(is_drive);
             }
+            // A favorite's place in the list: the places before it that are favorites.
+            let favorite = row
+                .root
+                .zip(place)
+                .filter(|(_, place)| place.kind.is_favorite())
+                .map(|(root, _)| {
+                    places[..root]
+                        .iter()
+                        .filter(|place| place.kind.is_favorite())
+                        .count()
+                });
             let (info, fill) = place.map_or_else(|| (String::new(), 0.0), place_space);
             let expandable = row.has_children_unknown || row.has_children;
             let shown = TreeRow {
@@ -740,6 +894,15 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
                 selected: row.selected,
                 dimmed: false,
                 hidden: row.hidden,
+                kind: RowKind::Folder,
+                row: i32::try_from(number).unwrap_or(i32::MAX),
+                is_favorite: favorite.is_some(),
+                favorite: favorite
+                    .map_or(-1, |favorite| i32::try_from(favorite).unwrap_or(i32::MAX)),
+                favorite_last: favorite.is_some_and(|favorite| favorite + 1 == favorites),
+                can_up: favorite.is_some_and(|favorite| favorite > 0),
+                can_down: favorite.is_some_and(|favorite| favorite + 1 < favorites),
+                recent: -1,
             };
             (row.id, shown)
         })
@@ -751,7 +914,8 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
 pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
     found
         .iter()
-        .filter_map(|&id| {
+        .enumerate()
+        .filter_map(|(number, &id)| {
             let node = tree.node(id)?;
             let info = node
                 .path
@@ -771,6 +935,14 @@ pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
                 selected: tree.target() == Some(&node.path),
                 dimmed: false,
                 hidden: node.attributes.contains(Attributes::HIDDEN),
+                kind: RowKind::Folder,
+                row: i32::try_from(number).unwrap_or(i32::MAX),
+                is_favorite: false,
+                favorite: -1,
+                favorite_last: false,
+                can_up: false,
+                can_down: false,
+                recent: -1,
             };
             Some((id, row))
         })
@@ -944,6 +1116,7 @@ pub fn spot_of(place: DropPlace, side: i32, index: i32) -> Option<DropSpot> {
             index: index?,
         },
         DropPlace::Tree => DropSpot::Tree(index?),
+        DropPlace::Favorites => DropSpot::Favorites { index },
     })
 }
 
@@ -974,17 +1147,31 @@ pub fn drop_spot(window: &MainWindow, at: WindowPoint) -> Option<DropSpot> {
 /// way (see [`drop_spot`]'s preconditions): the tree's row is then -1, none.
 pub fn drop_place(window: &MainWindow, at: WindowPoint) -> DropAt {
     let mut found = window.invoke_spot_at(at.x, at.y);
-    if found.found && found.place == DropPlace::Tree {
+    if found.found && in_sidebar(found.place) {
         window.invoke_forget_tree_pointer();
-        if !window.global::<DragPointer<'_>>().get_over() {
-            let position = slint::LogicalPosition::new(at.x, at.y);
-            window
-                .window()
-                .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        // While a drag of Slint's is under way the pointer cannot be moved to ask: the point is
+        // in the tree, and nothing more is known of it (not its empty part, which a pointer
+        // that was moved there and found no row would say).
+        if window.global::<DragPointer<'_>>().get_over() {
+            return DropAt {
+                found: true,
+                place: DropPlace::Tree,
+                side: 0,
+                index: -1,
+            };
         }
+        let position = slint::LogicalPosition::new(at.x, at.y);
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
         found = window.invoke_spot_at(at.x, at.y);
     }
     found
+}
+
+/// Whether `place` is one of the sidebar's: a row of its tree, or the list of favorites in it.
+pub fn in_sidebar(place: DropPlace) -> bool {
+    matches!(place, DropPlace::Tree | DropPlace::Favorites)
 }
 
 /// The pointer that [`drop_place`] moved over the tree leaves the window again (a
@@ -1016,6 +1203,9 @@ pub fn drop_at(spot: Option<DropSpot>) -> DropAt {
         Some(DropSpot::Pane { side, row }) => (DropPlace::List, side, row.map_or(-1, number)),
         Some(DropSpot::Tab { side, index }) => (DropPlace::Tab, side, number(index)),
         Some(DropSpot::Tree(row)) => (DropPlace::Tree, LEFT, number(row)),
+        Some(DropSpot::Favorites { index }) => {
+            (DropPlace::Favorites, LEFT, index.map_or(-1, number))
+        }
     };
     DropAt {
         found: true,
@@ -1064,6 +1254,34 @@ pub fn tab_id(data: &DataTransfer) -> Option<u64> {
     data.user_data()
         .and_then(|value| value.downcast::<TabToken>().ok())
         .map(|token| token.0)
+}
+
+/// What the payload of a drag of a favorite holds: its place in the list and its folder (so that
+/// a list that changed since the press is not mistaken for the one it was dragged from). Like the
+/// others, it stays in this app.
+#[derive(Debug)]
+struct FavoriteToken {
+    index: usize,
+    folder: String,
+}
+
+/// The payload of a drag of the favorite at `index`, whose folder is `folder` (as the settings
+/// keep it).
+pub fn favorite_payload(index: usize, folder: &str) -> DataTransfer {
+    let mut data = DataTransfer::default();
+    data.set_user_data(Rc::new(FavoriteToken {
+        index,
+        folder: folder.to_owned(),
+    }));
+    data
+}
+
+/// The place in the list and the folder of the favorite a drag's payload carries; `None` for a
+/// payload not made by [`favorite_payload`].
+pub fn favorite_dragged(data: &DataTransfer) -> Option<(usize, String)> {
+    data.user_data()
+        .and_then(|value| value.downcast::<FavoriteToken>().ok())
+        .map(|token| (token.index, token.folder.clone()))
 }
 
 /// What the window answers a drag over a place where a drop does `choice`, which its pointer

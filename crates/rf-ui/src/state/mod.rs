@@ -8,7 +8,8 @@
 //! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
 //! ([`AppState::drag`]), what its drop does (the keys held and the choices of 보기 ▸ 설정,
 //! module `drop_rule`), what a rest of it opens and the moves it made (module `drag`), the
-//! files another app drags onto the window (module `outside`), the address bar's lists
+//! files another app drags onto the window (module `outside`), the favorites the user keeps in
+//! the sidebar and its group of recent folders (module `favorites`), the address bar's lists
 //! (module `address`: a folder's subfolders
 //! under the `›` of a piece of the path row, and the path field's completions), and the views
 //! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
@@ -59,6 +60,7 @@ mod clipboard;
 mod copies;
 mod drag;
 pub mod drop_rule;
+mod favorites;
 mod jobs;
 mod layout;
 mod outside;
@@ -85,6 +87,7 @@ pub use copies::copy_origins;
 pub use drag::{
     Drag, DragOut, DropOffer, DropSpot, Hover, MOVE_TOAST_TIME, SPRING_DELAY, dropped_effect,
 };
+pub use favorites::{RECENT_FOLDERS, RecentAt, Unkept};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use panel::PanelButton;
@@ -207,6 +210,11 @@ pub enum Effect {
     /// Scroll the folder tree so that row `row`, the active pane's folder just found there,
     /// shows.
     ScrollTree(usize),
+    /// Scroll the sidebar so that the keyboard cursor in the group of recent folders shows.
+    ScrollRecent(RecentAt),
+    /// Find out on a worker thread which of these recent folders are folders still
+    /// (`std::fs::metadata`), then call [`AppState::recent_checked`].
+    CheckRecent(Vec<VPath>),
     /// List the names of folders for a list of the address bar
     /// ([`Loader::list_names`](crate::loader::Loader::list_names)); they come back to
     /// [`AppState::loaded`].
@@ -317,8 +325,11 @@ pub struct AppState {
     /// for each picker, and dropped when it closes.
     pick_tree: Tree,
     /// The sidebar's places, once found: the roots of both trees, and the favorites the
-    /// picker offers.
+    /// picker offers. The favorites come first (the user's, or the system's until they edit the
+    /// list), then the drives.
     places: Vec<Place>,
+    /// The favorites the user keeps and the folders visited last (module `favorites`).
+    kept: favorites::Kept,
     /// The folders the picker offers as recent targets, the last one chosen first.
     recent: Vec<VPath>,
     /// Where a tab goes when its folder and every parent of it are gone.
@@ -477,6 +488,7 @@ impl AppState {
             tree_cursor: None,
             pick_tree: Tree::new(filter),
             places: Vec::new(),
+            kept: favorites::Kept::default(),
             recent: Vec::new(),
             home,
             auto_reloads: HashMap::new(),
@@ -858,18 +870,23 @@ impl AppState {
         load(self.navigate_shown(side, folder))
     }
 
-    /// Makes `places` (the favorites, then the drives) the roots of the folder tree, which
-    /// starts again from them, closed, and finds the folder it follows again; and of the
-    /// picker's tree, when a picker is open.
+    /// Makes `places` (the well-known folders, then the drives) the roots of the folder tree,
+    /// which starts again from them, closed, and finds the folder it follows again; and of the
+    /// picker's tree, when a picker is open. The well-known folders are the favorites the sidebar
+    /// lists until the user edits the list; after that the user's own come in their place.
     pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
-        places.clone_into(&mut self.places);
-        // The new tree's nodes are other ones.
-        self.tree_cursor = None;
-        let mut effects = self.with_tree(|tree| tree.set_roots(pick::tree_roots(places)));
-        if self.shown_picker().is_some() {
-            effects.extend(self.with_pick_tree(|tree| tree.set_roots(pick::tree_roots(places))));
-        }
-        effects
+        self.kept.known = places
+            .iter()
+            .filter(|place| place.kind.is_favorite())
+            .cloned()
+            .collect();
+        let drives = places.iter().filter(|place| !place.kind.is_favorite());
+        self.places = self
+            .shown_favorites()
+            .into_iter()
+            .chain(drives.cloned())
+            .collect();
+        self.reroot_places()
     }
 
     /// The free space of the drive at `path`, as a worker read it again

@@ -24,7 +24,7 @@ import {
     Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
     MenuRoom
 } from "pane.slint";
-import { Sidebar, TreeRow, SectionHead } from "sidebar.slint";
+import { Sidebar, TreeRow, SectionHead, RowKind } from "sidebar.slint";
 import { JobPanel, JobRowView, RecentRowView } from "job-panel.slint";
 import { JobTray } from "tray.slint";
 import {
@@ -41,7 +41,7 @@ import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properti
 import { ItemMenu, OpenWithMenu, DropMenu, DragPointer, DropPlace, DropAt } from "list-parts.slint";
 
 export {
-    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, JobRowView, RecentRowView, JobTray, NameView,
+    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu, DragPointer, DropPlace, DropAt
@@ -159,9 +159,12 @@ export component MainWindow inherits Window {
     in-out property <bool> show-tree: true;
     in-out property <bool> show-preview;
     in-out property <bool> sync-navigation;
-    // The row of the tree's keyboard cursor, which shows while the tree has the keys; -1 for
-    // none.
+    // The row of the tree's keyboard cursor (its place in the list, the recent folders among
+    // the rows), which shows while the tree has the keys; -1 for none.
     in property <int> tree-cursor: -1;
+    // What dragging a favorite by its row carries: Rust readies it as the press on the row
+    // shows it.
+    in property <data-transfer> favorite-drag-data;
     // What the preview panel and quick look show of the item under the active pane's cursor,
     // and whether quick look shows (over everything but a dialog).
     in property <PreviewView> preview;
@@ -365,8 +368,15 @@ export component MainWindow inherits Window {
     // A click on row `index` of the tree, or on its chevron.
     callback tree-clicked(index: int);
     callback tree-toggled(index: int);
+    // The left button went down on favorite `index` of the sidebar, which a drag of it may
+    // follow; an item of the menu of favorite `index` (open, open-other, rename, remove, up,
+    // down); an item of the menu of the sidebar's empty part (add-current).
+    callback favorite-pressed(index: int);
+    callback favorite-command(index: int, name: string);
+    callback favorites-blank-command(name: string);
     // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
-    // below the rows), tab `index` of pane `side`, or row `index` of the tree (`side` 0). Rust
+    // below the rows), tab `index` of pane `side`, row `index` of the tree (`side` 0), or the
+    // gap `index` of the list of favorites (`side` 0; -1 for its empty part). Rust
     // gives what a drop there does, by the keys held and 보기 ▸ 설정 (Slint's own rule, which
     // knows only Ctrl and Shift, has no say), or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
@@ -431,6 +441,7 @@ export component MainWindow inherits Window {
     // The tree's rows forget which one the pointer moved over last (`spot-at`).
     public function forget-tree-pointer() {
         sidebar.pointed-row = -1;
+        sidebar.pointed-gap = -2;
     }
     // A drag moved where nothing takes drops (the toolbar, the gap between the panes), or a
     // place refused it: nothing it rested on opens (DND-08).
@@ -645,6 +656,15 @@ export component MainWindow inherits Window {
     // Scrolls the tree so that row `index` shows.
     public function tree-scroll-to(index: int) {
         sidebar.scroll-to(index);
+    }
+
+    // Shows the menu of favorite `index`, which lies at row `row` of the sidebar's list (the menu
+    // key on it), or the menu of the sidebar's empty part.
+    public function show-favorite-menu(index: int, row: int) {
+        sidebar.show-favorite-menu(index, row);
+    }
+    public function show-favorites-blank-menu() {
+        sidebar.show-blank-menu();
     }
 
     // Scrolls the picker's tree so that row `index` shows.
@@ -1134,7 +1154,9 @@ export component MainWindow inherits Window {
                         cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
                         accepts-drops: true;
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.tree ? root.outside-drop.index : -1;
-                        outside-over: root.outside-over.found && root.outside-over.place == DropPlace.tree;
+                        outside-gap: root.outside-drop.found && root.outside-drop.place == DropPlace.favorites ? root.outside-drop.index : -2;
+                        outside-over: root.outside-over.found && (root.outside-over.place == DropPlace.tree || root.outside-over.place == DropPlace.favorites);
+                        favorite-drag-data: root.favorite-drag-data;
                         row-clicked(index) => {
                             root.tree-clicked(index);
                             keys.focus();
@@ -1144,6 +1166,21 @@ export component MainWindow inherits Window {
                         }
                         dropped(data, index) => {
                             return root.drop-items(data, DropPlace.tree, 0, index);
+                        }
+                        favorites-check(data, gap) => {
+                            return root.drop-check(data, DropPlace.favorites, 0, gap);
+                        }
+                        favorites-dropped(data, gap) => {
+                            return root.drop-items(data, DropPlace.favorites, 0, gap);
+                        }
+                        favorite-pressed(index) => {
+                            root.favorite-pressed(index);
+                        }
+                        favorite-command(index, name) => {
+                            root.favorite-command(index, name);
+                        }
+                        blank-command(name) => {
+                            root.favorites-blank-command(name);
                         }
                         row-toggled(index) => {
                             root.tree-toggled(index);
