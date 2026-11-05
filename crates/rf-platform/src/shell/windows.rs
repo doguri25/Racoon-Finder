@@ -96,7 +96,7 @@ pub const SYSTEM_MENU: bool = true;
 pub const SHARES: bool = false;
 
 /// Ends the COM use of the thread that began it.
-struct ComScope;
+pub(crate) struct ComScope;
 
 impl Drop for ComScope {
     fn drop(&mut self) {
@@ -109,7 +109,7 @@ impl Drop for ComScope {
 /// COM on the calling thread in a single-threaded apartment, until the scope it gives ends: a
 /// new thread's first use of it, or one more use of the apartment the thread is already (the
 /// window's, where winit initialized OLE). A thread of another apartment is refused.
-fn enter_apartment() -> io::Result<ComScope> {
+pub(crate) fn enter_apartment() -> io::Result<ComScope> {
     // SAFETY: no reserved pointer; on a thread that has no apartment yet this makes it one, and
     // on a single-threaded apartment it only counts one more use of it (`S_FALSE`), which the
     // scope gives back.

@@ -1155,6 +1155,23 @@ F6 두 번, 트리를 숨겼으면 한 번) 작업 패널이 키를 받고, 첫 
   12. macOS: 항목 하나, 여러 개 ▸ "공유…": 공유 메뉴가 그 자리 아래에 뜨고 AirDrop·메일로 보낼 수 있다(메일에 그
       파일이 첨부된다). 이름에 한글이 든 파일(NFC로 만든 이름)도 같은 파일이 첨부된다. 빈 곳 메뉴에는 "공유…"가 없다.
 
+## 썸네일 공급자 (VIEW-09)
+
+- **무엇을 하나.** `rf-platform::thumbs::os_thumbnail(경로, 크기)`가 작업 스레드에서 OS에 파일 하나의 썸네일을 묻는다.
+  Windows는 셸의 `IShellItemImageFactory::GetImage`(썸네일만, 더 커도 됨), macOS는 Quick Look의
+  `QLThumbnailGenerator`(`.thumbnail`, 배율 1, 주 스레드가 필요 없다), Linux는 묻지 않는다(`None`). 답은 미리 곱하지
+  않은 RGBA(`Made`), "이 형식은 OS가 썸네일을 주지 않음"(`None`, 종류별 아이콘으로 남는다), 다시 시도할 수 있는
+  실패(`Failed`) 셋 중 하나다. macOS는 30초까지 기다리고 넘으면 `Failed("timed out")`. 작업 풀·캐시·아이콘 보기
+  연결과 자체 디코더 보완은 이 절의 다음 단계(Task 2)다.
+- **손으로 확인할 것(Windows 11·macOS 15, 데모 QA).** OS 공급자는 Linux에서 컴파일 검사만 했다. 무시된 테스트
+  `the_shell_makes_a_thumbnail_of_a_png`·`the_shell_has_no_thumbnail_of_plain_text`(Windows),
+  `quicklook_makes_a_thumbnail_of_a_png`(macOS)를 실제 PC에서 `cargo test -p rf-platform -- --ignored thumbs`로 돌린다.
+  1. Windows: JPG·PNG·HEIC(확장 설치 시)·MP4·PDF·DOCX의 썸네일이 탐색기와 같은 그림으로 온다. 투명한 PNG는 투명
+     부분이 투명하게, 알파 없는 JPG는 불투명하게 온다.
+  2. macOS: 같은 형식과 Keynote 파일. 투명한 PNG의 가장자리가 어둡게 번지지 않는다(미리 곱한 값을 나눈다).
+  3. 둘 다: 손상된 JPG, 0바이트 파일은 `None`이나 `Failed`이고 멈추지 않는다. 100 MB JPG 한 장의 시간을 잰다.
+  4. 텍스트 파일은 `None`(종류별 아이콘). 이름에 한글·공백·`#`·`%`가 든 파일도 썸네일이 온다.
+
 ## 대화상자 (KEY-02)
 
 모든 대화상자는 열리면서 키보드를 받고 키보드만으로 끝까지 쓸 수 있다.

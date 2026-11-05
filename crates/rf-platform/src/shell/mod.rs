@@ -61,6 +61,9 @@ mod other;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub(crate) use self::windows::enter_apartment;
+
 /// How the system lets the user choose the app that opens a file (연결 프로그램).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OpenWith {
