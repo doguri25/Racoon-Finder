@@ -60,7 +60,9 @@ use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT, IDropSource, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     BHID_DataObject, CFSTR_DROPDESCRIPTION, CFSTR_LOGICALPERFORMEDDROPEFFECT,
@@ -71,8 +73,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
 use windows::core::{IUnknown, PCWSTR};
 
 use super::{
-    DropEffect, DropHandler, DroppedItems, Effects, button_held, effects_bits, ours_format,
-    ours_in, ours_tag, performed_effect, primary_down,
+    DragMods, DropEffect, DropHandler, DroppedItems, Effects, button_held, effects_bits,
+    ours_format, ours_in, ours_tag, performed_effect, primary_down,
 };
 use crate::clipboard::{Global, global_bytes, hdrop_units};
 use crate::shell::Owner;
@@ -231,6 +233,22 @@ fn primary_held() -> bool {
         )
     };
     primary_down(left, right, swapped)
+}
+
+/// The modifier keys held now, as the system has them (`GetAsyncKeyState`, whose high bit is set
+/// while a key is down).
+pub fn held_mods() -> DragMods {
+    let down = |key: u16| {
+        // SAFETY: a plain read of the keyboard's state; it takes a key code and touches nothing.
+        let state = unsafe { GetAsyncKeyState(i32::from(key)) };
+        state < 0
+    };
+    DragMods {
+        ctrl: down(VK_CONTROL.0),
+        shift: down(VK_SHIFT.0),
+        alt: down(VK_MENU.0),
+        logo: down(VK_LWIN.0) || down(VK_RWIN.0),
+    }
 }
 
 /// The shell's data object of the items at `paths`, as File Explorer's own drag of them makes it

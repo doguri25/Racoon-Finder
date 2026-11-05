@@ -7,6 +7,7 @@ pub mod dnd;
 pub mod fileid;
 pub mod fsops;
 pub mod known;
+pub mod links;
 pub mod meta;
 pub mod natural;
 pub mod shell;
@@ -26,6 +27,10 @@ pub use fsops::{
     sync_file,
 };
 pub use known::{KnownFolder, known_folder};
+pub use links::{
+    LinkKind, drop_kind, kinds_for, link_name, link_points_to, make_link, mount_point_buffer,
+    remove_link, symlink_needs_privilege,
+};
 pub use meta::{copy_extras, set_attributes, set_times};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};
 pub use sparse::{DataRanges, data_ranges, file_data_ranges, mark_sparse};

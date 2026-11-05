@@ -97,16 +97,18 @@ export component DragSeen {
 }
 
 // The menu of a drop that asks what to do (놓을 때 묻기, DND-04), where the drop was: move or copy
-// the items there, or nothing (취소; Esc and a click beside the menu choose nothing too). It
-// offers only what the drag allows (`moves`, `copies`), as File Explorer's menu of a drag with
-// the right button leaves out what the source forbids. It takes no click itself
-// (`enabled: false`): it shows only when it is asked to.
+// the items there, make links to them, or nothing (취소; Esc and a click beside the menu choose
+// nothing too). It offers only what the drag allows (`moves`, `copies`, `links`), as File
+// Explorer's menu of a drag with the right button leaves out what the source forbids. It takes
+// no click itself (`enabled: false`): it shows only when it is asked to.
 export component DropMenu inherits ContextMenuArea {
-    // Whether the drag allows a move (여기로 이동) and a copy (여기로 복사).
+    // Whether the drag allows a move (여기로 이동), a copy (여기로 복사) and a link (여기에
+    // 링크 만들기).
     in property <bool> moves: true;
     in property <bool> copies: true;
+    in property <bool> links: true;
 
-    // An item was chosen: `move`, `copy` or `cancel`.
+    // An item was chosen: `move`, `copy`, `link` or `cancel`.
     callback chosen(name: string);
 
     enabled: false;
@@ -124,6 +126,12 @@ export component DropMenu inherits ContextMenuArea {
                 root.chosen("copy");
             }
         }
+        if root.links: MenuItem {
+            title: "여기에 링크 만들기";
+            activated => {
+                root.chosen("link");
+            }
+        }
         MenuSeparator { }
         MenuItem {
             title: "취소";
@@ -132,6 +140,13 @@ export component DropMenu inherits ContextMenuArea {
             }
         }
     }
+}
+
+// One entry of the item menu's 링크 만들기 ▸: a kind of link, with its name, off where it cannot be
+// made now (the title then says why: a menu item has no tooltip).
+export struct LinkEntry {
+    title: string,
+    enabled: bool,
 }
 
 // What the item menu offers for the items it opens for, besides what it always has: Rust sets it
@@ -150,6 +165,9 @@ export global ItemMenu {
     in property <bool> one-item;
     // The system shares items through a picker of its own (macOS): 공유….
     in property <bool> shares;
+    // The kinds of link 링크 만들기 ▸ offers, in order: a shortcut (an alias on macOS), a symbolic
+    // link, on Windows a junction for folders. Empty for no item or an item off the local disk.
+    in property <[LinkEntry]> links;
     // Whether Undo and Redo can start: something to undo (to do again), and no undo or redo
     // under way. The toolbar's 되돌리기 and the folder's menu follow them.
     in property <bool> can-undo;
@@ -189,7 +207,7 @@ export global ItemMenu {
 export component RowMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (move, copy, cut,
     // copy-files, paste-into, paste-move-into, copy-path-<form>, share, open, run-as-admin,
-    // open-with, quick-look, open-terminal, add-favorite, rename, delete, delete-permanently,
+    // open-with, quick-look, open-terminal, add-favorite, link-<i>, rename, delete, delete-permanently,
     // properties, system-properties, more-options).
     callback command(name: string);
 
@@ -244,6 +262,17 @@ export component RowMenu inherits ContextMenuArea {
                 title: PathForms.title(i);
                 activated => {
                     root.command("copy-path-\{i}");
+                }
+            }
+        }
+        if ItemMenu.links.length > 0: Menu {
+            title: "링크 만들기";
+
+            for link[i] in ItemMenu.links: MenuItem {
+                title: link.title;
+                enabled: link.enabled;
+                activated => {
+                    root.command("link-\{i}");
                 }
             }
         }

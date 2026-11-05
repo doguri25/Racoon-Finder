@@ -24,7 +24,7 @@ const ERRORS: ErrorPolicy = ErrorPolicy::Continue;
 /// item a name its file system cannot hold or that Windows would not open (a reserved name,
 /// a trailing dot or space), which the `\\?\` paths of the local provider would write
 /// literally.
-fn name_issue(name: &OsStr, path: &VPath, fs: FsKind, os: Os) -> Option<IssueKind> {
+pub(super) fn name_issue(name: &OsStr, path: &VPath, fs: FsKind, os: Os) -> Option<IssueKind> {
     check_name(name, fs)
         .into_iter()
         .next()

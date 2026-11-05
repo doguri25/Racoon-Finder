@@ -35,6 +35,7 @@ pub use preflight::{
 pub use progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
 pub use report::{FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals, one_line};
 pub use resolver::{ErrorAction, ErrorAnswer, NonInteractive, PreflightAnswer, Resolver};
+pub use rf_platform::LinkKind;
 pub use spec::{
     ConflictPolicy, CopyOf, CreateKind, DeleteCopiesSpec, DeleteMethod, DeleteSpec, ErrorPolicy,
     JobKind, JobSpec, SymlinkMode, TransferItem, TransferMode, TransferOptions, TransferSpec,

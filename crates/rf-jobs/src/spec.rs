@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::time::SystemTime;
 
 use rf_core::{Error, Result, VPath};
+use rf_platform::LinkKind;
 use serde::{Deserialize, Serialize};
 
 use crate::undo::{CreatedItem, UndoRecord};
@@ -177,6 +178,13 @@ pub enum JobSpec {
         name: OsString,
         kind: CreateKind,
     },
+    /// Makes links (OPS-08): for each `(target, at, kind)` a link of `kind` to `target`, called
+    /// as `at` says, and under the first free numbered name when that is taken (`a - 바로 가기
+    /// (2).lnk`). The targets are never touched, and a target that is not there still gets its
+    /// link, with a warning. The report's undo record is [`UndoRecord::LinksMade`].
+    MakeLink {
+        links: Vec<(VPath, VPath, LinkKind)>,
+    },
     /// Reverses an earlier job as its record says (OPS-12). The report's undo record reverses
     /// this job in turn, which is how a redo is done.
     Undo(UndoRecord),
@@ -191,12 +199,14 @@ pub enum JobKind {
     Delete,
     Rename,
     Create,
+    /// Making links (`JobSpec::MakeLink`).
+    Link,
     Undo,
 }
 
 impl JobKind {
-    /// The word the log writes for this kind: `copy`, `move`, `delete`, `rename`, `create` or
-    /// `undo`. It is English whatever language the UI shows, so logs can be compared.
+    /// The word the log writes for this kind: `copy`, `move`, `delete`, `rename`, `create`,
+    /// `link` or `undo`. It is English whatever language the UI shows, so logs can be compared.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Copy => "copy",
@@ -204,6 +214,7 @@ impl JobKind {
             Self::Delete => "delete",
             Self::Rename => "rename",
             Self::Create => "create",
+            Self::Link => "link",
             Self::Undo => "undo",
         }
     }
@@ -219,6 +230,7 @@ impl JobSpec {
             Self::Delete(_) | Self::DeleteCopies(_) => JobKind::Delete,
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
+            Self::MakeLink { .. } => JobKind::Link,
             Self::Undo(_) => JobKind::Undo,
         }
     }
@@ -238,11 +250,18 @@ impl JobSpec {
 
     /// Whether the job writes a journal. A rename or a create is one atomic step and needs
     /// none; a transfer or a delete works through many items one by one and keeps one, and so
-    /// does an undo, which may move, copy or trash as many.
+    /// does an undo, which may move, copy or trash as many, and a job that makes several
+    /// links. A link job leaves no temporary file for recovery to remove; its journal lines let
+    /// the next start say that it was cut off. Run again, it numbers the links that were made
+    /// already, as a copy under `ConflictPolicy::AutoRename` does.
     pub fn journaled(&self) -> bool {
         matches!(
             self,
-            Self::Transfer(_) | Self::Delete(_) | Self::DeleteCopies(_) | Self::Undo(_)
+            Self::Transfer(_)
+                | Self::Delete(_)
+                | Self::DeleteCopies(_)
+                | Self::MakeLink { .. }
+                | Self::Undo(_)
         )
     }
 }

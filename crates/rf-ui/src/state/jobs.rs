@@ -496,6 +496,7 @@ impl AppState {
         {
             effects.extend(self.select_outputs(side, slice::from_ref(output), marks.as_deref()));
         }
+        effects.extend(self.select_made_links(work, origin, &report, marks.as_deref()));
         // What a paste made is selected in the pane it was asked in, as File Explorer does;
         // what it could not make (a failure) is not among its outputs.
         if matches!(
@@ -588,6 +589,10 @@ impl AppState {
         if matches!(work, JobWork::Create | JobWork::Rename) {
             return Effect::Notice(words::name_refused(work, failures[0]));
         }
+        // One link that could not be made says why in the notice itself.
+        if work == JobWork::Link && failures.len() == 1 {
+            return Effect::Notice(words::link_refused(failures[0]));
+        }
         let gone: Vec<&ItemFailure> = deleted_for_good(report).collect();
         let shown = Failures {
             title: words::failures_title().to_owned(),
@@ -641,6 +646,15 @@ impl AppState {
                 JobSpec::Undo(record) => (words::undone(record), None),
                 _ => return None,
             },
+            (Outcome::Completed, JobWork::Link) => {
+                let dangling = report
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.reason == Some(FailureReason::LinkTargetMissing))
+                    .count();
+                let text = words::links_made(report.done.files, dangling);
+                (text, report.undo.clone().map(ToastAction::Undo))
+            }
             (Outcome::Completed, JobWork::Redo) => (words::outcome(Outcome::Completed, work), None),
             (Outcome::Aborted, _) => (words::outcome(Outcome::Aborted, work), None),
             _ => return None,
@@ -662,6 +676,29 @@ impl AppState {
         let action = report.undo.clone().map(ToastAction::Undo);
         let gone = deleted_for_good(report).count();
         Some(self.toast_for(words::and_gone(text, gone), action, Some(MOVE_TOAST_TIME)))
+    }
+
+    /// What a link job made is selected in the pane it was asked in, so that the new links are
+    /// what the next key acts on (OPS-08); see [`AppState::select_outputs`].
+    fn select_made_links(
+        &mut self,
+        work: JobWork,
+        origin: Option<usize>,
+        report: &JobReport,
+        marks: Option<&[(u64, u64)]>,
+    ) -> Vec<Effect> {
+        match origin {
+            Some(side)
+                if work == JobWork::Link
+                    && matches!(
+                        report.outcome,
+                        Outcome::Completed | Outcome::CompletedWithErrors
+                    ) =>
+            {
+                self.select_outputs(side, &report.outputs, marks)
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Selects `outputs`, the items a create, a rename, an undo or a paste made, in pane `side`:
@@ -866,6 +903,7 @@ pub(super) fn top_level_count(spec: &JobSpec) -> usize {
         JobSpec::Transfer(transfer) => transfer.items.len(),
         JobSpec::Delete(delete) => delete.paths.len(),
         JobSpec::DeleteCopies(delete) => delete.copies.len(),
+        JobSpec::MakeLink { links } => links.len(),
         JobSpec::Undo(record) => record.item_count(),
         _ => 1,
     }
@@ -880,6 +918,9 @@ fn record_paths(record: &UndoRecord) -> Vec<&VPath> {
         UndoRecord::Created { path, .. } | UndoRecord::Removed { path, .. } => vec![path],
         UndoRecord::Trashed { items } | UndoRecord::Restored { items } => {
             items.iter().map(|item| &item.original).collect()
+        }
+        UndoRecord::LinksMade { at: links } | UndoRecord::LinksRemoved { links } => {
+            links.iter().map(|(link, _, _)| link).collect()
         }
         // A record added after this was written.
         _ => Vec::new(),
@@ -904,6 +945,7 @@ fn touched_folders(spec: &JobSpec, outputs: &[VPath]) -> Vec<VPath> {
         JobSpec::Delete(delete) => paths.extend(&delete.paths),
         JobSpec::DeleteCopies(delete) => paths.extend(delete.copies.iter().map(|c| &c.made.path)),
         JobSpec::Rename { from, to } => paths.extend([from, to]),
+        JobSpec::MakeLink { links } => paths.extend(links.iter().map(|(_, at, _)| at)),
         // What an undo took away is in its record; what it put back is in its outputs.
         JobSpec::Undo(record) => paths.extend(record_paths(record)),
         // A create's output is the item it made; a kind of job added after this was written

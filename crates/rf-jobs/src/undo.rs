@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, VPath};
+use rf_platform::LinkKind;
 use serde::{Deserialize, Serialize};
 
 use crate::spec::CreateKind;
@@ -113,16 +114,28 @@ pub enum UndoRecord {
     Restored {
         items: Vec<TrashedItem>,
     },
+    /// Links a job made, each as `(the link, its kind, the target it points to)`, with any
+    /// numbered name applied. An undo removes a link only while it is still a link of that kind
+    /// to that target (it never touches the target), and leaves any other item at its path.
+    LinksMade {
+        at: Vec<(VPath, LinkKind, VPath)>,
+    },
+    /// Links an undo removed, in the shape of [`UndoRecord::LinksMade`]: a redo makes them again
+    /// under the very same names.
+    LinksRemoved {
+        links: Vec<(VPath, LinkKind, VPath)>,
+    },
 }
 
 impl UndoRecord {
     /// The number of items the record covers: the length of its list for a copy, a move, a
-    /// trash and a restore, and 1 for the others.
+    /// trash, a restore and for links, and 1 for the others.
     pub fn item_count(&self) -> usize {
         match self {
             Self::Copied { created, .. } => created.len(),
             Self::Moved { moves, .. } => moves.len(),
             Self::Trashed { items } | Self::Restored { items } => items.len(),
+            Self::LinksMade { at: links } | Self::LinksRemoved { links } => links.len(),
             Self::Renamed { .. } | Self::Created { .. } | Self::Removed { .. } => 1,
         }
     }

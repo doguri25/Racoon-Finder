@@ -8,7 +8,9 @@
 //! 보기 ▸ 설정 ([`AppState::set_drag_default`]) and the drives of the sidebar (for the system's
 //! way: a move within a drive, a copy to another) go into [`drop_rule::choose`], at every hover
 //! and at the drop. The choice of 놓을 때 묻기 drops nothing yet: the menu shows where the drop
-//! was, and the transfer it chooses goes the way a drop's would ([`AppState::drop_menu_chosen`]).
+//! was, and the transfer it chooses goes the way a drop's would ([`AppState::drop_menu_chosen`],
+//! [`AppState::drop_menu_link`]). The keys for a link make links instead (OPS-08, module
+//! `links`).
 //!
 //! The items are noted when the press readies the drag ([`Drag`]), under an id that the
 //! drag's payload carries ([`AppState::drag_id`]): a drop always moves the items the drag
@@ -44,10 +46,12 @@ use std::time::Duration;
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{ConflictPolicy, JobSpec, TransferMode, TransferOptions, TransferSpec};
 use rf_platform::dnd::{DragMods, DropEffect, Effects};
+use rf_platform::drop_kind;
 
 use super::drop_rule::{self, DropChoice};
 use super::favorites::Unkept;
 use super::jobs::submit;
+use super::links::link_job;
 use super::{AppState, Effect, MenuShown, load};
 use crate::jobs::JobEffect;
 use crate::pane::next_generation;
@@ -137,7 +141,7 @@ pub(super) struct AskedDrop {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hover {
     /// The place takes the items: a drop there does what the offer says, which is nothing for
-    /// keys that ask for a link or for what the drag does not allow.
+    /// keys that ask for what the drag does not allow.
     Takes(DropOffer),
     /// The place does not take them, for this reason.
     Refused(Validity),
@@ -157,7 +161,7 @@ pub enum Hover {
 impl Hover {
     /// What a drop there would do, for the pointer of a drag that `allowed` these: `None` where it
     /// does nothing. The menu of 놓을 때 묻기 shows as a move where the drag allows one, else as a
-    /// copy.
+    /// copy, else as a link.
     pub fn effect(&self, allowed: Effects) -> Option<DropEffect> {
         let Hover::Takes(offer) = self else {
             // An addition to the favorites shows as a link where the drag allows one (File
@@ -170,16 +174,17 @@ impl Hover {
             };
         };
         match offer.choice {
-            DropChoice::Do(effect @ (DropEffect::Copy | DropEffect::Move)) => Some(effect),
+            DropChoice::Do(effect) => Some(effect),
             DropChoice::Ask if allowed.contains(DropEffect::Move) => Some(DropEffect::Move),
-            DropChoice::Ask => Some(DropEffect::Copy),
-            DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => None,
+            DropChoice::Ask if allowed.contains(DropEffect::Copy) => Some(DropEffect::Copy),
+            DropChoice::Ask => Some(DropEffect::Link),
+            DropChoice::Refuse(_) => None,
         }
     }
 }
 
-/// What the effects of a drop did: the mode of the transfer they submit, or `None` (a notice,
-/// the menu of 놓을 때 묻기, nothing).
+/// What the effects of a drop did: the mode of the transfer they submit, a link they make, or
+/// `None` (a notice, the menu of 놓을 때 묻기, nothing).
 pub fn dropped_effect(effects: &[Effect]) -> Option<DropEffect> {
     effects.iter().find_map(|effect| match effect {
         Effect::Job(JobEffect::Submit {
@@ -189,6 +194,10 @@ pub fn dropped_effect(effects: &[Effect]) -> Option<DropEffect> {
             TransferMode::Copy => DropEffect::Copy,
             TransferMode::Move => DropEffect::Move,
         }),
+        Effect::Job(JobEffect::Submit {
+            spec: JobSpec::MakeLink { .. },
+            ..
+        }) => Some(DropEffect::Link),
         _ => None,
     })
 }
@@ -206,11 +215,13 @@ pub(super) fn asked(allowed: Effects) -> DropChoice {
 }
 
 /// The menu of 놓을 때 묻기 for a drop whose drag `allowed` these: it offers only what the drag
-/// allows (a drag of another app on Linux allows no move, and its menu no 여기로 이동).
+/// allows (a drag of another app on Linux allows no move, and its menu no 여기로 이동; one that
+/// allows no link has no 여기에 링크 만들기).
 pub(super) fn ask_menu(allowed: Effects) -> Effect {
     Effect::ShowMenu(MenuShown::AskDrop {
         moves: allowed.contains(DropEffect::Move),
         copies: allowed.contains(DropEffect::Copy),
+        links: allowed.contains(DropEffect::Link),
     })
 }
 
@@ -293,6 +304,11 @@ impl AppState {
         self.drag.as_ref()
     }
 
+    /// Whether Shift is held, as the window last heard.
+    pub fn shift_held(&self) -> bool {
+        self.drag_mods.shift
+    }
+
     /// The modifier keys held now, as the window tells them at each change: the next hover and
     /// the next drop choose with them.
     pub fn modifiers_changed(&mut self, mods: DragMods) {
@@ -323,13 +339,13 @@ impl AppState {
     /// from the paths alone, so that it can answer at every move of the pointer. The drag notes
     /// the folder, which the window shows, unless the keys refuse the drop there.
     pub fn drop_offer(&mut self, id: u64, spot: DropSpot) -> Option<DropOffer> {
-        self.offer_with(id, spot, self.drag_mods, Effects::COPY | Effects::MOVE)
+        self.offer_with(id, spot, self.drag_mods, Effects::ALL)
     }
 
     /// What the place `spot` makes of the drag readied last, whose payload carries `id`, for the
     /// window to show ([`AppState::drop_offer`], else [`AppState::drop_refused`]).
     pub fn drop_hover(&mut self, id: u64, spot: DropSpot) -> Hover {
-        self.hover_with(id, spot, self.drag_mods, Effects::COPY | Effects::MOVE)
+        self.hover_with(id, spot, self.drag_mods, Effects::ALL)
     }
 
     /// [`AppState::drop_hover`] with the keys `mods` and a drag that `allowed` these: a drag of
@@ -343,7 +359,7 @@ impl AppState {
         allowed: Effects,
     ) -> Hover {
         if let DropSpot::Favorites { index } = spot {
-            return self.keep_hover_rows(id, index, mods, allowed);
+            return self.keep_hover_rows(id, index, mods);
         }
         match self.offer_with(id, spot, mods, allowed) {
             Some(offer) => Hover::Takes(offer),
@@ -393,7 +409,7 @@ impl AppState {
 
     /// What a drop of items from `from` (their folder, or one of them) into `folder` does, with
     /// the keys `mods`, the setting, and a drag that `allowed` these (a drag of this window's
-    /// allows a copy and a move). The drives are those of the sidebar, which a worker found (none
+    /// allows a copy, a move and a link). The drives are those of the sidebar, which a worker found (none
     /// known yet: another drive), looked at only for the system's way.
     pub(super) fn drop_choice(
         &self,
@@ -444,13 +460,7 @@ impl AppState {
     /// one that may not take them at all: a notice says so, and the next hover shows where a
     /// drop goes.
     pub fn drop_items(&mut self, id: u64, spot: DropSpot) -> Vec<Effect> {
-        self.drop_with(
-            id,
-            spot,
-            self.drag_mods,
-            Effects::COPY | Effects::MOVE,
-            false,
-        )
+        self.drop_with(id, spot, self.drag_mods, Effects::ALL, false)
     }
 
     /// [`AppState::drop_items`] with the keys `mods` and a drag that `allowed` these, which asks
@@ -466,7 +476,7 @@ impl AppState {
         ask: bool,
     ) -> Vec<Effect> {
         if let DropSpot::Favorites { index } = spot {
-            return self.keep_dropped_rows(id, index, mods, allowed);
+            return self.keep_dropped_rows(id, index, mods);
         }
         let shown = self
             .drag
@@ -489,14 +499,17 @@ impl AppState {
         let mode = match choice {
             DropChoice::Do(DropEffect::Copy) => Some(TransferMode::Copy),
             DropChoice::Do(DropEffect::Move) => Some(TransferMode::Move),
-            DropChoice::Ask => None,
-            // The keys refuse it (no links are made).
-            DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => return Vec::new(),
+            DropChoice::Ask | DropChoice::Do(DropEffect::Link) => None,
+            // The keys or the drag refuse it.
+            DropChoice::Refuse(_) => return Vec::new(),
         };
         let Some(drag) = self.drag.take() else {
             return Vec::new();
         };
         self.pending_click = None;
+        if choice == DropChoice::Do(DropEffect::Link) {
+            return Self::drop_links(&drag.request.sources, &offer.folder, drag.side);
+        }
         let Some(mode) = mode else {
             self.asked_drop = Some(AskedDrop {
                 sources: drag.request.sources,
@@ -531,6 +544,29 @@ impl AppState {
             return Vec::new();
         }
         self.drop_transfer(mode, &asked.sources, &asked.folder, asked.side)
+    }
+
+    /// The menu of 놓을 때 묻기 chose 여기에 링크 만들기: the drop it showed for gets its links, as
+    /// a drop with the keys for a link would. Nothing where the drag does not allow a link, while a
+    /// window shows over the main window or the app ends. The drop is answered once.
+    pub fn drop_menu_link(&mut self) -> Vec<Effect> {
+        let Some(asked) = self.asked_drop.take() else {
+            return Vec::new();
+        };
+        if self.modal.is_some() || self.quitting || !asked.allowed.contains(DropEffect::Link) {
+            return Vec::new();
+        }
+        Self::drop_links(&asked.sources, &asked.folder, asked.side)
+    }
+
+    /// The job that makes the links a drop of `sources`, dragged from pane `side`, into `folder`
+    /// submits: the shortcut of the system (the alias on macOS, a symbolic link on Linux) to each
+    /// item, under the name its system gives it, numbered when that is taken (OPS-08).
+    pub(super) fn drop_links(sources: &[VPath], folder: &VPath, side: usize) -> Vec<Effect> {
+        match link_job(Os::CURRENT, drop_kind(Os::CURRENT), sources, folder) {
+            Ok(spec) => vec![submit(spec, Some(side))],
+            Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
+        }
     }
 
     /// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits:

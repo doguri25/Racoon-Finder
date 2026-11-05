@@ -13,9 +13,9 @@ use rf_jobs::{
     Compared, ConflictPolicy, CopyFound, DeleteMethod, FailureReason, IssueKind, ItemFailure,
     JobKind, JobSpec, JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
-use rf_platform::KnownFolder;
 use rf_platform::dnd::DropEffect;
 use rf_platform::shell::App;
+use rf_platform::{KnownFolder, LinkKind};
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
@@ -46,6 +46,8 @@ pub enum JobWork {
     Delete,
     Rename,
     Create,
+    /// Making links (`JobSpec::MakeLink`).
+    Link,
     /// An undo (`JobEngine::undo`).
     Undo,
     /// A redo (`JobEngine::redo`), which is an undo of the undo. Its spec is an undo spec too,
@@ -72,6 +74,7 @@ impl JobWork {
             JobKind::Delete => JobWork::Delete,
             JobKind::Rename => JobWork::Rename,
             JobKind::Create => JobWork::Create,
+            JobKind::Link => JobWork::Link,
             JobKind::Undo => JobWork::Undo,
             _ => JobWork::Other,
         }
@@ -96,6 +99,12 @@ impl JobWork {
                 "이름 바꾸기",
             ),
             JobWork::Create => ("만드는 중", "만들었", "만들기를", "새로 만들기"),
+            JobWork::Link => (
+                "링크 만드는 중",
+                "링크를 만들었",
+                "링크 만들기를",
+                "링크 만들기",
+            ),
             JobWork::Undo => ("되돌리는 중", "되돌렸", "되돌리기를", "되돌리기"),
             JobWork::Redo => (
                 "다시 실행하는 중",
@@ -527,6 +536,14 @@ pub fn failure_reason(reason: &FailureReason) -> String {
             "휴지통의 어디에 들어갔는지 알 수 없어 되돌릴 수 없습니다"
         }
         FailureReason::AcrossLocations => "이름 바꾸기로는 다른 위치로 옮길 수 없습니다",
+        FailureReason::LinkNotLocal => "링크는 이 컴퓨터의 드라이브에서만 만들 수 있습니다",
+        FailureReason::LinkNeedsPrivilege => {
+            "심볼릭 링크를 만들려면 개발자 모드를 켜거나 관리자 권한으로 실행해야 합니다"
+        }
+        FailureReason::LinkTargetMissing => "링크가 가리키는 대상이 없습니다",
+        FailureReason::ChangedSinceLinked => {
+            "링크가 바뀌었거나 다른 항목으로 대체되어 되돌리지 않았습니다"
+        }
         FailureReason::TempLeftBehind => "임시 파일을 지우지 못해 남아 있습니다",
         FailureReason::Issue(issue) => {
             return format!("{}. {}", issue_kind(issue), refused_because(issue));
@@ -755,6 +772,7 @@ pub fn job_report(
         JobWork::Delete => "삭제",
         JobWork::Rename => "이름 바꿈",
         JobWork::Create => "만듦",
+        JobWork::Link => "링크 만듦",
         JobWork::Undo => "되돌림",
         JobWork::Redo => "다시 실행",
         JobWork::Other => "처리",
@@ -1180,6 +1198,7 @@ pub fn undone(record: &UndoRecord) -> String {
         UndoRecord::Trashed { .. } => JobWork::Trash,
         UndoRecord::Renamed { .. } => JobWork::Rename,
         UndoRecord::Created { .. } => JobWork::Create,
+        UndoRecord::LinksMade { .. } => JobWork::Link,
         // The record of an undo, or one added after this was written.
         _ => JobWork::Other,
     };
@@ -1722,10 +1741,77 @@ pub fn drop_badge(choice: DropChoice, folder: &str) -> String {
         DropChoice::Do(DropEffect::Move) => format!("이동 → {folder}"),
         DropChoice::Do(DropEffect::Copy) => format!("복사 → {folder}"),
         DropChoice::Ask => format!("놓을 때 묻기 → {folder}"),
-        DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(Refusal::NoLinks) => {
-            "링크 만들기는 아직 없습니다".to_owned()
-        }
+        DropChoice::Do(DropEffect::Link) => format!("링크 만들기: {folder}"),
         DropChoice::Refuse(Refusal::NotAllowed) => "여기에는 놓을 수 없습니다".to_owned(),
+    }
+}
+
+/// The name of a kind of link in the item menu's 링크 만들기 ▸: the shortcut of Windows (바로
+/// 가기), the alias of macOS (별칭), a symbolic link, a junction.
+pub fn link_kind(kind: LinkKind, os: Os) -> &'static str {
+    match (kind, os) {
+        (LinkKind::Shortcut, Os::MacOs) => "별칭",
+        (LinkKind::Shortcut, _) => "바로 가기",
+        (LinkKind::Symlink, _) => "심볼릭 링크",
+        (LinkKind::Junction, _) => "정션",
+    }
+}
+
+/// The entry of a kind of link in 링크 만들기 ▸: its name, and for one that is off (`enabled`
+/// false: a symbolic link without the rights for one) the reason, since a menu item has no
+/// tooltip to carry it.
+pub fn link_entry(kind: LinkKind, enabled: bool, os: Os) -> String {
+    let name = link_kind(kind, os);
+    if enabled {
+        name.to_owned()
+    } else {
+        format!("{name} (개발자 모드나 관리자 권한 필요)")
+    }
+}
+
+/// What a click on a symbolic link that is off says: why, and what to do.
+pub fn link_needs_privilege() -> &'static str {
+    "심볼릭 링크를 만들려면 Windows 설정에서 개발자 모드를 켜거나 관리자 권한으로 실행해야 합니다"
+}
+
+/// The notice of links made: `링크 3개를 만들었습니다`, with how many of them (`dangling`)
+/// point to nothing: `링크 3개를 만들었습니다 · 대상이 없는 링크 1개`.
+pub fn links_made(count: u64, dangling: usize) -> String {
+    let made = format!("링크 {count}개를 만들었습니다");
+    if dangling == 0 {
+        made
+    } else {
+        format!("{made} · 대상이 없는 링크 {dangling}개")
+    }
+}
+
+/// The notice of a link that could not be made, with why: `링크를 만들지 못했습니다: 같은 이름의
+/// 항목이 이미 있습니다`.
+pub fn link_refused(failure: &ItemFailure) -> String {
+    format!("링크를 만들지 못했습니다: {}", item_failure(failure))
+}
+
+/// The title of the picker that finds where links go (PICK-09).
+pub fn pick_link_title() -> &'static str {
+    "링크를 어디에 만들까요?"
+}
+
+/// The picker's confirm button when it finds where links go.
+pub fn pick_link_confirm() -> &'static str {
+    "여기에 링크 만들기"
+}
+
+/// The picker's line under its title when it finds where `count` links of `kind` go.
+pub fn pick_link_summary(kind: LinkKind, count: usize, os: Os) -> String {
+    format!("항목 {count}개의 {}", link_kind(kind, os))
+}
+
+/// Why the picker cannot find a folder for links: one of the items, or a folder inside one, or
+/// else what [`pick_problem`] says.
+pub fn pick_link_problem(validity: Validity) -> String {
+    match validity {
+        Validity::IntoSource => "링크를 만드는 항목 안이라 고를 수 없음".to_owned(),
+        other => pick_problem(other, TransferMode::Copy, false),
     }
 }
 
@@ -1761,6 +1847,12 @@ pub fn drop_keeps() -> &'static str {
 /// Why the list of favorites takes the drag: it holds files, and the list takes folders only.
 pub fn drop_only_folders() -> &'static str {
     "폴더만 즐겨찾기에 추가할 수 있습니다"
+}
+
+/// Why the list of favorites takes nothing of a drag whose keys ask for a link: it makes none
+/// (OPS-08), and keeps folders as additions only.
+pub fn drop_favorites_no_links() -> &'static str {
+    "여기에는 링크를 만들지 않고 폴더만 추가합니다"
 }
 
 /// The notice for a folder the user asked to keep as a favorite that is one already.
@@ -3000,12 +3092,10 @@ mod tests {
             "복사 → Downloads"
         );
         assert_eq!(drop_badge(DropChoice::Ask, "백업"), "놓을 때 묻기 → 백업");
-        for links in [
-            DropChoice::Refuse(Refusal::NoLinks),
-            DropChoice::Do(DropEffect::Link),
-        ] {
-            assert_eq!(drop_badge(links, "백업"), "링크 만들기는 아직 없습니다");
-        }
+        assert_eq!(
+            drop_badge(DropChoice::Do(DropEffect::Link), "백업"),
+            "링크 만들기: 백업"
+        );
         assert_eq!(
             drop_badge(DropChoice::Refuse(Refusal::NotAllowed), "백업"),
             "여기에는 놓을 수 없습니다"

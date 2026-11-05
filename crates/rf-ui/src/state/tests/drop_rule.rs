@@ -8,7 +8,7 @@ use rf_platform::dnd::{DragMods, DropEffect, Effects};
 
 use super::*;
 use crate::settings::DragDefault;
-use crate::state::drop_rule::{DropChoice, Refusal, choose, same_volume};
+use crate::state::drop_rule::{DropChoice, Refusal, asks_for_link, choose, same_volume};
 
 const NO_KEYS: DragMods = DragMods {
     ctrl: false,
@@ -45,7 +45,7 @@ const ALT_LOGO_KEYS: DragMods = DragMods {
 
 const COPY: DropChoice = DropChoice::Do(DropEffect::Copy);
 const MOVE: DropChoice = DropChoice::Do(DropEffect::Move);
-const NO_LINKS: DropChoice = DropChoice::Refuse(Refusal::NoLinks);
+const LINK: DropChoice = DropChoice::Do(DropEffect::Link);
 const NOT_ALLOWED: DropChoice = DropChoice::Refuse(Refusal::NotAllowed);
 
 /// What a drop does on `os` with `mods` held, the setting a move, everything allowed, within
@@ -58,8 +58,8 @@ fn keyed(os: Os, mods: DragMods) -> DropChoice {
 fn windows_takes_file_explorers_keys() {
     assert_eq!(keyed(Os::Windows, CTRL_KEY), COPY);
     assert_eq!(keyed(Os::Windows, SHIFT_KEY), MOVE);
-    assert_eq!(keyed(Os::Windows, ALT_KEY), NO_LINKS);
-    assert_eq!(keyed(Os::Windows, CTRL_SHIFT_KEYS), NO_LINKS);
+    assert_eq!(keyed(Os::Windows, ALT_KEY), LINK);
+    assert_eq!(keyed(Os::Windows, CTRL_SHIFT_KEYS), LINK);
     // The Windows key is the system's.
     assert_eq!(keyed(Os::Windows, LOGO_KEY), MOVE);
     // A key beats the setting.
@@ -77,7 +77,7 @@ fn windows_takes_file_explorers_keys() {
 fn macos_takes_finders_keys() {
     assert_eq!(keyed(Os::MacOs, ALT_KEY), COPY);
     assert_eq!(keyed(Os::MacOs, LOGO_KEY), MOVE);
-    assert_eq!(keyed(Os::MacOs, ALT_LOGO_KEYS), NO_LINKS);
+    assert_eq!(keyed(Os::MacOs, ALT_LOGO_KEYS), LINK);
     // Control and Shift change nothing there: the setting chooses.
     for mods in [CTRL_KEY, SHIFT_KEY, CTRL_SHIFT_KEYS] {
         assert_eq!(keyed(Os::MacOs, mods), MOVE, "{mods:?}");
@@ -90,7 +90,7 @@ fn macos_takes_finders_keys() {
 fn linux_takes_the_keys_of_its_file_managers() {
     assert_eq!(keyed(Os::Other, CTRL_KEY), COPY);
     assert_eq!(keyed(Os::Other, SHIFT_KEY), MOVE);
-    assert_eq!(keyed(Os::Other, CTRL_SHIFT_KEYS), NO_LINKS);
+    assert_eq!(keyed(Os::Other, CTRL_SHIFT_KEYS), LINK);
 }
 
 #[test]
@@ -166,15 +166,37 @@ fn a_key_that_asks_for_what_the_drag_does_not_allow_refuses() {
         || true,
     );
     assert_eq!(move_only, NOT_ALLOWED);
-    // A key for a link refuses for that reason, whatever the drag allows.
-    let linked = choose(
-        Os::Windows,
-        DragDefault::Move,
-        ALT_KEY,
-        Effects::LINK,
-        || true,
+    // A key for a link links where the drag allows one, and refuses where it does not.
+    let linked = |os, mods, allowed| choose(os, DragDefault::Move, mods, allowed, || true);
+    assert_eq!(linked(Os::Windows, ALT_KEY, Effects::LINK), LINK);
+    assert_eq!(linked(Os::Windows, ALT_KEY, Effects::ALL), LINK);
+    assert_eq!(
+        linked(Os::Windows, ALT_KEY, Effects::COPY | Effects::MOVE),
+        NOT_ALLOWED
     );
-    assert_eq!(linked, NO_LINKS);
+    assert_eq!(linked(Os::MacOs, ALT_LOGO_KEYS, Effects::MOVE), NOT_ALLOWED);
+    assert_eq!(
+        linked(Os::Other, CTRL_SHIFT_KEYS, Effects::COPY),
+        NOT_ALLOWED
+    );
+}
+
+#[test]
+fn the_keys_for_a_link_are_told_whatever_the_drag_allows() {
+    // The list of favorites makes no links and says so, also for a drag that allows none.
+    assert!(asks_for_link(Os::Windows, ALT_KEY));
+    assert!(asks_for_link(Os::Windows, CTRL_SHIFT_KEYS));
+    assert!(asks_for_link(Os::MacOs, ALT_LOGO_KEYS));
+    assert!(asks_for_link(Os::Other, CTRL_SHIFT_KEYS));
+    // The keys of a copy and a move, and none, are not.
+    for os in [Os::Windows, Os::MacOs, Os::Other] {
+        for mods in [NO_KEYS, CTRL_KEY, SHIFT_KEY, LOGO_KEY] {
+            assert!(!asks_for_link(os, mods), "{os:?} {mods:?}");
+        }
+    }
+    // Alt alone is a link on Windows only (macOS: a copy; Linux: nothing).
+    assert!(!asks_for_link(Os::MacOs, ALT_KEY));
+    assert!(!asks_for_link(Os::Other, ALT_KEY));
 }
 
 #[test]

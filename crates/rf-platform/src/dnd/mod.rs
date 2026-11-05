@@ -66,8 +66,8 @@ pub(crate) use self::macos::content_view;
 pub enum DropEffect {
     Copy,
     Move,
-    /// A link to them (a shortcut on Windows, an alias on macOS), which the app does not make
-    /// yet.
+    /// A link to them (a shortcut on Windows, an alias on macOS, a symbolic link on Linux),
+    /// which the app makes in the folder they are dropped on (`crate::links`).
     Link,
 }
 
@@ -112,6 +112,13 @@ pub struct DragMods {
     pub shift: bool,
     pub alt: bool,
     pub logo: bool,
+}
+
+/// The modifier keys held now, as the system has them (Windows `GetAsyncKeyState`, macOS
+/// `NSEvent.modifierFlags`), for a choice made after a menu of the system's own ran its loop,
+/// which the window hears no key change in; none elsewhere, where winit tells the keys.
+pub fn held_mods() -> DragMods {
+    imp::held_mods()
 }
 
 /// The items a drag from another app carries.
@@ -328,8 +335,9 @@ pub struct DropReply {
 /// source must never read "move" from `Drop`'s effect or from `Performed DropEffect`: either
 /// tells it that the target only copied, and it would delete the originals itself, at once,
 /// before the app's copy is done (an "unoptimized move"). A copy answers `DROPEFFECT_COPY` in all
-/// three. Nothing done (a refusal, the menu of 놓을 때 묻기, whose choice comes later, a link,
-/// which the app does not make) answers `DROPEFFECT_NONE` and writes nothing.
+/// three, and a link `DROPEFFECT_LINK` in all three: the source keeps its items either way.
+/// Nothing done (a refusal, the menu of 놓을 때 묻기, whose choice comes later) answers
+/// `DROPEFFECT_NONE` and writes nothing.
 pub fn drop_reply(done: Option<DropEffect>) -> DropReply {
     match done {
         Some(DropEffect::Move) => DropReply {
@@ -342,7 +350,12 @@ pub fn drop_reply(done: Option<DropEffect>) -> DropReply {
             performed: Some(DROPEFFECT_COPY),
             logical: Some(DROPEFFECT_COPY),
         },
-        Some(DropEffect::Link) | None => DropReply {
+        Some(DropEffect::Link) => DropReply {
+            effect: DROPEFFECT_LINK,
+            performed: Some(DROPEFFECT_LINK),
+            logical: Some(DROPEFFECT_LINK),
+        },
+        None => DropReply {
             effect: DROPEFFECT_NONE,
             performed: None,
             logical: None,
@@ -602,7 +615,7 @@ fn mask_effects(mask: usize) -> Effects {
 /// read as "moved, delete the originals" while the app's own copy still runs: a copy is a copy;
 /// a move the app's job makes is the generic operation (the destination's own), or, for a source
 /// that allows no generic one, a copy, or else nothing (the drop is refused); nothing is nothing.
-/// A link, which the app does not make, is nothing too.
+/// A link is the link operation, where the source's mask has it, else nothing.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
@@ -612,36 +625,40 @@ fn answer_for(chosen: Option<DropEffect>, mask: usize) -> usize {
         Some(DropEffect::Copy) => NS_DRAG_COPY,
         Some(DropEffect::Move) if mask & NS_DRAG_GENERIC != 0 => NS_DRAG_GENERIC,
         Some(DropEffect::Move) if mask & NS_DRAG_COPY != 0 => NS_DRAG_COPY,
+        Some(DropEffect::Link) if mask & NS_DRAG_LINK != 0 => NS_DRAG_LINK,
         Some(DropEffect::Move | DropEffect::Link) | None => 0,
     }
 }
 
 /// What `performDragOperation:` answers for a drop that did `done`: `YES`, the drop is taken,
-/// only for a copy or a move the app's job does; then the source learns the operation the last
-/// hover answered ([`answer_for`], never a move). `NO` for nothing done (a refusal, a link, which
-/// the app does not make, and the menu of 놓을 때 묻기, whose choice comes later): the source
-/// learns of no operation, and the drag image slides back.
+/// only for a copy, a move or a link the app's job does; then the source learns the operation
+/// the last hover answered ([`answer_for`], never a move). `NO` for nothing done (a refusal and
+/// the menu of 놓을 때 묻기, whose choice comes later): the source learns of no operation, and
+/// the drag image slides back.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
 )]
 fn drop_taken(done: Option<DropEffect>) -> bool {
-    matches!(done, Some(DropEffect::Copy | DropEffect::Move))
+    matches!(
+        done,
+        Some(DropEffect::Copy | DropEffect::Move | DropEffect::Link)
+    )
 }
 
 /// What the app's own drag source allows of the effects `allowed`, as `AppKit` asks it for the
 /// place the drag is over (`draggingSession:sourceOperationMaskForDraggingContext:`): out of the
-/// app (`within` false), as Finder's own drags do, a copy, a move, its generic operation (the
+/// app, as Finder's own drags do, a copy, a move, its generic operation (the
 /// taker's own, which Finder takes for a move) and a link, for the taker to choose from by its
-/// keys; within the app (back over the window), a move or a copy alone, which the window's drop
-/// makes ([`mask_effects`]), with the generic operation for the move: the window answers a move
-/// with it ([`answer_for`]), and the pointer keeps the move's arrow rather than a copy's "+". The
-/// app is the source there and deletes nothing whatever it hears.
+/// keys; back over the window the same, which the window's drop makes ([`mask_effects`]), with
+/// the generic operation for the move: the window answers a move with it ([`answer_for`]), and
+/// the pointer keeps the move's arrow rather than a copy's "+". The app is the source there and
+/// deletes nothing whatever it hears.
 #[cfg_attr(
     not(target_os = "macos"),
     allow(dead_code, reason = "used by macOS code; tested on every OS")
 )]
-fn source_mask(allowed: Effects, within: bool) -> usize {
+fn source_mask(allowed: Effects) -> usize {
     let mut mask = 0;
     if allowed.contains(DropEffect::Copy) {
         mask |= NS_DRAG_COPY;
@@ -649,7 +666,7 @@ fn source_mask(allowed: Effects, within: bool) -> usize {
     if allowed.contains(DropEffect::Move) {
         mask |= NS_DRAG_MOVE | NS_DRAG_GENERIC;
     }
-    if allowed.contains(DropEffect::Link) && !within {
+    if allowed.contains(DropEffect::Link) {
         mask |= NS_DRAG_LINK;
     }
     mask
@@ -690,11 +707,12 @@ fn icon_place(index: usize, steps: u8) -> (u8, bool) {
     (step, index <= usize::from(steps))
 }
 
-/// `DROPIMAGE_INVALID`, `DROPIMAGE_NONE`, `DROPIMAGE_COPY`, `DROPIMAGE_MOVE`.
+/// `DROPIMAGE_INVALID`, `DROPIMAGE_NONE`, `DROPIMAGE_COPY`, `DROPIMAGE_MOVE`, `DROPIMAGE_LINK`.
 const DROPIMAGE_INVALID: i32 = -1;
 const DROPIMAGE_NONE: i32 = 0;
 const DROPIMAGE_COPY: i32 = 1;
 const DROPIMAGE_MOVE: i32 = 2;
+const DROPIMAGE_LINK: i32 = 4;
 
 /// The length of `DROPDESCRIPTION`'s strings, in UTF-16 units with their NUL (`MAX_PATH`).
 const DESCRIPTION_UNITS: usize = 260;
@@ -714,7 +732,8 @@ fn description_bytes(effect: Option<DropEffect>, hint: &DropHint) -> Vec<u8> {
         _ if hint.message.is_empty() => DROPIMAGE_INVALID,
         Some(DropEffect::Copy) => DROPIMAGE_COPY,
         Some(DropEffect::Move) => DROPIMAGE_MOVE,
-        Some(DropEffect::Link) | None => DROPIMAGE_NONE,
+        Some(DropEffect::Link) => DROPIMAGE_LINK,
+        None => DROPIMAGE_NONE,
     };
     let mut bytes = Vec::with_capacity(4 + DESCRIPTION_UNITS * 4);
     bytes.extend_from_slice(&image.to_le_bytes());
@@ -795,8 +814,21 @@ mod tests {
             logical: None,
         };
         assert_eq!(drop_reply(None), nothing);
-        assert_eq!(drop_reply(Some(DropEffect::Link)), nothing);
-        for done in [None, Some(DropEffect::Copy), Some(DropEffect::Move)] {
+        // A link is answered as a link in all three, and never as a move.
+        assert_eq!(
+            drop_reply(Some(DropEffect::Link)),
+            DropReply {
+                effect: DROPEFFECT_LINK,
+                performed: Some(DROPEFFECT_LINK),
+                logical: Some(DROPEFFECT_LINK),
+            }
+        );
+        for done in [
+            None,
+            Some(DropEffect::Copy),
+            Some(DropEffect::Move),
+            Some(DropEffect::Link),
+        ] {
             let reply = drop_reply(done);
             assert_ne!(reply.effect, DROPEFFECT_MOVE, "{done:?}");
             assert_ne!(reply.performed, Some(DROPEFFECT_MOVE), "{done:?}");
@@ -1097,10 +1129,11 @@ mod tests {
         // A source that allows only its move cannot drop into the app.
         assert_eq!(answer_for(Some(DropEffect::Move), 16), 0);
         assert_eq!(answer_for(Some(DropEffect::Move), 2 | 16), 0);
-        // Nothing, and a link, which the app does not make: `NSDragOperationNone`.
+        // Nothing: `NSDragOperationNone`. A link is the link operation, where the source has it.
         assert_eq!(answer_for(None, finder), 0);
         assert_eq!(answer_for(None, 0), 0);
-        assert_eq!(answer_for(Some(DropEffect::Link), finder), 0);
+        assert_eq!(answer_for(Some(DropEffect::Link), finder), NS_DRAG_LINK);
+        assert_eq!(answer_for(Some(DropEffect::Link), 1 | 16), 0);
         let masks = [
             0,
             1,
@@ -1125,7 +1158,7 @@ mod tests {
                 // Never a move, nor more than one operation.
                 let answer = answer_for(chosen, mask);
                 assert!(
-                    [0, 1, 4].contains(&answer),
+                    [0, 1, 4, NS_DRAG_LINK].contains(&answer),
                     "{chosen:?} {mask:#x}: {answer}"
                 );
             }
@@ -1193,32 +1226,23 @@ mod tests {
     }
 
     #[test]
-    fn the_app_s_drag_source_allows_all_out_of_the_app_and_a_move_or_a_copy_in_it() {
+    fn the_app_s_drag_source_allows_all_out_of_the_app_and_back_over_the_window() {
         let finder = NS_DRAG_COPY | NS_DRAG_LINK | NS_DRAG_GENERIC | NS_DRAG_MOVE;
-        // Out of the app, as Finder's own drags: the taker chooses, by its keys.
-        assert_eq!(source_mask(Effects::ALL, false), finder);
-        // Within it (back over the window): a move or a copy, which the window's drop makes,
-        // with the generic operation for its move, so that the window answers a move as Finder's
-        // own drags hear it, with the move cursor (never the "+" of a copy).
-        let within = source_mask(Effects::ALL, true);
-        assert_eq!(within, NS_DRAG_COPY | NS_DRAG_GENERIC | NS_DRAG_MOVE);
-        assert_eq!(mask_effects(within), Effects::COPY | Effects::MOVE);
-        assert_eq!(answer_for(Some(DropEffect::Move), within), NS_DRAG_GENERIC);
-        assert_eq!(answer_for(Some(DropEffect::Copy), within), NS_DRAG_COPY);
+        // As Finder's own drags: the taker chooses, by its keys. Back over the window it is the
+        // same, which the window's drop makes: a copy, a move (with the generic operation, so
+        // that the window answers a move as Finder's own drags hear it, with the move cursor,
+        // never the "+" of a copy) and a link.
+        let mask = source_mask(Effects::ALL);
+        assert_eq!(mask, finder);
+        assert_eq!(mask_effects(mask), Effects::ALL);
+        assert_eq!(answer_for(Some(DropEffect::Move), mask), NS_DRAG_GENERIC);
+        assert_eq!(answer_for(Some(DropEffect::Copy), mask), NS_DRAG_COPY);
+        assert_eq!(answer_for(Some(DropEffect::Link), mask), NS_DRAG_LINK);
         // Only what the drag allows.
-        assert_eq!(source_mask(Effects::COPY, false), NS_DRAG_COPY);
-        assert_eq!(source_mask(Effects::COPY, true), NS_DRAG_COPY);
-        assert_eq!(
-            source_mask(Effects::MOVE, false),
-            NS_DRAG_GENERIC | NS_DRAG_MOVE
-        );
-        assert_eq!(
-            source_mask(Effects::MOVE, true),
-            NS_DRAG_GENERIC | NS_DRAG_MOVE
-        );
-        assert_eq!(source_mask(Effects::LINK, false), NS_DRAG_LINK);
-        assert_eq!(source_mask(Effects::LINK, true), 0);
-        assert_eq!(source_mask(Effects(0), false), 0);
+        assert_eq!(source_mask(Effects::COPY), NS_DRAG_COPY);
+        assert_eq!(source_mask(Effects::MOVE), NS_DRAG_GENERIC | NS_DRAG_MOVE);
+        assert_eq!(source_mask(Effects::LINK), NS_DRAG_LINK);
+        assert_eq!(source_mask(Effects(0)), 0);
     }
 
     #[test]
@@ -1264,9 +1288,9 @@ mod tests {
     fn a_macos_drop_is_taken_only_for_what_the_app_did() {
         assert!(drop_taken(Some(DropEffect::Copy)));
         assert!(drop_taken(Some(DropEffect::Move)));
+        assert!(drop_taken(Some(DropEffect::Link)));
         // The menu of 놓을 때 묻기 and a refusal: the source must not learn of a move yet.
         assert!(!drop_taken(None));
-        assert!(!drop_taken(Some(DropEffect::Link)));
     }
 
     /// The image type, the message and the insert of a `DROPDESCRIPTION`'s bytes.
@@ -1312,6 +1336,18 @@ mod tests {
         assert_eq!(
             copied,
             (DROPIMAGE_COPY, "복사 → %1".to_owned(), "문서".to_owned())
+        );
+        let linked = description(&description_bytes(
+            Some(DropEffect::Link),
+            &hint("링크 만들기: %1", "문서"),
+        ));
+        assert_eq!(
+            linked,
+            (
+                DROPIMAGE_LINK,
+                "링크 만들기: %1".to_owned(),
+                "문서".to_owned()
+            )
         );
         // A folder whose name holds `%1` keeps it: the insert is never read for `%1`.
         let odd = description(&description_bytes(

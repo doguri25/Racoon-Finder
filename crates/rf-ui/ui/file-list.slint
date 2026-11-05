@@ -344,6 +344,8 @@ export component FileList inherits Rectangle {
                                 data: root.drag-data;
                                 allow-move: true;
                                 allow-copy: true;
+                                // A drop with the link keys makes links (OPS-08).
+                                allow-link: true;
                                 drag-finished(action) => {
                                     root.drag-ended();
                                 }

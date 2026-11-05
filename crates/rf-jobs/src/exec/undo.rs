@@ -19,7 +19,7 @@ use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
 use rf_vfs::{Deleted, Provider};
 
 use super::delete::{deleted_not_trashed, trash_one};
-use super::{At, Attempt, Ctx, Failed, Stopped, simple, transfer};
+use super::{At, Attempt, Ctx, Failed, Stopped, link, simple, transfer};
 use crate::copies::{self, Compared};
 use crate::report::{FailureReason, Stage, Totals};
 use crate::spec::{
@@ -47,6 +47,8 @@ const MOVE_BACK: TransferOptions = TransferOptions {
 ///   it and nothing is replaced); its record renames forth again.
 /// - `Created`: see [`remove_created`]. `Removed`: see [`make_again`].
 /// - `Trashed`: see [`restore`].
+/// - `LinksMade`: see `link::undo_links`, which removes only a link that is still as the job made
+///   it; `LinksRemoved`: `link::remake_links`.
 pub(crate) fn run_undo(ctx: &mut Ctx<'_>, record: &UndoRecord) {
     match record {
         UndoRecord::Copied {
@@ -69,6 +71,8 @@ pub(crate) fn run_undo(ctx: &mut Ctx<'_>, record: &UndoRecord) {
         UndoRecord::Removed { path, kind } => make_again(ctx, path, *kind),
         UndoRecord::Trashed { items } => restore(ctx, items),
         UndoRecord::Restored { items } => trash_again(ctx, items),
+        UndoRecord::LinksMade { at } => link::undo_links(ctx, at),
+        UndoRecord::LinksRemoved { links } => link::remake_links(ctx, links),
     }
 }
 

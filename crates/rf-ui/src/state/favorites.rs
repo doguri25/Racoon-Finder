@@ -30,9 +30,9 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use rf_core::VPath;
-use rf_platform::dnd::{DragMods, Effects};
+use rf_platform::dnd::DragMods;
 
-use super::drop_rule::{self, DropChoice, Refusal};
+use super::drop_rule;
 use super::{AppState, Effect, Hover, load};
 use crate::dialogs::{Modal, NameDialog};
 use crate::format::folder_label;
@@ -52,8 +52,7 @@ const CHECK_EVERY: Duration = Duration::from_secs(30);
 pub enum Unkept {
     /// The drag holds a file (or something else than a folder): the list takes folders only.
     Files,
-    /// The keys ask for a link: the list takes folders only as additions, and links are not
-    /// made.
+    /// The keys ask for a link: the list takes folders only as additions, and makes no links.
     Link,
 }
 
@@ -415,7 +414,6 @@ impl AppState {
         id: u64,
         index: Option<usize>,
         mods: DragMods,
-        allowed: Effects,
     ) -> Hover {
         if self.modal.is_some() || self.quitting {
             return Hover::Nothing;
@@ -427,26 +425,17 @@ impl AppState {
         drag.shown = None;
         let count = drag.request.sources.len();
         let only_folders = drag.request.folder_count == count;
-        self.keep_verdict(only_folders, count, index, mods, allowed)
+        Self::keep_verdict(only_folders, count, index, mods)
     }
 
     /// What a drop of `count` items on the gap `index` would do, `only_folders` or not.
     pub(super) fn keep_verdict(
-        &self,
         only_folders: bool,
         count: usize,
         index: Option<usize>,
         mods: DragMods,
-        allowed: Effects,
     ) -> Hover {
-        let choice = drop_rule::choose(
-            rf_core::Os::CURRENT,
-            self.drag_default,
-            mods,
-            allowed,
-            || false,
-        );
-        if choice == DropChoice::Refuse(Refusal::NoLinks) {
+        if drop_rule::asks_for_link(rf_core::Os::CURRENT, mods) {
             Hover::NoKeep(Unkept::Link)
         } else if !only_folders || count == 0 {
             Hover::NoKeep(Unkept::Files)
@@ -462,12 +451,8 @@ impl AppState {
         id: u64,
         index: Option<usize>,
         mods: DragMods,
-        allowed: Effects,
     ) -> Vec<Effect> {
-        if !matches!(
-            self.keep_hover_rows(id, index, mods, allowed),
-            Hover::Keeps { .. }
-        ) {
+        if !matches!(self.keep_hover_rows(id, index, mods), Hover::Keeps { .. }) {
             return Vec::new();
         }
         let Some(drag) = self.drag.take() else {

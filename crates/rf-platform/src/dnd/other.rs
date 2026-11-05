@@ -5,10 +5,16 @@ use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use super::{DropEffect, DropHandler, Effects};
+use super::{DragMods, DropEffect, DropHandler, Effects};
 use crate::shell::Owner;
 
 pub const DRAGS_OUT: bool = false;
+
+/// No key is read here: winit tells the keys, and a menu of the system's own that would make
+/// them stale does not run.
+pub fn held_mods() -> DragMods {
+    DragMods::default()
+}
 
 /// No registration is ever made here.
 pub enum Registration {}

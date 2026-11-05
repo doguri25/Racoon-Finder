@@ -9,8 +9,9 @@
 //! | Linux (GNOME Files) | Ctrl | Shift | Ctrl+Shift |
 //!
 //! Other keys (the Windows key, macOS's Control and Shift) leave the choice to the setting. The
-//! app makes no links yet, so a key for one refuses the drop ([`Refusal::NoLinks`]); a key for
-//! what the drag does not allow refuses it too ([`Refusal::NotAllowed`]). Without a key the
+//! keys for a link make one (OPS-08): a shortcut on Windows, an alias on macOS, a symbolic link
+//! on Linux (`rf_platform::drop_kind`); a key for what the drag does not allow refuses the drop
+//! ([`Refusal::NotAllowed`]), a link too. Without a key the
 //! setting chooses: a move, a copy, the system's way (a move within a drive, a copy to
 //! another), or the menu of 놓을 때 묻기. A move the drag does not allow is a copy (DND-05), and
 //! a copy is never made a move.
@@ -36,8 +37,6 @@ pub enum DropChoice {
 /// Why a drop does nothing at a place that takes the items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Refusal {
-    /// The keys ask for a link, which the app does not make yet.
-    NoLinks,
     /// The drag does not allow what the keys or the setting ask for.
     NotAllowed,
 }
@@ -53,10 +52,10 @@ pub fn choose(
     same_volume: impl FnOnce() -> bool,
 ) -> DropChoice {
     if let Some(asked) = keyed_effect(os, mods) {
-        return match asked {
-            DropEffect::Link => DropChoice::Refuse(Refusal::NoLinks),
-            _ if allowed.contains(asked) => DropChoice::Do(asked),
-            _ => DropChoice::Refuse(Refusal::NotAllowed),
+        return if allowed.contains(asked) {
+            DropChoice::Do(asked)
+        } else {
+            DropChoice::Refuse(Refusal::NotAllowed)
         };
     }
     let wanted = match default {
@@ -77,6 +76,13 @@ pub fn choose(
         .skip_while(|&effect| effect != wanted)
         .find(|&effect| allowed.contains(effect))
         .map_or(DropChoice::Refuse(Refusal::NotAllowed), DropChoice::Do)
+}
+
+/// Whether the keys `mods` ask for a link on `os` (Alt or Ctrl+Shift on Windows, ⌥⌘ on macOS,
+/// Ctrl+Shift on Linux), whatever the drag allows: a place that takes no links (the list of
+/// favorites) says so.
+pub fn asks_for_link(os: Os, mods: DragMods) -> bool {
+    keyed_effect(os, mods) == Some(DropEffect::Link)
 }
 
 /// What the keys `mods` ask for on `os`; `None` when they leave it to the setting.

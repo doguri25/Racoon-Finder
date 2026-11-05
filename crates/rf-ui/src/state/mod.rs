@@ -63,6 +63,7 @@ pub mod drop_rule;
 mod favorites;
 mod jobs;
 mod layout;
+mod links;
 mod outside;
 mod panel;
 mod pick;
@@ -90,6 +91,7 @@ pub use drag::{
 pub use favorites::{RECENT_FOLDERS, RecentAt, Unkept};
 use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
 pub use panel::PanelButton;
 pub use preview::{
     PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,

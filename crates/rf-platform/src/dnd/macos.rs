@@ -53,9 +53,10 @@
 //!   (`NSWorkspace iconForFile:`), stacked under the pointer; the items past the fifth lie under
 //!   it and show its icon ([`icon_place`]). The event it begins with is the
 //!   app's current one when it is a drag of the left button in the window, else one made for
-//!   where the mouse is now. Its source ([`DragSource`]) allows what [`source_mask`] says: out of
-//!   the app all that Finder's own drags allow, within it a move (with the generic operation, so
-//!   that the window's answer keeps the move's pointer) or a copy. As the session ends, it hands
+//!   where the mouse is now. Its source ([`DragSource`]) allows what [`source_mask`] says: all
+//!   that Finder's own drags allow, a move (with the generic operation, so that the window's
+//!   answer keeps the move's pointer), a copy or a link, out of the app and back over the
+//!   window alike. As the session ends, it hands
 //!   what the taker did to `done` ([`ended_effect`]), and nothing else: nothing is deleted here.
 //!   The source is held until then ([`DRAGGING`]). It begins only while the left button is down
 //!   as the mouse has it (`NSEvent.pressedMouseButtons`, [`left_pressed`]).
@@ -272,6 +273,12 @@ fn keys() -> DragMods {
     flag_mods(NSEvent::modifierFlags_class().0)
 }
 
+/// The modifier keys held now (`NSEvent.modifierFlags`, the keys as they are, not as the window
+/// last heard them).
+pub fn held_mods() -> DragMods {
+    keys()
+}
+
 /// The items of the drag `sender`: the paths of its file URLs, read byte for byte, its id when
 /// the app started it, and how many of its URLs name no path the app can read safely, which are
 /// left out of the paths as a paste leaves them out ([`DroppedItems::skipped`]); `None` when it
@@ -442,10 +449,9 @@ define_class!(
         fn operation_mask(
             &self,
             _session: &NSDraggingSession,
-            context: NSDraggingContext,
+            _context: NSDraggingContext,
         ) -> NSDragOperation {
-            let within = context == NSDraggingContext::WithinApplication;
-            NSDragOperation(source_mask(self.ivars().allowed, within))
+            NSDragOperation(source_mask(self.ivars().allowed))
         }
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]

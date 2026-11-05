@@ -6,6 +6,7 @@ use std::io::{self, BufWriter, Write};
 use std::time::{Duration, SystemTime};
 
 use rf_core::{ErrorKind, VPath};
+use rf_platform::LinkKind;
 use serde::{Deserialize, Serialize};
 
 use crate::copies::CopyFound;
@@ -196,6 +197,18 @@ pub enum FailureReason {
     TrashLocationUnknown,
     /// `Rename`, `Unsupported`: the two paths are in different locations, which no rename joins.
     AcrossLocations,
+    /// `Create`, `Unsupported`: a link is made on the local disk only (the target or the place
+    /// of the link is somewhere else).
+    LinkNotLocal,
+    /// `Create`, `Unsupported`: a symbolic link needs rights this process lacks (Windows with
+    /// Developer Mode off, not elevated); none is tried.
+    LinkNeedsPrivilege,
+    /// `Create` warning, `NotFound`: the link was made, and what it points to is not there.
+    LinkTargetMissing,
+    /// `Undo`, `Unsupported`: what is at the path of a link a job made is no longer a link of that
+    /// kind to that target (another item replaced it, or the link was pointed elsewhere), and is
+    /// left in place; the target is never touched.
+    ChangedSinceLinked,
     /// `Write` warning: a temporary file of the job could not be removed and stays under its
     /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
     /// crash recovery will not look for it.
@@ -240,6 +253,10 @@ impl FailureReason {
             Self::NotEmpty => "not_empty",
             Self::TrashLocationUnknown => "trash_location_unknown",
             Self::AcrossLocations => "across_locations",
+            Self::LinkNotLocal => "link_not_local",
+            Self::LinkNeedsPrivilege => "link_needs_privilege",
+            Self::LinkTargetMissing => "link_target_missing",
+            Self::ChangedSinceLinked => "changed_since_linked",
             Self::TempLeftBehind => "temp_left_behind",
             Self::Issue(issue) => issue.name(),
         }
@@ -371,6 +388,7 @@ impl JobReport {
     /// - A delete of copies retries each copy that failed, or that something below it failed
     ///   in, with what its copy job left: it is looked at again before it goes. The retry is
     ///   `DeleteCopiesSpec::resumed`, since this run may have deleted part of a copied folder.
+    /// - Links retry each link that failed, as asked.
     /// - A rename, a create or an undo is retried as it was asked, when it has any failure.
     ///
     /// Items that a cancelled or aborted job never reached are not failures and are not in the
@@ -380,10 +398,27 @@ impl JobReport {
             JobSpec::Transfer(spec) => self.retry_transfer(spec),
             JobSpec::Delete(spec) => self.retry_delete(spec),
             JobSpec::DeleteCopies(spec) => self.retry_delete_copies(spec),
+            JobSpec::MakeLink { links } => self.retry_links(links),
             JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
                 (!self.failures.is_empty()).then(|| self.spec.clone())
             }
         }
+    }
+
+    /// The links that failed: each one a failure names by its target (the source) and its place
+    /// (the target).
+    fn retry_links(&self, links: &[(VPath, VPath, LinkKind)]) -> Option<JobSpec> {
+        let failed = |target: &VPath, at: &VPath| {
+            self.failures.iter().any(|failure| {
+                failure.source.as_ref() == Some(target) && failure.target.as_ref() == Some(at)
+            })
+        };
+        let links: Vec<_> = links
+            .iter()
+            .filter(|(target, at, _)| failed(target, at))
+            .cloned()
+            .collect();
+        (!links.is_empty()).then_some(JobSpec::MakeLink { links })
     }
 
     fn retry_transfer(&self, spec: &TransferSpec) -> Option<JobSpec> {
@@ -704,6 +739,7 @@ mod tests {
             (JobKind::Delete, "delete"),
             (JobKind::Rename, "rename"),
             (JobKind::Create, "create"),
+            (JobKind::Link, "link"),
             (JobKind::Undo, "undo"),
         ];
         for (kind, name) in kinds {

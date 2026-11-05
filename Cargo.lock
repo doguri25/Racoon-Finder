@@ -4383,6 +4383,7 @@ dependencies = [
  "raw-window-handle",
  "rf-core",
  "rustix 1.1.5",
+ "serde",
  "tempfile",
  "windows",
  "windows-core",

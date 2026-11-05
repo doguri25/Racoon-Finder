@@ -38,13 +38,13 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
-import { ItemMenu, OpenWithMenu, DropMenu, DragPointer, DropPlace, DropAt } from "list-parts.slint";
+import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, DropPlace, DropAt } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView, ItemMenu, DragPointer, DropPlace, DropAt
+    PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, DropPlace, DropAt
 }
 
 // Which dialog is open over the main window.
@@ -628,10 +628,12 @@ export component MainWindow inherits Window {
     }
 
     // The menu of 놓을 때 묻기, where the drop was, with 여기로 이동 where the drag allows a move
-    // (`moves`) and 여기로 복사 where it allows a copy (`copies`).
-    public function show-drop-menu(moves: bool, copies: bool) {
+    // (`moves`), 여기로 복사 where it allows a copy (`copies`) and 여기에 링크 만들기 where it
+    // allows a link (`links`).
+    public function show-drop-menu(moves: bool, copies: bool, links: bool) {
         root.drop-moves = moves;
         root.drop-copies = copies;
+        root.drop-links = links;
         drop-keys.focus();
         root.drop-asking = true;
         drop-menu.show({ x: DragPointer.x, y: DragPointer.y });
@@ -649,6 +651,7 @@ export component MainWindow inherits Window {
     // What that menu offers: what the drag allows (`show-drop-menu`).
     private property <bool> drop-moves: true;
     private property <bool> drop-copies: true;
+    private property <bool> drop-links: true;
 
     private property <string> hint;
     private property <bool> hint-refused;
@@ -1991,6 +1994,7 @@ export component MainWindow inherits Window {
             drop-menu := DropMenu {
                 moves: root.drop-moves;
                 copies: root.drop-copies;
+                links: root.drop-links;
                 chosen(name) => {
                     root.drop-asking = false;
                     root.drop-menu-chosen(name);

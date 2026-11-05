@@ -43,6 +43,7 @@ use std::path::PathBuf;
 use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
 use rf_platform::shell::{App, AppVerb, Elevation, SystemMenuChoice, can_run_as_admin, elevation};
 
+use super::links::{LinkFacts, link_facts};
 use super::{AppState, Effect, RIGHT};
 use crate::words::{self, ShellAction};
 
@@ -88,9 +89,14 @@ pub enum MenuShown {
     /// showed last; the one chosen goes to [`AppState::open_with_chosen`].
     Apps(Vec<String>),
     /// The menu of 놓을 때 묻기 where a drag was dropped: 여기로 이동 where the drag allows a move
-    /// (`moves`), 여기로 복사 where it allows a copy (`copies`), and 취소; what it chooses goes
-    /// to [`AppState::drop_menu_chosen`].
-    AskDrop { moves: bool, copies: bool },
+    /// (`moves`), 여기로 복사 where it allows a copy (`copies`), 여기에 링크 만들기 where it
+    /// allows a link (`links`), and 취소; what it chooses goes to
+    /// [`AppState::drop_menu_chosen`] and [`AppState::drop_menu_link`].
+    AskDrop {
+        moves: bool,
+        copies: bool,
+        links: bool,
+    },
     /// The menu of favorite `index` of the sidebar, by its row (the menu key on it): 열기, 반대
     /// 패널에 열기, 이름 바꾸기, 즐겨찾기에서 제거, 위로, 아래로; what it chooses goes to
     /// [`AppState::favorite_command`].
@@ -200,6 +206,8 @@ struct AskedApps {
 pub(super) struct ShellState {
     /// The facts of the item menu that opened last.
     menu: MenuFacts,
+    /// What its 링크 만들기 ▸ offers (module `links`).
+    pub(super) links: LinkFacts,
     /// The last request for 연결 프로그램.
     asked: Option<AskedApps>,
     /// The apps of the menu that shows them last, and their file.
@@ -229,10 +237,15 @@ impl AppState {
     /// Notes what the item menu of pane `side` offers, as it opens for the items a command acts
     /// on there.
     pub(super) fn note_item_menu(&mut self, side: usize) {
-        self.shell.menu = menu_facts(
-            &self.target_entries(side),
-            rf_platform::shell::RUNS_AS_ADMIN,
+        let entries = self.target_entries(side);
+        let menu = menu_facts(&entries, rf_platform::shell::RUNS_AS_ADMIN);
+        let links = link_facts(
+            Os::CURRENT,
+            &entries,
+            rf_platform::symlink_needs_privilege(),
         );
+        self.shell.menu = menu;
+        self.shell.links = links;
     }
 
     /// Whether the system has a menu of its own of items that the app shows (Windows,
@@ -502,6 +515,7 @@ impl AppState {
     fn app_menu(&mut self, side: usize) -> Vec<Effect> {
         let Some(row) = self.menu_row(side) else {
             self.shell.menu = MenuFacts::default();
+            self.shell.links = LinkFacts::default();
             return vec![Effect::ShowMenu(MenuShown::Folder(side))];
         };
         self.note_item_menu(side);

@@ -131,8 +131,8 @@ pub trait LanePolicy: Send + Sync + fmt::Debug {
     fn lane(&self, spec: &JobSpec) -> LaneId;
 }
 
-/// Renames and creates in [`LaneId::QUICK`], and so the undos of one step: of a rename, of a
-/// create and of that undo. Everything else, the other undos included, in [`LaneId::MAIN`].
+/// Renames, creates and links in [`LaneId::QUICK`], and so the undos of one step: of a rename,
+/// of a create, of links and of that undo. Everything else, the other undos included, in [`LaneId::MAIN`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultLanes;
 
@@ -141,10 +141,13 @@ impl LanePolicy for DefaultLanes {
         match spec {
             JobSpec::Rename { .. }
             | JobSpec::Create { .. }
+            | JobSpec::MakeLink { .. }
             | JobSpec::Undo(
                 UndoRecord::Renamed { .. }
                 | UndoRecord::Created { .. }
-                | UndoRecord::Removed { .. },
+                | UndoRecord::Removed { .. }
+                | UndoRecord::LinksMade { .. }
+                | UndoRecord::LinksRemoved { .. },
             ) => LaneId::QUICK,
             JobSpec::Transfer(_)
             | JobSpec::Delete(_)

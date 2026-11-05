@@ -60,7 +60,7 @@ impl AppState {
     /// A drag of another app carrying `items`, with the keys `mods` held and allowing `allowed`,
     /// hovers over `spot` (`None`: where nothing takes drops): what a drop there would do, for
     /// the system's pointer; `None` where it would do nothing (no place, a place that refuses the
-    /// items, keys that ask for a link, a drag that allows nothing the drop would do, no path to
+    /// items, keys that ask for what the drag does not allow, no path to
     /// take, while a window shows over the main one or the app ends). See
     /// [`AppState::outside_hover`].
     pub fn outside_over(
@@ -103,9 +103,7 @@ impl AppState {
             .map(|outside| outside.sources.clone());
         let hover = if let (Some(spot), Some(sources)) = (spot, sources) {
             match spot {
-                DropSpot::Favorites { index } => {
-                    self.foreign_keep_hover(&sources, index, mods, allowed)
-                }
+                DropSpot::Favorites { index } => self.foreign_keep_hover(&sources, index, mods),
                 _ => self.foreign_hover(&sources, spot, mods, allowed),
             }
         } else {
@@ -169,7 +167,7 @@ impl AppState {
         // nothing was done, so it deletes nothing. Which of the paths are folders is for a worker
         // to find ([`Effect::KeepDropped`]); the UI thread never looks at them.
         if let DropSpot::Favorites { index } = spot {
-            let verdict = self.keep_verdict(true, sources.len(), index, mods, allowed);
+            let verdict = Self::keep_verdict(true, sources.len(), index, mods);
             if !matches!(verdict, Hover::Keeps { .. }) {
                 return (None, Vec::new());
             }
@@ -225,8 +223,9 @@ impl AppState {
                 });
                 vec![ask_menu(allowed)]
             }
-            // The keys refuse it (no links are made), or the drag allows nothing it would do.
-            DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => return (None, Vec::new()),
+            DropChoice::Do(DropEffect::Link) => Self::drop_links(&sources, &folder, side),
+            // The keys refuse it, or the drag allows nothing it would do.
+            DropChoice::Refuse(_) => return (None, Vec::new()),
         };
         let done = dropped_effect(&effects);
         if left_out > 0 {
@@ -312,17 +311,11 @@ impl AppState {
     /// app's drag that the app takes. Whether they are folders is not looked at (a path tells
     /// nothing of it, and the UI thread never touches the disk): the answer is that they are kept,
     /// and a worker keeps the folders among them at the drop.
-    fn foreign_keep_hover(
-        &self,
-        sources: &[VPath],
-        index: Option<usize>,
-        mods: DragMods,
-        allowed: Effects,
-    ) -> Hover {
+    fn foreign_keep_hover(&self, sources: &[VPath], index: Option<usize>, mods: DragMods) -> Hover {
         if self.modal.is_some() || self.quitting {
             return Hover::Nothing;
         }
-        self.keep_verdict(true, sources.len(), index, mods, allowed)
+        Self::keep_verdict(true, sources.len(), index, mods)
     }
 
     /// What the place `spot` makes of `sources`, the paths of another app's drag that the app

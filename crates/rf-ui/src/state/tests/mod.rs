@@ -24,6 +24,7 @@ mod drop_rule;
 mod favorites;
 mod jobs;
 mod layout;
+mod links;
 mod nav;
 mod outside;
 mod panel;

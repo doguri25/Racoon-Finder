@@ -47,16 +47,17 @@ use crate::selection::Selection;
 use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
-    Column, Completion, DropSpot, LEFT, MenuFacts, Names, PathForm, PreviewShown, RIGHT, RecentAt,
+    Column, Completion, DropSpot, LEFT, LinkFacts, MenuFacts, Names, PathForm, PreviewShown, RIGHT,
+    RecentAt,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
-    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, MainWindow,
-    MessageView, NameView, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind,
-    PreviewView, PropertiesView, RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts,
-    TabItem, TreeRow,
+    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, LinkEntry,
+    MainWindow, MessageView, NameView, PaneView, PatternView, PickTarget, PickView, PreflightView,
+    PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView, RowKind, SectionHead,
+    Shortcuts, TabItem, TreeRow,
 };
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
@@ -1299,12 +1300,13 @@ pub fn favorite_dragged(data: &DataTransfer) -> Option<(usize, String)> {
 }
 
 /// What the window answers a drag over a place where a drop does `choice`, which its pointer
-/// shows: a copy, a move (the menu of 놓을 때 묻기 too, which takes the drop), or none.
+/// shows: a copy, a move (the menu of 놓을 때 묻기 too, which takes the drop), a link, or none.
 pub fn drop_action(choice: DropChoice) -> DragAction {
     match choice {
         DropChoice::Do(DropEffect::Copy) => DragAction::Copy,
         DropChoice::Do(DropEffect::Move) | DropChoice::Ask => DragAction::Move,
-        DropChoice::Do(DropEffect::Link) | DropChoice::Refuse(_) => DragAction::None,
+        DropChoice::Do(DropEffect::Link) => DragAction::Link,
+        DropChoice::Refuse(_) => DragAction::None,
     }
 }
 
@@ -1428,6 +1430,20 @@ pub fn show_item_menu(window: &MainWindow, facts: MenuFacts) {
     menu.set_one_folder(facts.one_folder);
     menu.set_one_dir(facts.one_dir);
     menu.set_one_item(facts.one_item);
+}
+
+/// Gives the item menu its 링크 만들기 ▸: the kinds of link `links` offers, named for `os`.
+pub fn show_item_links(window: &MainWindow, links: LinkFacts, os: Os) {
+    let entries: Vec<LinkEntry> = links
+        .choices()
+        .map(|choice| LinkEntry {
+            title: words::link_entry(choice.kind, choice.enabled, os).into(),
+            enabled: choice.enabled,
+        })
+        .collect();
+    window
+        .global::<ItemMenu<'_>>()
+        .set_links(ModelRc::new(VecModel::from(entries)));
 }
 
 /// The models the view of the preview panel and quick look keeps between redraws: the lines of
@@ -1749,18 +1765,7 @@ impl PickModels {
                 .unwrap_or_default(),
         };
         let (policy_note, policy_danger) = words::pick_policy(picker.policy);
-        let (title, summary, confirm_text) = match &picker.purpose {
-            PickPurpose::Transfer => (
-                words::pick_title(request.mode).to_owned(),
-                crate::pick::summary(request),
-                words::pick_confirm(request.mode).to_owned(),
-            ),
-            PickPurpose::SaveLog { title, detail, .. } => (
-                words::pick_log_title().to_owned(),
-                words::pick_log_summary(title, detail),
-                words::pick_log_confirm().to_owned(),
-            ),
-        };
+        let (title, summary, confirm_text) = pick_words(picker);
         PickView {
             title: title.into(),
             summary: summary.into(),
@@ -1797,7 +1802,11 @@ impl PickModels {
             space: space.into(),
             problem: validity
                 .map(|validity| {
-                    words::pick_problem(validity, request.mode, request.folder_count > 0)
+                    if picker.for_links() {
+                        words::pick_link_problem(validity)
+                    } else {
+                        words::pick_problem(validity, request.mode, request.folder_count > 0)
+                    }
                 })
                 .unwrap_or_default()
                 .into(),
@@ -1805,8 +1814,31 @@ impl PickModels {
             unentered_hint: words::pick_path_unentered().into(),
             confirm_text: confirm_text.into(),
             can_confirm: picker.can_confirm(),
-            for_log: picker.for_a_log(),
+            for_log: picker.without_options(),
         }
+    }
+}
+
+/// The title, the line under it and the confirm button of `picker`, as what it finds a folder for
+/// words them.
+fn pick_words(picker: &Picker) -> (String, String, String) {
+    let request = &picker.request;
+    match &picker.purpose {
+        PickPurpose::Transfer => (
+            words::pick_title(request.mode).to_owned(),
+            crate::pick::summary(request),
+            words::pick_confirm(request.mode).to_owned(),
+        ),
+        PickPurpose::SaveLog { title, detail, .. } => (
+            words::pick_log_title().to_owned(),
+            words::pick_log_summary(title, detail),
+            words::pick_log_confirm().to_owned(),
+        ),
+        PickPurpose::Link { kind } => (
+            words::pick_link_title().to_owned(),
+            words::pick_link_summary(*kind, request.sources.len(), Os::CURRENT),
+            words::pick_link_confirm().to_owned(),
+        ),
     }
 }
 
@@ -2875,13 +2907,12 @@ mod tests {
         );
         // The menu of 놓을 때 묻기 takes the drop as a move would, and asks.
         assert_eq!(drop_action(DropChoice::Ask), DragAction::Move);
-        for refused in [
-            DropChoice::Do(DropEffect::Link),
-            DropChoice::Refuse(Refusal::NoLinks),
-            DropChoice::Refuse(Refusal::NotAllowed),
-        ] {
-            assert_eq!(drop_action(refused), DragAction::None, "{refused:?}");
-        }
+        assert_eq!(
+            drop_action(DropChoice::Do(DropEffect::Link)),
+            DragAction::Link
+        );
+        let refused = DropChoice::Refuse(Refusal::NotAllowed);
+        assert_eq!(drop_action(refused), DragAction::None, "{refused:?}");
     }
 
     #[test]

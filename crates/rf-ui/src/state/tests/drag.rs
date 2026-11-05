@@ -9,7 +9,7 @@ use crate::dialogs::Modal;
 use crate::jobs::{JobEffect, Started};
 use crate::pick::Validity;
 use crate::settings::DragDefault;
-use crate::state::drop_rule::{DropChoice, Refusal};
+use crate::state::drop_rule::DropChoice;
 use crate::words::JobWork;
 
 pub(super) fn in_a(name: &str) -> VPath {
@@ -35,9 +35,14 @@ pub(super) fn the_submit(effects: &[Effect]) -> (JobSpec, Option<usize>) {
     }
 }
 
-/// The menu of 놓을 때 묻기, offering 여기로 이동 (`moves`) and 여기로 복사 (`copies`) or not.
-pub(super) fn ask_menu(moves: bool, copies: bool) -> Effect {
-    Effect::ShowMenu(MenuShown::AskDrop { moves, copies })
+/// The menu of 놓을 때 묻기, offering 여기로 이동 (`moves`), 여기로 복사 (`copies`) and 여기에
+/// 링크 만들기 (`links`) or not.
+pub(super) fn ask_menu(moves: bool, copies: bool, links: bool) -> Effect {
+    Effect::ShowMenu(MenuShown::AskDrop {
+        moves,
+        copies,
+        links,
+    })
 }
 
 /// A window whose left pane at `a` holds the folders `docs` and `src` and the file `x.txt`,
@@ -397,7 +402,10 @@ fn a_drop_that_asks_is_forgotten_by_the_next_drag_and_while_a_window_shows() {
     let ask = |state: &mut AppState| {
         state.press_row(LEFT, 2, false, false);
         let id = state.drag_id();
-        assert_eq!(state.drop_items(id, RIGHT_LIST), [ask_menu(true, true)]);
+        assert_eq!(
+            state.drop_items(id, RIGHT_LIST),
+            [ask_menu(true, true, true)]
+        );
     };
     // Its menu closed choosing nothing (Esc, a click beside it, which the window tells as
     // 취소), and the next choice has no drop to make.
@@ -863,12 +871,7 @@ fn the_keys_held_choose_what_a_drop_does() {
     state.modifiers_changed(copy_keys());
     assert_eq!(choice(&mut state), Some(DropChoice::Do(DropEffect::Copy)));
     state.modifiers_changed(link_keys());
-    assert_eq!(
-        choice(&mut state),
-        Some(DropChoice::Refuse(Refusal::NoLinks))
-    );
-    // A drop the keys refuse does nothing, and the drag may drop again.
-    assert_eq!(state.drop_items(id, RIGHT_LIST), []);
+    assert_eq!(choice(&mut state), Some(DropChoice::Do(DropEffect::Link)));
     state.modifiers_changed(copy_keys());
     assert_eq!(
         submitted_mode(&state.drop_items(id, RIGHT_LIST)),
@@ -933,7 +936,10 @@ fn a_drop_that_asks_shows_its_menu_and_the_menu_submits_the_job() {
         .expect("the folder takes it");
     assert_eq!(offer.choice, DropChoice::Ask);
     // No job yet: the menu shows where the drop was.
-    assert_eq!(state.drop_items(id, RIGHT_LIST), [ask_menu(true, true)]);
+    assert_eq!(
+        state.drop_items(id, RIGHT_LIST),
+        [ask_menu(true, true, true)]
+    );
     // One drop each: the drag is over.
     assert_eq!(state.drop_offer(id, RIGHT_LIST), None);
     // 여기로 이동 moves the items the drag carried into the folder of the drop.

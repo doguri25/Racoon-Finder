@@ -681,6 +681,7 @@ mod tests {
     };
     use crate::testkit::{Fault, FaultyProvider, temp_files};
     use crate::undo::{CreatedItem, MovedItem, TrashedItem, UndoRecord};
+    use rf_platform::LinkKind;
 
     const A: JobId = JobId(1);
     const B: JobId = JobId(2);
@@ -899,6 +900,46 @@ mod tests {
         assert_eq!(ids(t.path()), [B]);
     }
 
+    /// A link job a crash cut off is found again with its links, and a build that does not know
+    /// the kind of job skips its line and keeps the others (the module doc: a new variant
+    /// needs no new format number).
+    #[test]
+    fn a_link_job_is_recovered_and_a_build_without_it_skips_its_line() {
+        let t = tempfile::tempdir().unwrap();
+        let d = VPath::local(t.path()).unwrap();
+        let spec = JobSpec::MakeLink {
+            links: vec![(
+                d.join("target").unwrap(),
+                d.join("link").unwrap(),
+                LinkKind::Symlink,
+            )],
+        };
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        write(
+            t.path(),
+            vec![
+                Record::Submitted {
+                    job: A,
+                    spec: spec.clone(),
+                    at,
+                },
+                Record::Started { job: A },
+            ],
+        );
+        let found = jobs(t.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].id, &found[0].spec, found[0].started),
+            (A, &spec, true)
+        );
+        // The line of a kind of job this build does not know is skipped as a torn one is.
+        append_raw(
+            t.path(),
+            "{\"v\":1,\"rec\":{\"Submitted\":{\"job\":9,\"spec\":{\"Teleport\":{}},\"at\":{\"secs_since_epoch\":1,\"nanos_since_epoch\":0}}}}\n",
+        );
+        assert_eq!(ids(t.path()), [A]);
+    }
+
     #[test]
     fn dismissed_jobs_are_gone() {
         let (t, _, _) = a_done_b_running();
@@ -1056,12 +1097,9 @@ mod tests {
         })
     }
 
-    /// One record of every kind, one submitted spec of every kind, and the line format 1
-    /// writes for each. A file name is stored as the OS gives it (bytes on Unix, UTF-16 units
-    /// on Windows), so the line of the create differs by OS.
-    fn golden() -> Vec<(Record, &'static str)> {
-        let at = golden_time();
-        let transfer = JobSpec::Transfer(TransferSpec {
+    /// A move with every option set.
+    fn transfer_golden() -> JobSpec {
+        JobSpec::Transfer(TransferSpec {
             mode: TransferMode::Move,
             items: vec![TransferItem {
                 source: remote(&["a.txt"]),
@@ -1072,7 +1110,25 @@ mod tests {
                 errors: ErrorPolicy::Ask,
                 symlinks: SymlinkMode::Follow,
             },
-        });
+        })
+    }
+
+    /// A link job with a link of the kind that has a name of its own.
+    fn make_link_golden() -> JobSpec {
+        JobSpec::MakeLink {
+            links: vec![(
+                remote(&["a.txt"]),
+                remote(&["d", "a.txt - 바로 가기.lnk"]),
+                LinkKind::Shortcut,
+            )],
+        }
+    }
+
+    /// One record of every kind, one submitted spec of every kind, and the line format 1
+    /// writes for each. A file name is stored as the OS gives it (bytes on Unix, UTF-16 units
+    /// on Windows), so the line of the create differs by OS.
+    fn golden() -> Vec<(Record, &'static str)> {
+        let at = golden_time();
         let delete = JobSpec::Delete(DeleteSpec {
             paths: vec![remote(&["a.txt"])],
             method: DeleteMethod::Permanent,
@@ -1091,7 +1147,7 @@ mod tests {
             (
                 Record::Submitted {
                     job: JobId(1),
-                    spec: transfer,
+                    spec: transfer_golden(),
                     at,
                 },
                 r#"{"v":1,"rec":{"Submitted":{"job":1,"spec":{"Transfer":{"mode":"Move","items":[{"source":"remote://p/a.txt","target":"remote://p/d/a.txt"}],"options":{"conflict":"AutoRename","errors":"Ask","symlinks":"Follow"}}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
@@ -1127,6 +1183,14 @@ mod tests {
                     at,
                 },
                 r#"{"v":1,"rec":{"Submitted":{"job":5,"spec":{"DeleteCopies":{"copies":[{"made":{"path":"remote://p/d/a.txt","is_dir":false,"size":3,"modified":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"identity":[1,7]},"original":"remote://p/a.txt"}],"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500},"resumed":true}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
+            ),
+            (
+                Record::Submitted {
+                    job: JobId(6),
+                    spec: make_link_golden(),
+                    at,
+                },
+                r#"{"v":1,"rec":{"Submitted":{"job":6,"spec":{"MakeLink":{"links":[["remote://p/a.txt","remote://p/d/a.txt - 바로 가기.lnk","Shortcut"]]}},"at":{"secs_since_epoch":1000000000,"nanos_since_epoch":500}}}}"#,
             ),
             (
                 Record::Started { job: JobId(1) },
@@ -1281,6 +1345,14 @@ mod tests {
             };
             pinned(&m, &format!("\"{name}\""));
         }
+        for k in [LinkKind::Shortcut, LinkKind::Symlink, LinkKind::Junction] {
+            let name = match k {
+                LinkKind::Shortcut => "Shortcut",
+                LinkKind::Symlink => "Symlink",
+                LinkKind::Junction => "Junction",
+            };
+            pinned(&k, &format!("\"{name}\""));
+        }
         for o in [
             O::Completed,
             O::CompletedWithErrors,
@@ -1329,6 +1401,7 @@ mod tests {
             },
         ];
         let (f, d_f) = (remote(&["f"]), remote(&["d", "f"]));
+        let link_at = remote(&["d", "link"]);
         vec![
             (
                 UndoRecord::Copied {
@@ -1382,6 +1455,18 @@ mod tests {
                 UndoRecord::Restored { items: trashed },
                 r#"{"Restored":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt"},{"original":"remote://p/d/a.txt","location":null}]}}"#,
             ),
+            (
+                UndoRecord::LinksMade {
+                    at: vec![(link_at.clone(), LinkKind::Symlink, remote(&["a.txt"]))],
+                },
+                r#"{"LinksMade":{"at":[["remote://p/d/link","Symlink","remote://p/a.txt"]]}}"#,
+            ),
+            (
+                UndoRecord::LinksRemoved {
+                    links: vec![(link_at, LinkKind::Junction, d)],
+                },
+                r#"{"LinksRemoved":{"links":[["remote://p/d/link","Junction","remote://p/d"]]}}"#,
+            ),
         ]
     }
 
@@ -1405,9 +1490,11 @@ mod tests {
             UndoRecord::Removed { .. } => 4,
             UndoRecord::Trashed { .. } => 5,
             UndoRecord::Restored { .. } => 6,
+            UndoRecord::LinksMade { .. } => 7,
+            UndoRecord::LinksRemoved { .. } => 8,
         };
         let kinds: Vec<_> = golden.iter().map(|(record, _)| kind(record)).collect();
-        assert_eq!(kinds, (0..7).collect::<Vec<_>>());
+        assert_eq!(kinds, (0..9).collect::<Vec<_>>());
     }
 
     #[test]

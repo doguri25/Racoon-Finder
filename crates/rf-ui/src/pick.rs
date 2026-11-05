@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 
 use rf_core::{ErrorKind, VPath};
-use rf_jobs::{ConflictPolicy, TransferMode, TransferOptions, TransferSpec};
+use rf_jobs::{ConflictPolicy, LinkKind, TransferMode, TransferOptions, TransferSpec};
 
 use crate::format::{folder_label, short_path};
 use crate::jobs::SharedReport;
@@ -297,6 +297,10 @@ pub enum PickPurpose {
         title: String,
         detail: String,
     },
+    /// Links of `kind` to the items of its request are made there (PICK-09; OPS-08). Nothing is
+    /// copied, so the picker has no move/copy toggle and no conflict policy: a link never goes
+    /// over an item, it is numbered.
+    Link { kind: LinkKind },
 }
 
 /// The picker while it shows.
@@ -391,6 +395,17 @@ impl Picker {
         origin: usize,
         groups: Vec<TargetGroup>,
     ) -> Picker {
+        Picker::for_purpose(purpose, request, origin, groups)
+    }
+
+    /// The picker of `request` for the items of pane `origin`, for `purpose` other than a copy or
+    /// a move, with the first folder that can be chosen as the target.
+    pub fn for_purpose(
+        purpose: PickPurpose,
+        request: PickRequest,
+        origin: usize,
+        groups: Vec<TargetGroup>,
+    ) -> Picker {
         Picker {
             purpose,
             ..Picker::new(request, origin, groups)
@@ -400,6 +415,17 @@ impl Picker {
     /// Whether it chooses where a log goes, rather than where items go.
     pub fn for_a_log(&self) -> bool {
         matches!(self.purpose, PickPurpose::SaveLog { .. })
+    }
+
+    /// Whether it chooses where links go.
+    pub fn for_links(&self) -> bool {
+        matches!(self.purpose, PickPurpose::Link { .. })
+    }
+
+    /// Whether it has no move/copy toggle and no conflict policy: a log never goes over a file,
+    /// and a link is numbered when its name is taken.
+    pub fn without_options(&self) -> bool {
+        self.for_a_log() || self.for_links()
     }
 
     /// The quick targets in the order they show, every head's in turn.

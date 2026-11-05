@@ -2,6 +2,7 @@
 
 mod delete;
 mod file;
+mod link;
 mod scan;
 mod simple;
 #[cfg(all(test, unix))]
@@ -172,6 +173,7 @@ fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
         JobSpec::DeleteCopies(copies) => delete::run_delete_copies(ctx, copies),
         JobSpec::Rename { from, to } => simple::run_rename(ctx, from, to),
         JobSpec::Create { parent, name, kind } => simple::run_create(ctx, parent, name, *kind),
+        JobSpec::MakeLink { links } => link::run_make_links(ctx, links),
         JobSpec::Undo(record) => undo::run_undo(ctx, record),
     }
 }

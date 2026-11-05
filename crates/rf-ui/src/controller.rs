@@ -97,10 +97,10 @@ use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
-use crate::state::drop_rule::{DropChoice, Refusal};
 use crate::state::{
-    AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, MenuShown, Paging,
-    PathForm, RIGHT, ShellWork, Subfolders, Unkept, dropped_effect, preview_width, start_folders,
+    AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
+    MenuShown, Paging, PathForm, RIGHT, ShellWork, Subfolders, Unkept, dropped_effect,
+    preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, RecentBlock, RecentFolder,
@@ -594,6 +594,10 @@ fn connect_drops(window: &MainWindow) {
         with(|c| c.drop_items(&data, place, s, i)).unwrap_or(DragAction::None)
     });
     window.on_drop_menu_chosen(|name| {
+        if name == "link" {
+            with(|c| c.update(AppState::drop_menu_link));
+            return;
+        }
         let mode = match name.as_str() {
             "move" => Some(TransferMode::Move),
             "copy" => Some(TransferMode::Copy),
@@ -913,10 +917,9 @@ fn hover_words(hover: &Hover, folder: &str) -> String {
         Hover::NoPaths => words::drop_no_paths().to_owned(),
         Hover::Keeps { .. } => words::drop_keeps().to_owned(),
         Hover::NoKeep(Unkept::Files) => words::drop_only_folders().to_owned(),
-        // The keys ask for a link, which is not made: the badge says so.
-        Hover::NoKeep(Unkept::Link) => {
-            words::drop_badge(DropChoice::Refuse(Refusal::NoLinks), folder)
-        }
+        // The keys ask for a link, which the list of favorites does not make: it takes folders
+        // as additions only.
+        Hover::NoKeep(Unkept::Link) => words::drop_favorites_no_links().to_owned(),
         Hover::Nothing => String::new(),
     }
 }
@@ -947,7 +950,8 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
     match dropped_effect(effects) {
         Some(DropEffect::Copy) => DragAction::Copy,
         Some(DropEffect::Move) => DragAction::Move,
-        Some(DropEffect::Link) | None => DragAction::None,
+        Some(DropEffect::Link) => DragAction::Link,
+        None => DragAction::None,
     }
 }
 
@@ -1284,6 +1288,9 @@ pub struct Controller {
     save_failure_told: Cell<bool>,
     /// The id of the drag whose payload the window holds.
     shown_drag: Cell<u64>,
+    /// What the item menu's 링크 만들기 ▸ holds: set again only when it changed, so that a menu
+    /// that is open is not made anew at every redraw.
+    shown_links: Cell<LinkFacts>,
     /// The time of a drag's rest on a place, which then opens (머무르면 열기, DND-08).
     spring: Spring,
     /// The files winit told were dropped on the window, until the next turn of the event loop
@@ -1409,6 +1416,7 @@ impl Controller {
             save_timer: slint::Timer::default(),
             save_failure_told: Cell::new(false),
             shown_drag: Cell::new(0),
+            shown_links: Cell::new(LinkFacts::default()),
             spring: Spring::new(|spot| {
                 with(|c| c.spring_due(spot));
             }),
@@ -2479,6 +2487,18 @@ impl Controller {
         completed
     }
 
+    /// Entry `index` of the item menu's 링크 만들기 ▸ was chosen: links in the folder of the pane,
+    /// or, with Shift held as it was chosen, in a folder the picker finds (OPS-08). The keys are
+    /// read as the system has them now (`rf_platform::dnd::held_mods`): the menu of the system's
+    /// own ran a loop of its own, in which the window heard no key change.
+    fn make_links(&self, index: usize) {
+        let held = dnd::held_mods().shift;
+        self.update(|state| {
+            let pick = held || state.shift_held();
+            state.make_links(index, pick)
+        });
+    }
+
     /// A toolbar button or a menu item: the same command as its key. A row menu's 붙여넣기 and
     /// 여기로 이동 paste into the folder of its row, and 경로 복사 has a form for each item.
     fn command(&self, name: &str) {
@@ -2510,6 +2530,12 @@ impl Controller {
                 });
             }
             _ => {}
+        }
+        if let Some(index) = name
+            .strip_prefix("link-")
+            .and_then(|number| number.parse().ok())
+        {
+            return self.make_links(index);
         }
         if let Some(form) = name
             .strip_prefix("copy-path-")
@@ -3011,7 +3037,11 @@ impl Controller {
                 );
                 window.invoke_show_open_with();
             }
-            MenuShown::AskDrop { moves, copies } => window.invoke_show_drop_menu(moves, copies),
+            MenuShown::AskDrop {
+                moves,
+                copies,
+                links,
+            } => window.invoke_show_drop_menu(moves, copies, links),
             MenuShown::Favorite { index } => {
                 let row = self
                     .state
@@ -3131,6 +3161,10 @@ impl Controller {
             ));
             window.set_quick_look(state.quick_look_open());
             ui_bridge::show_item_menu(&window, state.item_menu());
+            let links = state.item_links();
+            if self.shown_links.replace(links) != links {
+                ui_bridge::show_item_links(&window, links, Os::CURRENT);
+            }
             self.show_jobs(&window, state);
             self.show_dialog(&window, state);
         }

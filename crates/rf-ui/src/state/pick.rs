@@ -7,11 +7,12 @@
 //! tree is a [`Tree`] of its own, [`AppState`]'s `pick_tree`, made anew each time a picker
 //! opens and dropped when it closes, so that the listings it waits for stop.
 
-use rf_core::{Entry, EntryKind, ErrorKind, VPath};
+use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{ConflictPolicy, JobReport, JobSpec, Outcome, TransferMode};
 use rf_vfs::VisibilityFilter;
 
 use super::jobs::submit;
+use super::links::link_job;
 use super::{AppState, Effect, RIGHT};
 use crate::dialogs::{Modal, NameDialog};
 use crate::loader::LoadRequest;
@@ -179,6 +180,17 @@ impl AppState {
             self.close();
             return vec![Effect::SaveLog { report, folder }];
         }
+        if let (PickPurpose::Link { kind }, Some(folder)) = (&picker.purpose, picker.target.clone())
+        {
+            let (kind, origin) = (*kind, picker.origin);
+            let sources = picker.request.sources.clone();
+            self.close();
+            self.remember_target(folder.clone());
+            return match link_job(Os::CURRENT, kind, &sources, &folder) {
+                Ok(spec) => vec![submit(spec, Some(origin))],
+                Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
+            };
+        }
         let (Some(target), Some(spec)) = (picker.target.clone(), picker.spec()) else {
             return Vec::new();
         };
@@ -191,11 +203,11 @@ impl AppState {
         }
     }
 
-    /// The picker's 이동/복사 toggle.
+    /// The picker's 이동/복사 toggle. A log or a link has none.
     pub fn pick_mode(&mut self, mode: TransferMode) {
         if let Some(picker) = self
             .active_picker_mut()
-            .filter(|picker| !picker.for_a_log())
+            .filter(|picker| !picker.without_options())
         {
             picker.set_mode(mode);
         }
@@ -205,7 +217,7 @@ impl AppState {
     pub fn pick_policy(&mut self, policy: ConflictPolicy) {
         if let Some(picker) = self
             .active_picker_mut()
-            .filter(|picker| !picker.for_a_log())
+            .filter(|picker| !picker.without_options())
         {
             picker.policy = policy;
         }
