@@ -144,6 +144,8 @@ export global ItemMenu {
     in property <bool> runnable;
     // One folder: 터미널에서 열기.
     in property <bool> one-folder;
+    // One item that is a folder itself, not a link: 즐겨찾기에 추가.
+    in property <bool> one-dir;
     // One item: OS 속성 창 열기.
     in property <bool> one-item;
     // The system shares items through a picker of its own (macOS): 공유….
@@ -282,7 +284,7 @@ export component RowMenu inherits ContextMenuArea {
                 root.command("open-terminal");
             }
         }
-        if ItemMenu.one-folder: MenuItem {
+        if ItemMenu.one-dir: MenuItem {
             title: "즐겨찾기에 추가";
             activated => {
                 root.command("add-favorite");

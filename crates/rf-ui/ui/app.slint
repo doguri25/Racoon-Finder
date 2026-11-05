@@ -374,6 +374,8 @@ export component MainWindow inherits Window {
     callback favorite-pressed(index: int);
     callback favorite-command(index: int, name: string);
     callback favorites-blank-command(name: string);
+    // An item of the menu of row `index` of the sidebar's list that is no favorite (add-this).
+    callback row-command(index: int, name: string);
     // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
     // below the rows), tab `index` of pane `side`, row `index` of the tree (`side` 0), or the
     // gap `index` of the list of favorites (`side` 0; -1 for its empty part). Rust
@@ -1181,6 +1183,9 @@ export component MainWindow inherits Window {
                         }
                         blank-command(name) => {
                             root.favorites-blank-command(name);
+                        }
+                        row-command(index, name) => {
+                            root.row-command(index, name);
                         }
                         row-toggled(index) => {
                             root.tree-toggled(index);

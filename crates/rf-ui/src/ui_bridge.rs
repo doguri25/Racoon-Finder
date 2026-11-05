@@ -661,6 +661,8 @@ pub struct RecentBlock {
     pub folded: bool,
     /// The folders, the latest visited first.
     pub folders: Vec<RecentFolder>,
+    /// The folders of the favorites a worker found gone: their rows dim.
+    pub missing_favorites: HashSet<VPath>,
 }
 
 /// One folder of the group of recent folders.
@@ -712,6 +714,18 @@ impl TreeRows {
         }
         let data = tree.rows();
         let mut rows = tree_rows(&data, places);
+        {
+            let recent = self.recent.borrow();
+            for (shown, row) in rows.iter_mut().zip(&data) {
+                let gone = row
+                    .root
+                    .and_then(|root| places.get(root))
+                    .is_some_and(|place| {
+                        place.kind.is_favorite() && recent.missing_favorites.contains(&place.path)
+                    });
+                shown.1.dimmed = gone;
+            }
+        }
         self.hold_recent(&mut rows, recent_slot(&data, places));
         self.replace(rows);
     }
@@ -1412,6 +1426,7 @@ pub fn show_item_menu(window: &MainWindow, facts: MenuFacts) {
     menu.set_one_file(facts.one_file);
     menu.set_runnable(facts.runnable);
     menu.set_one_folder(facts.one_folder);
+    menu.set_one_dir(facts.one_dir);
     menu.set_one_item(facts.one_item);
 }
 

@@ -144,7 +144,7 @@ struct SystemAsked {
 /// What the item menu offers for the items it is for, besides what it always has.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "four items of a menu, each shown or not"
+    reason = "five items of a menu, each shown or not"
 )]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct MenuFacts {
@@ -154,6 +154,9 @@ pub struct MenuFacts {
     pub runnable: bool,
     /// One folder: 터미널에서 열기.
     pub one_folder: bool,
+    /// One item that is a folder itself (a link is not known to lead to one, and the listing
+    /// does not tell): 즐겨찾기에 추가.
+    pub one_dir: bool,
     /// One item: OS 속성 창 열기.
     pub one_item: bool,
 }
@@ -176,6 +179,7 @@ pub fn menu_facts(items: &[(VPath, &Entry)], runs_as_admin: bool) -> MenuFacts {
         one_file: file,
         runnable: file && runs_as_admin && path.as_local().is_some_and(can_run_as_admin),
         one_folder: matches!(entry.kind, EntryKind::Dir | EntryKind::Symlink),
+        one_dir: entry.kind == EntryKind::Dir,
         one_item: true,
     }
 }

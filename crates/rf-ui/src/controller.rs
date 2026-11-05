@@ -576,6 +576,9 @@ fn connect_sidebar(window: &MainWindow) {
     window.on_favorite_command(|i, name| {
         with(|c| c.update_at(i, |state, i| state.favorite_command(i, &name)));
     });
+    window.on_row_command(|i, name| {
+        with(|c| c.row_command(i, &name));
+    });
     window.on_favorites_blank_command(|name| {
         with(|c| c.update(|state| state.favorites_blank_command(&name)));
     });
@@ -821,26 +824,42 @@ fn tab_command(state: &mut AppState, side: usize, index: usize, name: &str) -> V
     }
 }
 
-/// Looks on a worker thread at which of the recent `folders` are folders still, then tells the
-/// state ([`AppState::recent_checked`]).
-fn check_recent(folders: Vec<VPath>) {
+/// Looks on a worker thread at which of the `folders` (recent ones and favorites) are folders
+/// still, then tells the state ([`AppState::folders_checked`]).
+fn check_folders(folders: Vec<VPath>) {
     spawn_worker("rf-ui-recent", move || {
         let found: Vec<(VPath, bool)> = folders
             .into_iter()
             .map(|folder| {
-                let there = folder
-                    .as_local()
-                    .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()));
+                let there = is_folder(&folder);
                 (folder, there)
             })
             .collect();
         post(move |c| {
             c.update(|state| {
-                state.recent_checked(&found);
+                state.folders_checked(&found);
                 Vec::new()
             });
         });
     });
+}
+
+/// Looks on a worker thread at which of the `sources` another app's drag dropped on the list of
+/// favorites are folders (a link to one counts), then tells the state
+/// ([`AppState::folders_kept`]), which keeps those. The UI thread never looks at them.
+fn keep_dropped(generation: u64, sources: Vec<VPath>, index: Option<usize>) {
+    spawn_worker("rf-ui-keep", move || {
+        let (folders, others): (Vec<VPath>, Vec<VPath>) = sources.into_iter().partition(is_folder);
+        post(move |c| {
+            c.update(|state| state.folders_kept(generation, folders, !others.is_empty(), index));
+        });
+    });
+}
+
+/// Whether `path` is a local folder, or a link to one (`std::fs::metadata` follows links).
+fn is_folder(path: &VPath) -> bool {
+    path.as_local()
+        .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()))
 }
 
 /// The group of recent folders as the sidebar shows it: each folder by its name, with the
@@ -859,9 +878,15 @@ fn recent_block(state: &AppState) -> RecentBlock {
                     .parent()
                     .map(|parent| folder_label(&parent))
                     .unwrap_or_default(),
-                missing: state.recent_is_missing(folder),
+                missing: state.is_missing(folder),
                 selected: folder == shown,
             })
+            .collect(),
+        missing_favorites: state
+            .places()
+            .iter()
+            .filter(|place| place.kind.is_favorite() && state.is_missing(&place.path))
+            .map(|place| place.path.clone())
             .collect(),
     }
 }
@@ -1790,6 +1815,22 @@ impl Controller {
         }
     }
 
+    /// An item of the menu of row `i` of the sidebar's list, which is no favorite
+    /// (`add-this`: its folder joins the favorites).
+    fn row_command(&self, i: i32, name: &str) {
+        let Some(i) = index(i) else {
+            return;
+        };
+        if name != "add-this" {
+            return;
+        }
+        match self.tree_rows.slot_at(i) {
+            RowSlot::Tree(row) => self.update(|state| state.favorite_add_tree_row(row)),
+            RowSlot::Recent(n) => self.update(|state| state.favorite_add_recent(n)),
+            RowSlot::RecentHead => {}
+        }
+    }
+
     /// A click on the chevron of row `i` of the sidebar's list.
     fn tree_toggled(&self, i: i32) {
         let Some(i) = index(i) else {
@@ -2551,6 +2592,7 @@ impl Controller {
             effects.extend(state.follow_properties());
             // Nothing that asks the user stays behind a hidden window.
             effects.extend(state.follow_background());
+            effects.extend(state.check_folders_due(Instant::now()));
             effects
         };
         self.apply(effects);
@@ -2582,7 +2624,8 @@ impl Controller {
                 }
                 Effect::CheckTrash { .. }
                 | Effect::CheckCopies { .. }
-                | Effect::CheckRecent(_)
+                | Effect::CheckFolders(_)
+                | Effect::KeepDropped { .. }
                 | Effect::FindExisting { .. }
                 | Effect::InspectTarget { .. }
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
@@ -2756,7 +2799,12 @@ impl Controller {
                 });
             }
             Effect::ReadSpace { tabs, drives } => self.read_space(tabs, drives),
-            Effect::CheckRecent(folders) => check_recent(folders),
+            Effect::CheckFolders(folders) => check_folders(folders),
+            Effect::KeepDropped {
+                generation,
+                sources,
+                index,
+            } => keep_dropped(generation, sources, index),
             Effect::FindExisting { generation, path } => {
                 let loader = self.loader.clone();
                 spawn_worker("rf-ui-vanished", move || {
@@ -2934,7 +2982,8 @@ impl Controller {
             | Effect::Job(_)
             | Effect::CheckTrash { .. }
             | Effect::CheckCopies { .. }
-            | Effect::CheckRecent(_)
+            | Effect::CheckFolders(_)
+            | Effect::KeepDropped { .. }
             | Effect::InspectTarget { .. }
             | Effect::ReadSpace { .. }
             | Effect::SaveLog { .. }

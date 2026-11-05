@@ -80,6 +80,7 @@ fn the_item_menu_offers_what_the_items_take() {
             one_file: true,
             runnable: false,
             one_folder: false,
+            one_dir: false,
             one_item: true,
         }
     );
@@ -90,6 +91,7 @@ fn the_item_menu_offers_what_the_items_take() {
         menu_facts(&one("docs", &docs), true),
         MenuFacts {
             one_folder: true,
+            one_dir: true,
             one_item: true,
             ..MenuFacts::default()
         }
@@ -388,7 +390,9 @@ fn a_link_gets_what_a_file_and_a_folder_get_and_the_worker_finds_which() {
         MenuFacts {
             one_file: true,
             runnable: false,
+            // A link is not known to lead to a folder: it cannot be kept as a favorite.
             one_folder: true,
+            one_dir: false,
             one_item: true,
         }
     );

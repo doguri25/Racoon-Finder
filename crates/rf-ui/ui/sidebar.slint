@@ -147,6 +147,22 @@ component FavoritesBlankMenu inherits ContextMenuArea {
     }
 }
 
+// The menu of a row of the sidebar that is no favorite but a folder (a drive, a folder of the
+// tree, a recent folder): its folder joins the favorites. Its item comes back as `command`
+// (add-this).
+component RowAddMenu inherits ContextMenuArea {
+    callback command(name: string);
+
+    Menu {
+        MenuItem {
+            title: "이 폴더를 즐겨찾기에 추가";
+            activated => {
+                root.command("add-this");
+            }
+        }
+    }
+}
+
 component TreeItem inherits Rectangle {
     in property <TreeRow> item;
     // The row's place in the list, recent folders among the rows (the tree's own number is
@@ -186,7 +202,7 @@ component TreeItem inherits Rectangle {
     callback favorite-pressed();
     // Dragging this favorite began or ended.
     callback reorder-changed(dragging: bool);
-    // An item of the favorite's menu.
+    // An item of the row's menu: the favorite's, or add-this for another folder row.
     callback menu-command(name: string);
 
     // The head takes more room above the drives, which come after the favorites.
@@ -196,6 +212,11 @@ component TreeItem inherits Rectangle {
     private property <length> indent: min(root.item.depth, 8) * 16px;
     // The head of the group of recent folders is a line of its own, like a section's head.
     private property <bool> is-head: root.item.kind == RowKind.recent-head;
+    // A dimmed folder takes no click, except a recent folder and a favorite of the sidebar that
+    // are gone, whose click says so.
+    private property <bool> clickable: !root.item.dimmed || root.item.kind == RowKind.recent || (root.item.is-favorite && root.accepts-drops);
+    // The row has a menu: a favorite's, or the one that adds the folder of any other folder row.
+    private property <bool> has-menu: root.accepts-drops && (root.item.is-favorite || root.item.kind == RowKind.folder || root.item.kind == RowKind.recent);
     private property <length> body-height: root.item.is-drive ? 56px : Theme.row-height;
     // The edges of a favorite's row stand for the gaps before and after it: a drop at the top
     // edge is between this favorite and the one above, at the bottom edge between it and the one
@@ -299,7 +320,7 @@ component TreeItem inherits Rectangle {
         width: parent.width - 16px;
         height: parent.height - root.head-height;
         border-radius: Theme.radius;
-        background: root.item.selected ? Theme.selection : root.item.dimmed && root.item.kind == RowKind.folder ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+        background: root.item.selected ? Theme.selection : root.item.dimmed && root.item.kind == RowKind.folder && !root.clickable ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
         accessible-role: list-item;
         accessible-label: root.item.label;
         accessible-description: root.item.info;
@@ -308,12 +329,12 @@ component TreeItem inherits Rectangle {
         // open it (its chevron does) to reach the folders below it. A recent folder that is
         // gone is dimmed too, but its click says so.
         accessible-item-index: root.index;
-        accessible-item-selectable: !root.item.dimmed || root.item.kind == RowKind.recent;
+        accessible-item-selectable: root.clickable;
         accessible-item-selected: root.item.selected;
         accessible-expandable: root.item.expandable;
         accessible-expanded: root.item.expanded;
         accessible-action-default => {
-            if (!root.item.dimmed || root.item.kind == RowKind.recent) {
+            if (root.clickable) {
                 root.clicked();
             }
         }
@@ -334,7 +355,12 @@ component TreeItem inherits Rectangle {
                 }
                 self.zone = root.zone-at(event.position.y);
                 if (self.zone != 0) {
-                    return root.gap-check(event.data, root.gap-of(self.zone));
+                    let kept = root.gap-check(event.data, root.gap-of(self.zone));
+                    // What the list does not keep as a favorite (files) goes into the folder
+                    // of the row, as in the middle of it; a favorite being dragged does not.
+                    if (kept != DragAction.none || root.reordering) {
+                        return kept;
+                    }
                 }
                 return root.drop-check(event.data);
             }
@@ -342,7 +368,10 @@ component TreeItem inherits Rectangle {
                 DragPointer.at(self.absolute-position, event.position);
                 let zone = root.zone-at(event.position.y);
                 if (zone != 0) {
-                    return root.gap-dropped(event.data, root.gap-of(zone));
+                    let kept = root.gap-dropped(event.data, root.gap-of(zone));
+                    if (kept != DragAction.none || root.reordering) {
+                        return kept;
+                    }
                 }
                 return root.dropped(event.data);
             }
@@ -360,6 +389,14 @@ component TreeItem inherits Rectangle {
                 root.reorder-changed(self.dragging);
             }
 
+            // The folder rows that are no favorites: shown by a right click, as the favorite's.
+            add-menu := RowAddMenu {
+                enabled: false;
+                command(name) => {
+                    root.menu-command(name);
+                }
+            }
+
             menu := FavoriteMenu {
                 enabled: root.item.is-favorite && root.accepts-drops;
                 can-up: root.item.can-up;
@@ -370,7 +407,7 @@ component TreeItem inherits Rectangle {
 
                 touch := TouchArea {
                     clicked => {
-                        if (!root.item.dimmed || root.item.kind == RowKind.recent) {
+                        if (root.clickable) {
                             root.clicked();
                         }
                     }
@@ -381,8 +418,12 @@ component TreeItem inherits Rectangle {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left && root.item.is-favorite) {
                             root.favorite-pressed();
                         }
-                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && root.item.is-favorite && root.accepts-drops) {
-                            menu.show({ x: self.mouse-x, y: self.mouse-y });
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right && root.has-menu) {
+                            if (root.item.is-favorite) {
+                                menu.show({ x: self.mouse-x, y: self.mouse-y });
+                            } else {
+                                add-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                            }
                         }
                     }
 
@@ -557,6 +598,8 @@ export component Sidebar inherits Rectangle {
     // An item of the menu of favorite `index`, or of the menu of the empty part.
     callback favorite-command(index: int, name: string);
     callback blank-command(name: string);
+    // An item of the menu of row `index` of the list, which is no favorite (add-this).
+    callback row-command(index: int, name: string);
 
     // The place of the tree under the point (`x`, `y`) of the window: in its list, the row the
     // pointer moved over last (`pointed-row`), the gap of the list of favorites at its edge, or
@@ -775,7 +818,11 @@ export component Sidebar inherits Rectangle {
                     root.reordering = dragging;
                 }
                 menu-command(name) => {
-                    root.favorite-command(row.favorite, name);
+                    if (row.is-favorite) {
+                        root.favorite-command(row.favorite, name);
+                    } else {
+                        root.row-command(i, name);
+                    }
                 }
             }
         }

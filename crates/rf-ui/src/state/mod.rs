@@ -212,9 +212,17 @@ pub enum Effect {
     ScrollTree(usize),
     /// Scroll the sidebar so that the keyboard cursor in the group of recent folders shows.
     ScrollRecent(RecentAt),
-    /// Find out on a worker thread which of these recent folders are folders still
-    /// (`std::fs::metadata`), then call [`AppState::recent_checked`].
-    CheckRecent(Vec<VPath>),
+    /// Find out on a worker thread which of these folders (the recent ones and the favorites)
+    /// are folders still (`std::fs::metadata`), then call [`AppState::folders_checked`].
+    CheckFolders(Vec<VPath>),
+    /// Paths of another app's drag were dropped on the gap `index` of the list of favorites
+    /// (`None`: its end): find out on a worker thread which of `sources` are folders
+    /// (`std::fs::metadata`), then call [`AppState::folders_kept`] with `generation`.
+    KeepDropped {
+        generation: u64,
+        sources: Vec<VPath>,
+        index: Option<usize>,
+    },
     /// List the names of folders for a list of the address bar
     /// ([`Loader::list_names`](crate::loader::Loader::list_names)); they come back to
     /// [`AppState::loaded`].
@@ -954,6 +962,9 @@ impl AppState {
         let Some(folder) = self.tree.node(id).map(|node| node.path.clone()) else {
             return Vec::new();
         };
+        if self.kept.missing.contains(&folder) {
+            return vec![Effect::Notice(words::start_folder_gone(&folder))];
+        }
         self.tree.select(id);
         self.go_to(folder)
     }

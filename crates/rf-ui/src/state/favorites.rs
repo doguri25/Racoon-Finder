@@ -14,16 +14,20 @@
 //! the job engine, the other app is told that nothing was done, and a folder that is among the
 //! favorites already goes to the place of the drop rather than into the list twice. The list
 //! takes folders only: a drag that holds a file, or a link key, is refused
-//! ([`Unkept`]). A drop onto the row of a favorite is the existing rule: the items go into its
+//! ([`Unkept`]). Of another app's drag nothing is looked at while it hovers (a path tells nothing
+//! of it, and the UI thread never touches the disk): it is answered as kept, and at the drop a
+//! worker keeps the folders among the paths ([`Effect::KeepDropped`], [`AppState::folders_kept`]),
+//! with a notice when some were not. A drop onto the row of a favorite is the existing rule: the items go into its
 //! folder ([`DropSpot::Tree`]).
 //!
 //! **Recent folders.** The last [`RECENT_FOLDERS`] folders either pane showed, the latest first
 //! ([`AppState::note_visits`], which the controller calls after every change, as it does
 //! [`AppState::follow_active`]), listed in a group under the favorites that the user can fold. A
-//! worker looks which are still there ([`Effect::CheckRecent`]); a folder that is gone dims, and
-//! a click on it says so.
+//! worker looks which are still there ([`Effect::CheckFolders`], at the start and again every half
+//! minute); a folder that is gone dims, favorite or recent, and a click on it says so.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use rf_core::VPath;
 use rf_platform::dnd::{DragMods, Effects};
@@ -38,6 +42,10 @@ use crate::words;
 
 /// How many folders the group of recent folders keeps.
 pub const RECENT_FOLDERS: usize = 10;
+
+/// How long a look at whether the favorites and the recent folders are still there is good for:
+/// the next one is asked for no sooner ([`AppState::check_folders_due`]).
+const CHECK_EVERY: Duration = Duration::from_secs(30);
 
 /// Why the list of favorites takes nothing of a drag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,8 +78,13 @@ pub(super) struct Kept {
     pub(super) known: Vec<Place>,
     /// The folders visited last, the latest first.
     pub(super) recent: Vec<VPath>,
-    /// The folders of `recent` a worker found missing.
+    /// The folders of `recent` and of the favorites a worker found missing.
     pub(super) missing: HashSet<VPath>,
+    /// Counts the times the favorites were set from outside (the settings): what a worker was
+    /// asked before is none of the new list's ([`AppState::folders_kept`]).
+    pub(super) generation: u64,
+    /// When the last look at the folders was asked for.
+    pub(super) checked: Option<Instant>,
     /// The group is folded to its head.
     pub(super) folded: bool,
     /// The folder each pane showed when [`AppState::note_visits`] looked last.
@@ -107,6 +120,7 @@ impl AppState {
             .collect();
         self.kept.edited = emptied || !favorites.is_empty();
         self.kept.favorites = favorites;
+        self.kept.generation += 1;
         if self.places.is_empty() {
             return Vec::new();
         }
@@ -283,6 +297,9 @@ impl AppState {
             return Vec::new();
         };
         match name {
+            "open" if self.kept.missing.contains(&folder) => {
+                vec![Effect::Notice(words::start_folder_gone(&folder))]
+            }
             "open" => self.go_to(folder),
             "open-other" => {
                 let other = 1 - self.active;
@@ -313,6 +330,23 @@ impl AppState {
             [one] => self.favorite_add(one),
             _ => self.keep_folders(folders, None),
         }
+    }
+
+    /// 이 폴더를 즐겨찾기에 추가 in the menu of a row of the sidebar that is no favorite: the
+    /// folder of row `row` of the tree joins the favorites.
+    pub fn favorite_add_tree_row(&mut self, row: usize) -> Vec<Effect> {
+        let folder = self
+            .tree
+            .node_at(row)
+            .and_then(|id| self.tree.node(id))
+            .map(|node| node.path.clone());
+        folder.map_or_else(Vec::new, |folder| self.favorite_add(&folder))
+    }
+
+    /// The same for recent folder `index`.
+    pub fn favorite_add_recent(&mut self, index: usize) -> Vec<Effect> {
+        let folder = self.kept.recent.get(index).cloned();
+        folder.map_or_else(Vec::new, |folder| self.favorite_add(&folder))
     }
 
     /// An item of the menu of the sidebar's empty part: `add-current` keeps the folder the
@@ -443,6 +477,31 @@ impl AppState {
         self.keep_folders(drag.request.sources, index)
     }
 
+    /// A worker looked at the paths of another app's drag that were dropped on the gap `index` of
+    /// the list ([`Effect::KeepDropped`]): the `folders` among them are kept there, and a notice
+    /// tells when some were not folders (`others`). A list set from the settings since (a
+    /// different `generation`) is not the one that was dropped on.
+    pub fn folders_kept(
+        &mut self,
+        generation: u64,
+        folders: Vec<VPath>,
+        others: bool,
+        index: Option<usize>,
+    ) -> Vec<Effect> {
+        if generation != self.kept.generation {
+            return Vec::new();
+        }
+        let mut effects = if folders.is_empty() {
+            Vec::new()
+        } else {
+            self.keep_folders(folders, index)
+        };
+        if others {
+            effects.push(Effect::Notice(words::drop_only_folders().to_owned()));
+        }
+        effects
+    }
+
     /// Keeps `folders` as favorites from the gap `index` on (`None`: at the end), in order; one
     /// that is a favorite already goes to its place there.
     pub(super) fn keep_folders(
@@ -463,7 +522,7 @@ impl AppState {
     }
 
     /// The folders the settings kept as the recent ones; a worker looks which are still there
-    /// ([`Effect::CheckRecent`]).
+    /// ([`Effect::CheckFolders`]).
     pub fn set_recent_folders(&mut self, folders: Vec<VPath>) -> Vec<Effect> {
         let mut seen = HashSet::new();
         self.kept.recent = folders
@@ -473,26 +532,66 @@ impl AppState {
             .collect();
         self.kept.missing.clear();
         self.kept.cursor = None;
-        if self.kept.recent.is_empty() {
-            return Vec::new();
-        }
-        vec![Effect::CheckRecent(self.kept.recent.clone())]
+        self.look_at_folders()
     }
 
-    /// A worker looked at the recent folders: which are folders still (`true`) and which are
-    /// gone.
-    pub fn recent_checked(&mut self, found: &[(VPath, bool)]) {
+    /// The folders a worker is asked about: the recent ones, then the favorites as they show.
+    fn folders_to_check(&self) -> Vec<VPath> {
+        let mut seen = HashSet::new();
+        self.kept
+            .recent
+            .iter()
+            .cloned()
+            .chain(self.shown_as_list().iter().filter_map(Favorite::folder))
+            .filter(|folder| seen.insert(folder.clone()))
+            .collect()
+    }
+
+    /// Asks a worker which of the recent folders and favorites are still there; nothing while
+    /// there are none.
+    fn look_at_folders(&self) -> Vec<Effect> {
+        let folders = self.folders_to_check();
+        if folders.is_empty() {
+            return Vec::new();
+        }
+        vec![Effect::CheckFolders(folders)]
+    }
+
+    /// The same look, if none was asked for within the last half minute: the controller calls
+    /// this after every change, so the favorites and recent folders that vanish while the app
+    /// runs (a drive taken away, a folder deleted) dim by the time the sidebar is looked at
+    /// again, at a cost of a few `stat`s on a worker thread, never more than twice a minute.
+    pub fn check_folders_due(&mut self, now: Instant) -> Vec<Effect> {
+        if self
+            .kept
+            .checked
+            .is_some_and(|before| now.saturating_duration_since(before) < CHECK_EVERY)
+        {
+            return Vec::new();
+        }
+        let effects = self.look_at_folders();
+        if !effects.is_empty() {
+            self.kept.checked = Some(now);
+        }
+        effects
+    }
+
+    /// A worker looked at the recent folders and favorites: which are folders still (`true`) and
+    /// which are gone.
+    pub fn folders_checked(&mut self, found: &[(VPath, bool)]) {
         for (folder, there) in found {
             if *there {
                 self.kept.missing.remove(folder);
-            } else if self.kept.recent.contains(folder) {
+            } else {
                 self.kept.missing.insert(folder.clone());
             }
         }
+        let asked = self.folders_to_check();
+        self.kept.missing.retain(|gone| asked.contains(gone));
     }
 
-    /// Whether a worker found the recent folder `folder` gone: its row dims.
-    pub fn recent_is_missing(&self, folder: &VPath) -> bool {
+    /// Whether a worker found the recent folder or favorite `folder` gone: its row dims.
+    pub fn is_missing(&self, folder: &VPath) -> bool {
         self.kept.missing.contains(folder)
     }
 
@@ -521,9 +620,6 @@ impl AppState {
         self.kept.recent.truncate(RECENT_FOLDERS);
         // The folder is there: a worker found it gone once, perhaps, and it came back.
         self.kept.missing.remove(folder);
-        self.kept
-            .missing
-            .retain(|gone| self.kept.recent.contains(gone));
         if let Some(RecentAt::Item(at)) = self.kept.cursor {
             self.kept.cursor = Some(RecentAt::Item(at.min(self.kept.recent.len() - 1)));
         }

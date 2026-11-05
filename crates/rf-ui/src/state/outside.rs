@@ -54,9 +54,6 @@ pub(super) struct Outside {
     /// The folder the last hover showed the items would go into; `None` after a hover where
     /// nothing takes them. This app's own drag keeps it in its [`Drag`](super::Drag).
     shown: Option<VPath>,
-    /// Whether every one of the paths is a folder, once a hover over the list of favorites
-    /// asked (a path tells nothing of it, so the disk is looked at, once for each drag).
-    only_folders: Option<bool>,
 }
 
 impl AppState {
@@ -169,14 +166,18 @@ impl AppState {
             return (None, told.into_iter().collect());
         }
         // The list of favorites keeps folders and moves nothing: the other app is told that
-        // nothing was done, so it deletes nothing.
+        // nothing was done, so it deletes nothing. Which of the paths are folders is for a worker
+        // to find ([`Effect::KeepDropped`]); the UI thread never looks at them.
         if let DropSpot::Favorites { index } = spot {
-            let verdict =
-                self.keep_verdict(only_folders(&sources), sources.len(), index, mods, allowed);
+            let verdict = self.keep_verdict(true, sources.len(), index, mods, allowed);
             if !matches!(verdict, Hover::Keeps { .. }) {
                 return (None, Vec::new());
             }
-            let mut effects = self.keep_folders(sources, index);
+            let mut effects = vec![Effect::KeepDropped {
+                generation: self.kept.generation,
+                sources,
+                index,
+            }];
             if left_out > 0 {
                 effects.push(Effect::Notice(words::dropped_left_out(left_out)));
             }
@@ -302,16 +303,17 @@ impl AppState {
                     mods,
                     allowed,
                     shown: None,
-                    only_folders: None,
                 });
             }
         }
     }
 
     /// What the gap `index` of the list of favorites makes of `sources`, the paths of another
-    /// app's drag that the app takes. Whether they are folders is found once for the drag.
+    /// app's drag that the app takes. Whether they are folders is not looked at (a path tells
+    /// nothing of it, and the UI thread never touches the disk): the answer is that they are kept,
+    /// and a worker keeps the folders among them at the drop.
     fn foreign_keep_hover(
-        &mut self,
+        &self,
         sources: &[VPath],
         index: Option<usize>,
         mods: DragMods,
@@ -320,15 +322,7 @@ impl AppState {
         if self.modal.is_some() || self.quitting {
             return Hover::Nothing;
         }
-        let known = self
-            .outside
-            .as_ref()
-            .and_then(|outside| outside.only_folders);
-        let only_folders = known.unwrap_or_else(|| only_folders(sources));
-        if let Some(outside) = self.outside.as_mut() {
-            outside.only_folders = Some(only_folders);
-        }
-        self.keep_verdict(only_folders, sources.len(), index, mods, allowed)
+        self.keep_verdict(true, sources.len(), index, mods, allowed)
     }
 
     /// What the place `spot` makes of `sources`, the paths of another app's drag that the app
@@ -355,18 +349,6 @@ impl AppState {
         let choice = self.drop_choice(first, &folder, mods, allowed);
         Hover::Takes(DropOffer { folder, choice })
     }
-}
-
-/// Whether every one of `sources` is a folder (a link to one counts), and there is one. A path
-/// tells nothing of it, so the disk is looked at: local paths only, and no further than the first
-/// that is not.
-fn only_folders(sources: &[VPath]) -> bool {
-    !sources.is_empty()
-        && sources.iter().all(|source| {
-            source
-                .as_local()
-                .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()))
-        })
 }
 
 /// Why `folder` does not take `sources`: one of them is it or holds it, or all of them are in it

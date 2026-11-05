@@ -388,7 +388,7 @@ struct Dragged {
 
 fn dragged() -> Dragged {
     let dir = tempfile::tempdir().expect("a temporary folder");
-    let folders: Vec<PathBuf> = ["프로젝트", "자료"]
+    let folders: Vec<PathBuf> = ["프로젝트", "자료", "보관"]
         .iter()
         .map(|name| {
             let path = dir.path().join(name);
@@ -410,6 +410,27 @@ fn items(paths: &[&PathBuf]) -> DroppedItems {
         paths: paths.iter().map(|path| (*path).clone()).collect(),
         ..DroppedItems::default()
     }
+}
+
+/// What the controller's worker does with the effect of a drop of another app's paths on the list
+/// ([`Effect::KeepDropped`]): looks at which are folders and tells the state. `None` when the
+/// effects hold no such request.
+fn worker_keeps(state: &mut AppState, effects: &[Effect]) -> Option<Vec<Effect>> {
+    let Some(Effect::KeepDropped {
+        generation,
+        sources,
+        index,
+    }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::KeepDropped { .. }))
+    else {
+        return None;
+    };
+    let (folders, others): (Vec<VPath>, Vec<VPath>) = sources.iter().cloned().partition(|path| {
+        path.as_local()
+            .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()))
+    });
+    Some(state.folders_kept(*generation, folders, !others.is_empty(), *index))
 }
 
 #[test]
@@ -437,9 +458,13 @@ fn a_folder_dragged_from_another_app_between_favorites_is_added_and_nothing_move
         Some(DropEffect::Link)
     );
     let (done, effects) = state.outside_drop(Some(between), one, plain(), both(), false);
-    // Nothing was moved or copied: the other app is told nothing was done.
+    // Nothing was moved or copied: the other app is told nothing was done. The folders are told
+    // by a worker, which the list waits for.
     assert_eq!(done, None);
     assert!(!asks_for_a_job(&effects), "{effects:?}");
+    assert!(!state.favorites_edited());
+    let kept = worker_keeps(&mut state, &effects).expect("a worker looks at the paths");
+    assert!(!asks_for_a_job(&kept), "{kept:?}");
     assert_eq!(names(&state), ["문서", "프로젝트", "사진"]);
 
     // Two folders, at the end; one of them is there already and moves to the end.
@@ -452,20 +477,38 @@ fn a_folder_dragged_from_another_app_between_favorites_is_added_and_nothing_move
         false,
     );
     assert_eq!((done, asks_for_a_job(&effects)), (None, false));
+    worker_keeps(&mut state, &effects).expect("a worker looks at the paths");
     assert_eq!(names(&state), ["문서", "사진", "자료", "프로젝트"]);
 
-    // A file is refused, with its reason; a link key too (and a right-button drop adds as well).
+    // A file: the hover cannot tell (nothing is looked at), the worker keeps no folder and a
+    // notice says why; a link key is refused at once (and a right-button drop adds as well).
     let file = items(&[&from.file]);
-    assert_eq!(
-        state.outside_hover(Some(between), &file, plain(), both()),
-        Hover::NoKeep(Unkept::Files)
-    );
-    assert_eq!(
-        state.outside_over(Some(between), &file, plain(), both()),
-        None
-    );
     let (done, effects) = state.outside_drop(Some(between), file, plain(), both(), false);
-    assert_eq!((done, effects), (None, Vec::new()));
+    assert_eq!(done, None);
+    let told = worker_keeps(&mut state, &effects).expect("a worker looks at the paths");
+    assert_eq!(
+        told,
+        [Effect::Notice(words::drop_only_folders().to_owned())]
+    );
+    // A mix keeps its folders and tells of the file.
+    let mix = items(&[&from.file, &from.folders[2]]);
+    let (_, effects) = state.outside_drop(
+        Some(DropSpot::Favorites { index: Some(0) }),
+        mix,
+        plain(),
+        both(),
+        false,
+    );
+    let told = worker_keeps(&mut state, &effects).expect("a worker looks at the paths");
+    assert_eq!(
+        told.last(),
+        Some(&Effect::Notice(words::drop_only_folders().to_owned()))
+    );
+    assert_eq!(
+        names(&state)[0],
+        from.folders[2].file_name().unwrap().to_string_lossy()
+    );
+    state.favorite_remove(0);
     let folder_drag = items(&[&from.folders[0]]);
     assert_eq!(
         state.outside_hover(Some(between), &folder_drag, link_keys(), both()),
@@ -476,6 +519,42 @@ fn a_folder_dragged_from_another_app_between_favorites_is_added_and_nothing_move
     assert_eq!((done, effects), (None, Vec::new()));
     assert_eq!(names(&state), ["문서", "사진", "자료", "프로젝트"]);
     assert_eq!(rows(&state, LEFT), ["docs", "src", "x.txt"]);
+
+    // The list was set from the settings while the worker looked: its answer is stale.
+    let again = items(&[&from.folders[2]]);
+    let (_, effects) = state.outside_drop(Some(between), again, plain(), both(), false);
+    state.set_favorites(Vec::new(), false);
+    assert_eq!(worker_keeps(&mut state, &effects), Some(Vec::new()));
+    assert_eq!(state.favorites(), []);
+}
+
+#[test]
+fn hovering_and_dropping_on_the_list_never_look_at_the_disk() {
+    let mut state = with_places();
+    // Paths that exist nowhere: a look at the disk would find no folder and refuse them.
+    let nowhere = items(&[&temp().as_local().expect("local").join("no/such/folder")]);
+    let between = DropSpot::Favorites { index: Some(1) };
+    for spot in [between, DropSpot::Favorites { index: None }] {
+        assert!(matches!(
+            state.outside_hover(Some(spot), &nowhere, plain(), both()),
+            Hover::Keeps { count: 1, .. }
+        ));
+        assert_eq!(
+            state.outside_over(Some(spot), &nowhere, plain(), both()),
+            Some(DropEffect::Copy)
+        );
+    }
+    let (done, effects) = state.outside_drop(Some(between), nowhere, plain(), both(), false);
+    assert_eq!(done, None);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::KeepDropped { index: Some(1), .. }]
+        ),
+        "{effects:?}"
+    );
+    // Nothing is kept until a worker says there is a folder.
+    assert!(!state.favorites_edited());
 }
 
 #[test]
@@ -525,13 +604,13 @@ fn a_missing_recent_folder_dims_and_a_click_says_it_is_gone() {
     let here = folder("here");
     let effects = state.set_recent_folders(vec![gone.clone(), here.clone()]);
     // A worker looks which of them are still there.
-    let Some(Effect::CheckRecent(asked)) = effects.first() else {
+    let Some(Effect::CheckFolders(asked)) = effects.first() else {
         panic!("a look at the folders: {effects:?}");
     };
     assert_eq!(asked, &[gone.clone(), here.clone()]);
-    state.recent_checked(&[(gone.clone(), false), (here.clone(), true)]);
-    assert!(state.recent_is_missing(&gone));
-    assert!(!state.recent_is_missing(&here));
+    state.folders_checked(&[(gone.clone(), false), (here.clone(), true)]);
+    assert!(state.is_missing(&gone));
+    assert!(!state.is_missing(&here));
 
     // The click on the missing one shows the notice of a folder that cannot be found, and no
     // pane moves to it.
@@ -551,7 +630,66 @@ fn a_missing_recent_folder_dims_and_a_click_says_it_is_gone() {
     // Visiting a folder again finds it there.
     state.go_to(gone.clone());
     state.note_visits();
-    assert!(!state.recent_is_missing(&gone));
+    assert!(!state.is_missing(&gone));
+}
+
+#[test]
+fn a_missing_favorite_dims_and_a_click_says_it_is_gone_and_the_look_repeats() {
+    let mut state = with_places();
+    state.note_visits();
+    state.favorite_add(&folder("kept"));
+    let start = Instant::now();
+    // The first look asks about the recent folders and the favorites, each once.
+    let effects = state.check_folders_due(start);
+    let Some(Effect::CheckFolders(asked)) = effects.first() else {
+        panic!("a look at the folders: {effects:?}");
+    };
+    assert!(asked.contains(&folder("kept")) && asked.contains(&folder("docs-known")));
+    assert_eq!(asked.iter().collect::<HashSet<_>>().len(), asked.len());
+    state.folders_checked(&[(folder("kept"), false), (folder("docs-known"), true)]);
+    assert!(state.is_missing(&folder("kept")));
+    assert!(!state.is_missing(&folder("docs-known")));
+
+    // The click on the dimmed favorite says so, and no pane moves; so does its menu's 열기.
+    let location = state.panes()[state.active()]
+        .active_tab()
+        .location()
+        .clone();
+    let row = state
+        .tree()
+        .rows()
+        .iter()
+        .position(|row| row.label == "kept")
+        .expect("the favorite's row");
+    assert_eq!(
+        state.open_tree_row(row),
+        [Effect::Notice(words::start_folder_gone(&folder("kept")))]
+    );
+    let index = state
+        .favorites()
+        .iter()
+        .position(|favorite| favorite.folder() == Some(folder("kept")))
+        .expect("a favorite");
+    assert_eq!(
+        state.favorite_command(index, "open"),
+        [Effect::Notice(words::start_folder_gone(&folder("kept")))]
+    );
+    assert_eq!(
+        state.panes()[state.active()].active_tab().location(),
+        &location
+    );
+
+    // No new look within half a minute, one after it; it finds the folder back.
+    let soon = start + Duration::from_secs(29);
+    assert_eq!(state.check_folders_due(soon), Vec::<Effect>::new());
+    let later = start + Duration::from_secs(31);
+    assert!(matches!(
+        state.check_folders_due(later).as_slice(),
+        [Effect::CheckFolders(_)]
+    ));
+    state.folders_checked(&[(folder("kept"), true)]);
+    assert!(!state.is_missing(&folder("kept")));
+    assert_eq!(the_load(&state.open_tree_row(row)).path, folder("kept"));
 }
 
 #[test]

@@ -5745,6 +5745,7 @@ const ONE_FILE: MenuFacts = MenuFacts {
     one_file: true,
     runnable: false,
     one_folder: false,
+    one_dir: false,
     one_item: true,
 };
 const ONE_PROGRAM: MenuFacts = MenuFacts {
@@ -5755,12 +5756,14 @@ const ONE_FOLDER: MenuFacts = MenuFacts {
     one_file: false,
     runnable: false,
     one_folder: true,
+    one_dir: true,
     one_item: true,
 };
 const SEVERAL: MenuFacts = MenuFacts {
     one_file: false,
     runnable: false,
     one_folder: false,
+    one_dir: false,
     one_item: false,
 };
 
@@ -7069,6 +7072,7 @@ fn the_group_of_recent_folders_lies_between_the_favorites_and_the_drives() {
                 selected: false,
             })
             .collect(),
+        missing_favorites: std::collections::HashSet::new(),
     };
     tree_rows.set_recent(block(false));
     tree_rows.sync(state.tree(), state.places());
