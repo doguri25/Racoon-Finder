@@ -40,6 +40,9 @@ export struct FileRow {
     // Cut to the clipboard (Ctrl+X), until it is pasted, the cut is cancelled or the clipboard
     // holds something else: it shows dimmed (DND-10).
     cut: bool,
+    // The file's thumbnail, once it came (VIEW-09): the medium icons and larger show it in the
+    // place of the icon. Empty (0 × 0) until then, and for a folder.
+    thumb: image,
 }
 
 // What a screen reader hears of an item besides its name: that it was cut.

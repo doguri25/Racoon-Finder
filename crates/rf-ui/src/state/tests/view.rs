@@ -442,3 +442,49 @@ fn a_choice_in_a_menu_or_on_a_head_makes_an_unknown_part_this_version_s() {
     assert_eq!(unknown(&state).sort.as_deref(), Some("rating"));
     assert_eq!(unknown(&state).then, None);
 }
+
+#[test]
+fn the_icon_size_steps_through_the_views_and_is_remembered() {
+    let mut state = ready_settled(files(3), vec![]);
+    // Ctrl+wheel up (or a pinch out) in 자세히: the small icons, then larger.
+    for wanted in [
+        ViewMode::SmallIcons,
+        ViewMode::MediumIcons,
+        ViewMode::LargeIcons,
+        ViewMode::ExtraLargeIcons,
+    ] {
+        let effects = state.step_icon_size(LEFT, true);
+        let effects = settled(&mut state, effects);
+        assert_eq!(effects, [Effect::ScrollTo { side: LEFT, row: 0 }]);
+        assert_eq!(mode(&state, LEFT), wanted);
+    }
+    // The largest stays: nothing changes.
+    assert_eq!(state.step_icon_size(LEFT, true), []);
+    assert_eq!(mode(&state, LEFT), ViewMode::ExtraLargeIcons);
+    assert_eq!(
+        state.views().own(&folder("a")).map(|own| own.view.mode),
+        Some(ViewMode::ExtraLargeIcons)
+    );
+    for _ in 0..3 {
+        state.step_icon_size(LEFT, false);
+    }
+    assert_eq!(mode(&state, LEFT), ViewMode::SmallIcons);
+    assert_eq!(state.step_icon_size(LEFT, false), []);
+    assert_eq!(mode(&state, LEFT), ViewMode::SmallIcons);
+    // The 보기 menu's 특대.
+    state.key(
+        Command::ViewExtraLargeIcons,
+        NONE,
+        Paging::rows(10),
+        Instant::now(),
+    );
+    assert_eq!(mode(&state, LEFT), ViewMode::ExtraLargeIcons);
+}
+
+#[test]
+fn thumbnails_show_until_the_setting_says_otherwise() {
+    let mut state = ready_settled(files(1), vec![]);
+    assert!(state.show_thumbnails());
+    state.set_show_thumbnails(false);
+    assert!(!state.show_thumbnails());
+}

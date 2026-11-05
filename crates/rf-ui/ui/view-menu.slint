@@ -1,8 +1,8 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
 // the names, the sidebar and the preview panel, the layout and the commands between the panes,
-// the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the undo of a
-// dragged move, and on Windows the menu of a right click). It is short enough for a 560px window,
+// the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
+// the icon views, the undo of a dragged move, and on Windows the menu of a right click). It is short enough for a 560px window,
 // with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
 // their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
 // 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach every item:
@@ -36,6 +36,8 @@ export component ViewMenu inherits ContextMenuArea {
     in-out property <bool> move-undo-toast;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
+    // The icon views show the files' thumbnails (VIEW-09), two-way with the window's.
+    in-out property <bool> show-thumbnails;
 
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
@@ -74,6 +76,7 @@ export component ViewMenu inherits ContextMenuArea {
         root.mark-mode-2 = root.view.mode == 2;
         root.mark-mode-3 = root.view.mode == 3;
         root.mark-mode-4 = root.view.mode == 4;
+        root.mark-mode-5 = root.view.mode == 5;
         root.mark-folders-first = root.view.folders-first;
         root.mark-sort-0 = root.view.sort-key == 0;
         root.mark-sort-1 = root.view.sort-key == 1;
@@ -105,6 +108,7 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> mark-mode-2;
     private property <bool> mark-mode-3;
     private property <bool> mark-mode-4;
+    private property <bool> mark-mode-5;
     private property <bool> mark-folders-first;
     private property <bool> mark-sort-0;
     private property <bool> mark-sort-1;
@@ -175,6 +179,17 @@ export component ViewMenu inherits ContextMenuArea {
         Menu {
             title: "보기 방식";
 
+            // No key: File Explorer's Ctrl+Shift+1 is not assigned (keyboard.md). Ctrl+wheel
+            // and a pinch step to it too.
+            MenuItem {
+                title: "특대 아이콘";
+                checkable: true;
+                checked <=> root.mark-mode-5;
+                activated => {
+                    root.command("view-extra-large-icons");
+                    root.done();
+                }
+            }
             MenuItem {
                 title: Shortcuts.titled("큰 아이콘", Shortcuts.view-large-icons);
                 checkable: true;
@@ -807,6 +822,15 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuSeparator { }
+            MenuItem {
+                title: "썸네일 보이기";
+                checkable: true;
+                checked <=> root.show-thumbnails;
+                activated => {
+                    root.command("toggle-thumbnails");
+                    root.done();
+                }
+            }
             MenuItem {
                 title: "끌어서 옮긴 뒤 되돌리기 알림";
                 checkable: true;

@@ -346,6 +346,7 @@ impl Controller {
             settings.drag_default = state.drag_default();
             settings.move_undo_toast = state.move_undo_toast();
             settings.system_menu_first = state.system_menu_first();
+            settings.show_thumbnails = state.show_thumbnails();
         }
         settings.theme = self.theme.get();
         if let Some(size) = self.window_size() {

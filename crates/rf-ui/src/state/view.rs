@@ -1,7 +1,7 @@
 //! How a pane shows its folder (NAV-06, NAV-07, NAV-08, NAV-10), and the commands that change
 //! it. A child of [`state`](super), so these methods see the fields of [`AppState`].
 //!
-//! A [`FolderView`] is the view mode ([`ViewMode`]: 자세히, 목록, or icons of three sizes), the
+//! A [`FolderView`] is the view mode ([`ViewMode`]: 자세히, 목록, or icons of four sizes), the
 //! columns of 자세히 after the name ([`ShownColumn`]: which, in what order, how wide) and the
 //! order of the rows (a `SortSpec`: a key, a second key for ties, folders first or mixed in).
 //!
@@ -45,15 +45,18 @@ pub enum ViewMode {
     /// Names with small icons, top to bottom and then in the next column (목록).
     List,
     /// Icons left to right and then down, with the name beside a small one or under a larger
-    /// one (작은 아이콘, 보통 아이콘, 큰 아이콘). Thumbnails are for a later version.
+    /// one (작은 아이콘, 보통 아이콘, 큰 아이콘, 특대 아이콘). From the medium icons up, a file
+    /// shows its thumbnail where it has one (VIEW-09, [`ViewMode::thumb_side`]).
     SmallIcons,
     MediumIcons,
     LargeIcons,
+    ExtraLargeIcons,
 }
 
 impl ViewMode {
-    /// Every mode, in the order the 보기 menu lists them after the largest icons (Explorer's).
-    pub const ALL: [ViewMode; 5] = [
+    /// Every mode, in the order the 보기 menu lists them, the largest icons first (Explorer's).
+    pub const ALL: [ViewMode; 6] = [
+        ViewMode::ExtraLargeIcons,
         ViewMode::LargeIcons,
         ViewMode::MediumIcons,
         ViewMode::SmallIcons,
@@ -69,6 +72,7 @@ impl ViewMode {
             ViewMode::SmallIcons => "small-icons",
             ViewMode::MediumIcons => "medium-icons",
             ViewMode::LargeIcons => "large-icons",
+            ViewMode::ExtraLargeIcons => "extra-large-icons",
         }
     }
 
@@ -77,7 +81,8 @@ impl ViewMode {
         ViewMode::ALL.into_iter().find(|mode| mode.name() == name)
     }
 
-    /// The number the screen knows the mode by (`PaneView.mode`).
+    /// The number the screen knows the mode by (`PaneView.mode`): 0 자세히, 1 목록, 2 to 5 the
+    /// icons from the smallest.
     pub fn number(self) -> i32 {
         match self {
             ViewMode::Details => 0,
@@ -85,6 +90,7 @@ impl ViewMode {
             ViewMode::SmallIcons => 2,
             ViewMode::MediumIcons => 3,
             ViewMode::LargeIcons => 4,
+            ViewMode::ExtraLargeIcons => 5,
         }
     }
 
@@ -93,6 +99,40 @@ impl ViewMode {
         ViewMode::ALL
             .into_iter()
             .find(|mode| mode.number() == number)
+    }
+
+    /// The next icon size up (Ctrl+wheel up, a pinch out: COMP-04): 자세히 and 목록 grow into
+    /// the small icons; `None` from the largest.
+    pub fn bigger(self) -> Option<ViewMode> {
+        match self {
+            ViewMode::Details | ViewMode::List => Some(ViewMode::SmallIcons),
+            ViewMode::SmallIcons => Some(ViewMode::MediumIcons),
+            ViewMode::MediumIcons => Some(ViewMode::LargeIcons),
+            ViewMode::LargeIcons => Some(ViewMode::ExtraLargeIcons),
+            ViewMode::ExtraLargeIcons => None,
+        }
+    }
+
+    /// The next icon size down; `None` from the small icons, 자세히 and 목록, which the steps
+    /// do not leave the icons for.
+    pub fn smaller(self) -> Option<ViewMode> {
+        match self {
+            ViewMode::ExtraLargeIcons => Some(ViewMode::LargeIcons),
+            ViewMode::LargeIcons => Some(ViewMode::MediumIcons),
+            ViewMode::MediumIcons => Some(ViewMode::SmallIcons),
+            ViewMode::SmallIcons | ViewMode::List | ViewMode::Details => None,
+        }
+    }
+
+    /// The side of the square a file's thumbnail fits in, in logical pixels, in the views that
+    /// show thumbnails: 보통 48, 크게 96, 특대 160. The others show each kind's icon.
+    pub fn thumb_side(self) -> Option<u32> {
+        match self {
+            ViewMode::MediumIcons => Some(48),
+            ViewMode::LargeIcons => Some(96),
+            ViewMode::ExtraLargeIcons => Some(160),
+            ViewMode::SmallIcons | ViewMode::List | ViewMode::Details => None,
+        }
     }
 }
 
@@ -558,6 +598,31 @@ impl AppState {
         vec![Effect::ScrollTo { side, row }]
     }
 
+    /// The icons of pane `side` one size bigger or smaller ([`ViewMode::bigger`],
+    /// [`ViewMode::smaller`]): Ctrl+wheel (macOS ⌘+wheel) and a trackpad's pinch (COMP-04).
+    /// Nothing at the end of the steps.
+    pub fn step_icon_size(&mut self, side: usize, bigger: bool) -> Vec<Effect> {
+        let mode = self.tab(side).view().mode;
+        let next = if bigger {
+            mode.bigger()
+        } else {
+            mode.smaller()
+        };
+        match next {
+            Some(next) => self.set_view_mode(side, next),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the icon views show the files' thumbnails (보기 ▸ 설정 ▸ 썸네일 보이기).
+    pub fn show_thumbnails(&self) -> bool {
+        self.show_thumbnails
+    }
+
+    pub fn set_show_thumbnails(&mut self, on: bool) {
+        self.show_thumbnails = on;
+    }
+
     /// Shows or hides `column` in pane `side` (the head's menu, the 보기 menu's 열).
     pub fn toggle_column(&mut self, side: usize, column: Column) -> Vec<Effect> {
         self.change_view(side, |view| {
@@ -872,6 +937,52 @@ mod tests {
         view.set_then(None);
         assert_eq!(view.sort.secondary, None);
         assert!(view.sort.folders_first);
+    }
+
+    #[test]
+    fn the_icon_sizes_step_up_and_down() {
+        use ViewMode::{Details, ExtraLargeIcons, LargeIcons, List, MediumIcons, SmallIcons};
+        assert_eq!(SmallIcons.bigger(), Some(MediumIcons));
+        assert_eq!(MediumIcons.bigger(), Some(LargeIcons));
+        assert_eq!(LargeIcons.bigger(), Some(ExtraLargeIcons));
+        assert_eq!(ExtraLargeIcons.bigger(), None, "the largest stays");
+        assert_eq!(ExtraLargeIcons.smaller(), Some(LargeIcons));
+        assert_eq!(MediumIcons.smaller(), Some(SmallIcons));
+        assert_eq!(SmallIcons.smaller(), None, "the smallest icons stay");
+        // 자세히 and 목록 grow into the small icons, and shrink no further.
+        assert_eq!(Details.bigger(), Some(SmallIcons));
+        assert_eq!(List.bigger(), Some(SmallIcons));
+        assert_eq!(Details.smaller(), None);
+        assert_eq!(List.smaller(), None);
+    }
+
+    #[test]
+    fn thumbnails_show_in_the_medium_icons_and_larger() {
+        assert_eq!(ViewMode::MediumIcons.thumb_side(), Some(48));
+        assert_eq!(ViewMode::LargeIcons.thumb_side(), Some(96));
+        assert_eq!(ViewMode::ExtraLargeIcons.thumb_side(), Some(160));
+        for mode in [ViewMode::SmallIcons, ViewMode::List, ViewMode::Details] {
+            assert_eq!(mode.thumb_side(), None, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_extra_large_icons_have_their_own_name_and_number() {
+        assert_eq!(ViewMode::ExtraLargeIcons.name(), "extra-large-icons");
+        assert_eq!(ViewMode::ExtraLargeIcons.number(), 5);
+        // The numbers the screen knew before stay.
+        let numbers: Vec<i32> = [
+            ViewMode::Details,
+            ViewMode::List,
+            ViewMode::SmallIcons,
+            ViewMode::MediumIcons,
+            ViewMode::LargeIcons,
+        ]
+        .into_iter()
+        .map(ViewMode::number)
+        .collect();
+        assert_eq!(numbers, [0, 1, 2, 3, 4]);
+        assert_eq!(ViewMode::ALL[0], ViewMode::ExtraLargeIcons);
     }
 
     #[test]

@@ -5,6 +5,11 @@
 // bottom and then in the next column, scrolls sideways (the wheel too), and makes only the
 // columns on screen. A folder of 100,000 items costs no more than one of ten.
 //
+// From the medium icons up, a file shows its thumbnail (VIEW-09) in the place of its icon once
+// Rust has it (`FileRow.thumb`), fitted to the icon's square in its own ratio; until then, and
+// for a folder, its kind's icon shows. The list tells which items are on screen
+// (`visible-changed`), for Rust to ask for theirs first.
+//
 // An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
 // same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
 // place to drop on, as in 자세히: an item of a folder takes the items into that folder, any other
@@ -39,7 +44,7 @@ component Tile inherits Rectangle {
     in property <FileRow> item;
     // Its position in the rows.
     in property <int> index;
-    // 1 목록, 2 small icons, 3 medium, 4 large.
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large.
     in property <int> mode;
     // The keyboard cursor is on it (in the pane with the keyboard), a drag would go into it.
     in property <bool> cursor-here;
@@ -49,7 +54,9 @@ component Tile inherits Rectangle {
     callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
 
     private property <bool> big: root.mode >= 3;
-    private property <length> icon-size: root.mode == 4 ? 72px : root.mode == 3 ? 40px : 18px;
+    // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up.
+    private property <length> icon-size: root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 ? 48px : 18px;
+    private property <bool> pictured: root.big && root.item.thumb.width > 0;
 
     background: root.item.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
     border-radius: 6px;
@@ -107,14 +114,23 @@ component Tile inherits Rectangle {
     Rectangle {
         opacity: root.item.cut ? 0.4 : root.item.hidden ? 0.5 : 1;
 
-        Icon {
+        if !root.pictured: Icon {
             x: root.big ? (parent.width - self.width) / 2 : 8px;
             y: root.big ? 8px : (parent.height - self.height) / 2;
             width: root.icon-size;
             height: root.icon-size;
-            stroke-width: root.mode == 4 ? 1.2px : 1.8px;
+            stroke-width: root.mode == 5 ? 0.8px : root.mode == 4 ? 1.1px : 1.8px;
             name: root.item.icon;
             color: root.item.is-dir ? Theme.folder : Theme.muted;
+        }
+        if root.pictured: Image {
+            x: (parent.width - self.width) / 2;
+            y: 8px;
+            width: root.icon-size;
+            height: root.icon-size;
+            source: root.item.thumb;
+            image-fit: contain;
+            accessible-role: none;
         }
         if root.big: Text {
             x: 4px;
@@ -153,7 +169,7 @@ component Tile inherits Rectangle {
 
 export component FileGrid inherits Rectangle {
     in property <[FileRow]> rows;
-    // 1 목록, 2 small icons, 3 medium, 4 large.
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large.
     in property <int> mode: 3;
     // The keyboard cursor's item, or -1.
     in property <int> cursor: -1;
@@ -178,12 +194,14 @@ export component FileGrid inherits Rectangle {
     callback drop-check(data: data-transfer, index: int) -> DragAction;
     callback dropped(data: data-transfer, index: int) -> DragAction;
     callback drag-ended();
+    // The first and the last item on screen changed (a scroll, another size, other rows).
+    callback visible-changed(first: int, last: int);
 
     private property <bool> columnar: root.mode == 1;
     private property <length> pad: 8px;
     // The room of an item; an item takes all of it but a 4px gap.
-    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : 136px;
-    private property <length> tile-h: root.mode <= 2 ? 30px : root.mode == 3 ? 108px : 148px;
+    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : root.mode == 4 ? 136px : 184px;
+    private property <length> tile-h: root.mode <= 2 ? 30px : root.mode == 3 ? 112px : root.mode == 4 ? 156px : 220px;
     // The scroll bar's room, which the items leave free.
     private property <length> bar: 14px;
     // The icons: how many a row holds, and how many rows there are.
@@ -194,6 +212,17 @@ export component FileGrid inherits Rectangle {
     private property <int> column-count: !root.columnar ? 0 : ceil(root.rows.length / root.per-column);
     private property <int> first-column: max(0, floor((-columns-view.content-x - root.pad) / root.tile-w));
     private property <int> columns-shown: !root.columnar ? 0 : ceil(columns-view.visible-width / root.tile-w) + 1;
+
+    // The first and the last item on screen (-1 for the last when there are none): of the rows
+    // of icons partly in view, or of the columns of 목록.
+    out property <int> visible-first: root.columnar ? root.first-column * root.per-column : max(0, floor(-icons.content-y / root.tile-h)) * root.per-row;
+    out property <int> visible-last: min(root.rows.length - 1, root.columnar ? (root.first-column + root.columns-shown) * root.per-column - 1 : ceil((-icons.content-y + icons.visible-height) / root.tile-h) * root.per-row - 1);
+    changed visible-first => {
+        root.visible-changed(root.visible-first, root.visible-last);
+    }
+    changed visible-last => {
+        root.visible-changed(root.visible-first, root.visible-last);
+    }
 
     // What the pointer did to item `index`: told to the pane as a row of 자세히 tells it.
     function tile-event(index: int, what: TileEvent, ctrl: bool, shift: bool, command: string) {

@@ -26,6 +26,7 @@ pub mod resolver;
 pub mod selection;
 pub mod settings;
 pub mod state;
+pub mod thumbs;
 pub mod tree;
 pub mod ui_bridge;
 pub mod words;
@@ -136,6 +137,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         settings: loaded.settings,
         saver: saver.clone(),
         log_dir: rf_core::VPath::local(paths.log_dir()).ok(),
+        cache_dir: paths.cache_dir().to_owned(),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     // A second start of the app shows this one's window. Without the look (no thread), a second

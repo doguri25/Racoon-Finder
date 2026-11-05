@@ -646,6 +646,8 @@ export component Pane inherits Rectangle {
     // A left press on row `index`, and its release when no drag came of it.
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
+    // The first and the last item the icon views show changed (`FileGrid.visible-changed`).
+    callback visible-changed(first: int, last: int);
     callback row-activated(index: int);
     // A right click on row `index`, before its menu opens; a command of the list's menus.
     callback row-menu(index: int);
@@ -1260,6 +1262,9 @@ export component Pane inherits Rectangle {
                 outside-over: root.outside-over && root.view.mode != 0;
                 drag-ended => {
                     root.drag-ended();
+                }
+                visible-changed(first, last) => {
+                    root.visible-changed(first, last);
                 }
                 row-clicked(index, ctrl, shift) => {
                     root.row-clicked(index, ctrl, shift);

@@ -76,7 +76,9 @@ use rf_platform::dnd::{
 };
 use rf_platform::shell::{Owner, WindowPoint};
 use slint::language::DragAction;
-use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent as WinitEvent};
+use slint::winit_030::winit::event::{
+    ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent as WinitEvent,
+};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
@@ -117,6 +119,7 @@ mod properties;
 mod sorter;
 mod spring;
 mod system_menu;
+mod thumber;
 
 use clipboard::{Clipper, Done, OsClipboard};
 use drops::{DropTarget, WindowDrops};
@@ -129,6 +132,7 @@ pub use previewer::Previewer;
 use properties::{Hasher, Measurer};
 use sorter::Sorter;
 use spring::Spring;
+use thumber::Thumber;
 
 /// How long the worker waits after a folder's watch ended before it looks for the folder:
 /// a folder replaced in one go (`rm -rf dist && mkdir dist`) is back by then, and is listed
@@ -224,6 +228,8 @@ pub struct Startup {
     pub saver: Saver,
     /// The app's folder for logs, where a job's log goes unless the user chooses another.
     pub log_dir: Option<VPath>,
+    /// The app's cache folder, which the thumbnails' disk cache is under.
+    pub cache_dir: PathBuf,
 }
 
 /// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
@@ -236,6 +242,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         settings,
         saver,
         log_dir,
+        cache_dir,
     } = startup;
     if let Some((width, height)) = settings.window_size() {
         window.set_start_width(logical(width));
@@ -253,6 +260,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         .set_shares(rf_platform::shell::SHARES);
     let controller = Rc::new(Controller::new(window, jobs, settings, saver));
     *controller.log_dir.borrow_mut() = log_dir;
+    *controller.thumber.cache_dir.borrow_mut() = Some(cache_dir);
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
     watch_winit_events(window);
@@ -529,6 +537,9 @@ fn connect(window: &MainWindow) {
     connect_view(window);
     window.on_row_clicked(|s, i, ctrl, shift| {
         with(|c| c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift)));
+    });
+    window.on_visible_range(|s, first, last| {
+        with(|c| c.visible_range(side(s), first, last));
     });
     window.on_row_released(|s, i| {
         with(|c| c.update_at(i, |state, i| state.release_row(side(s), i)));
@@ -858,7 +869,9 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
 /// asks without telling where it was; and a right press, which Slint then never sees when it
 /// ends a drag of rows or comes while the left button is down (no menu shows then), or when it
 /// shows Windows' own menu in the place of the app's (OPS-05,
-/// [`Controller::right_button_pressed`]).
+/// [`Controller::right_button_pressed`]); and the wheel with Ctrl (macOS ⌘) and a trackpad's
+/// pinch, which step the icon size of the pane under the pointer (COMP-04): the wheel then does
+/// not scroll the list.
 fn watch_winit_events(window: &MainWindow) {
     window.window().on_winit_window_event(|window, event| {
         match event {
@@ -871,7 +884,31 @@ fn watch_winit_events(window: &MainWindow) {
             }
             WinitEvent::ModifiersChanged(modifiers) => {
                 let mods = ui_bridge::drag_mods(modifiers.state());
-                with(|c| c.modifiers_changed(mods));
+                // ⌘ with the wheel on macOS, Ctrl elsewhere, changes the icons' size.
+                let zoom = if cfg!(target_os = "macos") {
+                    modifiers.state().super_key()
+                } else {
+                    modifiers.state().control_key()
+                };
+                with(|c| {
+                    c.modifiers_changed(mods);
+                    c.zoom_key(zoom);
+                });
+            }
+            WinitEvent::MouseWheel { delta, .. } => {
+                let (lines, pixels) = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (Some(f64::from(*y)), 0.0),
+                    MouseScrollDelta::PixelDelta(at) => {
+                        (None, at.y / f64::from(window.scale_factor()))
+                    }
+                };
+                if with(|c| c.zoom_wheel(lines, pixels)).unwrap_or(false) {
+                    return EventResult::PreventDefault;
+                }
+            }
+            WinitEvent::PinchGesture { delta, phase, .. } => {
+                let (delta, started) = (*delta, *phase == TouchPhase::Started);
+                with(|c| c.zoom_pinch(delta, started));
             }
             WinitEvent::CursorLeft { .. } => {
                 with(Controller::pointer_left);
@@ -1186,6 +1223,8 @@ pub struct Controller {
     previewer: Previewer,
     /// The models of the preview's view.
     preview: PreviewModels,
+    /// The thumbnails of the icon views, and the icon size of Ctrl+wheel and a pinch.
+    thumber: Thumber,
     /// The workers of the properties window: what the listing does not tell and the count of
     /// what its folders hold, and the checksums of its files.
     measurer: Measurer,
@@ -1310,6 +1349,7 @@ impl Controller {
                 )
             },
             preview: PreviewModels::default(),
+            thumber: Thumber::new(),
             measurer: measurer(),
             hasher: hasher(),
             properties: PropertiesModels::default(),
@@ -1355,6 +1395,7 @@ impl Controller {
             state.set_drag_default(settings.drag_default);
             state.set_move_undo_toast(settings.move_undo_toast);
             state.set_system_menu_first(settings.system_menu_first);
+            state.set_show_thumbnails(settings.show_thumbnails);
         }
         state.offer_system_menu(rf_platform::shell::SYSTEM_MENU);
         state.settle_views(&mut effects);
@@ -2260,6 +2301,12 @@ impl Controller {
                     Vec::new()
                 });
             }
+            "toggle-thumbnails" => {
+                return self.update(|state| {
+                    state.set_show_thumbnails(!state.show_thumbnails());
+                    Vec::new()
+                });
+            }
             _ => {}
         }
         if let Some(form) = name
@@ -2303,6 +2350,7 @@ impl Controller {
             "view-small-icons" => Command::ViewSmallIcons,
             "view-medium-icons" => Command::ViewMediumIcons,
             "view-large-icons" => Command::ViewLargeIcons,
+            "view-extra-large-icons" => Command::ViewExtraLargeIcons,
             "fit-columns" => Command::FitColumns,
             "quick-look" => Command::QuickLook,
             "cut" => Command::Cut,
@@ -2830,6 +2878,7 @@ impl Controller {
             window.set_show_extensions(state.show_extensions());
             window.set_drag_default(ui_bridge::drag_default_number(state.drag_default()));
             window.set_move_undo_toast(state.move_undo_toast());
+            window.set_show_thumbnails(state.show_thumbnails());
             window.set_system_menu_first(state.system_menu_first());
             show_layout(&window, state.layout(), state.syncing());
             window.set_preview_fits(!state.preview_cramped());
@@ -2862,6 +2911,7 @@ impl Controller {
         for (side, row) in scrolls {
             self.scroll_to(side, row);
         }
+        self.schedule_thumbs();
     }
 
     /// What the measure worker found for the properties window: the window alone is drawn

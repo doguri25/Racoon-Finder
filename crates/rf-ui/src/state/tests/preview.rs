@@ -9,12 +9,13 @@ use crate::preview::{PreviewContent, Previewed};
 use crate::words;
 use rf_vfs::Change;
 
-const ALL_MODES: [ViewMode; 5] = [
+const ALL_MODES: [ViewMode; 6] = [
     ViewMode::Details,
     ViewMode::List,
     ViewMode::SmallIcons,
     ViewMode::MediumIcons,
     ViewMode::LargeIcons,
+    ViewMode::ExtraLargeIcons,
 ];
 
 /// The one request for a preview among `effects`.

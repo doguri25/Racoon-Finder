@@ -362,6 +362,8 @@ pub struct AppState {
     move_undo_toast: bool,
     /// A right click shows Windows' own menu first (보기 ▸ 설정, OPS-05).
     system_menu_first: bool,
+    /// The icon views show the files' thumbnails (보기 ▸ 설정, VIEW-09).
+    show_thumbnails: bool,
     /// The drop that waits for the menu of 놓을 때 묻기 to choose.
     asked_drop: Option<drag::AskedDrop>,
     /// The moves drops submitted that the engine has not started yet, with how many items each
@@ -495,6 +497,7 @@ impl AppState {
             drag_default: DragDefault::default(),
             move_undo_toast: true,
             system_menu_first: false,
+            show_thumbnails: true,
             asked_drop: None,
             drag_submits: Vec::new(),
             dragged_moves: HashMap::new(),
@@ -705,6 +708,7 @@ impl AppState {
             Command::ViewSmallIcons => self.set_view_mode(side, ViewMode::SmallIcons),
             Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
+            Command::ViewExtraLargeIcons => self.set_view_mode(side, ViewMode::ExtraLargeIcons),
             Command::FitColumns => self.fit_columns(side),
             Command::QuickLook => self.toggle_quick_look(side),
             Command::Copy => self.put_on_clipboard(side, false),

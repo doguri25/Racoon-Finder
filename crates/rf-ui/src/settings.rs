@@ -5,8 +5,9 @@
 //! keyboard, the destination picker's recent targets, the views remembered per folder
 //! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
 //! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
-//! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07)
-//! and whether a right click shows Windows' menu first (`system_menu_first`, OPS-05).
+//! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07),
+//! whether a right click shows Windows' menu first (`system_menu_first`, OPS-05) and whether the
+//! icon views show thumbnails (`show_thumbnails`, VIEW-09).
 //!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
 //! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
@@ -25,7 +26,8 @@
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
 //! with the default layout and no tab pinned, one without `[[folder_views]]` with no view
 //! remembered, one without `hide_extensions` with the extensions shown, and one without the
-//! choices of 보기 ▸ 설정 with a drop that moves, the undo offered and the app's menu first. A
+//! choices of 보기 ▸ 설정 with a drop that moves, the undo offered, the app's menu first and the
+//! thumbnails shown. A
 //! folder view falls back one key at a time too: a mode or a key of the order this
 //! version does not know shows as the default one, and a column it does not know is left out of
 //! the view; all of them are kept as written (`UnknownParts`) and written back, until the user
@@ -232,6 +234,9 @@ pub struct Settings {
     /// Windows has one.
     #[serde(deserialize_with = "or_default")]
     pub system_menu_first: bool,
+    /// The icon views show the files' thumbnails (VIEW-09); on unless the file says `false`.
+    #[serde(deserialize_with = "or_true")]
+    pub show_thumbnails: bool,
     /// How the window lays out its panes and side panels.
     #[serde(deserialize_with = "or_default")]
     pub layout: LayoutSettings,
@@ -263,6 +268,7 @@ impl Default for Settings {
             drag_default: DragDefault::default(),
             move_undo_toast: true,
             system_menu_first: false,
+            show_thumbnails: true,
             layout: LayoutSettings::default(),
             panes: Vec::new(),
             folder_views: Vec::new(),
@@ -801,6 +807,7 @@ impl Settings {
             drag_default: self.drag_default,
             move_undo_toast: self.move_undo_toast,
             system_menu_first: self.system_menu_first,
+            show_thumbnails: self.show_thumbnails,
             layout: self.layout.clone(),
             panes: self.panes.clone(),
             folder_views: Vec::new(),
@@ -1287,6 +1294,27 @@ mod tests {
         let loaded = load(dir.path()).settings;
         assert_eq!(drag(&loaded), (DragDefault::Move, true, false));
         assert_eq!(loaded.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn thumbnails_show_unless_the_file_says_otherwise() {
+        assert!(Settings::default().show_thumbnails);
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let settings = Settings {
+            show_thumbnails: false,
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("read");
+        assert!(text.contains("show_thumbnails = false"), "{text}");
+        assert_eq!(load(dir.path()), writable(settings));
+        // The demos before had no such key: thumbnails show.
+        std::fs::write(&file, "theme = \"dark\"\n").expect("written");
+        assert!(load(dir.path()).settings.show_thumbnails);
+        // Nor does a value this version cannot read cost them.
+        std::fs::write(&file, "show_thumbnails = \"no\"\n").expect("written");
+        assert!(load(dir.path()).settings.show_thumbnails);
     }
 
     #[test]

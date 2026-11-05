@@ -144,6 +144,8 @@ export component MainWindow inherits Window {
     // the menu offers on Windows alone (`system-menu-offered`).
     in property <int> drag-default;
     in-out property <bool> move-undo-toast: true;
+    // 보기 ▸ 설정 ▸ 썸네일 보이기, which Rust sets back to the state's after the toggle.
+    in-out property <bool> show-thumbnails: true;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
     // The payload of a drag of a tab, made by Rust as a left press shows the tab.
@@ -293,6 +295,9 @@ export component MainWindow inherits Window {
     // A left press on row `index` of pane `side`, and its release when no drag came of it.
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
     callback row-released(side: int, index: int);
+    // The first and the last item the icon views of pane `side` show changed (VIEW-09: their
+    // thumbnails are asked for first).
+    callback visible-range(side: int, first: int, last: int);
     callback row-activated(side: int, index: int);
     // A right click on row `index` of pane `side`, before its menu opens.
     callback row-menu(side: int, index: int);
@@ -995,6 +1000,7 @@ export component MainWindow inherits Window {
                             sync-navigation <=> root.sync-navigation;
                             drag-default: root.drag-default;
                             move-undo-toast <=> root.move-undo-toast;
+                            show-thumbnails <=> root.show-thumbnails;
                             system-menu-first <=> root.system-menu-first;
                             system-menu-offered: root.system-menu-offered;
                             command(name) => {
@@ -1264,6 +1270,9 @@ export component MainWindow inherits Window {
                         row-released(index) => {
                             root.row-released(0, index);
                         }
+                        visible-changed(first, last) => {
+                            root.visible-range(0, first, last);
+                        }
                         row-activated(index) => {
                             root.row-activated(0, index);
                         }
@@ -1407,6 +1416,9 @@ export component MainWindow inherits Window {
                         }
                         row-released(index) => {
                             root.row-released(1, index);
+                        }
+                        visible-changed(first, last) => {
+                            root.visible-range(1, first, last);
                         }
                         row-activated(index) => {
                             root.row-activated(1, index);

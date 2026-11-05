@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use jiff::tz::TimeZone;
@@ -113,6 +114,22 @@ impl PaneModels {
         self.rows.set_show_extensions(show);
     }
 
+    /// Shows `image` as the thumbnail of the file at `path`, asked for at `size` pixels, while
+    /// the pane shows its folder ([`FileRows::set_thumb`]); `row` is where the file was.
+    pub fn set_thumb(&self, row: Option<usize>, path: &Path, size: u32, image: slint::Image) {
+        self.rows.set_thumb(row, path, size, image);
+    }
+
+    /// Whether the file at `path` shows its thumbnail of `size` pixels.
+    pub fn has_thumb(&self, path: &Path, size: u32) -> bool {
+        self.rows.has_thumb(path, size)
+    }
+
+    /// Shows each kind's icon again in the place of every thumbnail.
+    pub fn clear_thumbs(&self) {
+        self.rows.clear_thumbs();
+    }
+
     /// Shows the rows named `names` dimmed from the next [`PaneModels::view`] on: the items cut
     /// to the clipboard ([`FileRows::set_cut`]).
     pub fn set_cut(&self, names: HashSet<OsString>) {
@@ -129,6 +146,7 @@ impl PaneModels {
     /// date and handed over as they are.
     pub fn view(&self, pane: &Pane, active: bool) -> PaneView {
         let tab = pane.active_tab();
+        self.rows.set_folder(tab.location().as_local());
         self.rows.sync(tab.visible(), tab.selection());
         // The last tab that is not pinned: the menu of a tab before it can close tabs to its
         // right, and the menu of any other tab, when there is one, can close others.
@@ -307,7 +325,17 @@ pub struct FileRows {
     extensions: Cell<bool>,
     /// The names of the rows that show dimmed, cut to the clipboard ([`FileRows::set_cut`]).
     cut: RefCell<HashSet<OsString>>,
+    /// The local folder of the rows, whose files' thumbnails show ([`FileRows::set_folder`]).
+    folder: RefCell<Option<PathBuf>>,
+    /// The thumbnails that show, by the file's path: the size asked for, the picture and when
+    /// it came (a count), at most [`SHOWN_THUMBS`].
+    thumbs: RefCell<HashMap<PathBuf, (u32, slint::Image, u64)>>,
+    thumbs_came: Cell<u64>,
 }
+
+/// The most thumbnails a list keeps: the pool keeps as many ([`crate::thumbs::MEMORY_THUMBS`]),
+/// so one forgotten here that comes on screen again comes back from there.
+const SHOWN_THUMBS: usize = crate::thumbs::MEMORY_THUMBS;
 
 /// One row as [`FileRows`] keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,6 +365,9 @@ impl Default for FileRows {
             tz: RefCell::new(TimeZone::UTC),
             extensions: Cell::new(true),
             cut: RefCell::default(),
+            folder: RefCell::default(),
+            thumbs: RefCell::default(),
+            thumbs_came: Cell::new(0),
         }
     }
 }
@@ -414,6 +445,68 @@ impl FileRows {
 }
 
 impl FileRows {
+    /// The rows are of the local folder `folder` (`None`: not a local one) from now on: in
+    /// another folder than before, no thumbnail shows until it comes for that folder.
+    pub fn set_folder(&self, folder: Option<&Path>) {
+        if self.folder.borrow().as_deref() == folder {
+            return;
+        }
+        *self.folder.borrow_mut() = folder.map(Path::to_path_buf);
+        self.clear_thumbs();
+    }
+
+    /// Shows `image` (asked for at `size` pixels) as the thumbnail of the file at `path`, when
+    /// it is in the rows' folder, and tells the list of its row (at `row`, or found by its
+    /// name). Past [`crate::thumbs::MEMORY_THUMBS`] the one that came first is forgotten.
+    pub fn set_thumb(&self, row: Option<usize>, path: &Path, size: u32, image: slint::Image) {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return;
+        };
+        if self.folder.borrow().as_deref() != Some(parent) {
+            return;
+        }
+        let came = self.thumbs_came.get() + 1;
+        self.thumbs_came.set(came);
+        {
+            let mut thumbs = self.thumbs.borrow_mut();
+            thumbs.insert(path.to_path_buf(), (size, image, came));
+            if thumbs.len() > SHOWN_THUMBS
+                && let Some(first) = thumbs
+                    .iter()
+                    .min_by_key(|(_, (_, _, came))| *came)
+                    .map(|(path, _)| path.clone())
+            {
+                thumbs.remove(&first);
+            }
+        }
+        let at = {
+            let rows = self.rows.borrow();
+            row.filter(|&at| rows.get(at).is_some_and(|shown| shown.entry.name == name))
+                .or_else(|| rows.iter().position(|shown| shown.entry.name == name))
+        };
+        // The list reads the row back while it is told, so the borrow has ended.
+        if let Some(at) = at {
+            self.notify.row_changed(at);
+        }
+    }
+
+    /// Whether the file at `path` shows a thumbnail asked for at `size` pixels.
+    pub fn has_thumb(&self, path: &Path, size: u32) -> bool {
+        self.thumbs
+            .borrow()
+            .get(path)
+            .is_some_and(|(shown, _, _)| *shown == size)
+    }
+
+    /// Forgets every thumbnail: each row shows its kind's icon.
+    pub fn clear_thumbs(&self) {
+        let had = !self.thumbs.borrow().is_empty();
+        self.thumbs.borrow_mut().clear();
+        if had {
+            self.notify.reset();
+        }
+    }
+
     /// The texts of `column` in `count` rows from row `first` on, one a line
     /// ([`PaneModels::column_texts`]).
     fn texts(&self, column: Column, first: usize, count: usize) -> String {
@@ -465,6 +558,11 @@ impl Model for FileRows {
             self.extensions.get(),
         );
         file.cut = shown.cut;
+        if let Some(folder) = self.folder.borrow().as_ref()
+            && let Some((_, image, _)) = self.thumbs.borrow().get(&folder.join(&shown.entry.name))
+        {
+            file.thumb = image.clone();
+        }
         Some(file)
     }
 
@@ -748,6 +846,7 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         selected,
         hidden: entry.attributes.contains(Attributes::HIDDEN),
         cut: false,
+        thumb: slint::Image::default(),
     }
 }
 
@@ -1710,6 +1809,7 @@ mod tests {
     use rf_core::ErrorKind;
     use rf_platform::DiskSpace;
     use rf_vfs::VisibilityFilter;
+    use slint::SharedPixelBuffer;
 
     use super::*;
     use crate::loader::LoadEvent;
@@ -1943,6 +2043,53 @@ mod tests {
         // The row of `file_row` alone is never dimmed.
         let row = file_row(&list[1], false, &TimeZone::UTC, true);
         assert!(!row.cut);
+    }
+
+    #[test]
+    fn file_rows_show_the_thumbnails_of_their_folder() {
+        let model = FileRows::default();
+        let dir = std::env::temp_dir().join("rf-thumb-rows");
+        let list = vec![
+            entry("a.png", EntryKind::File, 1),
+            entry("b.png", EntryKind::File, 1),
+        ];
+        model.set_folder(Some(&dir));
+        model.sync(&list, &Selection::default());
+        let widths = |model: &FileRows| -> Vec<u32> {
+            (0..model.row_count())
+                .filter_map(|i| model.row_data(i).map(|row| row.thumb.size().width))
+                .collect()
+        };
+        assert_eq!(
+            widths(&model),
+            [0, 0],
+            "each kind's icon until a thumbnail comes"
+        );
+        let picture = slint::Image::from_rgba8(SharedPixelBuffer::new(6, 3));
+        // A wrong hint finds the row all the same.
+        model.set_thumb(Some(0), &dir.join("b.png"), 48, picture.clone());
+        assert_eq!(widths(&model), [0, 6]);
+        assert!(model.has_thumb(&dir.join("b.png"), 48));
+        assert!(
+            !model.has_thumb(&dir.join("b.png"), 96),
+            "another size is asked for again"
+        );
+        // One of another folder is not this list's.
+        model.set_thumb(
+            None,
+            &std::env::temp_dir().join("a.png"),
+            48,
+            picture.clone(),
+        );
+        assert_eq!(widths(&model), [0, 6]);
+        // Another folder with the same names shows none of these.
+        model.set_folder(Some(&dir.join("other")));
+        assert_eq!(widths(&model), [0, 0]);
+        model.set_folder(Some(&dir));
+        model.set_thumb(None, &dir.join("a.png"), 48, picture);
+        assert_eq!(widths(&model), [6, 0]);
+        model.clear_thumbs();
+        assert_eq!(widths(&model), [0, 0]);
     }
 
     #[test]

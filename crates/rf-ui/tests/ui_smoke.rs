@@ -4266,7 +4266,7 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     chord(&window, &["a"]);
     assert_eq!(calls.take(), ["key a"]);
-    // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 큰
+    // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 특대
     // 아이콘, and Enter takes it.
     let record = calls.clone();
     window.on_command(move |name| record.note(format!("command {name}")));
@@ -4275,7 +4275,7 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     press(&window, Key::RightArrow);
     press(&window, Key::DownArrow);
     press(&window, Key::Return);
-    assert_eq!(calls.take(), ["command view-large-icons"]);
+    assert_eq!(calls.take(), ["command view-extra-large-icons"]);
     // The sub-menu and the menu have closed: the panes take the keys again.
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     chord(&window, &["b"]);
@@ -4954,6 +4954,7 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     window.set_dual_pane(false);
     window.set_show_extensions(false);
     window.set_move_undo_toast(false);
+    window.set_show_thumbnails(false);
     let middle_y =
         |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
     let marked_by = |item: &str| {
@@ -4995,6 +4996,13 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     );
     choose_item(&window, "끌어서 옮긴 뒤 되돌리기 알림");
     assert_eq!(calls.take(), ["toggle-move-undo-toast"]);
+    // So does the thumbnails' switch (VIEW-09), marked while it is on.
+    window.set_move_undo_toast(false);
+    window.set_show_thumbnails(true);
+    open(&["설정"]);
+    assert!(marked_by("썸네일 보이기"));
+    choose_item(&window, "썸네일 보이기");
+    assert_eq!(calls.take(), ["toggle-thumbnails"]);
     window.set_system_menu_offered(true);
     open(&["설정"]);
     choose_item(&window, windows_menu);
