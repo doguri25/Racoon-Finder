@@ -72,7 +72,9 @@ pub(super) fn thumbnail(path: &Path, size: u32) -> ThumbOutcome {
                 }));
             },
         );
-        // SAFETY: the shared generator is thread-safe (see the module's notes).
+        // SAFETY: a class method that takes no arguments and returns the shared generator,
+        // retained; the class may be used from any thread (it is not main-thread-only, see the
+        // module's notes).
         let generator = unsafe { QLThumbnailGenerator::sharedGenerator() };
         // SAFETY: a live request and a handler of the type the method takes; the generator
         // keeps (copies) the block until it has called it.
@@ -135,10 +137,11 @@ fn rgba_of(image: &CGImage) -> ThumbOutcome {
         return ThumbOutcome::None;
     }
     let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
-        return ThumbOutcome::Failed(format!("Quick Look's picture is {width}×{height}"));
+        return ThumbOutcome::None;
     };
     if w > MAX_SIDE || h > MAX_SIDE {
-        return ThumbOutcome::Failed(format!("Quick Look's picture is {w}×{h}"));
+        // The same every time for this file: not a thumbnail to keep asking for.
+        return ThumbOutcome::None;
     }
     let stride = width * 4;
     let mut rgba = vec![0_u8; stride * height];
@@ -183,6 +186,7 @@ mod tests {
     use super::super::os_thumbnail;
     use super::super::tests::sample_png;
     use super::*;
+    use crate::thumbs::tests::assert_is_the_sample;
 
     #[test]
     #[ignore = "needs an interactive session"]
@@ -192,12 +196,8 @@ mod tests {
         std::fs::write(&path, sample_png()).unwrap();
         match os_thumbnail(&path, 64) {
             ThumbOutcome::Made(thumb) => {
-                assert!(thumb.width > 0 && thumb.width <= 64);
-                assert!(thumb.height > 0 && thumb.height <= 64);
-                assert_eq!(
-                    thumb.rgba.len(),
-                    thumb.width as usize * thumb.height as usize * 4
-                );
+                assert!(thumb.width <= 64 && thumb.height <= 64, "{thumb:?}");
+                assert_is_the_sample(&thumb);
             }
             other => panic!("{other:?}"),
         }

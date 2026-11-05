@@ -10,8 +10,12 @@
 //!   never the kind's icon) that may be bigger than asked (`SIIGBF_BIGGERSIZEOK`). The calling
 //!   thread joins a single-threaded apartment for the call. The bitmap is read as a 32-bit
 //!   top-down DIB (`GetDIBits`), turned into RGBA ([`bgra_to_rgba_rows`]), divided by its alpha
-//!   (the shell's bitmaps are premultiplied) and deleted. The codes by which the shell says
-//!   it has no thumbnail for the file (`no_thumbnail_hresult`) are [`ThumbOutcome::None`].
+//!   (the shell's bitmaps are premultiplied) and deleted. Only the codes that say the file's
+//!   content has no thumbnail, and will not have one until the file changes, are
+//!   [`ThumbOutcome::None`] (`no_thumbnail` in the Windows module: no handler, a handler that
+//!   could not make one, a picture format nothing decodes or a picture that cannot be read).
+//!   Every other code, among them a file that is locked, half-written or unreadable for now, is
+//!   [`ThumbOutcome::Failed`].
 //! - **macOS:** `QLThumbnailGenerator.sharedGenerator` with a request for the `.thumbnail`
 //!   representation at `size`×`size` points and scale 1. The generator is not tied to the main
 //!   thread (its headers mark nothing of it so): it answers on a queue of its own, and the
@@ -47,7 +51,8 @@ mod windows;
 pub(crate) const MAC_WAIT: Duration = Duration::from_secs(30);
 
 /// The longest side of a picture this module reads from the system. A thumbnail is far smaller;
-/// a bitmap bigger than this is a fault, not a picture to copy.
+/// a bitmap bigger than this is not copied, and the file is taken to have no thumbnail
+/// ([`ThumbOutcome::None`]): the system gives the same for it every time.
 #[cfg_attr(
     not(any(windows, target_os = "macos")),
     allow(dead_code, reason = "used by the Windows and macOS providers")
@@ -203,30 +208,6 @@ pub(crate) fn no_quicklook_thumbnail(code: isize) -> bool {
     NONE.contains(&code)
 }
 
-/// Whether an `HRESULT` of `IShellItemImageFactory::GetImage` says the shell has no thumbnail
-/// for the file (no handler, a handler that could not read it, a picture format nothing
-/// decodes) rather than a failure worth another try.
-#[cfg_attr(
-    not(windows),
-    allow(dead_code, reason = "used by the Windows provider; tested on every OS")
-)]
-pub(crate) fn no_thumbnail_hresult(hr: u32) -> bool {
-    /// `E_FAIL`: what `GetImage` with `SIIGBF_THUMBNAILONLY` gives for a file whose kind has
-    /// no thumbnail handler.
-    const E_FAIL: u32 = 0x8000_4005;
-    /// `WTS_E_FAILEDEXTRACTION`: the handler could not make one.
-    const WTS_E_FAILEDEXTRACTION: u32 = 0x8004_B200;
-    /// `WTS_E_NOSTORAGEPROVIDERTHUMBNAILHANDLER`: a cloud file whose provider has none.
-    const WTS_E_NOSTORAGEPROVIDERTHUMBNAILHANDLER: u32 = 0x8004_B207;
-    /// The facility of the Windows Imaging Component (`WINCODEC_ERR_*`): no decoder for the
-    /// format, a pixel format it cannot convert, a header it cannot read, …
-    const FACILITY_WINCODEC: u32 = 0x8898_0000;
-    matches!(
-        hr,
-        E_FAIL | WTS_E_FAILEDEXTRACTION | WTS_E_NOSTORAGEPROVIDERTHUMBNAILHANDLER
-    ) || hr & 0xFFFF_0000 == FACILITY_WINCODEC
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +278,35 @@ mod tests {
         chunk(b"IDAT", &zlib);
         chunk(b"IEND", &[]);
         png
+    }
+
+    /// Checks a system's thumbnail of [`sample_png`]: whole pixels, every one opaque, and the
+    /// top-left one near the sample's (0, 0, 128) (scaling and color management move it a bit).
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        allow(dead_code, reason = "the providers' tests use it")
+    )]
+    pub(super) fn assert_is_the_sample(thumb: &Thumb) {
+        assert!(thumb.width > 0 && thumb.height > 0, "{thumb:?}");
+        assert_eq!(
+            thumb.rgba.len(),
+            thumb.width as usize * thumb.height as usize * 4
+        );
+        assert!(
+            thumb
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255),
+            "the sample is opaque"
+        );
+        let near = |got: u8, want: u8| got.abs_diff(want) <= 24;
+        let top_left = &thumb.rgba[..4];
+        assert!(
+            near(top_left[0], 0) && near(top_left[1], 0) && near(top_left[2], 128),
+            "top-left pixel {top_left:?}"
+        );
     }
 
     #[test]
@@ -461,34 +471,6 @@ mod tests {
                 128, 64, 0, 128, 10, 20, 30, 255, 0, 0, 0, 0, 255, 255, 255, 100
             ]
         );
-    }
-
-    #[test]
-    fn the_shells_no_thumbnail_codes_mean_none() {
-        for hr in [
-            0x8000_4005, // E_FAIL
-            0x8004_B200, // WTS_E_FAILEDEXTRACTION
-            0x8004_B207, // WTS_E_NOSTORAGEPROVIDERTHUMBNAILHANDLER
-            0x8898_2F50, // WINCODEC_ERR_COMPONENTNOTFOUND
-            0x8898_2F80, // WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT
-            0x8898_2F07, // WINCODEC_ERR_UNKNOWNIMAGEFORMAT
-            0x8898_2F61, // WINCODEC_ERR_BADHEADER
-        ] {
-            assert!(no_thumbnail_hresult(hr), "{hr:#010X}");
-        }
-    }
-
-    #[test]
-    fn other_codes_are_failures_to_try_again() {
-        for hr in [
-            0x8007_0002, // file not found
-            0x8007_0005, // access denied
-            0x8004_B201, // WTS_E_EXTRACTIONTIMEDOUT
-            0x8000_FFFF, // E_UNEXPECTED
-            0x8007_000E, // E_OUTOFMEMORY
-        ] {
-            assert!(!no_thumbnail_hresult(hr), "{hr:#010X}");
-        }
     }
 
     #[test]
