@@ -23,6 +23,7 @@ use super::{Controller, with};
 use crate::DropPlace;
 use crate::state::{LEFT, RIGHT};
 use crate::thumbs::{self, ThumbPool, ThumbProvider, ThumbWant};
+use crate::ui_bridge::ThumbStamp;
 
 /// How long the controller gathers the changes of what shows before it asks the pools.
 pub const THUMB_BATCH: Duration = Duration::from_millis(100);
@@ -73,6 +74,15 @@ impl std::fmt::Debug for Thumber {
         f.debug_struct("Thumber")
             .field("cache_dir", &self.cache_dir)
             .finish_non_exhaustive()
+    }
+}
+
+/// What the thumbnail of `want` is for.
+fn stamp_of(want: &ThumbWant) -> ThumbStamp {
+    ThumbStamp {
+        size: want.size,
+        len: want.len,
+        mtime: want.mtime,
     }
 }
 
@@ -127,6 +137,13 @@ impl Controller {
         }
         let mut asked_any = false;
         for side in [LEFT, RIGHT] {
+            // A pane that is not shown (the other one has the window alone) asks for nothing.
+            if !state.layout().shows(side, state.active()) {
+                thumber.pools[side].borrow_mut().take();
+                *thumber.asked[side].borrow_mut() = (0, Vec::new());
+                thumber.rows[side].borrow_mut().clear();
+                continue;
+            }
             let tab = state.panes()[side].active_tab();
             let generation = tab.generation();
             let side_px = tab.view().mode.thumb_side();
@@ -136,7 +153,7 @@ impl Controller {
                     let size = physical(side_px, scale);
                     thumbs::visible_wants(tab.visible(), folder, first, last, size)
                         .into_iter()
-                        .filter(|want| !self.panes[side].has_thumb(&want.path, want.size))
+                        .filter(|want| !self.panes[side].has_thumb(&want.path, stamp_of(want)))
                         .map(|want| (want, first))
                         .collect::<Vec<_>>()
                 }
@@ -188,6 +205,10 @@ impl Controller {
     /// Shows the thumbnails the pools made for the listings the panes still show; stops looking
     /// once every pool is idle.
     fn harvest_thumbs(&self) {
+        let scale = self
+            .window
+            .upgrade()
+            .map_or(1.0, |window| window.window().scale_factor());
         let state = self.state.borrow();
         let Some(state) = state.as_ref() else {
             return;
@@ -198,15 +219,27 @@ impl Controller {
             let Some(pool) = pool.as_ref() else {
                 continue;
             };
-            let generation = state.panes()[side].active_tab().generation();
+            let tab = state.panes()[side].active_tab();
+            let generation = tab.generation();
+            // A slow result of an older size must not replace the one of the size now.
+            let size = tab
+                .view()
+                .mode
+                .thumb_side()
+                .map(|side_px| physical(side_px, scale));
             let rows = self.thumber.rows[side].borrow();
             for ready in pool.take_ready() {
-                if ready.generation != generation {
+                if ready.generation != generation || Some(ready.size) != size {
                     continue;
                 }
                 if let Some(image) = ready.image {
                     let row = rows.get(&ready.path).copied();
-                    self.panes[side].set_thumb(row, &ready.path, ready.size, image);
+                    let stamp = ThumbStamp {
+                        size: ready.size,
+                        len: ready.len,
+                        mtime: ready.mtime,
+                    };
+                    self.panes[side].set_thumb(row, &ready.path, stamp, image);
                 }
             }
             busy |= !pool.is_idle();

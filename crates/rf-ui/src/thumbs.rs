@@ -17,8 +17,11 @@
 //! 3. to the system's provider ([`rf_platform::thumbs::os_thumbnail`] in the app; a fake one in
 //!    the tests), whose picture is made to fit the size asked (Windows may give a bigger one);
 //! 4. when the system makes none, or fails, to the app's own decoder for the picture formats it
-//!    knows ([`preview::image_format`], [`preview::decode_image`]): Linux has no provider, so
-//!    every picture there is the app's.
+//!    knows ([`preview::image_format`], [`preview::decode_thumbnail_source`]): Linux has no
+//!    provider, so every picture there is the app's. It keeps to the preview's file-size cap
+//!    ([`preview::MAX_IMAGE_BYTES`]) and to tighter pixel bounds ([`preview::THUMB_PIXELS`]), and
+//!    at most [`DECODES`] pictures are decoded at once in the whole app, however many pools
+//!    there are.
 //!
 //! A thumbnail made is written to the disk cache (a new file only: written to a temporary name
 //! with `create_new`, then renamed). "No thumbnail" is remembered in memory only, for the
@@ -31,9 +34,11 @@
 //!
 //! The provider is other people's code, so every call is guarded: a panic fails that file only
 //! ([`preview::guarded`]), and a watchdog gives up on a call that has taken longer than
-//! [`THUMB_TIMEOUT`]: that file fails (and is not asked for again in the same listing), and a
-//! new worker takes the stuck one's place. The stuck thread cannot be stopped; it is left to end
-//! when the call returns, and what it made then is dropped. Each worker is a plain thread of its
+//! [`THUMB_TIMEOUT`]: that file fails (and is not asked for again in the same listing, nor in
+//! the next ones for [`TIMED_OUT_FOR`]), and a new worker takes the stuck one's place. The stuck
+//! thread cannot be stopped; it is left to end when the call returns, and what it made then is
+//! dropped. With [`MAX_STUCK`] such threads alive no more are started, and what is asked fails
+//! at once until some return. Each worker is a plain thread of its
 //! own (never a pool's): Windows' provider needs a thread that can join a single-threaded COM
 //! apartment.
 
@@ -41,7 +46,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -66,6 +71,13 @@ pub const DEFAULT_WORKERS: usize = 2;
 pub const MAX_WORKERS: usize = 4;
 /// The folder of the disk cache under the app's cache folder.
 pub const CACHE_FOLDER: &str = "thumbs";
+/// How many pictures the app decodes at once, over every pool.
+pub const DECODES: usize = 2;
+/// How many stuck threads (calls the watchdog gave up on that have not returned) a pool lives
+/// with before it stops starting workers.
+pub const MAX_STUCK: usize = 8;
+/// How long a file that timed out is not asked for again, in any listing.
+pub const TIMED_OUT_FOR: Duration = Duration::from_secs(60);
 
 /// How often the watchdog looks at the workers.
 const WATCH_STEP: Duration = Duration::from_millis(100);
@@ -92,6 +104,9 @@ pub struct ThumbReady {
     pub generation: u64,
     pub path: PathBuf,
     pub size: u32,
+    /// The length and the modification time the file had when it was asked for.
+    pub len: u64,
+    pub mtime: Option<SystemTime>,
     pub image: Option<slint::Image>,
 }
 
@@ -101,6 +116,8 @@ impl std::fmt::Debug for ThumbReady {
             .field("generation", &self.generation)
             .field("path", &self.path)
             .field("size", &self.size)
+            .field("len", &self.len)
+            .field("mtime", &self.mtime)
             .field("image", &self.image.as_ref().map(slint::Image::size))
             .finish()
     }
@@ -114,6 +131,8 @@ struct Done {
     generation: u64,
     path: PathBuf,
     size: u32,
+    len: u64,
+    mtime: Option<SystemTime>,
     pixels: Option<Pixels>,
 }
 
@@ -134,6 +153,7 @@ struct Inner {
     provider: ThumbProvider,
     workers: usize,
     timeout: Duration,
+    max_stuck: usize,
 }
 
 struct State {
@@ -150,6 +170,11 @@ struct State {
     uses: u64,
     /// The keys of the generation's files that have no thumbnail.
     none: HashSet<String>,
+    /// The keys of the files that timed out, with when: not asked for again for
+    /// [`TIMED_OUT_FOR`], whatever the listing.
+    timed_out: HashMap<String, Instant>,
+    /// The calls the watchdog gave up on that have not returned.
+    stuck: usize,
     /// The workers that run and have not been given up on.
     alive: usize,
     next_id: u64,
@@ -180,6 +205,17 @@ impl ThumbPool {
     /// under `cache_dir`/[`CACHE_FOLDER`]. Its threads start with the first [`ThumbPool::want`]
     /// and end when it goes (a stuck one when its call returns).
     pub fn new(workers: usize, cache_dir: PathBuf, provider: ThumbProvider) -> ThumbPool {
+        ThumbPool::with_limits(workers, cache_dir, provider, THUMB_TIMEOUT, MAX_STUCK)
+    }
+
+    /// [`ThumbPool::new`] with the watchdog's `timeout` and the most stuck threads, `max_stuck`.
+    fn with_limits(
+        workers: usize,
+        cache_dir: PathBuf,
+        provider: ThumbProvider,
+        timeout: Duration,
+        max_stuck: usize,
+    ) -> ThumbPool {
         ThumbPool {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
@@ -190,6 +226,8 @@ impl ThumbPool {
                     memory: HashMap::new(),
                     uses: 0,
                     none: HashSet::new(),
+                    timed_out: HashMap::new(),
+                    stuck: 0,
                     alive: 0,
                     next_id: 0,
                     watching: false,
@@ -203,7 +241,8 @@ impl ThumbPool {
                 },
                 provider,
                 workers: workers.max(1),
-                timeout: THUMB_TIMEOUT,
+                timeout,
+                max_stuck,
             }),
         }
     }
@@ -219,10 +258,20 @@ impl ThumbPool {
             state.generation = folder_generation;
             state.none.clear();
         }
+        state
+            .timed_out
+            .retain(|_, when| when.elapsed() < TIMED_OUT_FOR);
         state.queue.clear();
         for want in in_order(items) {
             let key = cache_key(&want.path, want.len, want.mtime, want.size);
-            if state.none.contains(&key) || state.running.values().any(|(task, _)| task.key == key)
+            // A task under way for an older listing still fills the memory, but it does not
+            // deliver: the file is asked again (and then found there).
+            if state.none.contains(&key)
+                || state.timed_out.contains_key(&key)
+                || state
+                    .running
+                    .values()
+                    .any(|(task, _)| task.key == key && task.generation == folder_generation)
             {
                 continue;
             }
@@ -231,6 +280,8 @@ impl ThumbPool {
                     generation: folder_generation,
                     path: want.path,
                     size: want.size,
+                    len: want.len,
+                    mtime: want.mtime,
                     pixels: Some(pixels),
                 });
                 continue;
@@ -242,6 +293,7 @@ impl ThumbPool {
             });
         }
         start_threads(inner, &mut state);
+        shed(inner, &mut state);
         drop(state);
         inner.wake.notify_all();
     }
@@ -254,6 +306,8 @@ impl ThumbPool {
                 generation: done.generation,
                 path: done.path,
                 size: done.size,
+                len: done.len,
+                mtime: done.mtime,
                 image: done.pixels.map(slint::Image::from_rgba8),
             })
             .collect()
@@ -313,7 +367,7 @@ fn start_threads(inner: &Arc<Inner>, state: &mut State) {
     if state.closed {
         return;
     }
-    while state.alive < inner.workers {
+    while state.alive < inner.workers && state.stuck < inner.max_stuck {
         state.next_id += 1;
         let id = state.next_id;
         let shared = Arc::clone(inner);
@@ -331,6 +385,27 @@ fn start_threads(inner: &Arc<Inner>, state: &mut State) {
             .name("rf-ui-thumbs-watch".to_owned())
             .spawn(move || watch(&shared));
         state.watching = spawned.is_ok();
+    }
+}
+
+/// With no worker left and too many stuck threads for another, what waits fails at once (and
+/// is not asked for again in the listing): a dead share must not leave a thread behind for
+/// every file.
+fn shed(inner: &Inner, state: &mut State) {
+    if state.stuck < inner.max_stuck || state.alive > 0 {
+        return;
+    }
+    let generation = state.generation;
+    while let Some(task) = state.queue.pop_front() {
+        state.none.insert(task.key);
+        state.ready.push(Done {
+            generation,
+            path: task.want.path,
+            size: task.want.size,
+            len: task.want.len,
+            mtime: task.want.mtime,
+            pixels: None,
+        });
     }
 }
 
@@ -355,10 +430,13 @@ fn work(inner: &Arc<Inner>, id: u64) {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         };
-        let made = make(inner, &task.want, &task.key);
+        // What an older listing's task made is in memory: not made again.
+        let known = inner.lock().remember(&task.key);
+        let made = known.or_else(|| make(inner, &task.want, &task.key));
         let mut state = inner.lock();
         if state.running.remove(&id).is_none() {
             // Given up on: another worker has taken this one's place.
+            state.stuck = state.stuck.saturating_sub(1);
             return;
         }
         let current = task.generation == state.generation;
@@ -374,17 +452,20 @@ fn work(inner: &Arc<Inner>, id: u64) {
                 generation: task.generation,
                 path: task.want.path,
                 size: task.want.size,
+                len: task.want.len,
+                mtime: task.want.mtime,
                 pixels: made,
             });
         }
     }
 }
 
-/// The watchdog: prunes the disk cache once, then gives up on each call that has taken longer
+/// The watchdog: starts the pruning of the disk cache, then gives up on each call that has taken longer
 /// than the pool's timeout (its file fails, and is not asked for again in the generation) and
-/// starts a worker in the stuck one's place, until the pool goes.
+/// starts a worker in the stuck one's place (up to the most stuck threads), until the pool
+/// goes.
 fn watch(inner: &Arc<Inner>) {
-    prune(&inner.cache, CACHE_CAP);
+    prune_in_background(&inner.cache);
     let step = WATCH_STEP
         .min(inner.timeout / 4)
         .max(Duration::from_millis(1));
@@ -412,17 +493,22 @@ fn watch(inner: &Arc<Inner>) {
                 continue;
             };
             state.alive = state.alive.saturating_sub(1);
+            state.stuck += 1;
+            state.timed_out.insert(task.key.clone(), Instant::now());
             if task.generation == state.generation {
                 state.none.insert(task.key);
                 state.ready.push(Done {
                     generation: task.generation,
                     path: task.want.path,
                     size: task.want.size,
+                    len: task.want.len,
+                    mtime: task.want.mtime,
                     pixels: None,
                 });
             }
         }
         start_threads(inner, &mut state);
+        shed(inner, &mut state);
     }
 }
 
@@ -447,12 +533,12 @@ fn make(inner: &Inner, want: &ThumbWant, key: &str) -> Option<Pixels> {
     };
     let picture = match picture {
         Some(picture) => picture,
-        None => preview::guarded(|| decoded(&want.path, want.size)).flatten()?,
+        None => preview::guarded(|| decoded(&want.path, want.len, want.size)).flatten()?,
     };
     if write_cached(&file, &picture)
         && WRITTEN.fetch_add(1, Ordering::Relaxed) % PRUNE_EVERY == PRUNE_EVERY - 1
     {
-        prune(&inner.cache, CACHE_CAP);
+        prune_in_background(&inner.cache);
     }
     Some(Pixels::clone_from_slice(
         picture.as_raw(),
@@ -474,12 +560,16 @@ fn fitted(image: &RgbaImage, size: u32) -> Option<RgbaImage> {
     Some(image::imageops::thumbnail(image, width, height))
 }
 
-/// The app's own thumbnail of the picture at `path`, by its extension; `None` for a file that
-/// is not a picture it decodes.
-fn decoded(path: &Path, size: u32) -> Option<RgbaImage> {
+/// The app's own thumbnail of the picture at `path` (`len` bytes), by its extension; `None` for
+/// a file that is not a picture it decodes, or is over the preview's file-size cap.
+fn decoded(path: &Path, len: u64, size: u32) -> Option<RgbaImage> {
     let format = preview::image_format(path.file_name()?)?;
+    if len > preview::MAX_IMAGE_BYTES {
+        return None;
+    }
     let reader = BufReader::new(File::open(path).ok()?);
-    let image = preview::decode_image(reader, format, &CancelToken::new()).ok()?;
+    let _permit = DECODING.acquire();
+    let image = preview::decode_thumbnail_source(reader, format, &CancelToken::new()).ok()?;
     let rgba = RgbaImage::from_raw(
         image.pixels.width(),
         image.pixels.height(),
@@ -527,6 +617,63 @@ fn write_cached(file: &Path, picture: &RgbaImage) -> bool {
         return false;
     }
     true
+}
+
+/// Whether a pruning runs now: one at a time.
+static PRUNING: AtomicBool = AtomicBool::new(false);
+
+/// [`prune`] of `cache` on a thread of its own, so that it takes no worker's or the watchdog's
+/// time; nothing when one runs already.
+fn prune_in_background(cache: &Path) {
+    if PRUNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let cache = cache.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("rf-ui-thumbs-prune".to_owned())
+        .spawn(move || {
+            prune(&cache, CACHE_CAP);
+            PRUNING.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        PRUNING.store(false, Ordering::Release);
+    }
+}
+
+/// A counting semaphore: how many decodes of pictures run at once, over every pool.
+struct Permits {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A permit of [`DECODING`], given back when dropped.
+struct Permit(&'static Permits);
+
+static DECODING: Permits = Permits {
+    free: Mutex::new(DECODES),
+    freed: Condvar::new(),
+};
+
+impl Permits {
+    /// Waits for a permit.
+    fn acquire(&'static self) -> Permit {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        while *free == 0 {
+            free = self
+                .freed
+                .wait(free)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *free -= 1;
+        Permit(self)
+    }
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.0.freed.notify_one();
+    }
 }
 
 /// The cache file of `key` at `size` under the cache folder `cache`.
@@ -858,6 +1005,127 @@ mod tests {
         // The file that stuck is not asked for again in this folder.
         pool.want(1, vec![want(dir.path(), "slow.dat", 0)]);
         nothing_more(&pool);
+    }
+
+    #[test]
+    fn a_file_under_way_for_the_last_listing_is_still_delivered_in_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (open, gate) = mpsc::channel();
+        let (provider, asks) = telling("a.dat", gate);
+        let pool = ThumbPool::new(1, dir.path().to_owned(), provider);
+        pool.want(1, vec![want(dir.path(), "a.dat", 0)]);
+        assert_eq!(asks.recv_timeout(WAIT).ok().as_deref(), Some("a.dat"));
+        // Refreshed (or sorted) while it is made: the same file is on screen in the new listing.
+        pool.want(2, vec![want(dir.path(), "a.dat", 0)]);
+        open.send(()).unwrap();
+        assert_eq!(collect(&pool, 1), [("a.dat".to_owned(), 2, Some((48, 24)))]);
+        nothing_more(&pool);
+        // Made once: the new listing's task found it in memory.
+        assert_eq!(asks.try_iter().count(), 0);
+    }
+
+    /// A provider that sticks on every file for as long as the returned sender lives, counting
+    /// its calls.
+    fn sticking() -> (ThumbProvider, mpsc::Sender<()>, Arc<AtomicUsize>) {
+        let (release, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let provider: ThumbProvider = Arc::new(move |_: &Path, _: u32| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = gate.lock().unwrap().recv_timeout(WAIT);
+            made(8, 8)
+        });
+        (provider, release, calls)
+    }
+
+    #[test]
+    fn a_file_that_timed_out_is_not_asked_for_again_in_the_next_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _release, calls) = sticking();
+        let pool = ThumbPool::with_limits(
+            1,
+            dir.path().to_owned(),
+            provider,
+            Duration::from_millis(100),
+            8,
+        );
+        pool.want(1, vec![want(dir.path(), "slow.dat", 0)]);
+        assert_eq!(collect(&pool, 1), [("slow.dat".to_owned(), 1, None)]);
+        // A refresh is a new listing, but the file timed out a moment ago.
+        pool.want(2, vec![want(dir.path(), "slow.dat", 0)]);
+        nothing_more(&pool);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn too_many_stuck_threads_stop_the_workers_and_the_rest_fail_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, release, calls) = sticking();
+        let pool = ThumbPool::with_limits(
+            1,
+            dir.path().to_owned(),
+            provider,
+            Duration::from_millis(100),
+            2,
+        );
+        let names = ["a.dat", "b.dat", "c.dat", "d.dat", "e.dat"];
+        pool.want(
+            1,
+            names
+                .iter()
+                .enumerate()
+                .map(|(rank, name)| want(dir.path(), name, rank))
+                .collect(),
+        );
+        // Two files stick (a thread each); no worker is started for the rest, which fail.
+        let got = collect(&pool, names.len());
+        assert_eq!(got.len(), names.len(), "{got:?}");
+        assert!(got.iter().all(|(_, _, size)| size.is_none()), "{got:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // When the stuck calls return, work goes on.
+        drop(release);
+        std::thread::sleep(QUIET);
+        pool.want(2, vec![want(dir.path(), "f.dat", 0)]);
+        let again = collect(&pool, 1);
+        assert_eq!(again.len(), 1, "{again:?}");
+    }
+
+    #[test]
+    fn a_picture_over_the_preview_s_size_cap_is_not_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        File::create(&big)
+            .unwrap()
+            .set_len(preview::MAX_IMAGE_BYTES + 1)
+            .unwrap();
+        assert!(decoded(&big, preview::MAX_IMAGE_BYTES + 1, 96).is_none());
+        let small = dir.path().join("small.png");
+        RgbaImage::from_pixel(30, 30, image::Rgba([1, 2, 3, 255]))
+            .save(&small)
+            .unwrap();
+        let len = fs::metadata(&small).unwrap().len();
+        assert_eq!(
+            decoded(&small, len, 96).map(|image| image.dimensions()),
+            Some((30, 30))
+        );
+    }
+
+    #[test]
+    fn the_decodes_wait_for_a_permit() {
+        static PERMITS: Permits = Permits {
+            free: Mutex::new(1),
+            freed: Condvar::new(),
+        };
+        let first = PERMITS.acquire();
+        let (done, waited) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _second = PERMITS.acquire();
+            let _ = done.send(());
+        });
+        assert!(waited.recv_timeout(QUIET).is_err(), "waits for the first");
+        drop(first);
+        assert!(waited.recv_timeout(WAIT).is_ok());
     }
 
     #[test]

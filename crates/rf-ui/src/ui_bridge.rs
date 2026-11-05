@@ -116,13 +116,19 @@ impl PaneModels {
 
     /// Shows `image` as the thumbnail of the file at `path`, asked for at `size` pixels, while
     /// the pane shows its folder ([`FileRows::set_thumb`]); `row` is where the file was.
-    pub fn set_thumb(&self, row: Option<usize>, path: &Path, size: u32, image: slint::Image) {
-        self.rows.set_thumb(row, path, size, image);
+    pub fn set_thumb(
+        &self,
+        row: Option<usize>,
+        path: &Path,
+        stamp: ThumbStamp,
+        image: slint::Image,
+    ) {
+        self.rows.set_thumb(row, path, stamp, image);
     }
 
-    /// Whether the file at `path` shows its thumbnail of `size` pixels.
-    pub fn has_thumb(&self, path: &Path, size: u32) -> bool {
-        self.rows.has_thumb(path, size)
+    /// Whether the file at `path` shows its thumbnail for `stamp`.
+    pub fn has_thumb(&self, path: &Path, stamp: ThumbStamp) -> bool {
+        self.rows.has_thumb(path, stamp)
     }
 
     /// Shows each kind's icon again in the place of every thumbnail.
@@ -327,10 +333,27 @@ pub struct FileRows {
     cut: RefCell<HashSet<OsString>>,
     /// The local folder of the rows, whose files' thumbnails show ([`FileRows::set_folder`]).
     folder: RefCell<Option<PathBuf>>,
-    /// The thumbnails that show, by the file's path: the size asked for, the picture and when
-    /// it came (a count), at most [`SHOWN_THUMBS`].
-    thumbs: RefCell<HashMap<PathBuf, (u32, slint::Image, u64)>>,
+    /// The thumbnails that show, by the file's path: what they were made for, the picture and
+    /// when it came (a count), at most [`SHOWN_THUMBS`].
+    thumbs: RefCell<HashMap<PathBuf, (ThumbStamp, slint::Image, u64)>>,
     thumbs_came: Cell<u64>,
+}
+
+/// What a shown thumbnail was made for: the size asked, and the length and modification time the
+/// file had. A file that changed (the same name, another length or time) shows its kind's icon
+/// until its new thumbnail comes, and is asked for again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThumbStamp {
+    pub size: u32,
+    pub len: u64,
+    pub mtime: Option<std::time::SystemTime>,
+}
+
+impl ThumbStamp {
+    /// Whether `entry` is the file as the thumbnail saw it.
+    fn is_of(&self, entry: &Entry) -> bool {
+        self.len == entry.size && self.mtime == entry.modified
+    }
 }
 
 /// The most thumbnails a list keeps: the pool keeps as many ([`crate::thumbs::MEMORY_THUMBS`]),
@@ -458,18 +481,38 @@ impl FileRows {
     /// Shows `image` (asked for at `size` pixels) as the thumbnail of the file at `path`, when
     /// it is in the rows' folder, and tells the list of its row (at `row`, or found by its
     /// name). Past [`crate::thumbs::MEMORY_THUMBS`] the one that came first is forgotten.
-    pub fn set_thumb(&self, row: Option<usize>, path: &Path, size: u32, image: slint::Image) {
+    pub fn set_thumb(
+        &self,
+        row: Option<usize>,
+        path: &Path,
+        stamp: ThumbStamp,
+        image: slint::Image,
+    ) {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return;
         };
         if self.folder.borrow().as_deref() != Some(parent) {
             return;
         }
+        let (at, stale) = {
+            let rows = self.rows.borrow();
+            let at = row
+                .filter(|&at| rows.get(at).is_some_and(|shown| shown.entry.name == name))
+                .or_else(|| rows.iter().position(|shown| shown.entry.name == name));
+            let stale = at
+                .and_then(|at| rows.get(at))
+                .is_some_and(|shown| !stamp.is_of(&shown.entry));
+            (at, stale)
+        };
+        // A picture of the file as it was, before it changed, is not shown.
+        if stale {
+            return;
+        }
         let came = self.thumbs_came.get() + 1;
         self.thumbs_came.set(came);
         {
             let mut thumbs = self.thumbs.borrow_mut();
-            thumbs.insert(path.to_path_buf(), (size, image, came));
+            thumbs.insert(path.to_path_buf(), (stamp, image, came));
             if thumbs.len() > SHOWN_THUMBS
                 && let Some(first) = thumbs
                     .iter()
@@ -479,23 +522,19 @@ impl FileRows {
                 thumbs.remove(&first);
             }
         }
-        let at = {
-            let rows = self.rows.borrow();
-            row.filter(|&at| rows.get(at).is_some_and(|shown| shown.entry.name == name))
-                .or_else(|| rows.iter().position(|shown| shown.entry.name == name))
-        };
         // The list reads the row back while it is told, so the borrow has ended.
         if let Some(at) = at {
             self.notify.row_changed(at);
         }
     }
 
-    /// Whether the file at `path` shows a thumbnail asked for at `size` pixels.
-    pub fn has_thumb(&self, path: &Path, size: u32) -> bool {
+    /// Whether the file at `path` shows the thumbnail for `stamp`: asked for at that size, of
+    /// the file as it has that length and modification time.
+    pub fn has_thumb(&self, path: &Path, stamp: ThumbStamp) -> bool {
         self.thumbs
             .borrow()
             .get(path)
-            .is_some_and(|(shown, _, _)| *shown == size)
+            .is_some_and(|(shown, _, _)| *shown == stamp)
     }
 
     /// Forgets every thumbnail: each row shows its kind's icon.
@@ -559,7 +598,9 @@ impl Model for FileRows {
         );
         file.cut = shown.cut;
         if let Some(folder) = self.folder.borrow().as_ref()
-            && let Some((_, image, _)) = self.thumbs.borrow().get(&folder.join(&shown.entry.name))
+            && let Some((stamp, image, _)) =
+                self.thumbs.borrow().get(&folder.join(&shown.entry.name))
+            && stamp.is_of(&shown.entry)
         {
             file.thumb = image.clone();
         }
@@ -2066,19 +2107,24 @@ mod tests {
             "each kind's icon until a thumbnail comes"
         );
         let picture = slint::Image::from_rgba8(SharedPixelBuffer::new(6, 3));
+        let stamp = |size| ThumbStamp {
+            size,
+            len: 1,
+            mtime: None,
+        };
         // A wrong hint finds the row all the same.
-        model.set_thumb(Some(0), &dir.join("b.png"), 48, picture.clone());
+        model.set_thumb(Some(0), &dir.join("b.png"), stamp(48), picture.clone());
         assert_eq!(widths(&model), [0, 6]);
-        assert!(model.has_thumb(&dir.join("b.png"), 48));
+        assert!(model.has_thumb(&dir.join("b.png"), stamp(48)));
         assert!(
-            !model.has_thumb(&dir.join("b.png"), 96),
+            !model.has_thumb(&dir.join("b.png"), stamp(96)),
             "another size is asked for again"
         );
         // One of another folder is not this list's.
         model.set_thumb(
             None,
             &std::env::temp_dir().join("a.png"),
-            48,
+            stamp(48),
             picture.clone(),
         );
         assert_eq!(widths(&model), [0, 6]);
@@ -2086,10 +2132,48 @@ mod tests {
         model.set_folder(Some(&dir.join("other")));
         assert_eq!(widths(&model), [0, 0]);
         model.set_folder(Some(&dir));
-        model.set_thumb(None, &dir.join("a.png"), 48, picture);
+        model.set_thumb(None, &dir.join("a.png"), stamp(48), picture);
         assert_eq!(widths(&model), [6, 0]);
         model.clear_thumbs();
         assert_eq!(widths(&model), [0, 0]);
+    }
+
+    #[test]
+    fn a_file_that_changed_loses_its_thumbnail_and_is_asked_for_again() {
+        let model = FileRows::default();
+        let dir = std::env::temp_dir().join("rf-thumb-changed");
+        let path = dir.join("a.png");
+        let mut file = entry("a.png", EntryKind::File, 10);
+        file.modified = Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        model.set_folder(Some(&dir));
+        model.sync(std::slice::from_ref(&file), &Selection::default());
+        let width = |model: &FileRows| model.row_data(0).map(|row| row.thumb.size().width);
+        let old = ThumbStamp {
+            size: 48,
+            len: file.size,
+            mtime: file.modified,
+        };
+        let picture = slint::Image::from_rgba8(SharedPixelBuffer::new(6, 3));
+        model.set_thumb(None, &path, old, picture.clone());
+        assert!(model.has_thumb(&path, old));
+        assert_eq!(width(&model), Some(6));
+
+        // Overwritten: the same name, a later time. The old picture is no longer its own.
+        file.modified = file.modified.map(|time| time + Duration::from_secs(5));
+        model.sync(std::slice::from_ref(&file), &Selection::default());
+        let new = ThumbStamp {
+            mtime: file.modified,
+            ..old
+        };
+        assert!(!model.has_thumb(&path, new), "asked for again");
+        assert_eq!(width(&model), Some(0), "its kind's icon until then");
+        // The old picture arriving late is dropped; the new one shows.
+        model.set_thumb(None, &path, old, picture.clone());
+        assert!(!model.has_thumb(&path, new));
+        assert_eq!(width(&model), Some(0));
+        model.set_thumb(None, &path, new, picture);
+        assert!(model.has_thumb(&path, new));
+        assert_eq!(width(&model), Some(6));
     }
 
     #[test]

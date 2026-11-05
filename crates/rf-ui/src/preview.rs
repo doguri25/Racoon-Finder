@@ -164,6 +164,17 @@ const BOUNDS: Bounds = Bounds {
     bytes: MAX_DECODE_BYTES,
 };
 
+/// The most pixels a thumbnail's source may have: tighter than the preview's, since several are
+/// decoded at once.
+pub const THUMB_PIXELS: u64 = 40_000_000;
+
+/// The bounds of a thumbnail's source.
+const THUMB_BOUNDS: Bounds = Bounds {
+    side: MAX_DIMENSION,
+    pixels: THUMB_PIXELS,
+    bytes: THUMB_PIXELS * 4,
+};
+
 /// What the first part of a file is as text ([`read_text`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextRead {
@@ -341,6 +352,15 @@ pub fn decode_image(
     cancel: &CancelToken,
 ) -> Result<PreviewImage, ImageRefused> {
     decode_within(reader, format, cancel, BOUNDS)
+}
+
+/// [`decode_image`] within the tighter bounds of a thumbnail's source ([`THUMB_PIXELS`]).
+pub fn decode_thumbnail_source(
+    reader: impl BufRead + Seek,
+    format: ImageFormat,
+    cancel: &CancelToken,
+) -> Result<PreviewImage, ImageRefused> {
+    decode_within(reader, format, cancel, THUMB_BOUNDS)
 }
 
 /// [`decode_image`] within `bounds`.
