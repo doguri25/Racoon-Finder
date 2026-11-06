@@ -1456,7 +1456,7 @@ mod tests {
         for other in [
             cache_key(Path::new("/a/c.png"), 10, time, 48),
             cache_key(path, 11, time, 48),
-            cache_key(path, 10, time.map(|t| t + Duration::from_nanos(1)), 48),
+            cache_key(path, 10, time.map(|t| t + Duration::from_micros(1)), 48),
             cache_key(path, 10, None, 48),
             cache_key(path, 10, time, 96),
         ] {

@@ -158,16 +158,29 @@ jobs:
           # The script needs Inno Setup 6.3 or newer (it also checks this itself). Use the
           # preinstalled one when it is new enough, else install a pinned 6.x. Not the latest
           # package: a 7.x installs elsewhere and the paths below would not hold.
-          $iscc = $null
-          foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
-            $candidate = Join-Path $dir 'Inno Setup 6\ISCC.exe'
-            if ((Test-Path $candidate) -and ([version](Get-Item $candidate).VersionInfo.ProductVersion -ge [version]'6.3.0')) { $iscc = $candidate; break }
+          function Find-Iscc {
+            $found = @()
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $found += $cmd.Source }
+            foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, 'C:\ProgramData\chocolatey\lib\innosetup\tools')) {
+              if ($dir -and (Test-Path $dir)) {
+                $found += Get-ChildItem -Path $dir -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object FullName
+              }
+            }
+            foreach ($candidate in $found | Select-Object -Unique) {
+              try {
+                $v = [version]((Get-Item $candidate).VersionInfo.FileVersionRaw.ToString())
+                if ($v -ge [version]'6.3.0' -and $v.Major -eq 6) { return $candidate }
+              } catch { Write-Host "skipping ${candidate}: $_" }
+            }
+            return $null
           }
+          $iscc = Find-Iscc
           if (-not $iscc) {
             # 6.4.3 is a guess at a 6.x (>= 6.3) that choco has; it was not looked up.
             choco install innosetup --version=6.4.3 -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed (exit $LASTEXITCODE)" }
-            $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+            $iscc = Find-Iscc
+            if (-not $iscc) { throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)" }
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
           Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
