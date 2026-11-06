@@ -230,6 +230,8 @@ export struct PaneView {
     error: string,
     // The pane has the keyboard.
     active: bool,
+    // How much of the rows is selected, for the head's checkbox (NAV-15): 0 none, 1 all, 2 part.
+    select-state: int,
     // The pane has a closed tab to reopen.
     can-reopen: bool,
     // The completion list of the path field, while it is edited.
@@ -594,6 +596,8 @@ export component Pane inherits Rectangle {
     in property <int> outside-tab: -1;
     // A drag of another app is over the pane's list, which scrolls under it near its ends.
     in property <bool> outside-over;
+    // The rows start with a checkbox (NAV-15, 선택 ▸ 체크박스로 선택).
+    in property <bool> checkboxes;
     // What the list frames for the drag of another app it takes (`FileList.outside-target`).
     out property <int> outside-target: root.view.mode == 0 ? files.outside-target : grid.outside-target;
     // The path row shows a text field instead of the crumbs.
@@ -651,6 +655,9 @@ export component Pane inherits Rectangle {
     callback row-activated(index: int);
     // A right click on row `index`, before its menu opens; a command of the list's menus.
     callback row-menu(index: int);
+    // A click on the checkbox of row `index`, and on the head's (NAV-15).
+    callback row-checkbox(index: int);
+    callback all-checkbox();
     callback menu-command(name: string);
     callback retry();
     // A drag over row `index` of the list (-1 below the rows) or over tab `index`, and its
@@ -694,6 +701,23 @@ export component Pane inherits Rectangle {
             files.show-blank-menu();
         } else {
             grid.show-blank-menu();
+        }
+    }
+
+    // The item menu, or the folder's, where a long press was (PICK-02), at (`x`, `y`) of the
+    // window.
+    public function show-item-menu-at(x: length, y: length) {
+        if (root.view.mode == 0) {
+            files.show-item-menu-at(x, y);
+        } else {
+            grid.show-item-menu-at(x, y);
+        }
+    }
+    public function show-blank-menu-at(x: length, y: length) {
+        if (root.view.mode == 0) {
+            files.show-blank-menu-at(x, y);
+        } else {
+            grid.show-blank-menu-at(x, y);
         }
     }
 
@@ -791,6 +815,16 @@ export component Pane inherits Rectangle {
             return { found: false, place: DropPlace.list, side: 0, index: -1 };
         }
         return root.view.mode == 0 ? files.spot-at(x, y) : grid.spot-at(x, y);
+    }
+
+    // The place of the list a long press at the point (`x`, `y`) of the window would start on
+    // (`FileList.press-at`); not `found` anywhere else (the tabs, the heads, the bars) or while
+    // the folder cannot be shown. The window sets its `side`.
+    public pure function press-at(x: length, y: length) -> DropAt {
+        if (root.view.error != "") {
+            return { found: false, place: DropPlace.list, side: 0, index: -1 };
+        }
+        return root.view.mode == 0 ? files.press-at(x, y) : grid.press-at(x, y);
     }
 
     // The place between the tabs nearest to `x`, a position in the strip: 0 before the first
@@ -1210,6 +1244,14 @@ export component Pane inherits Rectangle {
                 drag-data: root.drag-data;
                 outside-row: root.outside-row;
                 outside-over: root.outside-over && root.view.mode == 0;
+                checkboxes: root.checkboxes;
+                select-state: root.view.select-state;
+                row-checkbox(index) => {
+                    root.row-checkbox(index);
+                }
+                all-checkbox => {
+                    root.all-checkbox();
+                }
                 drag-ended => {
                     root.drag-ended();
                 }
@@ -1260,6 +1302,10 @@ export component Pane inherits Rectangle {
                 drag-data: root.drag-data;
                 outside-row: root.outside-row;
                 outside-over: root.outside-over && root.view.mode != 0;
+                checkboxes: root.checkboxes;
+                row-checkbox(index) => {
+                    root.row-checkbox(index);
+                }
                 drag-ended => {
                     root.drag-ended();
                 }

@@ -64,9 +64,11 @@ mod favorites;
 mod jobs;
 mod layout;
 mod links;
+pub mod long_press;
 mod outside;
 mod panel;
 mod pick;
+mod pointer;
 mod preview;
 mod properties;
 mod report;
@@ -93,11 +95,12 @@ use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
 pub use panel::PanelButton;
+pub use pointer::SWIPE_DISTANCE;
 pub use preview::{
     PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
     preview_width,
 };
-pub use select::{MATCH_STRETCH, MatchRequest, Matched};
+pub use select::{MATCH_STRETCH, MatchRequest, Matched, SelectState};
 pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
 pub use tray::TrayCommand;
 pub use view::{
@@ -385,6 +388,16 @@ pub struct AppState {
     system_menu_first: bool,
     /// The icon views show the files' thumbnails (보기 ▸ 설정, VIEW-09).
     show_thumbnails: bool,
+    /// A press held on a row opens its menu (보기 ▸ 설정, PICK-02), and for how many
+    /// milliseconds (module `pointer`).
+    long_press: bool,
+    long_press_ms: u16,
+    /// The rows show a checkbox that selects them (선택 ▸ 체크박스로 선택, NAV-15).
+    checkbox_select: bool,
+    /// What decides whether the mouse's buttons and a trackpad's swipe act, and the swipe under
+    /// way (module `pointer`).
+    pointer: pointer::PointerContext,
+    swipe: pointer::Swipe,
     /// The drop that waits for the menu of 놓을 때 묻기 to choose.
     asked_drop: Option<drag::AskedDrop>,
     /// The moves drops submitted that the engine has not started yet, with how many items each
@@ -520,6 +533,11 @@ impl AppState {
             move_undo_toast: true,
             system_menu_first: false,
             show_thumbnails: true,
+            long_press: true,
+            long_press_ms: crate::settings::LONG_PRESS_DEFAULT_MS,
+            checkbox_select: false,
+            pointer: pointer::PointerContext::default(),
+            swipe: pointer::Swipe::default(),
             asked_drop: None,
             drag_submits: Vec::new(),
             dragged_moves: HashMap::new(),

@@ -64,6 +64,17 @@ export global DragPointer {
     }
 }
 
+// The ring beside the pointer that fills while a press is held on a row for its menu (PICK-02,
+// the long press). Rust drives it from the press's progress, 0 to 1, and shows it only after the
+// first moments of a press, so that a click shows nothing. The main window draws it.
+export global LongPressRing {
+    in-out property <bool> shown;
+    in-out property <float> progress;
+    // Where the press is, in the window.
+    in-out property <length> x;
+    in-out property <length> y;
+}
+
 // Whether the pointer of a drag is still where a list last saw it (`saw`, from the list's own
 // drop areas), and over the window (DND-08): a list scrolls under a drag held near its ends only
 // then, whether its rows take the drop or not, and stops once the pointer has moved on to

@@ -3,11 +3,18 @@
 // tool chooses among the rows on screen, whatever the view mode, and each item says its key
 // (KEY-03): the keys do the same from the panes, so the menu needs no key of its own (KEY-02).
 // 선택 해제 says none: Esc does more (with nothing selected it cancels a cut, as File
-// Explorer's does), and File Explorer's 선택 안 함 shows no key either.
+// Explorer's does), and File Explorer's 선택 안 함 shows no key either. 체크박스로 선택 is a
+// switch, saved with the settings: the rows of 자세히, 목록 and the icons then start with a
+// checkbox. It has no key: it is turned on and off rarely, and a key would have to be free in
+// the tables of every system (KEY-02 asks for a key only where one is free), so the menu is
+// its way.
 
 import { Shortcuts } from "shortcuts.slint";
 
 export component SelectMenu inherits ContextMenuArea {
+    // The rows show a checkbox that selects them (NAV-15), two-way with the window's.
+    in-out property <bool> checkbox-select;
+
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
 
@@ -46,6 +53,17 @@ export component SelectMenu inherits ContextMenuArea {
             title: Shortcuts.titled("같은 확장자 선택", Shortcuts.select-same-extension);
             activated => {
                 root.command("select-same-extension");
+            }
+        }
+        MenuSeparator { }
+        // From the menu only: a mode of the window, as the thumbnails' switch, with no key of its
+        // own.
+        MenuItem {
+            title: "체크박스로 선택";
+            checkable: true;
+            checked <=> root.checkbox-select;
+            activated => {
+                root.command("toggle-checkboxes");
             }
         }
     }

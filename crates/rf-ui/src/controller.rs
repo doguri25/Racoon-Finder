@@ -97,6 +97,7 @@ use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
 use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
+use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
     MenuShown, Paging, PathForm, RIGHT, ShellWork, Subfolders, Unkept, dropped_effect,
@@ -116,6 +117,7 @@ mod drops;
 mod matcher;
 mod newest;
 mod persist;
+mod pointer;
 mod previewer;
 mod properties;
 mod sorter;
@@ -544,8 +546,13 @@ fn connect(window: &MainWindow) {
         with(|c| c.visible_range(side(s), first, last));
     });
     window.on_row_released(|s, i| {
+        // The release of a long press that opened a menu clicks nothing.
+        if with(Controller::release_swallowed).unwrap_or(false) {
+            return;
+        }
         with(|c| c.update_at(i, |state, i| state.release_row(side(s), i)));
     });
+    connect_checkboxes(window);
     window.on_row_activated(|s, i| {
         with(|c| c.update_at(i, |state, i| state.open_row(side(s), i)));
     });
@@ -559,6 +566,27 @@ fn connect(window: &MainWindow) {
     connect_report(window);
     connect_pick(window);
     connect_properties(window);
+}
+
+/// The callbacks of the checkboxes (NAV-15) and of the long press's time (PICK-02).
+fn connect_checkboxes(window: &MainWindow) {
+    // The checkbox of a row (NAV-15): selects or lets go of that row alone, and the head's of all.
+    window.on_row_checkbox(|s, i| {
+        with(|c| c.update_at(i, |state, i| state.click_checkbox(side(s), i)));
+    });
+    window.on_all_checkbox(|s| {
+        with(|c| c.update(|state| state.toggle_all(side(s))));
+    });
+    window.on_long_press_ms_chosen(|ms| {
+        if let Ok(ms) = u16::try_from(ms) {
+            with(|c| {
+                c.update(|state| {
+                    state.set_long_press_ms(ms);
+                    Vec::new()
+                });
+            });
+        }
+    });
 }
 
 /// The callbacks of the sidebar: a click on a row or its chevron, and the favorites (the press
@@ -955,6 +983,91 @@ fn dropped_action(effects: &[Effect]) -> DragAction {
     }
 }
 
+/// A finger on the screen: it arms, moves and ends a long press. True when the release of a
+/// press whose menu opened must not reach Slint.
+fn winit_touch(window: &slint::Window, touch: &slint::winit_030::winit::event::Touch) -> bool {
+    let at = touch
+        .location
+        .to_logical::<f32>(f64::from(window.scale_factor()));
+    let spot = Spot::new(at.x, at.y);
+    let id = touch.id;
+    match touch.phase {
+        TouchPhase::Started => {
+            with(|c| {
+                c.pointer.set(Some(WindowPoint { x: at.x, y: at.y }));
+                if c.fingers_changed(true) > 1 {
+                    c.press_cancel();
+                } else {
+                    c.press_began(spot, Some(id));
+                }
+            });
+            false
+        }
+        TouchPhase::Moved => {
+            with(|c| {
+                c.pointer.set(Some(WindowPoint { x: at.x, y: at.y }));
+                if c.is_press_finger(id) {
+                    c.press_moved(spot);
+                }
+            });
+            false
+        }
+        TouchPhase::Ended | TouchPhase::Cancelled => with(|c| {
+            let mine = c.is_press_finger(id);
+            c.fingers_changed(false);
+            mine && c.press_released()
+        })
+        .unwrap_or(false),
+    }
+}
+
+/// A mouse button: the left one arms and ends a long press, the right one has its menu, the
+/// fourth and fifth go back and forward. True when Slint must not see the event.
+fn winit_mouse_button(state: ElementState, button: MouseButton) -> bool {
+    match (state, button) {
+        (ElementState::Pressed, MouseButton::Left) => {
+            with(|c| {
+                c.left_down.set(true);
+                if let Some(at) = c.pointer.get() {
+                    c.press_began(Spot::new(at.x, at.y), None);
+                }
+            });
+            false
+        }
+        (ElementState::Pressed, MouseButton::Right) => {
+            with(Controller::press_cancel);
+            with(Controller::right_button_pressed).unwrap_or(false)
+        }
+        // The mouse's fourth and fifth buttons: the active pane's Back and Forward.
+        (ElementState::Pressed, MouseButton::Back | MouseButton::Forward) => {
+            with(|c| {
+                c.press_cancel();
+                c.mouse_nav(button == MouseButton::Back);
+            });
+            true
+        }
+        (ElementState::Pressed, _) => {
+            // The middle button, or any other: not a long press.
+            with(Controller::press_cancel);
+            false
+        }
+        (ElementState::Released, MouseButton::Left) => {
+            let opened = with(|c| {
+                c.left_down.set(false);
+                c.press_released()
+            })
+            .unwrap_or(false);
+            // Once Slint has taken the release: its drop, or the end of the drag.
+            slint::Timer::single_shot(Duration::ZERO, || {
+                with(Controller::left_button_released);
+            });
+            // The release of a press whose menu opened: Slint was told already.
+            opened
+        }
+        (ElementState::Released, _) => false,
+    }
+}
+
 /// Looks at the events of the window's winit window before Slint does, and passes each on: the
 /// modifier keys, which Slint's drop events do not tell and a drop's action follows
 /// ([`Controller::modifiers_changed`]); the end of a drag over the window, which Slint does
@@ -1011,44 +1124,50 @@ fn watch_winit_events(window: &MainWindow) {
                 let (delta, started) = (*delta, *phase == TouchPhase::Started);
                 with(|c| c.zoom_pinch(delta, started));
             }
+            // A swipe of two fingers (winit tells it on iOS alone; on desktops it stays idle).
+            WinitEvent::PanGesture { delta, phase, .. } => {
+                let dx = delta.x / window.scale_factor();
+                let started = *phase == TouchPhase::Started;
+                let ended = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+                with(|c| c.swipe(dx, started, ended));
+            }
+            // A key ends a long press that waits.
+            WinitEvent::KeyboardInput {
+                event: key_event, ..
+            } if key_event.state == ElementState::Pressed => {
+                with(Controller::press_cancel);
+            }
+            WinitEvent::Focused(false) => {
+                with(Controller::press_cancel);
+            }
+            WinitEvent::Touch(touch) => {
+                if winit_touch(window, touch) {
+                    return EventResult::PreventDefault;
+                }
+            }
             WinitEvent::CursorLeft { .. } => {
-                with(Controller::pointer_left);
+                with(|c| {
+                    c.press_cancel();
+                    c.pointer_left();
+                });
             }
             WinitEvent::CursorMoved { position, .. }
                 if ui_bridge::outside_window(*position, window.size()) =>
             {
-                with(Controller::pointer_outside);
+                with(|c| {
+                    c.press_cancel();
+                    c.pointer_outside();
+                });
             }
             WinitEvent::CursorMoved { position, .. } => {
                 let at = position.to_logical::<f32>(f64::from(window.scale_factor()));
-                with(|c| c.pointer.set(Some(WindowPoint { x: at.x, y: at.y })));
-            }
-            WinitEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                with(|c| c.left_down.set(true));
-            }
-            WinitEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Right,
-                ..
-            } => {
-                if with(Controller::right_button_pressed).unwrap_or(false) {
-                    return EventResult::PreventDefault;
-                }
-            }
-            WinitEvent::MouseInput {
-                state: ElementState::Released,
-                button: MouseButton::Left,
-                ..
-            } => {
-                with(|c| c.left_down.set(false));
-                // Once Slint has taken the release: its drop, or the end of the drag.
-                slint::Timer::single_shot(Duration::ZERO, || {
-                    with(Controller::left_button_released);
+                with(|c| {
+                    c.pointer.set(Some(WindowPoint { x: at.x, y: at.y }));
+                    c.press_moved(Spot::new(at.x, at.y));
                 });
+            }
+            WinitEvent::MouseInput { state, button, .. } if winit_mouse_button(*state, *button) => {
+                return EventResult::PreventDefault;
             }
             _ => {}
         }
@@ -1305,6 +1424,8 @@ pub struct Controller {
     /// Whether the window moved its pointer over the tree for the drag of another app
     /// ([`Controller::leave_tree`]).
     moved_over_tree: Cell<bool>,
+    /// The long press under way (module `pointer`).
+    press: pointer::PressWork,
     /// The left button is down in the window, as winit told last: a drag of rows goes out of the
     /// window only while it is ([`Controller::drag_leaves`]), and no menu shows while it is
     /// ([`Controller::right_button_pressed`], [`Controller::held_key`]). Cleared, too, where
@@ -1427,6 +1548,7 @@ impl Controller {
             }),
             outside_hint: RefCell::new(DropHint::default()),
             moved_over_tree: Cell::new(false),
+            press: pointer::PressWork::new(),
             left_down: Cell::new(false),
             leaving: Cell::new(false),
             checks: RefCell::new(CopyChecks::default()),
@@ -1507,6 +1629,9 @@ impl Controller {
             state.set_move_undo_toast(settings.move_undo_toast);
             state.set_system_menu_first(settings.system_menu_first);
             state.set_show_thumbnails(settings.show_thumbnails);
+            state.set_long_press(settings.long_press);
+            state.set_long_press_ms(settings.long_press_ms);
+            state.set_checkbox_select(settings.checkbox_select);
         }
         state.offer_system_menu(rf_platform::shell::SYSTEM_MENU);
         state.settle_views(&mut effects);
@@ -2499,9 +2624,50 @@ impl Controller {
         });
     }
 
+    /// The toggles of 보기 ▸ 설정 and 선택: true when `name` was one of them.
+    fn toggle_command(&self, name: &str) -> bool {
+        match name {
+            "toggle-move-undo-toast" => {
+                self.update(|state| {
+                    state.set_move_undo_toast(!state.move_undo_toast());
+                    Vec::new()
+                });
+            }
+            "toggle-system-menu-first" => {
+                self.update(|state| {
+                    state.set_system_menu_first(!state.system_menu_first());
+                    Vec::new()
+                });
+            }
+            "toggle-long-press" => {
+                self.update(|state| {
+                    state.set_long_press(!state.long_press());
+                    Vec::new()
+                });
+            }
+            "toggle-checkboxes" => {
+                self.update(|state| {
+                    state.toggle_checkbox_mode();
+                    Vec::new()
+                });
+            }
+            "toggle-thumbnails" => {
+                self.update(|state| {
+                    state.set_show_thumbnails(!state.show_thumbnails());
+                    Vec::new()
+                });
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// A toolbar button or a menu item: the same command as its key. A row menu's 붙여넣기 and
     /// 여기로 이동 paste into the folder of its row, and 경로 복사 has a form for each item.
     fn command(&self, name: &str) {
+        if self.toggle_command(name) {
+            return;
+        }
         match name {
             "paste-into" => return self.update(|state| state.paste_from_menu(false)),
             "folder-properties" => return self.update(AppState::folder_properties),
@@ -2511,24 +2677,6 @@ impl Controller {
             "share" => return self.update(AppState::share),
             "add-favorite" => return self.update(AppState::favorite_add_selected),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
-            "toggle-move-undo-toast" => {
-                return self.update(|state| {
-                    state.set_move_undo_toast(!state.move_undo_toast());
-                    Vec::new()
-                });
-            }
-            "toggle-system-menu-first" => {
-                return self.update(|state| {
-                    state.set_system_menu_first(!state.system_menu_first());
-                    Vec::new()
-                });
-            }
-            "toggle-thumbnails" => {
-                return self.update(|state| {
-                    state.set_show_thumbnails(!state.show_thumbnails());
-                    Vec::new()
-                });
-            }
             _ => {}
         }
         if let Some(index) = name
@@ -3139,6 +3287,9 @@ impl Controller {
             window.set_drag_default(ui_bridge::drag_default_number(state.drag_default()));
             window.set_move_undo_toast(state.move_undo_toast());
             window.set_show_thumbnails(state.show_thumbnails());
+            window.set_long_press(state.long_press());
+            window.set_long_press_ms(i32::from(state.long_press_ms()));
+            window.set_checkbox_select(state.checkbox_select());
             window.set_system_menu_first(state.system_menu_first());
             show_layout(&window, state.layout(), state.syncing());
             window.set_preview_fits(!state.preview_cramped());
@@ -3709,6 +3860,178 @@ mod tests {
         assert!(shown().is_none(), "no hover left behind");
         drop(controller);
         assert!(jobs.close_down(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_long_press_opens_the_menu_where_it_was_pressed_and_the_release_ends_it() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y);
+        let ring = c.window.upgrade().expect("the window");
+        let ring = ring.global::<crate::LongPressRing<'_>>();
+        let start = Instant::now();
+        // The press, as the hook and Slint see it.
+        d.move_to(d.row);
+        d.left(true, d.row);
+        c.pointer.set(Some(WindowPoint { x, y }));
+        c.press_began(Spot::new(x, y), None);
+        assert!(c.press.machine.borrow().is_armed());
+        assert!(c.press.timer.running());
+        // A click shows no ring; a press held a while does, filling.
+        c.press_tick_at(start + Duration::from_millis(50));
+        assert!(!ring.get_shown());
+        c.press_tick_at(start + Duration::from_millis(300));
+        assert!(ring.get_shown());
+        assert!(ring.get_progress() > 0.0 && ring.get_progress() < 1.0);
+        assert_eq!((ring.get_x(), ring.get_y()), (x, y));
+        // At the time, the menu opens at the press; the ring and the timer are gone, and the
+        // button counts as up for the window.
+        c.press_tick_at(start + Duration::from_millis(900));
+        assert!(!ring.get_shown());
+        assert!(!c.press.timer.running());
+        assert!(!c.left_down.get());
+        let menu = d.window.global::<ItemMenu<'_>>();
+        assert_eq!((menu.get_at_x(), menu.get_at_y()), (x, y));
+        // The pressed row is the item the menu is of.
+        let selected = c
+            .state
+            .borrow()
+            .as_ref()
+            .map(|state| state.panes()[LEFT].active_tab().selection().len());
+        assert_eq!(selected, Some(1));
+        // The release that follows ends the press and nothing else, and only once.
+        assert!(c.press_released());
+        assert!(!c.release_swallowed());
+        assert!(!c.press_released());
+    }
+
+    #[test]
+    fn a_long_press_on_the_part_without_rows_opens_the_folders_menu() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y + 200.0);
+        let found = d.window.invoke_press_at(x, y);
+        assert!(found.found && found.index == -1, "{found:?}");
+        let start = Instant::now();
+        c.pointer.set(Some(WindowPoint { x, y }));
+        c.left_down.set(true);
+        c.press_began(Spot::new(x, y), None);
+        assert!(c.press.machine.borrow().is_armed());
+        c.press_tick_at(start + Duration::from_secs(2));
+        let menu = d.window.global::<ItemMenu<'_>>();
+        assert_eq!((menu.get_at_x(), menu.get_at_y()), (x, y));
+        assert!(!c.left_down.get());
+        // Nothing was selected by a press on no row.
+        let selected = c
+            .state
+            .borrow()
+            .as_ref()
+            .map(|state| state.panes()[LEFT].active_tab().selection().len());
+        assert_eq!(selected, Some(0));
+    }
+
+    #[test]
+    fn a_press_that_moves_past_the_threshold_or_ends_early_opens_no_menu() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y);
+        let start = Instant::now();
+        let untouched = |c: &Controller| {
+            let menu = c
+                .window
+                .upgrade()
+                .expect("the window")
+                .global::<ItemMenu<'_>>()
+                .get_at_x();
+            menu == 0.0
+        };
+        // Moved 9 px: a drag (or a scroll), cancelled before its time.
+        c.press_began(Spot::new(x, y), None);
+        c.press_moved(Spot::new(x + 3.0, y + 2.0));
+        assert!(c.press.machine.borrow().is_armed(), "a wobble stays armed");
+        c.press_moved(Spot::new(x + 9.0, y));
+        assert!(!c.press.machine.borrow().is_armed());
+        assert!(!c.press.timer.running());
+        c.press_tick_at(start + Duration::from_secs(5));
+        assert!(untouched(c));
+        assert!(!c.press_released(), "its release is the drag's");
+        // Released before its time: a click.
+        c.press_began(Spot::new(x, y), None);
+        assert!(!c.press_released());
+        assert!(!c.press.timer.running());
+        c.press_tick_at(start + Duration::from_secs(5));
+        assert!(untouched(c));
+        // A second button, a key, or the pointer leaving cancels it.
+        c.press_began(Spot::new(x, y), None);
+        c.press_cancel();
+        assert!(!c.press.machine.borrow().is_armed());
+        assert!(!c.press.timer.running());
+        c.press_tick_at(start + Duration::from_secs(5));
+        assert!(untouched(c));
+    }
+
+    #[test]
+    fn a_press_arms_only_on_a_list_and_only_when_the_setting_is_on() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y);
+        let armed = |c: &Controller| c.press.machine.borrow().is_armed();
+        c.press_began(Spot::new(x, y), None);
+        assert!(armed(c));
+        c.press_cancel();
+        // The tab strip, the toolbar and the sidebar are no place to hold a press.
+        for (px, py) in [(x, 4.0), (x, 40.0), (20.0, y)] {
+            c.press_began(Spot::new(px, py), None);
+            assert!(!armed(c), "{px} {py}");
+            assert!(!c.press.timer.running());
+        }
+        // While a dialog shows over the panes.
+        d.window.set_dialog(DialogKind::Message);
+        c.press_began(Spot::new(x, y), None);
+        assert!(!armed(c));
+        d.window.set_dialog(DialogKind::None);
+        // With the setting off.
+        c.update(|state| {
+            state.set_long_press(false);
+            Vec::new()
+        });
+        c.press_began(Spot::new(x, y), None);
+        assert!(!armed(c));
+        c.update(|state| {
+            state.set_long_press(true);
+            Vec::new()
+        });
+        c.press_began(Spot::new(x, y), None);
+        assert!(armed(c));
+        // The time of the setting is the press's.
+        c.press_cancel();
+        c.update(|state| {
+            state.set_long_press_ms(1_200);
+            Vec::new()
+        });
+        c.press_began(Spot::new(x, y), None);
+        assert_eq!(
+            c.press.machine.borrow().delay(),
+            Duration::from_millis(1_200)
+        );
+        c.press_cancel();
+    }
+
+    #[test]
+    fn a_second_finger_cancels_the_press_of_the_first() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y);
+        assert_eq!(c.fingers_changed(true), 1);
+        c.press_began(Spot::new(x, y), Some(7));
+        assert!(c.is_press_finger(7));
+        assert!(!c.is_press_finger(8));
+        assert_eq!(c.fingers_changed(true), 2);
+        c.press_cancel();
+        assert!(!c.press.machine.borrow().is_armed());
+        assert_eq!(c.fingers_changed(false), 1);
+        assert_eq!(c.fingers_changed(false), 0);
+        assert_eq!(c.fingers_changed(false), 0, "never below none");
     }
 
     #[test]

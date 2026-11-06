@@ -675,3 +675,58 @@ export component Field inherits Rectangle {
         }
     }
 }
+
+// The checkbox at the start of a row (NAV-15, 선택 ▸ 체크박스로 선택): a click on it selects the row
+// or lets it go without Ctrl, and the one in the head of 자세히 selects every row or none. `state`
+// is 0 for off, 1 for on and 2 for some (the head's, while only part of the rows is selected).
+// The box is 16px, in a place 22px wide that takes the click, the height of what it lies on.
+export component SelectBox inherits Rectangle {
+    in property <int> state;
+    in property <string> label;
+    callback toggled();
+
+    width: 22px;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.state == 1;
+    accessible-action-default => {
+        root.toggled();
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border-width: 1.5px;
+        border-color: root.state != 0 ? Theme.accent : touch.has-hover ? Theme.muted : Theme.faint;
+        background: root.state != 0 ? Theme.accent : Theme.panel;
+
+        if root.state == 1: Icon {
+            x: 1px;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+            name: "check";
+            color: Theme.on-accent;
+            stroke-width: 2.4px;
+            accessible-role: none;
+        }
+        if root.state == 2: Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 8px;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.on-accent;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}

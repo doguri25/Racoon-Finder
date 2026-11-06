@@ -38,13 +38,13 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
-import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, DropPlace, DropAt } from "list-parts.slint";
+import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing, DropPlace, DropAt } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, DropPlace, DropAt
+    PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt
 }
 
 // Which dialog is open over the main window.
@@ -148,6 +148,12 @@ export component MainWindow inherits Window {
     in-out property <bool> show-thumbnails: true;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
+    // 보기 ▸ 설정 ▸ 길게 눌러 메뉴 열기 and its time in milliseconds (PICK-02), which Rust sets back
+    // to the state's after the toggle and the choice.
+    in-out property <bool> long-press: true;
+    in property <int> long-press-ms: 500;
+    // 선택 ▸ 체크박스로 선택 (NAV-15): the rows of both panes start with a checkbox.
+    in-out property <bool> checkbox-select;
     // The payload of a drag of a tab, made by Rust as a left press shows the tab.
     in property <data-transfer> tab-drag-data;
     // The layout (Rust sets it from its state; the 보기 menu's marks are bound to it): two panes
@@ -248,6 +254,8 @@ export component MainWindow inherits Window {
     callback theme-chosen(choice: int);
     // 보기 ▸ 설정 ▸ 끌어 놓기: … chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
+    // 보기 ▸ 설정 ▸ 길게 누르기 시간 chose `ms` milliseconds.
+    callback long-press-ms-chosen(ms: int);
     // The window's size changed (the settings keep it).
     callback window-resized();
     callback pane-activated(side: int);
@@ -298,6 +306,9 @@ export component MainWindow inherits Window {
     // A left press on row `index` of pane `side`, and its release when no drag came of it.
     callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
     callback row-released(side: int, index: int);
+    // A click on the checkbox of row `index` of pane `side`, and on the head's (NAV-15).
+    callback row-checkbox(side: int, index: int);
+    callback all-checkbox(side: int);
     // The first and the last item the icon views of pane `side` show changed (VIEW-09: their
     // thumbnails are asked for first).
     callback visible-range(side: int, first: int, last: int);
@@ -478,6 +489,9 @@ export component MainWindow inherits Window {
     // main window takes the keys for a while and leaves this as it was.
     private property <int> keys-region;
     private property <bool> in-pane-fields: left.editing || right.editing || filter-box.has-focus;
+    // A text field of the panes has the keys (the path field, the filter box): the mouse's
+    // fourth and fifth buttons leave the history alone then (NAV-04).
+    out property <bool> typing: root.in-pane-fields;
     changed in-pane-fields => {
         if (root.in-pane-fields) {
             root.keys-region = 0;
@@ -524,6 +538,46 @@ export component MainWindow inherits Window {
         } else {
             right.show-blank-menu();
         }
+    }
+
+    // The item menu or the folder's of pane `side` at the point (`x`, `y`) of the window, where a
+    // long press was held (PICK-02); Rust has chosen the row as a right click does.
+    public function show-item-menu-at(side: int, x: length, y: length) {
+        if (side == 0) {
+            left.show-item-menu-at(x, y);
+        } else {
+            right.show-item-menu-at(x, y);
+        }
+    }
+    public function show-blank-menu-at(side: int, x: length, y: length) {
+        if (side == 0) {
+            left.show-blank-menu-at(x, y);
+        } else {
+            right.show-blank-menu-at(x, y);
+        }
+    }
+
+    // The row of a pane's list, or the part below its rows, that a long press at the point
+    // (`x`, `y`) of the window starts on (`Pane.press-at`); not `found` anywhere else: the
+    // sidebar's rows (favorites too), the tabs, the heads, the bars, and while a dialog, quick
+    // look or a list of the window shows over the panes (`drops-blocked`).
+    public pure function press-at(x: length, y: length) -> DropAt {
+        if (root.drops-blocked()) {
+            return { found: false, place: DropPlace.list, side: 0, index: -1 };
+        }
+        if (left.visible) {
+            let at = left.press-at(x, y);
+            if (at.found) {
+                return at;
+            }
+        }
+        if (right.visible) {
+            let at = right.press-at(x, y);
+            if (at.found) {
+                return { found: true, place: at.place, side: 1, index: at.index };
+            }
+        }
+        return { found: false, place: DropPlace.list, side: 0, index: -1 };
     }
 
     // Where those two show, in the window: the system's own menu of the same items shows there
@@ -996,6 +1050,7 @@ export component MainWindow inherits Window {
                     // The 선택 menu (`select-menu.slint`), under its button.
                     Rectangle {
                         select-menu := SelectMenu {
+                            checkbox-select <=> root.checkbox-select;
                             command(name) => {
                                 root.command(name);
                             }
@@ -1028,6 +1083,11 @@ export component MainWindow inherits Window {
                             show-thumbnails <=> root.show-thumbnails;
                             system-menu-first <=> root.system-menu-first;
                             system-menu-offered: root.system-menu-offered;
+                            long-press <=> root.long-press;
+                            long-press-ms: root.long-press-ms;
+                            long-press-ms-chosen(ms) => {
+                                root.long-press-ms-chosen(ms);
+                            }
                             command(name) => {
                                 root.command(name);
                                 if (name == "focus-tree") {
@@ -1231,6 +1291,15 @@ export component MainWindow inherits Window {
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 0 ? root.outside-drop.index : -2;
                         outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 0 ? root.outside-drop.index : -1;
                         outside-over: root.outside-over.found && root.outside-over.place == DropPlace.list && root.outside-over.side == 0;
+                        checkboxes: root.checkbox-select;
+                        row-checkbox(index) => {
+                            root.row-checkbox(0, index);
+                            keys.focus();
+                        }
+                        all-checkbox => {
+                            root.all-checkbox(0);
+                            keys.focus();
+                        }
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();
@@ -1378,6 +1447,15 @@ export component MainWindow inherits Window {
                         outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.list && root.outside-drop.side == 1 ? root.outside-drop.index : -2;
                         outside-tab: root.outside-drop.found && root.outside-drop.place == DropPlace.tab && root.outside-drop.side == 1 ? root.outside-drop.index : -1;
                         outside-over: root.outside-over.found && root.outside-over.place == DropPlace.list && root.outside-over.side == 1;
+                        checkboxes: root.checkbox-select;
+                        row-checkbox(index) => {
+                            root.row-checkbox(1, index);
+                            keys.focus();
+                        }
+                        all-checkbox => {
+                            root.all-checkbox(1);
+                            keys.focus();
+                        }
                         drag-ended => {
                             root.drag-gone();
                             root.drag-ended();
@@ -1641,6 +1719,59 @@ export component MainWindow inherits Window {
             }
             keys.focus();
             root.completion-chosen(side, index);
+        }
+    }
+
+    // The progress of a long press beside the pointer (PICK-02): a ring that fills from the top,
+    // clockwise, until the menu opens. Below and to the right of the press, or to its left and
+    // above it near the window's edges; it takes no pointer.
+    if LongPressRing.shown: ring := Rectangle {
+        x: LongPressRing.x + 16px + self.width + 4px <= root.width ? LongPressRing.x + 16px : max(4px, LongPressRing.x - 16px - self.width);
+        y: LongPressRing.y + 16px + self.height + 4px <= root.height ? LongPressRing.y + 16px : max(4px, LongPressRing.y - 16px - self.height);
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: Theme.panel;
+        drop-shadow-blur: 6px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: #00000033;
+        accessible-role: none;
+
+        property <angle> sweep: min(LongPressRing.progress, 0.9999) * 360deg;
+
+        // The track.
+        Rectangle {
+            x: 3.5px;
+            y: 3.5px;
+            width: 25px;
+            height: 25px;
+            border-radius: 12.5px;
+            border-width: 3px;
+            border-color: Theme.border;
+        }
+        // The part of it the press has covered.
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 32;
+            viewbox-height: 32;
+            fill: transparent;
+            stroke: Theme.accent;
+            stroke-width: 3px;
+            stroke-line-cap: round;
+
+            MoveTo {
+                x: 16;
+                y: 5;
+            }
+            ArcTo {
+                radius-x: 11;
+                radius-y: 11;
+                x: 16 + 11 * sin(ring.sweep);
+                y: 16 - 11 * cos(ring.sweep);
+                large-arc: LongPressRing.progress > 0.5;
+                sweep: true;
+            }
         }
     }
 

@@ -7,7 +7,9 @@
 //! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
 //! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07),
 //! whether a right click shows Windows' menu first (`system_menu_first`, OPS-05) and whether the
-//! icon views show thumbnails (`show_thumbnails`, VIEW-09); and the sidebar's favorites the user
+//! icon views show thumbnails (`show_thumbnails`, VIEW-09), whether a long press opens the menu
+//! (`long_press`, with its delay `long_press_ms`, PICK-02) and whether the rows show checkboxes
+//! (`checkbox_select`, NAV-15); and the sidebar's favorites the user
 //! keeps (`[[favorites]]`, NAV-05: none until the user first edits the list, then the whole list),
 //! the last ten folders visited (`recent_folders`) and whether their group is folded
 //! (`recent_folded`).
@@ -240,6 +242,18 @@ pub struct Settings {
     /// The icon views show the files' thumbnails (VIEW-09); on unless the file says `false`.
     #[serde(deserialize_with = "or_true")]
     pub show_thumbnails: bool,
+    /// A left press held on a row (or on the empty part of the list) opens its menu (PICK-02);
+    /// on unless the file says `false`.
+    #[serde(deserialize_with = "or_true")]
+    pub long_press: bool,
+    /// How long that press is held, in milliseconds: [`LONG_PRESS_MIN_MS`] to
+    /// [`LONG_PRESS_MAX_MS`], [`LONG_PRESS_DEFAULT_MS`] where the file has no whole number. A
+    /// number outside the range is brought into it.
+    #[serde(deserialize_with = "long_press_ms_or_default")]
+    pub long_press_ms: u16,
+    /// The rows of 자세히, 목록 and 아이콘 start with a checkbox that selects them (NAV-15).
+    #[serde(deserialize_with = "or_default")]
+    pub checkbox_select: bool,
     /// The favorites the user keeps under "즐겨찾기" in the sidebar, in order (NAV-05). None until
     /// the user first edits the list (add, remove, rename, reorder): the sidebar then shows the
     /// system's well-known folders, and the first edit makes that list the user's own and keeps
@@ -293,6 +307,9 @@ impl Default for Settings {
             move_undo_toast: true,
             system_menu_first: false,
             show_thumbnails: true,
+            long_press: true,
+            long_press_ms: LONG_PRESS_DEFAULT_MS,
+            checkbox_select: false,
             favorites: Vec::new(),
             favorites_emptied: false,
             recent_folders: Vec::new(),
@@ -554,6 +571,25 @@ where
 {
     let value = toml::Value::deserialize(deserializer)?;
     Ok(value.as_bool().unwrap_or(true))
+}
+
+/// How long a long press is held by default, in milliseconds.
+pub const LONG_PRESS_DEFAULT_MS: u16 = 500;
+/// The shortest and the longest time a long press can be set to, in milliseconds.
+pub const LONG_PRESS_MIN_MS: u16 = 300;
+pub const LONG_PRESS_MAX_MS: u16 = 1500;
+
+/// The time of a long press: a whole number brought into [`LONG_PRESS_MIN_MS`] to
+/// [`LONG_PRESS_MAX_MS`], or the default when the value is anything else.
+fn long_press_ms_or_default<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(value.as_integer().map_or(LONG_PRESS_DEFAULT_MS, |ms| {
+        u16::try_from(ms.clamp(i64::from(LONG_PRESS_MIN_MS), i64::from(LONG_PRESS_MAX_MS)))
+            .unwrap_or(LONG_PRESS_DEFAULT_MS)
+    }))
 }
 
 /// The folder views as a list, without the entries that are no table; no list at all is none.
@@ -894,6 +930,9 @@ impl Settings {
             move_undo_toast: self.move_undo_toast,
             system_menu_first: self.system_menu_first,
             show_thumbnails: self.show_thumbnails,
+            long_press: self.long_press,
+            long_press_ms: self.long_press_ms,
+            checkbox_select: self.checkbox_select,
             favorites: self.favorites.clone(),
             favorites_emptied: self.favorites_emptied,
             recent_folders: self.recent_folders.clone(),
@@ -1156,6 +1195,9 @@ mod tests {
             drag_default: DragDefault::Ask,
             move_undo_toast: false,
             system_menu_first: true,
+            long_press: false,
+            long_press_ms: 800,
+            checkbox_select: true,
             ..Settings::default()
         };
         settings.set_session(&Session {
@@ -1485,6 +1527,55 @@ mod tests {
         // Nor does a value this version cannot read cost them.
         std::fs::write(&file, "show_thumbnails = \"no\"\n").expect("written");
         assert!(load(dir.path()).settings.show_thumbnails);
+    }
+
+    #[test]
+    fn long_presses_and_checkboxes_round_trip_and_old_files_lack_them() {
+        let defaults = Settings::default();
+        assert!(defaults.long_press);
+        assert_eq!(defaults.long_press_ms, 500);
+        assert!(!defaults.checkbox_select);
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let settings = Settings {
+            long_press: false,
+            long_press_ms: 1200,
+            checkbox_select: true,
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("read");
+        assert!(text.contains("long_press = false"), "{text}");
+        assert!(text.contains("long_press_ms = 1200"), "{text}");
+        assert!(text.contains("checkbox_select = true"), "{text}");
+        assert_eq!(load(dir.path()), writable(settings));
+        // The demos before had none of the keys: the defaults.
+        std::fs::write(&file, "theme = \"dark\"\n").expect("written");
+        let old = load(dir.path()).settings;
+        assert!(old.long_press);
+        assert_eq!(old.long_press_ms, 500);
+        assert!(!old.checkbox_select);
+    }
+
+    #[test]
+    fn a_long_press_time_is_brought_into_its_range_and_odd_values_take_the_default() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        for (text, want) in [
+            ("long_press_ms = 100\n", 300),
+            ("long_press_ms = 99999\n", 1500),
+            ("long_press_ms = -5\n", 300),
+            ("long_press_ms = 800\n", 800),
+            ("long_press_ms = \"slow\"\n", 500),
+            ("long_press_ms = 400.5\n", 500),
+            ("long_press = \"yes\"\ncheckbox_select = 1\n", 500),
+        ] {
+            std::fs::write(&file, text).expect("written");
+            let loaded = load(dir.path()).settings;
+            assert_eq!(loaded.long_press_ms, want, "{text}");
+            assert!(loaded.long_press, "{text}");
+            assert!(!loaded.checkbox_select, "{text}");
+        }
     }
 
     #[test]

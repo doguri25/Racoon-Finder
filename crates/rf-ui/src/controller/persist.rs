@@ -348,6 +348,9 @@ impl Controller {
             settings.move_undo_toast = state.move_undo_toast();
             settings.system_menu_first = state.system_menu_first();
             settings.show_thumbnails = state.show_thumbnails();
+            settings.long_press = state.long_press();
+            settings.long_press_ms = state.long_press_ms();
+            settings.checkbox_select = state.checkbox_select();
         }
         settings.theme = self.theme.get();
         if let Some(size) = self.window_size() {

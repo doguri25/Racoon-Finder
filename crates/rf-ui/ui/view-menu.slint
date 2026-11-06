@@ -38,12 +38,18 @@ export component ViewMenu inherits ContextMenuArea {
     in property <bool> system-menu-offered;
     // The icon views show the files' thumbnails (VIEW-09), two-way with the window's.
     in-out property <bool> show-thumbnails;
+    // A press held on a row opens its menu (PICK-02), two-way with the window's, and for how many
+    // milliseconds (300, 500, 800 or 1200).
+    in-out property <bool> long-press;
+    in property <int> long-press-ms: 500;
 
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
     callback theme-chosen(choice: int);
     // An item 끌어 놓기: … of 설정 chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
+    // An item 길게 누르기 시간: … of 설정 chose `ms` milliseconds.
+    callback long-press-ms-chosen(ms: int);
     // 두 패널을 같은 크기로, and the divider moved by `step` of the room.
     callback even-split();
     callback divider-moved(step: float);
@@ -66,6 +72,7 @@ export component ViewMenu inherits ContextMenuArea {
     public function open(x: length, y: length) {
         root.mark();
         root.mark-drag-default(root.drag-default);
+        root.mark-long-press-ms(root.long-press-ms);
         root.show({ x: x, y: y });
     }
 
@@ -164,6 +171,23 @@ export component ViewMenu inherits ContextMenuArea {
     function choose-drag-default(choice: int) {
         root.mark-drag-default(choice);
         root.drag-default-chosen(choice);
+        root.done();
+    }
+
+    private property <bool> press-300-mark;
+    private property <bool> press-500-mark;
+    private property <bool> press-800-mark;
+    private property <bool> press-1200-mark;
+    function mark-long-press-ms(ms: int) {
+        root.press-300-mark = ms == 300;
+        root.press-500-mark = ms == 500;
+        root.press-800-mark = ms == 800;
+        root.press-1200-mark = ms == 1200;
+    }
+    // An item of how long a press is held (길게 누르기 시간: …): its mark alone shows.
+    function choose-long-press-ms(ms: int) {
+        root.mark-long-press-ms(ms);
+        root.long-press-ms-chosen(ms);
         root.done();
     }
 
@@ -831,6 +855,53 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
+            MenuSeparator { }
+            MenuItem {
+                title: "길게 눌러 메뉴 열기";
+                checkable: true;
+                checked <=> root.long-press;
+                activated => {
+                    root.command("toggle-long-press");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "길게 누르기 시간: 300 ms";
+                checkable: true;
+                checked <=> root.press-300-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(300);
+                }
+            }
+            MenuItem {
+                title: "길게 누르기 시간: 500 ms";
+                checkable: true;
+                checked <=> root.press-500-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(500);
+                }
+            }
+            MenuItem {
+                title: "길게 누르기 시간: 800 ms";
+                checkable: true;
+                checked <=> root.press-800-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(800);
+                }
+            }
+            MenuItem {
+                title: "길게 누르기 시간: 1200 ms";
+                checkable: true;
+                checked <=> root.press-1200-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(1200);
+                }
+            }
+            MenuSeparator { }
             MenuItem {
                 title: "끌어서 옮긴 뒤 되돌리기 알림";
                 checkable: true;

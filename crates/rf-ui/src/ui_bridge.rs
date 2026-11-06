@@ -48,7 +48,7 @@ use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
     Column, Completion, DropSpot, LEFT, LinkFacts, MenuFacts, Names, PathForm, PreviewShown, RIGHT,
-    RecentAt,
+    RecentAt, SelectState,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
@@ -240,6 +240,11 @@ impl PaneModels {
                 LoadStatus::Loading | LoadStatus::Ready => SharedString::new(),
             },
             active,
+            select_state: match SelectState::of(tab.selection().len(), tab.visible().len()) {
+                SelectState::None => 0,
+                SelectState::All => 1,
+                SelectState::Some => 2,
+            },
             can_reopen: pane.can_reopen(),
             completion: FolderMenuView::default(),
             chevron: -1,

@@ -20,7 +20,7 @@ import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
-import { ScrollCue, EdgeScroll } from "widgets.slint";
+import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
 
 // What the pointer did to an item.
@@ -37,6 +37,8 @@ enum TileEvent {
     command,
     // A drag of the items ended, dropped or not.
     drag-end,
+    // A click on its checkbox (NAV-15).
+    check,
 }
 
 // One item: its icon, and its name beside a small icon or under a larger one.
@@ -49,11 +51,16 @@ component Tile inherits Rectangle {
     // The keyboard cursor is on it (in the pane with the keyboard), a drag would go into it.
     in property <bool> cursor-here;
     in property <bool> drop-here;
+    // The items start with a checkbox (NAV-15): in the corner of a large icon, before the icon of
+    // the others.
+    in property <bool> checkboxes;
     in property <data-transfer> drag-data;
     // What the pointer did, with the modifiers of a press and the command of a menu item.
     callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
 
     private property <bool> big: root.mode >= 3;
+    // What the checkbox takes before the icon of the smaller items.
+    private property <length> check-room: root.checkboxes && !root.big ? 22px : 0px;
     // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up.
     private property <length> icon-size: root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 ? 48px : 18px;
     private property <bool> pictured: root.big && root.item.thumb.width > 0;
@@ -117,7 +124,7 @@ component Tile inherits Rectangle {
         opacity: root.item.cut ? 0.4 : root.item.hidden ? 0.5 : 1;
 
         if !root.pictured: Icon {
-            x: root.big ? (parent.width - self.width) / 2 : 8px;
+            x: root.big ? (parent.width - self.width) / 2 : 8px + root.check-room;
             y: root.big ? 8px : (parent.height - self.height) / 2;
             width: root.icon-size;
             height: root.icon-size;
@@ -147,13 +154,25 @@ component Tile inherits Rectangle {
             overflow: elide;
         }
         if !root.big: Text {
-            x: 8px + root.icon-size + 8px;
+            x: 8px + root.check-room + root.icon-size + 8px;
             width: parent.width - self.x - 6px;
             height: parent.height;
             text: root.item.name;
             color: Theme.text;
             vertical-alignment: center;
             overflow: elide;
+        }
+    }
+
+    // Above the item's own press and drag; a click on it selects the item without Ctrl.
+    if root.checkboxes: SelectBox {
+        x: 2px;
+        y: root.big ? 2px : 0px;
+        height: root.big ? 24px : parent.height;
+        state: root.item.selected ? 1 : 0;
+        label: root.item.name + " 선택";
+        toggled => {
+            root.event(TileEvent.check, false, false, "");
         }
     }
 
@@ -187,11 +206,15 @@ export component FileGrid inherits Rectangle {
     // the items, as `FileList` has them.
     in property <int> outside-row: -2;
     in property <bool> outside-over;
+    // The items start with a checkbox (NAV-15).
+    in property <bool> checkboxes;
 
     callback row-clicked(index: int, ctrl: bool, shift: bool);
     callback row-released(index: int);
     callback row-activated(index: int);
     callback row-menu(index: int);
+    // A click on the checkbox of item `index`.
+    callback row-checkbox(index: int);
     callback menu-command(name: string);
     callback drop-check(data: data-transfer, index: int) -> DragAction;
     callback dropped(data: data-transfer, index: int) -> DragAction;
@@ -238,6 +261,8 @@ export component FileGrid inherits Rectangle {
             root.row-menu(index);
         } else if (what == TileEvent.command) {
             root.menu-command(command);
+        } else if (what == TileEvent.check) {
+            root.row-checkbox(index);
         } else {
             root.drag-ended();
         }
@@ -334,6 +359,28 @@ export component FileGrid inherits Rectangle {
         key-menus.blank(at.x, at.y);
     }
 
+    // The item menu, or the folder's, at the point (`x`, `y`) of the window, for a long press
+    // (as in `FileList`).
+    public function show-item-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.item(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+    public function show-blank-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.blank(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+
+    // The place of the list a press at the point (`x`, `y`) of the window is on, for a long press:
+    // as `spot-at` finds it, but not on a scroll bar (the icons' at the right, 목록's at the
+    // bottom).
+    public pure function press-at(x: length, y: length) -> DropAt {
+        let at = root.spot-at(x, y);
+        let dx = x - drop.absolute-position.x;
+        let dy = y - drop.absolute-position.y;
+        let on-bar = root.columnar ? dy > drop.height - 16px && columns-view.content-width > columns-view.visible-width : dx > drop.width - 16px && icons.content-height > icons.visible-height;
+        return { found: at.found && !on-bar, place: at.place, side: at.side, index: at.index };
+    }
+
     // Where those two show, in the window: the system's own menu of the same items shows there
     // from the keys (Windows' Shift+F10).
     public pure function item-menu-place(index: int) -> Point {
@@ -413,6 +460,7 @@ export component FileGrid inherits Rectangle {
                         cursor-here: root.active && self.index == root.cursor;
                         drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                         drag-data: root.drag-data;
+                        checkboxes: root.checkboxes;
                         event(what, ctrl, shift, command) => {
                             root.tile-event(self.index, what, ctrl, shift, command);
                         }
@@ -464,6 +512,7 @@ export component FileGrid inherits Rectangle {
                             cursor-here: root.active && self.index == root.cursor;
                             drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                             drag-data: root.drag-data;
+                            checkboxes: root.checkboxes;
                             event(what, ctrl, shift, command) => {
                                 root.tile-event(self.index, what, ctrl, shift, command);
                             }

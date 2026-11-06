@@ -16,7 +16,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
-import { ScrollCue, EdgeScroll } from "widgets.slint";
+import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
 
 export { ColumnView }
@@ -104,6 +104,10 @@ export component FileList inherits Rectangle {
     in property <int> outside-row: -2;
     // A drag of another app is over the rows (Rust found it there), whether they take it or not.
     in property <bool> outside-over;
+    // The rows start with a checkbox (NAV-15, 선택 ▸ 체크박스로 선택), and the head's checkbox is
+    // 0 off, 1 on, 2 for some.
+    in property <bool> checkboxes;
+    in property <int> select-state;
 
     // A click on the head of column `column` (with Shift: `then`).
     callback sort(column: int, then: bool);
@@ -123,6 +127,9 @@ export component FileList inherits Rectangle {
     callback row-activated(index: int);
     // A right click on row `index`, just before its menu opens.
     callback row-menu(index: int);
+    // A click on the checkbox of row `index`, and on the head's.
+    callback row-checkbox(index: int);
+    callback all-checkbox();
     // A menu item: the name of the toolbar command it runs (move, copy, open, rename, delete,
     // delete-permanently, new-folder).
     callback menu-command(name: string);
@@ -172,6 +179,26 @@ export component FileList inherits Rectangle {
         key-menus.blank(at.x, at.y);
     }
 
+    // The item menu, or the folder's, at the point (`x`, `y`) of the window: a long press
+    // (PICK-02) opens the menu of what is pressed where it was pressed. Rust has chosen the row
+    // as a right click does.
+    public function show-item-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.item(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+    public function show-blank-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.blank(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+
+    // The place of the list a press at the point (`x`, `y`) of the window is on, for a long press:
+    // as `spot-at` finds it, but not where the list's own scroll bar lies over the rows' edge.
+    public pure function press-at(x: length, y: length) -> DropAt {
+        let at = root.spot-at(x, y);
+        let on-bar = x - drop.absolute-position.x > drop.width - 16px && list.content-height > list.visible-height;
+        return { found: at.found && !on-bar, place: at.place, side: at.side, index: at.index };
+    }
+
     // Where those two show, in the window: the system's own menu of the same items shows there
     // from the keys (Windows' Shift+F10).
     public pure function item-menu-place(index: int) -> Point {
@@ -187,14 +214,14 @@ export component FileList inherits Rectangle {
     // part of the row, by its name.
     pure function item-menu-at(index: int) -> Point {
         return {
-            x: head.pad + root.icon-room,
+            x: head.pad + root.check-room + root.icon-room,
             y: head.height + list.content-y + (index + 0.75) * Theme.row-height,
         };
     }
 
     // Where the folder's menu shows from the keyboard, in the list: by its first row.
     pure function blank-menu-at() -> Point {
-        return { x: head.pad + root.icon-room, y: head.height + Theme.row-height / 2 };
+        return { x: head.pad + root.check-room + root.icon-room, y: head.height + Theme.row-height / 2 };
     }
 
     settle := ListSettle { }
@@ -204,6 +231,8 @@ export component FileList inherits Rectangle {
 
     // The room before a row's name: its icon.
     private property <length> icon-room: 26px;
+    // What the checkbox takes before it, while the rows have one.
+    private property <length> check-room: root.checkboxes ? head.check-room : 0px;
 
     // The row at `y` in the list (the rows are all `Theme.row-height` tall), or -1 below them.
     pure function row-at(y: length) -> int {
@@ -254,6 +283,11 @@ export component FileList inherits Rectangle {
 
     VerticalLayout {
         head := FileHead {
+            checkboxes: root.checkboxes;
+            select-state: root.select-state;
+            all-toggled => {
+                root.all-checkbox();
+            }
             columns: root.columns;
             shows: root.shows;
             sort-key: root.sort-key;
@@ -382,6 +416,19 @@ export component FileList inherits Rectangle {
                                 }
                             }
 
+                            // Above the row's own press and drag: a click on it selects the row
+                            // without Ctrl, and starts no drag.
+                            if root.checkboxes: SelectBox {
+                                x: head.pad - 4px;
+                                width: 22px;
+                                height: parent.height;
+                                state: row.selected ? 1 : 0;
+                                label: row.name + " 선택";
+                                toggled => {
+                                    root.row-checkbox(i);
+                                }
+                            }
+
                             // Hidden items show at half strength, cut ones fainter still. Its
                             // least width is the row's (a ListView's content is as wide as its
                             // rows' least width, which a row takes from such a child).
@@ -390,7 +437,7 @@ export component FileList inherits Rectangle {
                                 opacity: row.cut ? 0.4 : row.hidden ? 0.5 : 1;
 
                                 Icon {
-                                    x: head.pad;
+                                    x: head.pad + root.check-room;
                                     y: (parent.height - self.height) / 2;
                                     width: 18px;
                                     height: 18px;
@@ -398,7 +445,7 @@ export component FileList inherits Rectangle {
                                     color: row.is-dir ? Theme.folder : Theme.muted;
                                 }
                                 Text {
-                                    x: head.pad + root.icon-room;
+                                    x: head.pad + root.check-room + root.icon-room;
                                     width: head.name-end - self.x;
                                     height: parent.height;
                                     text: row.name;

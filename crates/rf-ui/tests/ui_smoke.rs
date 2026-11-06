@@ -4957,6 +4957,8 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     window.set_show_extensions(false);
     window.set_move_undo_toast(false);
     window.set_show_thumbnails(false);
+    window.set_long_press(false);
+    window.set_long_press_ms(0);
     let middle_y =
         |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
     let marked_by = |item: &str| {
@@ -7384,4 +7386,209 @@ fn the_tree_is_not_looked_at_while_a_drag_of_the_window_is_under_way() {
     calls.drops.borrow_mut().clear();
     assert!(!window.global::<DragPointer<'_>>().get_over());
     assert_eq!(found_at(&window, documents), Some(DropSpot::Tree(1)));
+}
+
+/// A main window of the size the demo is judged at, with the left pane listing `names`.
+fn narrow_window(names: &[&str]) -> (MainWindow, Pane, PaneModels) {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let pane = listed_pane(
+        names
+            .iter()
+            .map(|name| entry(name, EntryKind::File, 10))
+            .collect(),
+    );
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    (window, pane, models)
+}
+
+/// The middle of `element`, in the window.
+fn middle(element: &ElementHandle) -> (f32, f32) {
+    let (at, size) = (element.absolute_position(), element.size());
+    (at.x + size.width / 2.0, at.y + size.height / 2.0)
+}
+
+#[test]
+fn the_rows_start_with_checkboxes_that_select_at_900_by_560() {
+    let (window, mut pane, models) = narrow_window(&["a.txt", "b.txt", "c.txt"]);
+    // The panes both have a head: the left pane's is the one that lies farthest left.
+    let boxes = |label: &str| {
+        let mut found = labelled(&window, label, AccessibleRole::Checkbox);
+        found.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
+        found
+    };
+    // Off: no checkbox anywhere, and the rows are as they were.
+    assert!(boxes("a.txt 선택").is_empty());
+    assert!(boxes("모든 항목 선택").is_empty());
+
+    window.set_checkbox_select(true);
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        assert_eq!(boxes(&format!("{name} 선택")).len(), 1, "{name}");
+    }
+    let head = boxes("모든 항목 선택");
+    assert_eq!(head.len(), 2, "one for each pane");
+    assert_eq!(head[0].accessible_checked(), Some(false));
+
+    // A click on a row's checkbox is the checkbox's callback, and no press of the row.
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let record = Rc::clone(&calls);
+        window.on_row_checkbox(move |side, index| {
+            record.borrow_mut().push(format!("box {side} {index}"));
+        });
+        let record = Rc::clone(&calls);
+        window.on_all_checkbox(move |side| record.borrow_mut().push(format!("all {side}")));
+        let record = Rc::clone(&calls);
+        window.on_row_clicked(move |side, index, _, _| {
+            record.borrow_mut().push(format!("press {side} {index}"));
+        });
+    }
+    let second = boxes("b.txt 선택");
+    let (x, y) = middle(&second[0]);
+    click_at(&window, x, y);
+    assert_eq!(*calls.borrow(), ["box 0 1"]);
+    calls.borrow_mut().clear();
+    let (x, y) = middle(&head[0]);
+    click_at(&window, x, y);
+    assert_eq!(*calls.borrow(), ["all 0"]);
+    calls.borrow_mut().clear();
+
+    // The marks follow the selection the pane has: a row's, and the head's (all, or part).
+    {
+        let tab = pane.active_tab_mut();
+        let (selection, rows) = tab.selection_mut();
+        selection.click(1, rows);
+    }
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(boxes("b.txt 선택")[0].accessible_checked(), Some(true));
+    assert_eq!(boxes("a.txt 선택")[0].accessible_checked(), Some(false));
+    // Part of the rows selected: the head is neither off nor on.
+    assert_eq!(window.get_left_pane().select_state, 2);
+    assert_eq!(boxes("모든 항목 선택")[0].accessible_checked(), Some(false));
+    {
+        let tab = pane.active_tab_mut();
+        let (selection, rows) = tab.selection_mut();
+        selection.select_all(rows);
+    }
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(window.get_left_pane().select_state, 1);
+    assert_eq!(boxes("모든 항목 선택")[0].accessible_checked(), Some(true));
+
+    // The checkbox leaves room: the name starts to its right, inside the list.
+    let name = labelled(&window, "a.txt", AccessibleRole::ListItem);
+    assert_eq!(name.len(), 1);
+    let first_box = boxes("a.txt 선택");
+    assert!(first_box[0].absolute_position().x >= name[0].absolute_position().x);
+    // Switched off again, they are gone.
+    window.set_checkbox_select(false);
+    assert!(boxes("a.txt 선택").is_empty());
+    window.hide().expect("hides");
+}
+
+#[test]
+fn the_icon_views_have_checkboxes_too() {
+    let (window, _pane, models) = narrow_window(&["a.txt", "b.txt"]);
+    for mode in [ViewMode::MediumIcons, ViewMode::List] {
+        let mut pane = listed_pane(vec![
+            entry("a.txt", EntryKind::File, 10),
+            entry("b.txt", EntryKind::File, 10),
+        ]);
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        window.set_checkbox_select(true);
+        let boxes = labelled(&window, "b.txt 선택", AccessibleRole::Checkbox);
+        assert_eq!(boxes.len(), 1, "{mode:?}");
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let record = Rc::clone(&calls);
+        window.on_row_checkbox(move |side, index| {
+            record.borrow_mut().push(format!("box {side} {index}"));
+        });
+        let (x, y) = middle(&boxes[0]);
+        click_at(&window, x, y);
+        assert_eq!(*calls.borrow(), ["box 0 1"], "{mode:?}");
+        window.set_checkbox_select(false);
+        assert!(labelled(&window, "b.txt 선택", AccessibleRole::Checkbox).is_empty());
+    }
+    window.hide().expect("hides");
+}
+
+#[test]
+fn a_press_is_found_on_a_row_and_below_the_rows_but_not_on_the_heads_or_over_a_dialog() {
+    let (window, _pane, _models) = narrow_window(&["a.txt", "b.txt"]);
+    let rows = labelled(&window, "b.txt", AccessibleRole::ListItem);
+    let (x, y) = middle(&rows[0]);
+    let on_row = window.invoke_press_at(x, y);
+    assert!(on_row.found && on_row.place == DropPlace::List);
+    assert_eq!((on_row.side, on_row.index), (0, 1));
+    // Below the last row of the list: the part without rows (index -1), still the list.
+    let below = window.invoke_press_at(x, y + 150.0);
+    assert!(below.found && below.index == -1, "{below:?}");
+    // The heads are not a place to press for a menu.
+    let head = labelled(&window, "이름", AccessibleRole::Text);
+    if let Some(head) = head.first() {
+        let (hx, hy) = middle(head);
+        assert!(!window.invoke_press_at(hx, hy).found);
+    }
+    // Nor the tab strip, the sidebar or the toolbar.
+    assert!(!window.invoke_press_at(x, 4.0).found);
+    assert!(!window.invoke_press_at(20.0, y).found || window.invoke_press_at(20.0, y).side == 0);
+    // Nor a dialog's own place.
+    window.set_dialog(DialogKind::Message);
+    assert!(!window.invoke_press_at(x, y).found);
+    window.hide().expect("hides");
+}
+
+#[test]
+fn the_ring_of_a_long_press_shows_beside_the_pointer_and_fills() {
+    use rf_ui::LongPressRing;
+    let (window, _pane, _models) = narrow_window(&["a.txt"]);
+    let ring = || ElementHandle::find_by_element_id(&window, "MainWindow::ring").next();
+    assert!(ring().is_none(), "no ring without a press");
+    let global = window.global::<LongPressRing<'_>>();
+    global.set_x(300.0);
+    global.set_y(200.0);
+    global.set_progress(0.4);
+    global.set_shown(true);
+    let shown = ring().expect("the ring shows");
+    let (at, size) = (shown.absolute_position(), shown.size());
+    // Below and to the right of the pointer, whole inside the window.
+    assert!(at.x > 300.0 && at.y > 200.0, "{at:?}");
+    assert!(at.x + size.width <= 900.0 && at.y + size.height <= 560.0);
+    // Near the corner it moves to the pointer's other side, still inside.
+    global.set_x(895.0);
+    global.set_y(555.0);
+    let moved = ring().expect("the ring shows");
+    let (at, size) = (moved.absolute_position(), moved.size());
+    assert!(
+        at.x + size.width <= 900.0 && at.y + size.height <= 560.0,
+        "{at:?}"
+    );
+    assert!(at.x < 895.0 && at.y < 555.0, "{at:?}");
+    // It takes no pointer: a click through it reaches the row below.
+    global.set_x(0.0);
+    global.set_y(0.0);
+    global.set_progress(1.0);
+    assert!(ring().is_some());
+    global.set_shown(false);
+    assert!(ring().is_none());
+    window.hide().expect("hides");
+}
+
+#[test]
+fn a_menu_asked_for_where_a_press_was_shows_without_a_click() {
+    let (window, _pane, _models) = narrow_window(&["a.txt", "b.txt"]);
+    let rows = labelled(&window, "b.txt", AccessibleRole::ListItem);
+    let (x, y) = middle(&rows[0]);
+    // The functions the controller calls for a long press, for the item and the folder.
+    window.invoke_show_item_menu_at(0, x, y);
+    assert_eq!(window.global::<ItemMenu<'_>>().get_at_x(), x);
+    assert_eq!(window.global::<ItemMenu<'_>>().get_at_y(), y);
+    window.invoke_show_blank_menu_at(0, x + 5.0, y + 100.0);
+    assert_eq!(window.global::<ItemMenu<'_>>().get_at_x(), x + 5.0);
+    assert_eq!(window.global::<ItemMenu<'_>>().get_at_y(), y + 100.0);
+    window.hide().expect("hides");
 }

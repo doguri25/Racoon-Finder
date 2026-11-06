@@ -17,7 +17,7 @@
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
-import { ScrollCue, EdgeScroll } from "widgets.slint";
+import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 
 // A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
 // 5 extension, 6 attributes), what its head says, how wide it is, whether its text lines up on
@@ -112,6 +112,13 @@ component HeadCell inherits Rectangle {
 }
 
 export component FileHead inherits Rectangle {
+    // The rows start with a checkbox (NAV-15): the name's head leaves it room, and the head has
+    // its own, 0 for none selected, 1 for all, 2 for part of the rows.
+    in property <bool> checkboxes;
+    in property <int> select-state;
+    // A click on the head's checkbox.
+    callback all-toggled();
+
     // The columns after the name, in their order, and which columns show by number (0 to 6),
     // for the head's menu.
     in property <[ColumnView]> columns;
@@ -150,6 +157,8 @@ export component FileHead inherits Rectangle {
     // Column geometry, shared by the heads and the rows. The columns are placed by hand, not
     // by a layout, so that the name can take the room the others leave without a binding loop.
     out property <length> pad: 12px;
+    // The room a checkbox takes before a row's icon (NAV-15).
+    out property <length> check-room: 24px;
     private property <length> gap: 10px;
     private property <length> name-min: 120px;
     // The border before column `drag-border` is being dragged, `drag-dx` from where it was
@@ -424,9 +433,20 @@ export component FileHead inherits Rectangle {
             }
         }
 
+        // The same place as the rows' checkboxes (`check-room`).
+        if root.checkboxes: SelectBox {
+            x: root.pad - 4px;
+            width: 22px;
+            height: parent.height;
+            state: root.select-state;
+            label: "모든 항목 선택";
+            toggled => {
+                root.all-toggled();
+            }
+        }
         HeadCell {
-            x: root.pad;
-            width: root.name-end - root.pad;
+            x: root.pad + (root.checkboxes ? root.check-room : 0px);
+            width: root.name-end - self.x;
             text: "이름";
             sorted: root.sort-key == 0 ? 1 : root.then-key == 0 ? 2 : 0;
             ascending: root.sort-key == 0 ? root.sort-ascending : root.then-ascending;

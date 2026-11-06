@@ -47,6 +47,27 @@ impl std::fmt::Debug for MatchRequest {
     }
 }
 
+/// How much of a list's rows is selected: the state of the checkbox of its head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectState {
+    None,
+    Some,
+    All,
+}
+
+impl SelectState {
+    /// What `selected` selected rows of `shown` rows on screen make of it.
+    pub fn of(selected: usize, shown: usize) -> SelectState {
+        if selected == 0 {
+            SelectState::None
+        } else if shown > 0 && selected >= shown {
+            SelectState::All
+        } else {
+            SelectState::Some
+        }
+    }
+}
+
 /// How many names the worker matches between two looks at whether a newer request has come.
 pub const MATCH_STRETCH: usize = 1_024;
 
@@ -128,6 +149,50 @@ impl AppState {
         let request = tab.reload();
         self.sync_relisted(old, request.generation);
         vec![Effect::Load(request)]
+    }
+
+    /// Whether the rows show a checkbox that selects them (NAV-15).
+    pub fn checkbox_select(&self) -> bool {
+        self.checkbox_select
+    }
+
+    pub fn set_checkbox_select(&mut self, on: bool) {
+        self.checkbox_select = on;
+    }
+
+    /// 선택 ▸ 체크박스로 선택: the checkboxes show, or hide. The selection stays as it is, and
+    /// the keys do what they always do.
+    pub fn toggle_checkbox_mode(&mut self) {
+        self.checkbox_select = !self.checkbox_select;
+    }
+
+    /// A click on the checkbox of row `row` of pane `side`: the row is selected or no longer, as
+    /// a click with Ctrl does it, and the rest of the selection stays. The pane gets the
+    /// keyboard.
+    pub fn click_checkbox(&mut self, side: usize, row: usize) -> Vec<Effect> {
+        self.pending_click = None;
+        self.click_row(side, row, true, false)
+    }
+
+    /// A click on the checkbox of the list's head: every row of pane `side` is selected, or
+    /// none when every one is already.
+    pub fn toggle_all(&mut self, side: usize) -> Vec<Effect> {
+        self.activate(side);
+        self.pending_click = None;
+        let all = self.selection_state(side) == SelectState::All;
+        let (selection, rows) = self.tab_mut(side).selection_mut();
+        if all {
+            selection.clear();
+        } else {
+            selection.select_all(rows);
+        }
+        Vec::new()
+    }
+
+    /// How much of the rows on screen of pane `side` is selected, for the head's checkbox.
+    pub fn selection_state(&self, side: usize) -> SelectState {
+        let tab = self.tab(side);
+        SelectState::of(tab.selection().len(), tab.visible().len())
     }
 
     /// The selection tool `command` on the rows of pane `side`: Ctrl+Space flips the cursor's
