@@ -84,12 +84,45 @@ pub(super) struct Kept {
     pub(super) generation: u64,
     /// When the last look at the folders was asked for.
     pub(super) checked: Option<Instant>,
+    /// Whether a worker is looking at the folders now (one at a time: a share that does not
+    /// answer holds it for long, and no second look piles up behind it).
+    pub(super) look: Look,
     /// The group is folded to its head.
     pub(super) folded: bool,
     /// The folder each pane showed when [`AppState::note_visits`] looked last.
     pub(super) visited: [Option<VPath>; 2],
     /// The keyboard cursor, while it is in the group (and then on no row of the tree).
     pub(super) cursor: Option<RecentAt>,
+}
+
+/// How the look at the folders stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Look {
+    /// No worker looks.
+    #[default]
+    Idle,
+    /// A worker looks.
+    Running,
+    /// A worker looks, and another look was asked for meanwhile: it follows the answer.
+    Queued,
+}
+
+impl Look {
+    /// Whether a look may start now: not while one is under way (it is noted that another is
+    /// wanted). Marks the look as under way when it may.
+    fn may_start(&mut self) -> bool {
+        if *self == Look::Idle {
+            *self = Look::Running;
+            return true;
+        }
+        *self = Look::Queued;
+        false
+    }
+
+    /// The worker answered; whether a look was asked for meanwhile.
+    fn answered(&mut self) -> bool {
+        std::mem::take(self) == Look::Queued
+    }
 }
 
 impl AppState {
@@ -534,9 +567,12 @@ impl AppState {
 
     /// Asks a worker which of the recent folders and favorites are still there; nothing while
     /// there are none.
-    fn look_at_folders(&self) -> Vec<Effect> {
+    fn look_at_folders(&mut self) -> Vec<Effect> {
         let folders = self.folders_to_check();
         if folders.is_empty() {
+            return Vec::new();
+        }
+        if !self.kept.look.may_start() {
             return Vec::new();
         }
         vec![Effect::CheckFolders(folders)]
@@ -563,7 +599,10 @@ impl AppState {
 
     /// A worker looked at the recent folders and favorites: which are folders still (`true`) and
     /// which are gone.
-    pub fn folders_checked(&mut self, found: &[(VPath, bool)]) {
+    ///
+    /// Returns the look that was asked for meanwhile, if one was; the next look starts only now.
+    pub fn folders_checked(&mut self, found: &[(VPath, bool)]) -> Vec<Effect> {
+        let again = self.kept.look.answered();
         for (folder, there) in found {
             if *there {
                 self.kept.missing.remove(folder);
@@ -573,6 +612,10 @@ impl AppState {
         }
         let asked = self.folders_to_check();
         self.kept.missing.retain(|gone| asked.contains(gone));
+        if again {
+            return self.look_at_folders();
+        }
+        Vec::new()
     }
 
     /// Whether a worker found the recent folder or favorite `folder` gone: its row dims.

@@ -44,7 +44,11 @@ fn io_error(error: &NSError) -> io::Error {
 pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
     autoreleasepool(|_| {
         let target_url = file_url(target)?;
-        let alias_url = file_url(at)?;
+        // `writeBookmarkData` replaces an item that is there, and one another process made at
+        // `at` since the caller looked must stay: the alias is written under a name of its own,
+        // beside `at`, and moved into place without replacing anything.
+        let temp = temp_beside(at);
+        let alias_url = file_url(&temp)?;
         let data = target_url
             .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
                 NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
@@ -52,8 +56,37 @@ pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
                 None,
             )
             .map_err(|error| io_error(&error))?;
-        NSURL::writeBookmarkData_toURL_options_error(&data, &alias_url, 0)
-            .map_err(|error| io_error(&error))
+        if let Err(error) = NSURL::writeBookmarkData_toURL_options_error(&data, &alias_url, 0) {
+            // A half-written file is not left in the user's folder.
+            let _ = std::fs::remove_file(&temp);
+            return Err(io_error(&error));
+        }
+        move_into_place(&temp, at).inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
+    })
+}
+
+/// A name in the folder of `at` for an alias that is written there before it takes its place;
+/// no two calls get the same one.
+fn temp_beside(at: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    at.with_file_name(format!(".rf-link-{}-{number}", std::process::id()))
+}
+
+/// Renames `temp` to `at` and never replaces `at`: an item there fails with `AlreadyExists` and
+/// stays as it is.
+fn move_into_place(temp: &Path, at: &Path) -> io::Result<()> {
+    let (Ok(from), Ok(to)) = (rf_core::VPath::local(temp), rf_core::VPath::local(at)) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not an absolute path",
+        ));
+    };
+    crate::rename_no_replace(&from, &to).map_err(|error| match error {
+        rf_core::Error::Io { source, .. } => source,
+        other => io::Error::other(other.to_string()),
     })
 }
 

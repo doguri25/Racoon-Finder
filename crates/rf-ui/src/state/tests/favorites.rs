@@ -828,3 +828,35 @@ fn the_group_of_recent_folders_folds() {
     state.set_recent_folded(false);
     assert!(!state.recent_folded());
 }
+
+#[test]
+fn only_one_look_at_the_folders_runs_and_the_one_asked_meanwhile_follows_its_answer() {
+    let mut state = with_places();
+    state.note_visits();
+    state.favorite_add(&folder("kept"));
+    let start = Instant::now();
+    assert!(matches!(
+        state.check_folders_due(start).as_slice(),
+        [Effect::CheckFolders(_)]
+    ));
+    // The share does not answer: no look starts behind it, however long it takes or however
+    // often the list is edited.
+    let later = start + Duration::from_secs(100);
+    assert_eq!(state.check_folders_due(later), Vec::<Effect>::new());
+    assert_eq!(
+        state.set_recent_folders(vec![folder("a")]),
+        Vec::<Effect>::new()
+    );
+    // Its answer starts the one that was wanted meanwhile, and only that one.
+    let next = state.folders_checked(&[(folder("kept"), false)]);
+    assert!(matches!(next.as_slice(), [Effect::CheckFolders(_)]));
+    assert_eq!(state.folders_checked(&[]), Vec::<Effect>::new());
+    // With none wanted meanwhile, an answer starts nothing.
+    assert!(matches!(
+        state
+            .check_folders_due(later + Duration::from_secs(40))
+            .as_slice(),
+        [Effect::CheckFolders(_)]
+    ));
+    assert_eq!(state.folders_checked(&[]), Vec::<Effect>::new());
+}

@@ -410,7 +410,7 @@ fn the_list_of_favorites_still_makes_no_links() {
     assert_eq!(state.drop_items(id, between), []);
     assert_eq!(
         words::drop_favorites_no_links(),
-        "여기에는 링크를 만들지 않고 폴더만 추가합니다"
+        "링크 키를 떼고 놓으면 폴더를 즐겨찾기에 추가합니다"
     );
 }
 

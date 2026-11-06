@@ -184,6 +184,15 @@ pub fn cleanup(
         say(out, words::cleanup_portable());
         return Exit::Done;
     }
+    // The folder this very program runs from is not deleted under it (an install folder chosen
+    // inside the app's own data folders): nothing is changed.
+    if let Some(folder) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| owned_folder_running(paths.owned_paths(), &exe))
+    {
+        say(out, &words::cleanup_runs_from_owned(&folder));
+        return Exit::Failed;
+    }
     // The app that runs is asked to end, and the lock of its job journal says when it has. A
     // data folder that is not there has no app running from it.
     let lock = if paths.data_dir().is_dir() {
@@ -227,6 +236,17 @@ pub fn cleanup(
     }
 }
 
+/// The owned folder that holds `exe` (or is it), if one does: deleting it would delete the
+/// running program.
+fn owned_folder_running(owned: &[PathBuf], exe: &Path) -> Option<PathBuf> {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let exe = real(exe);
+    owned
+        .iter()
+        .find(|folder| exe.starts_with(real(folder)))
+        .cloned()
+}
+
 /// Says how the cleanup went; `Done` when it is complete, `Partial` when something remains.
 fn finish(report: &CleanupReport, out: &mut dyn Write) -> Exit {
     write_report(report, out);
@@ -268,6 +288,24 @@ mod tests {
     use rf_ledger::FakeBackend;
 
     use super::*;
+
+    #[test]
+    fn the_folder_the_program_runs_from_is_not_deleted() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let owned = dir.path().join("local").join("app");
+        let other = dir.path().join("config");
+        std::fs::create_dir_all(owned.join("bin")).expect("made");
+        std::fs::create_dir_all(&other).expect("made");
+        let exe = owned.join("bin").join("app.exe");
+        std::fs::write(&exe, b"").expect("made");
+        let list = vec![other.clone(), owned.clone()];
+        assert_eq!(owned_folder_running(&list, &exe), Some(owned));
+        // An executable beside the folders, or an owned list without its folder, is free.
+        let away = dir.path().join("elsewhere.exe");
+        std::fs::write(&away, b"").expect("made");
+        assert_eq!(owned_folder_running(&list, &away), None);
+        assert_eq!(owned_folder_running(&[other], &exe), None);
+    }
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()

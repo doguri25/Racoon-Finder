@@ -5148,6 +5148,7 @@ fn the_view_menu_s_settings_end_with_the_way_to_remove_the_app() {
     }
     // macOS: 완전 삭제…, below everything else, inside the window.
     window.set_removal_offer(1);
+    window.set_remove_app_title(delete.into());
     window.set_system_menu_offered(false);
     open(&["설정"]);
     assert!(shown(delete) && !shown(uninstall));

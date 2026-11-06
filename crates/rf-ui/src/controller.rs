@@ -287,6 +287,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     ui_bridge::show_shortcuts(window, Os::CURRENT);
     window.set_system_menu_offered(rf_platform::shell::SYSTEM_MENU);
     window.set_removal_offer(crate::removal::Offer::number(removal_offer));
+    window.set_remove_app_title(words::remove_app_menu().into());
     window
         .global::<ItemMenu<'_>>()
         .set_shares(rf_platform::shell::SHARES);
@@ -643,6 +644,10 @@ fn connect(window: &MainWindow) {
 fn connect_checkboxes(window: &MainWindow) {
     // The checkbox of a row (NAV-15): selects or lets go of that row alone, and the head's of all.
     window.on_row_checkbox(|s, i| {
+        // The release of a long press that opened a menu ticks nothing.
+        if with(Controller::release_swallowed).unwrap_or(false) {
+            return;
+        }
         with(|c| c.update_at(i, |state, i| state.click_checkbox(side(s), i)));
     });
     window.on_all_checkbox(|s| {
@@ -931,18 +936,21 @@ fn tab_command(state: &mut AppState, side: usize, index: usize, name: &str) -> V
 /// still, then tells the state ([`AppState::folders_checked`]).
 fn check_folders(folders: Vec<VPath>) {
     spawn_worker("rf-ui-recent", move || {
-        let found: Vec<(VPath, bool)> = folders
-            .into_iter()
-            .map(|folder| {
-                let there = is_folder(&folder);
-                (folder, there)
-            })
-            .collect();
+        // A look that panics still answers (with nothing found), or no further look would
+        // ever start.
+        let found: Vec<(VPath, bool)> =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                folders
+                    .into_iter()
+                    .map(|folder| {
+                        let there = is_folder(&folder);
+                        (folder, there)
+                    })
+                    .collect()
+            }))
+            .unwrap_or_default();
         post(move |c| {
-            c.update(|state| {
-                state.folders_checked(&found);
-                Vec::new()
-            });
+            c.update(|state| state.folders_checked(&found));
         });
     });
 }
@@ -4105,6 +4113,27 @@ mod tests {
         c.press_focus_lost();
         assert_eq!(c.fingers_changed(true), 1, "the fingers count afresh");
         assert!(!c.press_released());
+    }
+
+    #[test]
+    fn the_release_of_a_long_press_ticks_no_checkbox() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let selected = || {
+            c.state
+                .borrow()
+                .as_ref()
+                .map(|state| state.panes()[LEFT].active_tab().selection().len())
+        };
+        assert_eq!(selected(), Some(0));
+        // The synthetic release of a long press that opened a menu is swallowed.
+        c.press.swallow.set(true);
+        d.window.invoke_row_checkbox(0, 0);
+        c.press.swallow.set(false);
+        assert_eq!(selected(), Some(0), "the selection is left as it was");
+        // A click on the checkbox otherwise ticks the row.
+        d.window.invoke_row_checkbox(0, 0);
+        assert_eq!(selected(), Some(1));
     }
 
     #[test]

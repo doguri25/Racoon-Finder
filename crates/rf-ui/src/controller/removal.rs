@@ -60,12 +60,17 @@ impl Controller {
             .spawn(move || {
                 // Refused here as well as at the start: the list is not shown for an app that
                 // cannot be moved to the trash. The path listed is the one that will be moved.
-                let plan = match exe.as_deref().map(rf_platform::can_trash_app_bundle) {
-                    Some(Ok(bundle)) => removal::plan_lines(&context.paths, Some(&bundle))
-                        .map_err(|error| error.to_string()),
-                    Some(Err(block)) => Err(words::removal_blocked(block).to_owned()),
-                    None => Err(words::background_failed().to_owned()),
-                };
+                // A panic is an answer as well, or the menu item would do nothing for the rest
+                // of the run.
+                let plan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match exe.as_deref().map(rf_platform::can_trash_app_bundle) {
+                        Some(Ok(bundle)) => removal::plan_lines(&context.paths, Some(&bundle))
+                            .map_err(|error| error.to_string()),
+                        Some(Err(block)) => Err(words::removal_blocked(block).to_owned()),
+                        None => Err(words::background_failed().to_owned()),
+                    }
+                }))
+                .unwrap_or_else(|_| Err(words::background_failed().to_owned()));
                 post(move |c| c.update(|state| state.removal_planned(plan)));
             });
         if started.is_err() {

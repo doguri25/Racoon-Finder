@@ -381,7 +381,7 @@ mod tests {
 
         let existing: Vec<_> = paths
             .owned_paths()
-            .into_iter()
+            .iter()
             .filter(|owned| owned.exists())
             .collect();
         let lines = plan_lines(&paths, Some(&bundle)).expect("a list");

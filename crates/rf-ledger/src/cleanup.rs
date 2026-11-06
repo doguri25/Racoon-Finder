@@ -248,6 +248,22 @@ fn portable_steps(paths: &AppPaths, root: &Path) -> Vec<CleanupAction> {
     }
 }
 
+/// What follows `TEMP_PREFIX` in the names of the release files (the installer, the demo
+/// archives and the disk image), which the browser or an extraction may leave in the temp
+/// folder: they are not the app's temporary files.
+const RELEASE_NAMES: [&str; 2] = ["setup-", "demo-"];
+
+/// Whether `name` is of a temporary file or folder of the app: it starts with `TEMP_PREFIX` and
+/// is no name of a release file.
+fn is_temp_name(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(TEMP_PREFIX.as_bytes()) else {
+        return false;
+    };
+    !RELEASE_NAMES
+        .iter()
+        .any(|release| rest.starts_with(release.as_bytes()))
+}
+
 /// The entries of the shared temp folder `temp` whose names start with `TEMP_PREFIX`, by name;
 /// none if the folder is missing.
 fn temp_entries(temp: &Path) -> Result<Vec<PathBuf>, LedgerError> {
@@ -260,11 +276,7 @@ fn temp_entries(temp: &Path) -> Result<Vec<PathBuf>, LedgerError> {
     let mut found = Vec::new();
     for entry in listing {
         let entry = entry.map_err(fail)?;
-        if entry
-            .file_name()
-            .as_encoded_bytes()
-            .starts_with(TEMP_PREFIX.as_bytes())
-        {
+        if is_temp_name(entry.file_name().as_encoded_bytes()) {
             found.push(entry.path());
         }
     }
@@ -310,5 +322,25 @@ fn remove_if_empty(path: &Path) -> io::Result<()> {
             Ok(())
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use rf_core::identity::TEMP_PREFIX;
+
+    use super::is_temp_name;
+
+    #[test]
+    fn the_sweep_takes_the_apps_temporary_names_and_not_the_release_files() {
+        let name = |rest: &str| format!("{TEMP_PREFIX}{rest}");
+        assert!(is_temp_name(name("1.tmp").as_bytes()));
+        assert!(is_temp_name(name("dir").as_bytes()));
+        assert!(!is_temp_name(
+            name("setup-0.4.0-windows-x64.exe").as_bytes()
+        ));
+        assert!(!is_temp_name(name("demo-windows-x64.zip").as_bytes()));
+        assert!(!is_temp_name(name("demo-macos.dmg").as_bytes()));
+        assert!(!is_temp_name(b"Other-1.tmp"));
     }
 }

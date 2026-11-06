@@ -42,6 +42,13 @@ pub(super) struct PressTarget {
     row: Option<usize>,
 }
 
+/// How many fingers count as down once the menu of a long press returned: when a finger armed
+/// the press, the menu's loop may have taken its end, so none counts (a finger still down
+/// brings the count back to none at its own end, which never goes below none).
+fn fingers_after_menu(armed_by_finger: bool, down: usize) -> usize {
+    if armed_by_finger { 0 } else { down }
+}
+
 /// What the controller keeps of the long press under way.
 pub(super) struct PressWork {
     pub(super) machine: RefCell<LongPress>,
@@ -53,7 +60,7 @@ pub(super) struct PressWork {
     /// Runs while a press waits.
     pub(super) timer: slint::Timer,
     /// The release Slint is being told of is the long press's own: it clicks nothing.
-    swallow: Cell<bool>,
+    pub(super) swallow: Cell<bool>,
 }
 
 impl PressWork {
@@ -326,5 +333,27 @@ impl Controller {
             }
             None => window.invoke_show_blank_menu_at(side, at.x, at.y),
         }
+        // A menu of the system's may have taken the finger's end: the count is forgotten.
+        self.press.fingers.set(fingers_after_menu(
+            self.press.finger.get().is_some(),
+            self.press.fingers.get(),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod finger_tests {
+    use super::fingers_after_menu;
+
+    #[test]
+    fn a_menu_of_a_finger_s_press_forgets_the_fingers_it_may_have_lost() {
+        assert_eq!(fingers_after_menu(true, 1), 0);
+        assert_eq!(fingers_after_menu(true, 2), 0);
+        assert_eq!(
+            fingers_after_menu(false, 1),
+            1,
+            "a mouse press leaves the count"
+        );
+        assert_eq!(fingers_after_menu(false, 0), 0);
     }
 }

@@ -746,6 +746,15 @@ pub fn cleanup_still_running() -> &'static str {
     "앱이 아직 실행 중입니다. 앱을 끝낸 뒤 다시 시도하세요."
 }
 
+/// What `--cleanup` says when the program runs from inside a folder it would delete (exit code
+/// 1): nothing was changed.
+pub fn cleanup_runs_from_owned(folder: &std::path::Path) -> String {
+    format!(
+        "이 프로그램이 지울 폴더 안에서 실행 중이라 아무것도 지우지 않았습니다: {}. 앱을 다른 폴더에 설치한 뒤 다시 시도하세요.",
+        folder.display()
+    )
+}
+
 /// What `--cleanup-plan` says when there is nothing to delete.
 pub fn cleanup_plan_empty() -> &'static str {
     "지울 것이 없습니다."
@@ -872,6 +881,11 @@ pub fn cleanup_partial() -> &'static str {
 /// The line of the list in the window of 완전 삭제…: the app itself goes to the trash last.
 pub fn removal_step_bundle(bundle: &std::path::Path) -> String {
     format!("앱을 휴지통으로 옮기기: {}", bundle.display())
+}
+
+/// The item at the bottom of 보기 ▸ 설정 that removes the app (macOS).
+pub fn remove_app_menu() -> String {
+    format!("{} 완전 삭제…", rf_core::identity::DISPLAY_NAME)
 }
 
 /// The title of the window of 완전 삭제….
@@ -2386,9 +2400,9 @@ pub fn drop_only_folders() -> &'static str {
 }
 
 /// Why the list of favorites takes nothing of a drag whose keys ask for a link: it makes none
-/// (OPS-08), and keeps folders as additions only.
+/// (OPS-08): the drop is refused, and the words say what is taken, without the link key.
 pub fn drop_favorites_no_links() -> &'static str {
-    "여기에는 링크를 만들지 않고 폴더만 추가합니다"
+    "링크 키를 떼고 놓으면 폴더를 즐겨찾기에 추가합니다"
 }
 
 /// The notice for a folder the user asked to keep as a favorite that is one already.

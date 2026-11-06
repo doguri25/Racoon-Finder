@@ -248,6 +248,12 @@ jobs:
             if (-not (Test-Path (Join-Path $dir 'racoon-finder.exe'))) { throw 'racoon-finder.exe was not installed' }
             if (Test-Path (Join-Path $dir 'portable')) { throw 'the installer put a portable marker in the install folder' }
 
+            # The installed program starts on this runner (a missing DLL or a crash at start would
+            # show here); --cleanup-plan lists what --cleanup would do and changes nothing.
+            $exe = Join-Path $dir 'racoon-finder.exe'
+            $p = Start-Process -FilePath $exe -ArgumentList '--cleanup-plan' -PassThru -Wait -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "racoon-finder.exe --cleanup-plan exit code $($p.ExitCode)" }
+
             # The uninstaller copies itself to a temp folder and returns early: wait for the folder to go.
             $p = Start-Process -FilePath (Join-Path $dir 'unins000.exe') -PassThru -ArgumentList @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$uninstallLog")
@@ -256,6 +262,9 @@ jobs:
             $deadline = (Get-Date).AddSeconds(90)
             while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
             if (Test-Path $dir) { throw "the install folder is still there after 90 s: $dir" }
+            # The uninstaller carries on when --cleanup fails and only logs it: the job must not.
+            if (-not (Test-Path $uninstallLog)) { throw 'the uninstaller wrote no log' }
+            if ((Get-Content $uninstallLog -Raw) -match 'could not start|--cleanup exit code') { throw 'the uninstaller did not run --cleanup cleanly (see the log below)' }
           }
           finally {
             foreach ($log in $installLog, $uninstallLog) {
