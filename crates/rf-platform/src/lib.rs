@@ -22,7 +22,9 @@ mod win_util;
 pub use attrs::{
     attributes_from_bsd_flags, attributes_from_windows, entry_attributes, is_dot_file,
 };
-pub use bundle::{app_bundle_of, move_app_bundle_to_trash};
+pub use bundle::{
+    TrashBlock, app_bundle_of, can_trash_app_bundle, move_app_bundle_to_trash, trash_block_by_path,
+};
 pub use fileid::{file_identity, metadata_identity, resolved_file_identity};
 pub use fsops::{
     is_not_a_regular_file, not_a_regular_file, open_regular_file, rename_no_replace, sync_dir,

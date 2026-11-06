@@ -93,7 +93,11 @@ pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
         let temp = temp_beside(at);
         let temp_units = wide(temp.as_os_str());
         // SAFETY: as above, with `temp_units`; the shortcut is not remembered as that file.
-        unsafe { file.Save(PCWSTR(temp_units.as_ptr()), false) }.map_err(|e| to_io(&e))?;
+        if let Err(error) = unsafe { file.Save(PCWSTR(temp_units.as_ptr()), false) } {
+            // A half-written file is not left in the user's folder.
+            let _ = fs::remove_file(&temp);
+            return Err(to_io(&error));
+        }
         move_into_place(&temp, at).inspect_err(|_| {
             let _ = fs::remove_file(&temp);
         })

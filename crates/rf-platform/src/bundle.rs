@@ -28,6 +28,79 @@ pub fn app_bundle_of(exe: &Path) -> Option<PathBuf> {
     (named(macos, "MacOS") && named(contents, "Contents") && is_app).then(|| bundle.to_path_buf())
 }
 
+/// Why the app bundle of the running app cannot be moved to the trash now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrashBlock {
+    /// The executable is in no app bundle (a build folder, a portable folder).
+    NotInBundle,
+    /// Gatekeeper runs the app from a read-only copy (App Translocation): the real bundle is
+    /// somewhere else, and the one that runs cannot be moved.
+    Translocated,
+    /// The bundle is on a volume mounted read-only (a mounted disk image).
+    ReadOnlyVolume,
+    /// The folder the bundle is in cannot be written by this user, which moving it out needs.
+    FolderNotWritable,
+}
+
+/// The block a bundle at `bundle` has by its path alone: Gatekeeper's translocated copies are
+/// under a folder `AppTranslocation`. Pure.
+pub fn trash_block_by_path(bundle: &Path) -> Option<TrashBlock> {
+    bundle
+        .components()
+        .any(|part| part.as_os_str() == "AppTranslocation")
+        .then_some(TrashBlock::Translocated)
+}
+
+/// Whether the app bundle `exe` is in can be moved to the trash, as far as the system tells
+/// before anything is tried: it must be a bundle ([`app_bundle_of`]), not a translocated copy,
+/// not on a read-only volume, and in a folder this user can write. Reads the disk (a stat of
+/// the bundle's folder): call it from a worker thread. `Ok` carries the bundle, by the path the
+/// trash will be given.
+pub fn can_trash_app_bundle(exe: &Path) -> Result<PathBuf, TrashBlock> {
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let bundle = app_bundle_of(&exe).ok_or(TrashBlock::NotInBundle)?;
+    if let Some(block) = trash_block_by_path(&bundle) {
+        return Err(block);
+    }
+    let parent = bundle.parent().ok_or(TrashBlock::FolderNotWritable)?;
+    if volume_is_read_only(&bundle) {
+        return Err(TrashBlock::ReadOnlyVolume);
+    }
+    if !folder_is_writable(parent) {
+        return Err(TrashBlock::FolderNotWritable);
+    }
+    Ok(bundle)
+}
+
+#[cfg(unix)]
+fn volume_is_read_only(path: &Path) -> bool {
+    use rustix::fs::{StatVfsMountFlags, statvfs};
+    statvfs(path).is_ok_and(|stat| stat.f_flag.contains(StatVfsMountFlags::RDONLY))
+}
+
+#[cfg(not(unix))]
+fn volume_is_read_only(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn folder_is_writable(folder: &Path) -> bool {
+    use rustix::fs::AtFlags;
+    use rustix::fs::{Access, CWD, accessat};
+    accessat(
+        CWD,
+        folder,
+        Access::WRITE_OK | Access::EXEC_OK,
+        AtFlags::empty(),
+    )
+    .is_ok()
+}
+
+#[cfg(not(unix))]
+fn folder_is_writable(folder: &Path) -> bool {
+    std::fs::metadata(folder).is_ok_and(|meta| !meta.permissions().readonly())
+}
+
 /// Moves the app bundle the running executable is in to the trash, and returns where it went
 /// (the bundle's own place when the system did not say). Fails, and moves nothing, when the
 /// system is not macOS (`Unsupported`) or the executable is not in an app bundle
@@ -126,6 +199,59 @@ mod tests {
             "/MacOS/racoon-finder",
         ] {
             assert_eq!(app_bundle_of(Path::new(odd)), None, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_translocated_copy_is_blocked_by_its_path() {
+        let moved =
+            Path::new("/private/var/folders/x/AppTranslocation/ABC-123/d/Racoon Finder.app");
+        assert_eq!(trash_block_by_path(moved), Some(TrashBlock::Translocated));
+        for fine in [
+            "/Applications/Racoon Finder.app",
+            "/Users/a/AppTranslocationNot/Racoon.app",
+        ] {
+            assert_eq!(trash_block_by_path(Path::new(fine)), None, "{fine}");
+        }
+    }
+
+    #[test]
+    fn a_bundle_in_a_folder_that_can_be_written_may_be_trashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let macos = dir.path().join("Racoon.app").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("racoon-finder");
+        std::fs::write(&exe, "x").unwrap();
+        let bundle = can_trash_app_bundle(&exe).expect("movable");
+        assert_eq!(
+            bundle,
+            std::fs::canonicalize(dir.path().join("Racoon.app")).unwrap()
+        );
+        // A program outside a bundle is no candidate, and one that is gone is not either.
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        assert_eq!(can_trash_app_bundle(&plain), Err(TrashBlock::NotInBundle));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_in_a_folder_nobody_writes_is_blocked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let apps = dir.path().join("apps");
+        let macos = apps.join("Racoon.app").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let exe = macos.join("racoon-finder");
+        std::fs::write(&exe, "x").unwrap();
+        std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // The administrator may write anywhere: the check has nothing to say then.
+        let probe = apps.join("probe");
+        let as_root = std::fs::write(&probe, "x").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        let result = can_trash_app_bundle(&exe);
+        std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !as_root {
+            assert_eq!(result, Err(TrashBlock::FolderNotWritable));
         }
     }
 

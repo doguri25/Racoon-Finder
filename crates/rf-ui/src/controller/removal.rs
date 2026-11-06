@@ -54,12 +54,18 @@ impl Controller {
             return self
                 .update(|state| state.removal_planned(Err(words::background_failed().to_owned())));
         };
-        let bundle = context.exe.as_deref().and_then(rf_platform::app_bundle_of);
+        let exe = context.exe.clone();
         let started = std::thread::Builder::new()
             .name("rf-ui-plan-removal".to_owned())
             .spawn(move || {
-                let plan = removal::plan_lines(&context.paths, bundle.as_deref())
-                    .map_err(|error| error.to_string());
+                // Refused here as well as at the start: the list is not shown for an app that
+                // cannot be moved to the trash. The path listed is the one that will be moved.
+                let plan = match exe.as_deref().map(rf_platform::can_trash_app_bundle) {
+                    Some(Ok(bundle)) => removal::plan_lines(&context.paths, Some(&bundle))
+                        .map_err(|error| error.to_string()),
+                    Some(Err(block)) => Err(words::removal_blocked(block).to_owned()),
+                    None => Err(words::background_failed().to_owned()),
+                };
                 post(move |c| c.update(|state| state.removal_planned(plan)));
             });
         if started.is_err() {
@@ -109,6 +115,16 @@ impl Controller {
         let started = std::thread::Builder::new()
             .name("rf-ui-remove".to_owned())
             .spawn(move || {
+                // Before the backup and before anything is touched: an app that cannot be moved
+                // to the trash is not half-removed.
+                if let Some(Err(block)) = context
+                    .exe
+                    .as_deref()
+                    .map(rf_platform::can_trash_app_bundle)
+                {
+                    let text = words::removal_blocked(block).to_owned();
+                    return post(move |c| c.removal_stopped(RemovalStop::BackupFailed(text)));
+                }
                 let documents = documents_folder();
                 let saved = || text.and_then(|text| saver.save_within(text, FINAL_SAVE_WAIT));
                 match back_up_first(&context.paths, backup, documents.as_deref(), saved) {
@@ -139,7 +155,10 @@ impl Controller {
             .name("rf-ui-remove-app".to_owned())
             .spawn(move || {
                 end_work(end);
-                saver.stop_within(FINAL_SAVE_WAIT);
+                if !saver.stop_within(FINAL_SAVE_WAIT) {
+                    // A write of the settings still hangs and could make the folder again.
+                    return stopped(backed_up, vec![words::removal_save_pending().to_owned()]);
+                }
                 let outcome = removal::remove(
                     &context.paths,
                     rf_ledger::os_backend(),
@@ -147,6 +166,8 @@ impl Controller {
                 );
                 match outcome {
                     Outcome::Done { .. } => {
+                        // A thumbnail still being written may have made the folder again.
+                        let _ = std::fs::remove_dir_all(context.paths.cache_dir());
                         let _ = slint::invoke_from_event_loop(|| {
                             let _ = slint::quit_event_loop();
                         });

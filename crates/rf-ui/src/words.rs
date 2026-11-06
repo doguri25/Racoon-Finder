@@ -786,6 +786,31 @@ pub fn cleanup_step_other() -> &'static str {
     "그 밖의 정리 단계"
 }
 
+/// 완전 삭제… did not start because the app cannot be moved to the trash from where it is: it
+/// would have deleted the data and left the app. Nothing was changed.
+pub fn removal_blocked(block: rf_platform::TrashBlock) -> &'static str {
+    use rf_platform::TrashBlock;
+    match block {
+        TrashBlock::NotInBundle => {
+            "이 앱은 앱 번들로 실행 중이 아니라 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다."
+        }
+        TrashBlock::Translocated => {
+            "Gatekeeper가 앱을 임시 위치에서 실행 중이라 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 앱을 응용 프로그램 폴더로 옮긴 뒤 다시 실행해 주세요."
+        }
+        TrashBlock::ReadOnlyVolume => {
+            "앱이 읽기 전용 디스크(마운트한 디스크 이미지 등)에 있어 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 앱을 응용 프로그램 폴더로 복사해 그 앱으로 다시 실행해 주세요."
+        }
+        TrashBlock::FolderNotWritable => {
+            "앱이 있는 폴더에 쓸 권한이 없어 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 관리자에게 맡기거나 직접 휴지통으로 옮겨 주세요."
+        }
+    }
+}
+
+/// The settings could not be written for good before the removal went on.
+pub fn removal_save_pending() -> &'static str {
+    "설정 저장이 끝나지 않아 설정 폴더는 지우지 않았습니다. 잠시 뒤 앱을 끝내고 다시 실행해 지워 주세요."
+}
+
 /// The settings were copied to `copy`.
 pub fn cleanup_backup_done(copy: &std::path::Path) -> String {
     format!("설정을 백업했습니다: {}", copy.display())
@@ -856,7 +881,7 @@ pub fn removal_title() -> &'static str {
 
 /// What the window of 완전 삭제… says before the list of what goes.
 pub fn removal_message() -> &'static str {
-    "이 컴퓨터에서 Racoon Finder를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 앱은 휴지통으로 옮겨집니다. 지운 데이터는 되돌릴 수 없습니다."
+    "이 컴퓨터에서 Racoon Finder를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 마지막으로 앱을 휴지통으로 옮깁니다(옮길 수 없으면 알려 드립니다). 지운 데이터는 되돌릴 수 없습니다."
 }
 
 /// The checkbox of the window of 완전 삭제…: the settings are copied to the documents folder
@@ -913,7 +938,7 @@ pub fn removal_stopped_title() -> &'static str {
 
 /// Said above the report when the app's data is partly or wholly gone and the app stays.
 pub fn removal_stopped_note() -> &'static str {
-    "여기서 멈췄습니다. 앱을 끝낸 뒤 다시 실행하면 남은 것부터 이어서 지울 수 있습니다."
+    "여기서 멈췄습니다. 아래에 어디까지 했는지 적었습니다. 지우지 못한 것이 있으면 앱을 끝낸 뒤 다시 실행해 이어서 지울 수 있습니다."
 }
 
 /// The app's data is gone, but the app could not be moved to the trash.

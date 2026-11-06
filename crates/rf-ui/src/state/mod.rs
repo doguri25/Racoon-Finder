@@ -383,6 +383,9 @@ pub struct AppState {
     planning_removal: bool,
     /// 완전 삭제… works (the app is `quitting` meanwhile, so the window is the closing note).
     removing: bool,
+    /// The windows and job questions that were open when 완전 삭제… began, kept aside until it
+    /// is known whether it goes on.
+    removal_stash: Vec<Modal>,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
     /// For each job under way, how far the user had changed the selection of each tab when it
@@ -545,6 +548,7 @@ impl AppState {
             removal_offer: None,
             planning_removal: false,
             removing: false,
+            removal_stash: Vec::new(),
             journal_error_told: false,
             selections_at_submit: HashMap::new(),
             copies: copies::Copies::default(),

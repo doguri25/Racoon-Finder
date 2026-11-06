@@ -3,7 +3,7 @@
 
 use super::jobs::finish;
 use super::*;
-use crate::dialogs::{ConfirmPurpose, Modal};
+use crate::dialogs::{Confirm, ConfirmPurpose, Modal};
 use crate::jobs::Started;
 use crate::removal::Offer;
 use crate::words::{self, JobWork};
@@ -22,7 +22,7 @@ fn plan() -> Vec<String> {
     ]
 }
 
-fn the_confirm(state: &AppState) -> &crate::dialogs::Confirm {
+fn the_confirm(state: &AppState) -> &Confirm {
     match state.modal() {
         Some(Modal::Confirm(confirm)) => confirm,
         other => panic!("a confirmation, not {other:?}"),
@@ -258,5 +258,65 @@ fn nothing_is_offered_while_the_app_ends() {
     state.begin_quit();
     assert_eq!(state.removal_asked(), []);
     assert_eq!(state.removal_planned(Ok(plan())), []);
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
+fn a_failed_backup_puts_back_the_windows_and_the_job_questions_that_were_open() {
+    use crate::resolver::{Asked, Question};
+    let mut state = menu(Some(Offer::DeleteCompletely));
+    running(&mut state, 1);
+    // A question of the job is open, and another waits behind it.
+    let question = |id| Question {
+        id,
+        job: JobId(1),
+        asked: Asked::Preflight(Vec::new()),
+    };
+    asked_about(&mut state);
+    state.question(question(7));
+    state.question(question(8));
+    // They wait behind the question of 완전 삭제…, which goes on with the jobs stopped.
+    assert_eq!(state.confirm_accepted(), []);
+    assert_eq!(
+        state.confirm_accepted(),
+        [Effect::Removal(RemovalWork::Run { backup: false })]
+    );
+
+    // While it works nothing shows, and a question that comes meanwhile is kept, not lost.
+    assert_eq!(state.modal(), None);
+    state.question(question(9));
+    assert_eq!(state.modal(), None);
+
+    let text = "백업하지 못했습니다".to_owned();
+    assert_eq!(
+        state.removal_stopped(RemovalStop::BackupFailed(text.clone())),
+        [Effect::Notice(text)]
+    );
+
+    // The first question shows again, then the others in their order; the window is live.
+    assert!(!state.quitting() && !state.removing());
+    let ids = |state: &AppState| match state.modal() {
+        Some(Modal::Preflight(q)) => q.id,
+        other => panic!("a question, not {other:?}"),
+    };
+    assert_eq!(ids(&state), 7);
+    state.dialog_cancelled();
+    assert_eq!(ids(&state), 8);
+    state.dialog_cancelled();
+    assert_eq!(ids(&state), 9);
+    state.dialog_cancelled();
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
+fn the_questions_set_aside_are_gone_once_the_engine_has_ended() {
+    let mut state = menu(Some(Offer::DeleteCompletely));
+    asked_about(&mut state);
+    state.open(Modal::Confirm(Confirm::quit(0, None)));
+    state.confirm_accepted();
+    state.removal_stopped(RemovalStop::Partway(vec!["x".to_owned()]));
+    // Only the window that says how far it got; the older window does not come back.
+    assert!(matches!(state.modal(), Some(Modal::Failures(_))));
+    state.dialog_cancelled();
     assert_eq!(state.modal(), None);
 }

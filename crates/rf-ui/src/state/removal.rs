@@ -123,27 +123,55 @@ impl AppState {
         Vec::new()
     }
 
-    /// The removal begins: every window closes and no question shows any more, as the app
-    /// ends. The worker does the rest ([`RemovalWork::Run`]).
+    /// The removal begins: the window is the closing note and takes no click or key. Windows
+    /// and questions that were open are kept aside, not answered or dropped: the backup may
+    /// still stop the removal ([`AppState::removal_stopped`] puts them back). The worker does
+    /// the rest ([`RemovalWork::Run`]).
     pub(super) fn begin_removal(&mut self, backup: bool) -> Vec<Effect> {
         if self.quitting {
             return Vec::new();
         }
-        self.close_for_end();
+        let asking_removal = |modal: &Modal| {
+            matches!(
+                modal,
+                Modal::Confirm(confirm)
+                    if matches!(
+                        confirm.purpose,
+                        ConfirmPurpose::RemoveApp | ConfirmPurpose::RemoveAppWithJobs { .. }
+                    )
+            )
+        };
+        self.removal_stash = self
+            .modal
+            .take()
+            .into_iter()
+            .chain(self.later.drain(..))
+            .filter(|modal| !asking_removal(modal))
+            .collect();
+        self.toast = None;
+        self.quitting = true;
         self.removing = true;
         vec![Effect::Removal(RemovalWork::Run { backup })]
     }
 
-    /// The removal stopped before it was complete, as the worker tells: the window is the
-    /// window again, with a notice or with a window that says how far it got.
+    /// The removal stopped before it was complete, as the worker tells. Before anything was
+    /// touched ([`RemovalStop::BackupFailed`]) the windows and the job questions that were open
+    /// come back as they were; after the engine ended ([`RemovalStop::Partway`]) they are gone
+    /// with it and a window says how far the removal got.
     pub fn removal_stopped(&mut self, stop: RemovalStop) -> Vec<Effect> {
         if !self.removing {
             return Vec::new();
         }
         self.removing = false;
         self.quitting = false;
+        let stash = std::mem::take(&mut self.removal_stash);
         match stop {
-            RemovalStop::BackupFailed(text) => vec![Effect::Notice(text)],
+            RemovalStop::BackupFailed(text) => {
+                for modal in stash {
+                    self.open(modal);
+                }
+                vec![Effect::Notice(text)]
+            }
             RemovalStop::Partway(mut lines) => {
                 lines.insert(0, words::removal_stopped_note().to_owned());
                 self.open(Modal::Failures(Failures {

@@ -133,7 +133,9 @@ impl AppState {
     /// Takes a question of a job: it shows once the windows before it have closed. While the
     /// app ends, it is left unanswered, for the release that follows the engine's shutdown.
     pub fn question(&mut self, question: Question) -> Vec<Effect> {
-        if self.quitting {
+        // While the app removes itself, a question that comes before the engine ends is kept
+        // aside with the windows that were open ([`AppState::removal_stopped`]).
+        if self.quitting && !self.removing {
             return Vec::new();
         }
         let Question { id, job, asked } = question;
@@ -147,6 +149,10 @@ impl AppState {
             }),
             Asked::Preflight(issues) => Modal::Preflight(PreflightQuestion { id, job, issues }),
         };
+        if self.removing {
+            self.removal_stash.push(modal);
+            return Vec::new();
+        }
         self.open(modal);
         // Behind the tray icon, nobody would see it: the window comes back to ask.
         self.follow_background()
