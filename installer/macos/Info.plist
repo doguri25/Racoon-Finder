@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Bundle information for the demo .app built by .github/workflows/demo.yml.
+  The name and identifier must match rf_core::identity::{DISPLAY_NAME, BUNDLE_ID}
+  (crates/rf-core/src/identity.rs); the workflow checks this.
+  The workflow replaces __VERSION__ with the app crate's version.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Racoon Finder</string>
+	<key>CFBundleDisplayName</key>
+	<string>Racoon Finder</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.doguri25.RacoonFinder</string>
+	<key>CFBundleExecutable</key>
+	<string>racoon-finder</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<!-- Why the app asks to control Finder: OS 속성 창 열기 opens Finder's Get Info window
+	     through osascript (crates/rf-platform/src/shell/macos.rs). -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>OS 속성 창 열기에서 Finder의 정보 가져오기 창을 열려면 Finder를 제어해야 합니다.</string>
+</dict>
+</plist>

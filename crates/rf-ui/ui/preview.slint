@@ -1,0 +1,326 @@
+// The preview panel (VIEW-02) at the right end of the window, and quick look (VIEW-01) over it:
+// what Rust's preview (`ui_bridge::PreviewModels`) shows of the item under the active pane's
+// cursor. An image fits the room (never larger than it is), a text shows its lines in a fixed
+// width font without numbers, a folder its item count, and anything else its icon; the name,
+// kind, size and date go under it.
+//
+// The panel never takes the keys: nothing in it takes focus, and its text scrolls with the
+// wheel. Quick look takes every key while it shows and hands it to Rust (`key`), which uses
+// ← → Space Esc (and ⌘Y on macOS) and lets no other one reach the panes; ↑ ↓ PageUp PageDown
+// Home End scroll its text.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { ToolButton } from "widgets.slint";
+import { Shortcuts } from "shortcuts.slint";
+
+// What the preview has of the item: nothing to show (no item), its content on its way, or what
+// a worker made of it.
+export enum PreviewKind {
+    none,
+    loading,
+    image,
+    text,
+    folder,
+    // The facts alone: a file that is no text, a link, a special file.
+    plain,
+    // An image file too large to decode: its size shows.
+    large,
+    // It cannot be read, or it is broken ("미리 볼 수 없습니다").
+    unavailable,
+}
+
+export struct PreviewView {
+    kind: PreviewKind,
+    // The item's name as the panes show it, its line icon (`Icon.name`), and whether it is a
+    // folder (the icon's color).
+    name: string,
+    icon: string,
+    folder: bool,
+    // Its kind, size and date: "PNG 이미지 · 1.2 MB · 2026-10-30 09:12".
+    facts: string,
+    // What the content says: the image's size, the text's encoding, the folder's count, or why
+    // nothing shows.
+    note: string,
+    image: image,
+    lines: [string],
+}
+
+// The fixed width font of a text, each system's own.
+export global PreviewFont {
+    out property <string> mono: Platform.os == OperatingSystemType.windows ? "Consolas" : Platform.os == OperatingSystemType.macos ? "Menlo" : "DejaVu Sans Mono";
+}
+
+// One line of a text, wrapped between words, and inside a word too long for the room.
+component TextLine inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size;
+
+    HorizontalLayout {
+        padding-left: Theme.gap-s;
+        padding-right: Theme.gap-s;
+
+        Text {
+            text: root.text;
+            font-family: PreviewFont.mono;
+            font-size: root.font-size;
+            color: Theme.text;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+}
+
+// What the item holds: its image, its text, or its icon with what the preview says of it.
+component PreviewBody inherits Rectangle {
+    in property <PreviewView> view;
+    in property <length> icon-size;
+    in property <length> text-size;
+
+    // A key that scrolls the text (↑ ↓ PageUp PageDown Home End): whether it was one.
+    public function scroll-key(event: KeyEvent) -> bool {
+        if (root.view.kind != PreviewKind.text || event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            return false;
+        }
+        let line = root.text-size * 1.6;
+        let page = max(line, lines.visible-height - line);
+        if (event.text == Key.UpArrow) {
+            root.scroll-to(lines.content-y + line);
+        } else if (event.text == Key.DownArrow) {
+            root.scroll-to(lines.content-y - line);
+        } else if (event.text == Key.PageUp) {
+            root.scroll-to(lines.content-y + page);
+        } else if (event.text == Key.PageDown) {
+            root.scroll-to(lines.content-y - page);
+        } else if (event.text == Key.Home) {
+            root.scroll-to(0px);
+        } else if (event.text == Key.End) {
+            root.scroll-to(-lines.content-height);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    function scroll-to(y: length) {
+        lines.content-y = max(min(0px, lines.visible-height - lines.content-height), min(0px, y));
+    }
+
+    // Another item's text starts at its top.
+    changed view => {
+        if (root.view.kind != PreviewKind.text) {
+            lines.content-y = 0px;
+        }
+    }
+
+    if root.view.kind == PreviewKind.image: Image {
+        // As large as the room lets it be, and no larger than it is.
+        property <float> scale: min(1, min(parent.width / max(1px, root.view.image.width * 1px), parent.height / max(1px, root.view.image.height * 1px)));
+        width: root.view.image.width * 1px * self.scale;
+        height: root.view.image.height * 1px * self.scale;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.view.image;
+        image-fit: contain;
+        accessible-role: image;
+        accessible-label: root.view.name;
+    }
+
+    lines := ListView {
+        visible: root.view.kind == PreviewKind.text;
+        accessible-label: root.view.name;
+
+        for line in root.view.lines: TextLine {
+            text: line;
+            font-size: root.text-size;
+        }
+    }
+
+    if root.view.kind != PreviewKind.image && root.view.kind != PreviewKind.text: VerticalLayout {
+        alignment: center;
+        spacing: Theme.gap-m;
+
+        if root.view.kind != PreviewKind.none: HorizontalLayout {
+            alignment: center;
+
+            Icon {
+                width: root.icon-size;
+                height: root.icon-size;
+                stroke-width: 1.2px;
+                name: root.view.icon;
+                color: root.view.kind == PreviewKind.loading ? Theme.faint : root.view.folder ? Theme.folder : Theme.muted;
+            }
+        }
+        Text {
+            text: root.view.kind == PreviewKind.none ? "미리 볼 항목이 없습니다" : root.view.note;
+            color: Theme.muted;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// The preview panel, at the right end of the window while it shows (LAY-06).
+export component PreviewPanel inherits Rectangle {
+    in property <PreviewView> view;
+
+    background: Theme.panel;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-large;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "미리 보기";
+
+    VerticalLayout {
+        padding: Theme.gap-l;
+        spacing: Theme.gap-s;
+
+        Text {
+            accessible-role: none;
+            text: "미리 보기";
+            font-weight: 700;
+            color: Theme.text;
+        }
+
+        PreviewBody {
+            vertical-stretch: 1;
+            view: root.view;
+            icon-size: 64px;
+            text-size: Theme.font-small;
+        }
+
+        if root.view.kind != PreviewKind.none: VerticalLayout {
+            spacing: Theme.gap-xs;
+
+            Text {
+                text: root.view.name;
+                font-weight: 600;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            // Its facts keep their words together (no-break spaces): the line breaks only
+            // between them.
+            Text {
+                text: root.view.facts;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+            // The image's size and the text's encoding, under the facts (the others say theirs
+            // under the icon).
+            if root.view.kind == PreviewKind.image || root.view.kind == PreviewKind.text: Text {
+                text: root.view.note;
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Quick look: the item over the window, on a dark scrim. A click on the scrim or the close
+// button closes it, as Rust's keys do.
+export component QuickLook inherits Rectangle {
+    in property <PreviewView> view;
+    // A key while it shows: Rust decides what it does (`keys::quick_look_key`).
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool);
+    callback closed();
+
+    // It takes the keys.
+    public function take-keys() {
+        keys.focus();
+    }
+
+    background: #00000059;
+
+    TouchArea {
+        clicked => {
+            root.closed();
+        }
+    }
+
+    card := Rectangle {
+        width: min(960px, root.width - 96px);
+        height: min(680px, root.height - 80px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: Theme.radius-large;
+        clip: true;
+        accessible-role: groupbox;
+        accessible-label: "빠른 보기";
+
+        // Takes the clicks on the card.
+        TouchArea { }
+
+        keys := FocusScope {
+            key-pressed(event) => {
+                if (body.scroll-key(event)) {
+                    return accept;
+                }
+                root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta);
+                accept
+            }
+
+            VerticalLayout {
+                padding: Theme.gap-l;
+                spacing: Theme.gap-m;
+
+                HorizontalLayout {
+                    spacing: Theme.gap-s;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        name: root.view.icon;
+                        color: root.view.folder ? Theme.folder : Theme.muted;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.view.name;
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    ToolButton {
+                        icon: "close";
+                        label: "닫기";
+                        keys: Shortcuts.quick-look;
+                        clicked => {
+                            root.closed();
+                        }
+                    }
+                }
+
+                body := PreviewBody {
+                    vertical-stretch: 1;
+                    view: root.view;
+                    icon-size: 96px;
+                    text-size: Theme.font-body;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.gap-m;
+
+                    Text {
+                        text: root.view.kind == PreviewKind.image || root.view.kind == PreviewKind.text ? "\{root.view.facts} · \{root.view.note}" : root.view.facts;
+                        font-size: Theme.font-small;
+                        color: Theme.muted;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: "← → 이전·다음 파일 · \{Shortcuts.quick-look} 닫기";
+                        font-size: Theme.font-small;
+                        color: Theme.faint;
+                    }
+                }
+            }
+        }
+    }
+}

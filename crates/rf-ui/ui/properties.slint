@@ -1,0 +1,606 @@
+// The properties window (OPS-06's own window) and the checksums of its files (OPS-10), over the
+// main window: what Rust (`properties.rs`, `ui_bridge::PropertiesModels`) shows of the items it
+// opened for. It only reads.
+//
+// The facts first: the kind, the place, the size (while a worker counts what folders hold, with
+// 중지 under it), the times, the attributes and where a link leads. Then the checksums: an
+// algorithm to choose (MD5, SHA-1, SHA-256, BLAKE3, xxHash3-64), which a worker makes for each
+// file, a row each, with a bar while it reads and 복사 once it is made; and 비교, a field for a
+// hash to compare with them (Rust compares, ignoring case and the space around it, and says 일치
+// or 불일치). While an input method composes a syllable, the field's text and Rust do not have it
+// until it is committed, and Tab leaves the field only once it is.
+//
+// The keys (KEY-02): Esc, and Enter while no button is chosen, close it (닫기 is its main
+// button). Tab and Shift+Tab go round 중지 (while the count goes on), the algorithms (← →; Space
+// chooses the one chosen again, which makes what 계산 중지 left), the checksums (↑ ↓ among several
+// files; Space or Enter copies the row's), 계산 중지 (while checksums are made), 비교, OS 속성 창
+// 열기 (for one item: the system's own window takes the place of this one, OPS-06) and 닫기,
+// past what does not show; Space or Enter presses the button the keys are on. A fact whose
+// value is shortened (a long path) has the whole of it in a tooltip and for screen readers.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { PrimaryButton, OutlineButton, DialogFrame, Segment, SegmentTrack, ProgressBar, Field } from "widgets.slint";
+import { DialogKeys } from "shortcuts.slint";
+import { ListScroll } from "list-parts.slint";
+import { PreviewFont } from "preview.slint";
+
+// A fact of the window: what it is, and its value.
+export struct FactRow {
+    label: string,
+    value: string,
+    // The whole value when `value` leaves part of it out (a long path); empty otherwise.
+    full: string,
+}
+
+// A file's checksum.
+export struct HashRowView {
+    // The file's name (it shows when there are several files).
+    name: string,
+    // The checksum once it is made; else what the row waits for, or why it has none.
+    value: string,
+    // How far the file is read, 0 to 1, while it is read; -1 otherwise.
+    progress: float,
+    // `value` is a checksum: 복사 shows.
+    done: bool,
+    // The checksum went to the clipboard.
+    copied: bool,
+    // The pasted hash is this checksum.
+    matched: bool,
+}
+
+export struct PropertiesView {
+    // The item's name, or how many items there are.
+    title: string,
+    icon: string,
+    folder: bool,
+    facts: [FactRow],
+    // A worker counts what the folders hold: 중지 shows.
+    counting: bool,
+    // What the count says: that it goes on, stopped or failed, what it left out.
+    count-note: string,
+    // There is a file to hash.
+    hashable: bool,
+    // Checksums are made: 계산 중지 shows.
+    hashing: bool,
+    // The algorithm chosen (`Algorithms.names`); -1 before one is.
+    algorithm: int,
+    // What to do first, how far several files are, what was left out, why a copy failed; or,
+    // without a file to hash, that only files have checksums.
+    hash-note: string,
+    // Several files: their names show, and ↑ ↓ choose among them.
+    several: bool,
+    // One item: OS 속성 창 열기 shows.
+    system: bool,
+    hashes: [HashRowView],
+    // What the comparison says ("일치", "불일치", "계산이 끝나면 비교합니다"), and which it is.
+    verdict: string,
+    matched: bool,
+    mismatched: bool,
+}
+
+// The names of the algorithms, in the order of their numbers (`hashing::Algorithm::number`).
+export global Algorithms {
+    out property <[string]> names: ["MD5", "SHA-1", "SHA-256", "BLAKE3", "xxHash3-64"];
+}
+
+// The width of the facts' labels.
+global FactsColumn {
+    out property <length> label: 96px;
+}
+
+// A file's row among the checksums: its name (of several), its checksum in a fixed width font
+// (or a bar while it is read, or what it waits for), a check when it is the pasted hash, and
+// 복사.
+component HashLine inherits Rectangle {
+    in property <HashRowView> line;
+    in property <bool> several;
+    // The keys are on this row (of several), or on its 복사 (of one file).
+    in property <bool> current;
+    in property <bool> focused;
+    in property <string> algorithm;
+    callback copy();
+
+    height: 40px;
+    border-radius: 6px;
+    background: root.current ? Theme.selection : transparent;
+    accessible-role: list-item;
+    accessible-label: root.several ? root.line.name : root.algorithm;
+    accessible-description: root.line.value;
+    accessible-item-selected: root.current;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 4px;
+        spacing: Theme.gap-m;
+
+        if root.several: Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            preferred-width: 0px;
+            text: root.line.name;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            horizontal-stretch: 2;
+            min-width: 0px;
+            preferred-width: 0px;
+
+            if root.line.progress >= 0: HorizontalLayout {
+                spacing: Theme.gap-s;
+
+                ProgressBar {
+                    y: (parent.height - self.height) / 2;
+                    horizontal-stretch: 1;
+                    value: root.line.progress;
+                }
+                Text {
+                    text: root.line.value;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+            }
+            if root.line.progress < 0 && root.line.done: Text {
+                width: 100%;
+                height: 100%;
+                text: root.line.value;
+                font-family: PreviewFont.mono;
+                // A checksum of 64 digits whole on one line beside 복사.
+                font-size: 12px;
+                color: Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.line.progress < 0 && !root.line.done: Text {
+                width: 100%;
+                height: 100%;
+                text: root.line.value;
+                color: Theme.muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if root.line.matched: Icon {
+            y: (parent.height - self.height) / 2;
+            width: 16px;
+            height: 16px;
+            name: "check";
+            color: Theme.accent;
+        }
+        if root.line.done: OutlineButton {
+            y: (parent.height - self.height) / 2;
+            button-height: 30px;
+            text: root.line.copied ? "복사함" : "복사";
+            focused: root.focused;
+            clicked => {
+                root.copy();
+            }
+        }
+    }
+}
+
+export component PropertiesDialog inherits DialogFrame {
+    in property <PropertiesView> view;
+    // The most height the window may take: the room the main window has for it.
+    in property <length> room: 100000px;
+    callback algorithm-chosen(number: int);
+    callback count-stopped();
+    callback hashes-stopped();
+    callback copy(row: int);
+    callback compare-edited(text: string);
+    // OS 속성 창 열기.
+    callback system-properties();
+    callback cancelled();
+
+    property <bool> composing: compare.composing;
+    // Where the keys are: -1 nowhere yet, 0 중지 (of the count), 1 the algorithms, 2 the
+    // checksums, 3 계산 중지, 4 비교, 5 OS 속성 창 열기, 6 닫기.
+    property <int> stop: -1;
+    // The row of the checksums the keys are on, among several files.
+    property <int> cursor-row: 0;
+    // The checksums show: there is a file, and an algorithm is chosen.
+    property <bool> listed: root.view.hashable && root.view.algorithm >= 0;
+    property <length> row-height: 40px;
+
+    height: min(layout.preferred-height, root.room);
+    accessible-label: "속성";
+
+    init => {
+        keys.focus();
+    }
+
+    // A count or checksums ended while the keys were on their 중지, which is gone: the keys are
+    // nowhere again.
+    changed view => {
+        if ((root.stop == 0 && !root.view.counting) || (root.stop == 3 && !root.view.hashing)) {
+            root.stop = -1;
+        }
+    }
+
+    // Whether stop `stop` shows, for the keys to go to it.
+    pure function shows(stop: int) -> bool {
+        if (stop == 0) {
+            return root.view.counting;
+        }
+        if (stop == 1 || stop == 4) {
+            return root.view.hashable;
+        }
+        if (stop == 2) {
+            return root.listed;
+        }
+        if (stop == 3) {
+            return root.view.hashing;
+        }
+        if (stop == 5) {
+            return root.view.system;
+        }
+        return stop == 6;
+    }
+
+    // The stop `step` places after `stop`, among the seven, going round.
+    pure function after(stop: int, step: int) -> int {
+        return Math.mod(stop + step + 7, 7);
+    }
+
+    // The keys go `step` stops on, past those that do not show (닫기 always does).
+    function go(step: int) {
+        let first = root.stop < 0 ? (step > 0 ? 0 : 6) : root.after(root.stop, step);
+        let second = root.shows(first) ? first : root.after(first, step);
+        let third = root.shows(second) ? second : root.after(second, step);
+        let fourth = root.shows(third) ? third : root.after(third, step);
+        let fifth = root.shows(fourth) ? fourth : root.after(fourth, step);
+        let sixth = root.shows(fifth) ? fifth : root.after(fifth, step);
+        let seventh = root.shows(sixth) ? sixth : root.after(sixth, step);
+        root.stop = seventh;
+        if (seventh == 4) {
+            // A field the keys go to has all its text selected: what is pasted replaces it.
+            compare.take-focus-all();
+        } else {
+            keys.focus();
+        }
+    }
+
+    // ← or →: the algorithm before or after the one chosen; from none, the first or the last.
+    function step-algorithm(forward: bool) {
+        let from = root.view.algorithm;
+        let count = Algorithms.names.length;
+        root.algorithm-chosen(from < 0 ? (forward ? 0 : count - 1) : max(0, min(count - 1, from + (forward ? 1 : -1))));
+    }
+
+    // ↑ or ↓ among several files: the row before or after, scrolled into view.
+    function step-row(delta: int) {
+        root.cursor-row = max(0, min(root.view.hashes.length - 1, root.cursor-row + delta));
+        let y = ListScroll.into-view(root.cursor-row * root.row-height, root.row-height, list.content-y, list.visible-height);
+        if (y <= 0) {
+            list.content-y = y;
+        }
+    }
+
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.go(step);
+                return accept;
+            }
+            let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+            if (root.stop == 1 && plain && (event.text == Key.LeftArrow || event.text == Key.RightArrow)) {
+                root.step-algorithm(event.text == Key.RightArrow);
+                return accept;
+            }
+            // The one chosen, again: what 계산 중지 left is made.
+            if (root.stop == 1 && event.text == " " && root.view.algorithm >= 0) {
+                root.algorithm-chosen(root.view.algorithm);
+                return accept;
+            }
+            if (root.stop == 2 && root.view.several && plain && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                root.step-row(event.text == Key.DownArrow ? 1 : -1);
+                return accept;
+            }
+            if (root.stop == 2 && DialogKeys.presses(event)) {
+                root.copy(root.view.several ? root.cursor-row : 0);
+                return accept;
+            }
+            if (root.stop == 0 && DialogKeys.presses(event)) {
+                root.count-stopped();
+                return accept;
+            }
+            if (root.stop == 3 && DialogKeys.presses(event)) {
+                root.hashes-stopped();
+                return accept;
+            }
+            if (root.stop == 5 && DialogKeys.presses(event)) {
+                root.system-properties();
+                return accept;
+            }
+            if ((root.stop == 6 && DialogKeys.presses(event)) || event.text == Key.Return) {
+                root.cancelled();
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 20px;
+            spacing: Theme.gap-m;
+
+            // The item: its icon and its name.
+            HorizontalLayout {
+                spacing: Theme.gap-m;
+
+                Icon {
+                    y: (parent.height - self.height) / 2;
+                    width: 28px;
+                    height: 28px;
+                    name: root.view.icon;
+                    color: root.view.folder ? Theme.folder : Theme.muted;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    text: root.view.title;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+            // The facts.
+            VerticalLayout {
+                spacing: 6px;
+
+                for fact in root.view.facts: HorizontalLayout {
+                    spacing: Theme.gap-m;
+
+                    Text {
+                        width: FactsColumn.label;
+                        text: fact.label;
+                        color: Theme.muted;
+                    }
+                    // One line: Rust shortens a long path in its middle (the whole of it shows
+                    // in a tooltip and goes to screen readers), and the end of any other long
+                    // value is left out.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        preferred-width: 0px;
+
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: fact.value;
+                            color: Theme.text;
+                            overflow: elide;
+                            accessible-description: fact.full;
+                        }
+                        if fact.full != "": Tooltip {
+                            text: @markdown("\{fact.full}");
+                        }
+                    }
+                }
+            }
+            // What the count says, and 중지 while it goes on.
+            if root.view.counting || root.view.count-note != "": HorizontalLayout {
+                padding-left: FactsColumn.label + Theme.gap-m;
+                spacing: Theme.gap-m;
+
+                // A line for each thing it says (Rust breaks them).
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    text: root.view.count-note;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.view.counting: OutlineButton {
+                    button-height: 30px;
+                    text: "중지";
+                    focused: root.stop == 0;
+                    clicked => {
+                        root.count-stopped();
+                    }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+            // The checksums: the algorithm, then a row for each file.
+            HorizontalLayout {
+                spacing: Theme.gap-m;
+
+                Text {
+                    width: FactsColumn.label;
+                    text: "체크섬";
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                }
+                if root.view.hashable: SegmentTrack {
+                    label: "알고리즘";
+                    focused: root.stop == 1;
+
+                    for name[i] in Algorithms.names: Segment {
+                        text: name;
+                        chosen: root.view.algorithm == i;
+                        clicked => {
+                            root.algorithm-chosen(i);
+                        }
+                    }
+                }
+                if !root.view.hashable: Text {
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    horizontal-stretch: 1;
+                    text: root.view.hash-note;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+            // Always in the window, for the keys to reach; it takes no room while there is
+            // nothing to list.
+            list := ListView {
+                visible: root.listed;
+                min-height: root.listed ? root.row-height + 4px : 0px;
+                preferred-height: root.listed ? min(root.view.hashes.length, 6) * root.row-height + 4px : 0px;
+                max-height: root.listed ? root.view.hashes.length * root.row-height + 4px : 0px;
+                vertical-stretch: 1;
+                accessible-label: "체크섬";
+
+                for hash[i] in root.view.hashes: HashLine {
+                    line: hash;
+                    several: root.view.several;
+                    current: root.view.several && root.stop == 2 && root.cursor-row == i;
+                    focused: !root.view.several && root.stop == 2;
+                    algorithm: root.view.algorithm >= 0 ? Algorithms.names[root.view.algorithm] : "";
+                    copy => {
+                        root.copy(i);
+                    }
+                }
+            }
+            // What the checksums say, a line each, and 계산 중지 while they are made: it stops
+            // them, and the ones made stay.
+            if root.view.hashable && (root.view.hash-note != "" || root.view.hashing): HorizontalLayout {
+                spacing: Theme.gap-m;
+
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    text: root.view.hash-note;
+                    color: Theme.muted;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.view.hashing: OutlineButton {
+                    button-height: 30px;
+                    text: "계산 중지";
+                    focused: root.stop == 3;
+                    clicked => {
+                        root.hashes-stopped();
+                    }
+                }
+            }
+            // 비교: always in the window, as the list is, and without room while there is no
+            // file.
+            Rectangle {
+                visible: root.view.hashable;
+                height: root.view.hashable ? 36px : 0px;
+
+                HorizontalLayout {
+                    spacing: Theme.gap-m;
+
+                    Text {
+                        width: FactsColumn.label;
+                        text: "비교";
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                    }
+                    compare := Field {
+                        hint: "붙여넣은 해시와 비교";
+                        label: "비교";
+                        edited(text) => {
+                            root.compare-edited(text);
+                        }
+                        key(event) => {
+                            if (event.text == Key.Escape) {
+                                root.cancelled();
+                                return accept;
+                            }
+                            let step = DialogKeys.tab-step(event);
+                            if (step != 0) {
+                                if (!root.composing) {
+                                    root.go(step);
+                                }
+                                return accept;
+                            }
+                            reject
+                        }
+                        // A click into the field takes the keys there.
+                        changed has-focus => {
+                            if (self.has-focus) {
+                                root.stop = 4;
+                            }
+                        }
+                    }
+                    // As wide whatever it says, so that the field does not move.
+                    HorizontalLayout {
+                        width: 150px;
+                        spacing: 6px;
+
+                        if root.view.matched: Icon {
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            name: "check";
+                            color: Theme.accent;
+                        }
+                        if root.view.mismatched: Icon {
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            name: "warning";
+                            color: Theme.warning;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            text: root.view.verdict;
+                            color: root.view.matched ? Theme.accent : root.view.mismatched ? Theme.text : Theme.muted;
+                            font-weight: root.view.matched || root.view.mismatched ? 600 : 400;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.gap-s;
+                padding-top: Theme.gap-s;
+
+                // The system's own window of the one item (OPS-06): File Explorer's properties,
+                // Finder's 정보 가져오기.
+                if root.view.system: OutlineButton {
+                    button-height: 36px;
+                    text: "OS 속성 창 열기";
+                    focused: root.stop == 5;
+                    clicked => {
+                        root.system-properties();
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "닫기";
+                    focused: root.stop == 6;
+                    clicked => {
+                        root.cancelled();
+                    }
+                }
+            }
+        }
+    }
+}

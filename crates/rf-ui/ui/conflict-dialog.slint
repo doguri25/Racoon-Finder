@@ -1,0 +1,403 @@
+// The name conflict window (760×560, from the mockup): what is there and what would come, side
+// by side, and what to do about it. The safe choice, keeping both under a numbered name, is
+// chosen when it opens; overwriting is offered only between two files, says what it does to
+// the file that is there, and is never confirmed by Enter alone. With the keys: ↑↓ choose, Enter
+// takes the choice (not an overwrite), Tab goes to "남은 충돌에도 같은 선택 적용" (Space flips it),
+// 작업 취소 and the main button, where Space or Enter presses it, and Esc cancels the job.
+
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { PrimaryButton, OutlineButton, CheckBox, ChoiceRow, DialogFrame } from "widgets.slint";
+import { DialogKeys } from "shortcuts.slint";
+
+export struct ConflictView {
+    // A new question gets a new number, which resets the choice.
+    serial: int,
+    title: string,
+    description: string,
+    incoming-label: string,
+    incoming-name: string,
+    incoming-place: string,
+    incoming-size: string,
+    incoming-time: string,
+    incoming-newer: bool,
+    incoming-dir: bool,
+    existing-label: string,
+    existing-name: string,
+    existing-place: string,
+    existing-size: string,
+    existing-time: string,
+    existing-newer: bool,
+    existing-dir: bool,
+    can-overwrite: bool,
+    overwrite-hint: string,
+    // What skipping leaves out: "이 파일은 복사하지 않습니다".
+    skip-hint: string,
+    rename-hint: string,
+    // What overwriting does to the file that is there, for this conflict and for all of them.
+    warning-once: string,
+    warning-all: string,
+    // The items the job has still to do, or empty.
+    items-left: string,
+}
+
+// One side of the conflict.
+component Card inherits Rectangle {
+    in property <string> label;
+    in property <string> name;
+    in property <string> place;
+    in property <string> size;
+    in property <string> time;
+    in property <bool> newer;
+    in property <bool> is-dir;
+    in property <bool> raised;
+
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 12px;
+    background: root.raised ? Theme.raised : transparent;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            height: 22px;
+
+            Text {
+                text: root.label;
+                font-size: Theme.font-small;
+                font-weight: 700;
+                color: Theme.muted;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            if root.newer: Rectangle {
+                width: newer-text.preferred-width + 16px;
+                border-radius: 11px;
+                background: Theme.selection;
+
+                newer-text := Text {
+                    text: "더 최근";
+                    font-size: Theme.font-small;
+                    font-weight: 500;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 10px;
+
+            Icon {
+                y: (parent.height - self.height) / 2;
+                width: 28px;
+                height: 28px;
+                name: root.is-dir ? "folder" : "file";
+                color: root.is-dir ? Theme.folder : Theme.muted;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+
+                Text {
+                    text: root.name;
+                    font-weight: 500;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.place;
+                    font-size: Theme.font-small;
+                    color: Theme.muted;
+                    overflow: elide;
+                }
+            }
+        }
+        GridLayout {
+            spacing-horizontal: 8px;
+            spacing-vertical: 4px;
+
+            Row {
+                Text {
+                    width: 80px;
+                    text: "크기";
+                    font-size: 13px;
+                    color: Theme.muted;
+                }
+                Text {
+                    text: root.size;
+                    font-size: 13px;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+            }
+            Row {
+                Text {
+                    width: 80px;
+                    text: "수정한 날짜";
+                    font-size: 13px;
+                    color: Theme.muted;
+                }
+                Text {
+                    text: root.time;
+                    font-size: 13px;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}
+
+export component ConflictDialog inherits DialogFrame {
+    in property <ConflictView> view;
+    // `choice`: 0 overwrite, 1 skip, 2 keep both under a numbered name.
+    callback answered(choice: int, apply-all: bool);
+    // Stops the whole job.
+    callback cancelled();
+
+    // What the user picked, and for which question: a new question starts again from keeping
+    // both, with "apply to all" off.
+    private property <int> picked-choice: 2;
+    private property <bool> picked-all;
+    private property <int> picked-for: -1;
+    private property <int> choice: root.picked-for == root.view.serial ? root.picked-choice : 2;
+    private property <bool> apply-all: root.picked-for == root.view.serial && root.picked-all;
+
+    // Where the keys are: -1 the choices, 0 the box, 1 작업 취소, 2 the main button. A new
+    // question starts again on the choices.
+    private property <int> on-button: -1;
+    private property <int> serial: root.view.serial;
+    changed serial => {
+        root.on-button = -1;
+    }
+
+    width: 760px;
+    height: 560px;
+    accessible-label: root.view.title;
+    accessible-description: root.view.description;
+
+    init => {
+        keys.focus();
+    }
+
+    // The choice below `from` moving `step` rows, over a missing overwrite.
+    pure function step-choice(from: int, step: int) -> int {
+        let lowest = root.view.can-overwrite ? 0 : 1;
+        return max(lowest, min(2, from + step));
+    }
+
+    function pick(choice: int) {
+        root.picked-all = root.apply-all;
+        root.picked-choice = choice;
+        root.picked-for = root.view.serial;
+    }
+
+    function toggle-all() {
+        root.picked-choice = root.choice;
+        root.picked-all = !root.apply-all;
+        root.picked-for = root.view.serial;
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.on-button = DialogKeys.cycle(root.on-button + 1, step, 4) - 1;
+                return accept;
+            }
+            if (root.on-button == 0 && event.text == " ") {
+                root.toggle-all();
+                return accept;
+            }
+            if (root.on-button == 1 && DialogKeys.presses(event)) {
+                root.cancelled();
+                return accept;
+            }
+            // The button, chosen with Tab, confirms an overwrite too.
+            if (root.on-button == 2 && DialogKeys.presses(event)) {
+                root.answered(root.choice, root.apply-all);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.pick(root.step-choice(root.choice, -1));
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.pick(root.step-choice(root.choice, 1));
+                return accept;
+            }
+            // An overwrite destroys the file that is there: only the button confirms it.
+            if (event.text == Key.Return && root.choice != 0) {
+                root.answered(root.choice, root.apply-all);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding-left: 28px;
+            padding-right: 28px;
+            padding-top: 24px;
+            padding-bottom: 24px;
+            spacing: 18px;
+
+            VerticalLayout {
+                spacing: 6px;
+
+                Text {
+                    text: root.view.title;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                }
+                Text {
+                    text: root.view.description;
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Card {
+                    horizontal-stretch: 1;
+                    raised: true;
+                    label: root.view.incoming-label;
+                    name: root.view.incoming-name;
+                    place: root.view.incoming-place;
+                    size: root.view.incoming-size;
+                    time: root.view.incoming-time;
+                    newer: root.view.incoming-newer;
+                    is-dir: root.view.incoming-dir;
+                }
+                Card {
+                    horizontal-stretch: 1;
+                    label: root.view.existing-label;
+                    name: root.view.existing-name;
+                    place: root.view.existing-place;
+                    size: root.view.existing-size;
+                    time: root.view.existing-time;
+                    newer: root.view.existing-newer;
+                    is-dir: root.view.existing-dir;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                accessible-role: radio-group;
+                accessible-label: "어떻게 할까요?";
+
+                Text {
+                    text: "어떻게 할까요?";
+                    font-weight: 500;
+                    color: Theme.text;
+                }
+                ChoiceRow {
+                    text: "덮어쓰기";
+                    hint: root.view.overwrite-hint;
+                    enabled: root.view.can-overwrite;
+                    chosen: root.choice == 0;
+                    clicked => {
+                        root.pick(0);
+                        keys.focus();
+                    }
+                }
+                ChoiceRow {
+                    text: "건너뛰기";
+                    hint: root.view.skip-hint;
+                    chosen: root.choice == 1;
+                    clicked => {
+                        root.pick(1);
+                        keys.focus();
+                    }
+                }
+                ChoiceRow {
+                    text: "이름 바꿔 둘 다 두기";
+                    hint: root.view.rename-hint;
+                    chosen: root.choice == 2;
+                    clicked => {
+                        root.pick(2);
+                        keys.focus();
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+
+                if root.choice == 0: Text {
+                    y: 0;
+                    width: parent.width;
+                    text: root.apply-all ? root.view.warning-all : root.view.warning-once;
+                    color: Theme.text;
+                    font-weight: 500;
+                    wrap: word-wrap;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                VerticalLayout {
+                    alignment: center;
+
+                    CheckBox {
+                        text: "남은 충돌에도 같은 선택 적용";
+                        checked: root.apply-all;
+                        focused: root.on-button == 0;
+                        toggled => {
+                            root.toggle-all();
+                            keys.focus();
+                        }
+                    }
+                }
+                if root.view.items-left != "": Text {
+                    text: root.view.items-left;
+                    font-size: Theme.font-small;
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+
+                    OutlineButton {
+                        button-height: 44px;
+                        text: "작업 취소";
+                        focused: root.on-button == 1;
+                        clicked => {
+                            root.cancelled();
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+
+                    PrimaryButton {
+                        button-height: 44px;
+                        text: root.choice == 0 ? "덮어쓰기" : "계속";
+                        focused: root.on-button == 2;
+                        clicked => {
+                            root.answered(root.choice, root.apply-all);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

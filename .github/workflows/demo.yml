@@ -1,0 +1,355 @@
+# Builds the demo app for each OS and uploads one downloadable package per platform
+# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.4.0`), or a
+# manual run with "release" ticked, also publishes the four packages, the two Windows installers and the macOS disk
+# image (seven files) as the GitHub release v<workspace version>, with docs/releases/<tag>.md as its notes.
+name: Demo build
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish the packages as the release v<workspace version> (creates the tag on this commit)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # File name of the guide inside every package; the text comes from installer/demo/<os>.txt.
+  GUIDE_NAME: "데모-안내.txt"
+
+jobs:
+  package:
+    name: package (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows-x64, ext: zip }
+          - { os: windows-11-arm, platform: windows-arm64, ext: zip }
+          - { os: macos-15, platform: macos-arm64, ext: zip }
+          - { os: ubuntu-latest, platform: linux-x64, ext: tar.gz }
+    env:
+      PACKAGE: RacoonFinder-demo-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux UI libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p racoon-finder
+        env:
+          # Windows: link the C runtime into the .exe so it runs without the Visual C++ redistributable.
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path dist $env:PACKAGE
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item target/release/racoon-finder.exe $dir
+          # Empty marker: the app keeps all its data in the `data` folder next to the .exe,
+          # so deleting the folder removes everything (PRD INST-06, identity::PORTABLE_MARKER).
+          New-Item -ItemType File -Path (Join-Path $dir portable) | Out-Null
+          Copy-Item installer/demo/windows.txt (Join-Path $dir $env:GUIDE_NAME)
+          # The files sit at the top of the zip: Explorer's "Extract All" already makes a folder.
+          Compress-Archive -Path (Join-Path $dir '*') -DestinationPath "dist/$($env:PACKAGE).zip"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The bundle's name and identifier come from crates/rf-core/src/identity.rs.
+          ident() { sed -n "s/^pub const $1: &str = \"\(.*\)\";\$/\1/p" crates/rf-core/src/identity.rs; }
+          app_name=$(ident DISPLAY_NAME)
+          bundle_id=$(ident BUNDLE_ID)
+          plist=installer/macos/Info.plist
+          check() {
+            local value
+            value=$(plutil -extract "$1" raw -o - "$plist")
+            if [ "$value" != "$2" ]; then
+              echo "::error file=$plist::$1 is '$value' but identity.rs says '$2'"
+              exit 1
+            fi
+          }
+          check CFBundleName "$app_name"
+          check CFBundleDisplayName "$app_name"
+          check CFBundleIdentifier "$bundle_id"
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "racoon-finder"))')
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CFBundleVersion needs a plain x.y.z version, got '$version'"
+            exit 1
+          fi
+          app="dist/$PACKAGE/$app_name.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp target/release/racoon-finder "$app/Contents/MacOS/"
+          sed "s/__VERSION__/$version/g" "$plist" > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          # Ad-hoc signature: not notarized, but Apple silicon refuses to run unsigned code.
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          cp installer/demo/macos.txt "dist/$PACKAGE/$GUIDE_NAME"
+          ditto -c -k --keepParent "dist/$PACKAGE" "dist/$PACKAGE.zip"
+
+          # Disk image: the app, a link to /Applications to drag it onto, and the guide.
+          # ditto keeps the signature and the executable bits of the bundle.
+          dmg="RacoonFinder-demo-$version-macos-arm64.dmg"
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "$app" "$stage/$app_name.app"
+          ln -s /Applications "$stage/Applications"
+          cp installer/demo/macos.txt "$stage/$GUIDE_NAME"
+          # hdiutil sometimes fails with "Resource busy" on the runners (diskimages-help still
+          # running): retry a few times before giving up.
+          made=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Racoon Finder" -srcfolder "$stage" -ov -format UDZO "dist/$dmg"; then
+              made=1
+              break
+            fi
+            echo "hdiutil attempt $attempt failed; retrying"
+            sleep $((attempt * 5))
+          done
+          test "$made" = 1
+          test -s "dist/$dmg"
+          echo "DMG_NAME=$dmg" >> "$GITHUB_ENV"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$PACKAGE"
+          cp target/release/racoon-finder "dist/$PACKAGE/"
+          cp installer/demo/linux.txt "dist/$PACKAGE/$GUIDE_NAME"
+          tar -czf "dist/$PACKAGE.tar.gz" -C dist "$PACKAGE"
+
+      # Uploaded as-is (not zipped again): a zipped artifact loses the executable bits that
+      # the macOS app and the Linux binary need, and users would get a zip inside a zip.
+      # The artifact is named after the file, e.g. RacoonFinder-demo-windows-x64.zip.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ env.PACKAGE }}.${{ matrix.ext }}
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload the macOS disk image
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ env.DMG_NAME }}
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+
+  # Wraps the Windows packages' racoon-finder.exe in a per-user Inno Setup installer
+  # (installer/windows/). Unsigned, like the packages.
+  installer:
+    name: installer (windows)
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # The packages were uploaded as they are (archive: false); skip-decompress keeps the zip whole.
+      - uses: actions/download-artifact@v8
+        with:
+          name: RacoonFinder-demo-windows-x64.zip
+          path: pkg
+          skip-decompress: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: RacoonFinder-demo-windows-arm64.zip
+          path: pkg
+          skip-decompress: true
+      - name: Build the installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Same source as the release job: the first `version = "..."` line of the root Cargo.toml.
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "need a plain x.y.z version, got '$version'" }
+          "INSTALLER_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # The script needs Inno Setup 6.3 or newer (it also checks this itself). Use the
+          # preinstalled one when it is new enough, else install a pinned 6.x. Not the latest
+          # package: a 7.x installs elsewhere and the paths below would not hold.
+          function Find-Iscc {
+            $found = @()
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $found += $cmd.Source }
+            foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LOCALAPPDATA 'Programs'), 'C:\ProgramData\chocolatey\lib', 'C:\ProgramData\chocolatey\bin')) {
+              if ($dir -and (Test-Path $dir)) {
+                $found += Get-ChildItem -Path $dir -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object FullName
+              }
+            }
+            foreach ($candidate in $found | Select-Object -Unique) {
+              try {
+                $info = (Get-Item $candidate).VersionInfo
+                Write-Host "candidate: $candidate file=$($info.FileVersionRaw) product=$($info.ProductVersion)"
+                # ISCC.exe's own file version need not equal the Inno Setup version, so also trust
+                # the 'Inno Setup 6' install folder (Inno Setup 7 installs elsewhere).
+                $v = [version]($info.FileVersionRaw.ToString())
+                if (($v -ge [version]'6.3.0' -and $v.Major -eq 6) -or $candidate -like '*\Inno Setup 6\ISCC.exe') { return $candidate }
+              } catch { Write-Host "skipping ${candidate}: $_" }
+            }
+            return $null
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            # The image's chocolatey record says InnoSetup 6.7.1 is installed but no compiler is on
+            # disk (and 6.4.3 is not in the feed): reinstall the package that is known to exist.
+            choco install innosetup --version=6.7.1 --force -y --no-progress
+            $iscc = Find-Iscc
+            if (-not $iscc) {
+              Get-ChildItem -Path 'C:\Program Files*' -Filter 'Inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "found dir: $($_.FullName)" }
+              Get-ChildItem -Path 'C:\ProgramData\chocolatey\lib\InnoSetup' -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Host "choco lib: $($_.FullName)" }
+              Get-ChildItem -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'Inno Setup*' } | ForEach-Object { Write-Host "uninstall key: $($_.PSChildName) -> $((Get-ItemProperty $_.PSPath).InstallLocation)" }
+              throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)"
+            }
+          }
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
+          Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
+
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $out = (Resolve-Path dist).Path
+          foreach ($arch in 'x64', 'arm64') {
+            $zip = "pkg/RacoonFinder-demo-windows-$arch.zip"
+            $src = Join-Path $env:RUNNER_TEMP "src-$arch"
+            Expand-Archive -Path $zip -DestinationPath $src -Force
+            if (-not (Test-Path (Join-Path $src 'racoon-finder.exe'))) { throw "$zip has no racoon-finder.exe" }
+            & $iscc "/DAppVersion=$version" "/DArch=$arch" "/DSource=$src" "/O$out" installer/windows/racoon-finder.iss
+            if ($LASTEXITCODE -ne 0) { throw "ISCC failed for $arch (exit $LASTEXITCODE)" }
+            $setup = Join-Path $out "RacoonFinder-setup-$version-windows-$arch.exe"
+            if (-not (Test-Path $setup)) { throw "$setup was not produced" }
+          }
+          Get-ChildItem $out | Format-Table Name, Length
+
+      # Silent install and uninstall of the x64 installer on the runner (no UI is needed with
+      # /VERYSILENT). The uninstaller runs --cleanup against the runner's own empty profile.
+      - name: Smoke-test the x64 installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist -Filter 'RacoonFinder-setup-*-windows-x64.exe').FullName
+          $dir = Join-Path $env:RUNNER_TEMP 'rfinst'
+          $installLog = Join-Path $env:RUNNER_TEMP 'install.log'
+          $uninstallLog = Join-Path $env:RUNNER_TEMP 'uninstall.log'
+          try {
+            $p = Start-Process -FilePath $setup -PassThru -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir", "/LOG=$installLog")
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the installer did not finish in 120 s' }
+            if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+            if (-not (Test-Path (Join-Path $dir 'racoon-finder.exe'))) { throw 'racoon-finder.exe was not installed' }
+            if (Test-Path (Join-Path $dir 'portable')) { throw 'the installer put a portable marker in the install folder' }
+
+            # The installed program starts on this runner (a missing DLL or a crash at start would
+            # show here); --cleanup-plan lists what --cleanup would do and changes nothing.
+            $exe = Join-Path $dir 'racoon-finder.exe'
+            $p = Start-Process -FilePath $exe -ArgumentList '--cleanup-plan' -PassThru -Wait -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "racoon-finder.exe --cleanup-plan exit code $($p.ExitCode)" }
+
+            # The uninstaller copies itself to a temp folder and returns early: wait for the folder to go.
+            $p = Start-Process -FilePath (Join-Path $dir 'unins000.exe') -PassThru -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$uninstallLog")
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the uninstaller did not finish in 120 s' }
+            if ($p.ExitCode -ne 0) { throw "uninstaller exit code $($p.ExitCode)" }
+            $deadline = (Get-Date).AddSeconds(90)
+            while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
+            if (Test-Path $dir) { throw "the install folder is still there after 90 s: $dir" }
+            # The uninstaller carries on when --cleanup fails and only logs it: the job must not.
+            if (-not (Test-Path $uninstallLog)) { throw 'the uninstaller wrote no log' }
+            if ((Get-Content $uninstallLog -Raw) -match 'could not start|--cleanup exit code') { throw 'the uninstaller did not run --cleanup cleanly (see the log below)' }
+          }
+          finally {
+            foreach ($log in $installLog, $uninstallLog) {
+              if (Test-Path $log) { Write-Host "::group::$log"; Get-Content $log; Write-Host '::endgroup::' }
+            }
+          }
+
+      # The workflow knows the version, so the paths are exact (no glob). INSTALLER_VERSION is
+      # set by the build step above.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/RacoonFinder-setup-${{ env.INSTALLER_VERSION }}-windows-x64.exe
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/RacoonFinder-setup-${{ env.INSTALLER_VERSION }}-windows-arm64.exe
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+
+  # A version tag, or a manual run with "release", publishes the packages of this run as a
+  # pre-release (a demo, not 1.0). The tag names the workspace version, and its notes must exist;
+  # a manual run creates the tag on the commit it built.
+  release:
+    name: release
+    needs: [package, installer]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version"
+            exit 1
+          fi
+          test -f "docs/releases/$tag.md" || { echo "::error::docs/releases/$tag.md is missing"; exit 1; }
+          echo "name=$tag" >> "$GITHUB_OUTPUT"
+      # The packages were uploaded as they are (archive: false). download-artifact v8 would
+      # still unpack the three that are zip files, so skip-decompress keeps them whole.
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 4 packages (3 archives + the Linux tar.gz), 2 Windows installers and 1 macOS disk image.
+          mapfile -t files < <(find dist -type f \( -name 'RacoonFinder-demo-*' -o -name 'RacoonFinder-setup-*.exe' \) | sort)
+          printf '%s\n' "${files[@]}"
+          packages=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-demo-.*\.\(zip\|tar\.gz\)$' || true)
+          installers=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-setup-.*\.exe$' || true)
+          images=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-demo-.*-macos-arm64\.dmg$' || true)
+          if [ "$packages" -ne 4 ] || [ "$installers" -ne 2 ] || [ "$images" -ne 1 ] || [ "${#files[@]}" -ne 7 ]; then
+            echo "::error::expected 4 packages + 2 installers + 1 disk image (7 files), found $packages packages, $installers installers, $images disk images, ${#files[@]} files"
+            exit 1
+          fi
+          tag="${{ steps.tag.outputs.name }}"
+          # A pushed tag is used as it is; a manual run tags the commit it built.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then where=(--verify-tag); else where=(--target "$GITHUB_SHA"); fi
+          gh release create "$tag" "${files[@]}" "${where[@]}" --prerelease \
+            --title "Racoon Finder ${tag#v} (데모)" \
+            --notes-file "docs/releases/$tag.md"
