@@ -115,7 +115,18 @@ jobs:
           ditto "$app" "$stage/$app_name.app"
           ln -s /Applications "$stage/Applications"
           cp installer/demo/macos.txt "$stage/$GUIDE_NAME"
-          hdiutil create -volname "Racoon Finder" -srcfolder "$stage" -ov -format UDZO "dist/$dmg"
+          # hdiutil sometimes fails with "Resource busy" on the runners (diskimages-help still
+          # running): retry a few times before giving up.
+          made=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Racoon Finder" -srcfolder "$stage" -ov -format UDZO "dist/$dmg"; then
+              made=1
+              break
+            fi
+            echo "hdiutil attempt $attempt failed; retrying"
+            sleep $((attempt * 5))
+          done
+          test "$made" = 1
           test -s "dist/$dmg"
           echo "DMG_NAME=$dmg" >> "$GITHUB_ENV"
 
