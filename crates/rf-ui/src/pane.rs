@@ -667,23 +667,32 @@ impl Tab {
         })
     }
 
-    /// The status bar: `항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB`. The selection part
-    /// shows only with a selection, and its size, the sum of the selected files (folders and
-    /// links have none), only when a file is selected. The free space shows once known.
-    pub fn status_line(&self) -> String {
+    /// The parts of the status line ([`words::status_parts`]): the selection (its size is the
+    /// sum of the selected files; a folder is counted as `+폴더`, never looked into), the
+    /// rows, the filter while one hides rows, and the room left on the folder's drive. The
+    /// room is the tab's own, once a worker has read it, else `drive_free`, what the sidebar
+    /// knows of the drive. Nothing here looks at the disk.
+    pub fn status_parts(&self, drive_free: Option<u64>) -> Vec<String> {
         let selected = self.selection.indices(&self.visible);
-        let files: Vec<&Entry> = selected
-            .iter()
-            .map(|&i| &self.visible[i])
+        let entries = || selected.iter().filter_map(|&i| self.visible.get(i));
+        let files: Vec<&Entry> = entries()
             .filter(|entry| entry.kind == EntryKind::File)
             .collect();
-        let bytes = (!files.is_empty()).then(|| files.iter().map(|entry| entry.size).sum());
-        if self.name_filter.is_empty() {
-            words::status_line(self.visible.len(), selected.len(), bytes, self.free)
-        } else {
-            let shown = (self.visible.len(), self.unfiltered);
-            words::filtered_status_line(&self.name_filter, shown, selected.len(), bytes, self.free)
-        }
+        let filter = (!self.name_filter.is_empty()).then(|| words::StatusFilter {
+            text: &self.name_filter,
+            shown: self.visible.len(),
+            of: self.unfiltered,
+        });
+        words::status_parts(&words::StatusFacts {
+            items: self.visible.len(),
+            selected: selected.len(),
+            selected_bytes: (!files.is_empty()).then(|| files.iter().map(|entry| entry.size).sum()),
+            selected_folders: entries()
+                .filter(|entry| entry.kind == EntryKind::Dir)
+                .count(),
+            filter,
+            free: self.free.or(drive_free),
+        })
     }
 
     /// Moves the cursor to the first row whose name starts with what was typed, ignoring case,
@@ -1718,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn status_line_matches_mockup() {
+    fn the_status_parts_follow_the_selection_the_filter_and_the_room() {
         let mut entries = vec![
             dir("문서"),
             dir("사진"),
@@ -1728,9 +1737,19 @@ mod tests {
         entries.extend((0..5).map(|i| file(&format!("z{i}"), 1)));
         let mut tab = ready_tab("a", entries);
         let generation = tab.generation();
-        assert_eq!(tab.status_line(), "항목 9개");
+        assert_eq!(tab.status_parts(None), ["항목 9개"]);
+        // The sidebar's drive stands in for the room until the tab has read its own.
+        assert_eq!(
+            tab.status_parts(Some(5 * 1024 * 1024 * 1024)),
+            ["항목 9개", "남은 공간 5 GB"]
+        );
         assert!(tab.apply_space(generation, 212 * 1024 * 1024 * 1024));
-        assert_eq!(tab.status_line(), "항목 9개 · 남은 공간 212 GB");
+        assert_eq!(tab.status_parts(None), ["항목 9개", "남은 공간 212 GB"]);
+        // The tab's own reading wins over the drive's.
+        assert_eq!(
+            tab.status_parts(Some(5 * 1024 * 1024 * 1024)),
+            ["항목 9개", "남은 공간 212 GB"]
+        );
 
         let find = |tab: &Tab, name: &str| {
             tab.visible()
@@ -1749,25 +1768,34 @@ mod tests {
             selection.toggle(txt, rows);
         }
         assert_eq!(
-            tab.status_line(),
-            "항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB"
+            tab.status_parts(None),
+            ["2개 선택", "크기 1.4 MB", "항목 9개", "남은 공간 212 GB"]
         );
 
-        // A folder adds to the count but not to the size.
+        // A folder adds to the count but not to the size, and is told apart.
         {
             let (selection, rows) = tab.selection_mut();
             selection.toggle(docs, rows);
         }
         assert_eq!(
-            tab.status_line(),
-            "항목 9개 · 선택 3개 (1.4 MB) · 남은 공간 212 GB"
+            tab.status_parts(None),
+            [
+                "3개 선택",
+                "크기 1.4 MB",
+                "+폴더 1개",
+                "항목 9개",
+                "남은 공간 212 GB"
+            ]
         );
         // Folders alone have no size to show.
         {
             let (selection, rows) = tab.selection_mut();
             selection.click(docs, rows);
         }
-        assert_eq!(tab.status_line(), "항목 9개 · 선택 1개 · 남은 공간 212 GB");
+        assert_eq!(
+            tab.status_parts(None),
+            ["1개 선택", "폴더 1개", "항목 9개", "남은 공간 212 GB"]
+        );
     }
 
     #[test]
@@ -1797,8 +1825,14 @@ mod tests {
         let generation = tab.generation();
         assert!(tab.apply_space(generation, 212 * 1024 * 1024 * 1024));
         assert_eq!(
-            tab.status_line(),
-            "거르는 중: ‘TxT’ · 항목 2개 / 4개 · 선택 1개 (1 바이트) · 남은 공간 212 GB"
+            tab.status_parts(None),
+            [
+                "1개 선택",
+                "크기 1 바이트",
+                "항목 2개",
+                "거르기: TxT · 2/4",
+                "남은 공간 212 GB"
+            ]
         );
         // A row that comes is filtered too.
         assert!(tab.apply_changes(
@@ -1813,14 +1847,18 @@ mod tests {
         tab.reload();
         tab.set_name_filter("zzz");
         assert_eq!(names(tab.visible()), NONE);
-        assert!(
-            tab.status_line()
-                .starts_with("거르는 중: ‘zzz’ · 항목 0개 / 6개")
-        );
+        let parts = tab.status_parts(None);
+        assert!(parts.contains(&"항목 0개".to_owned()), "{parts:?}");
+        assert!(parts.contains(&"거르기: zzz · 0/6".to_owned()), "{parts:?}");
         // Cleared, every row shows again, and the line is as before.
         tab.set_name_filter("");
         assert_eq!(tab.visible().len(), 6);
-        assert!(tab.status_line().starts_with("항목 6개"));
+        let parts = tab.status_parts(None);
+        assert!(parts.contains(&"항목 6개".to_owned()), "{parts:?}");
+        assert!(
+            !parts.iter().any(|part| part.starts_with("거르기")),
+            "{parts:?}"
+        );
         // It filters this folder only: another folder starts without it.
         tab.set_name_filter("txt");
         tab.navigate(folder("b"));

@@ -20,9 +20,10 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, FactRow, FolderMenuRow,
-    FolderMenuView, HashRowView, ItemMenu, JobRowView, JobTray, MainWindow, MessageView, NameView,
-    NoticeWindow, PaneView, PatternView, PickTarget, PickView, PreflightView, PreviewKind,
-    PreviewView, PropertiesView, RecentRowView, RecoveryView, Theme,
+    FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray, MainWindow,
+    MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
+    PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
+    StatusFit, Theme,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -34,6 +35,10 @@ fn window() -> MainWindow {
     i_slint_backend_testing::init_no_event_loop();
     let window = MainWindow::new().expect("MainWindow builds");
     window.window().set_size(LogicalSize::new(1280.0, 800.0));
+    // As the controller wires it: the status lines take as many parts as their panes are wide.
+    window
+        .global::<StatusFit<'_>>()
+        .on_fit(|parts, cells| ui_bridge::fit_status(&parts, cells).into());
     window.show().expect("the window shows");
     window
 }
@@ -126,7 +131,8 @@ fn pane_view_shows_rows_from_the_model() {
     assert!(view.active && !view.loading);
     assert_eq!(view.error, "");
     assert_eq!(view.cursor, 2);
-    assert_eq!(view.status, "항목 3개 · 선택 2개 (1.2 MB)");
+    // The parts of the status line, one to a line: the window picks as many as the pane holds.
+    assert_eq!(view.status, "2개 선택\n크기 1.2 MB\n항목 3개");
     assert_eq!(view.rows.row_count(), 3);
     let row = view.rows.row_data(2).expect("a third row");
     assert_eq!(
@@ -7631,4 +7637,196 @@ fn a_menu_asked_for_where_a_press_was_shows_without_a_click() {
     assert_eq!(window.global::<ItemMenu<'_>>().get_at_x(), x + 5.0);
     assert_eq!(window.global::<ItemMenu<'_>>().get_at_y(), y + 100.0);
     window.hide().expect("hides");
+}
+
+/// The status line of the pane called `label` as it shows: the one text among the pane's that
+/// is made of its parts.
+fn status_shown(window: &MainWindow, label: &str, parts: &[String]) -> String {
+    let (_, pane) = shown_pane(window, label);
+    // The text is the pane's width less 16px at each side, a cell being half of 12px.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a pane is a few hundred pixels wide"
+    )]
+    let cells = usize::try_from(((pane.width - 32.0) / 6.0).floor() as i64).unwrap_or(0);
+    let expected = rf_ui::words::fit_status(parts, cells);
+    assert_eq!(
+        labelled(window, &expected, AccessibleRole::Text).len(),
+        1,
+        "the {label}'s status line is {expected:?} for {cells} cells"
+    );
+    expected
+}
+
+#[test]
+fn the_status_line_shows_as_many_parts_as_its_pane_holds() {
+    let window = window();
+    let mut pane = listed_pane(vec![
+        entry("docs", EntryKind::Dir, 0),
+        entry("notes.txt", EntryKind::File, 3100),
+        entry("설계안.pdf", EntryKind::File, 1_258_291),
+        entry("영상.mp4", EntryKind::File, 12_000_000),
+    ]);
+    {
+        let tab = pane.active_tab_mut();
+        let generation = tab.generation();
+        assert!(tab.apply_space(generation, 212 * 1024 * 1024 * 1024));
+        let (selection, rows) = tab.selection_mut();
+        selection.click(0, rows);
+        selection.toggle(1, rows);
+        selection.toggle(2, rows);
+    }
+    let parts = pane.active_tab().status_parts(None);
+    let full = parts.join(" · ");
+    assert_eq!(
+        full,
+        "3개 선택 · 크기 1.2 MB · +폴더 1개 · 항목 4개 · 남은 공간 212 GB"
+    );
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+
+    // A pane of the default 1280px window holds the whole line.
+    assert_eq!(status_shown(&window, "왼쪽 패널", &parts), full);
+
+    // At 900x560 the two panes are narrow: the line loses its last parts, whole ones, and
+    // keeps its first (the selection).
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let narrow = status_shown(&window, "왼쪽 패널", &parts);
+    assert!(narrow.len() < full.len(), "{narrow}");
+    assert!(full.starts_with(&narrow), "{narrow}");
+    assert!(narrow.starts_with("3개 선택"), "{narrow}");
+    assert!(
+        parts.iter().any(|part| narrow.ends_with(part.as_str())),
+        "{narrow} ends between two parts"
+    );
+
+    // One pane above the other have the whole width each: the whole line again.
+    window.set_stacked(true);
+    assert_eq!(status_shown(&window, "왼쪽 패널", &parts), full);
+}
+
+/// A row of 되돌리기 기록.
+fn history_row(
+    title: &str,
+    note: &str,
+    line: i32,
+    index: i32,
+    heads_before: i32,
+) -> HistoryRowView {
+    HistoryRowView {
+        head: false,
+        title: title.into(),
+        time: "14:32".into(),
+        note: note.into(),
+        next: index == 0,
+        enabled: index == 0,
+        dimmed: false,
+        redo: false,
+        button: "되돌리기".into(),
+        line,
+        index,
+        heads_before,
+    }
+}
+
+fn history_head(title: &str, heads_before: i32) -> HistoryRowView {
+    HistoryRowView {
+        head: true,
+        title: title.into(),
+        line: -1,
+        heads_before,
+        ..HistoryRowView::default()
+    }
+}
+
+#[test]
+fn the_history_group_shows_by_itself_and_opens_to_its_rows() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_history_toggled(move || record.note("toggled"));
+    let record = calls.clone();
+    window.on_history_run(move |redo, i| record.note(format!("run {redo} {i}")));
+    let panel_height =
+        |window: &MainWindow| pane_box(window, "작업").map_or(0.0, |(_, size)| size.height);
+    // Not a job, not a finished one: the panel takes no room.
+    assert!(panel_height(&window) < 1.0);
+
+    // A record in the history gives the panel its head alone.
+    window.set_history_title("되돌리기 기록 3개".into());
+    assert!(panel_height(&window) > 20.0);
+    assert_eq!(
+        labelled(&window, "되돌리기 기록 3개", AccessibleRole::Text).len(),
+        1
+    );
+    assert!(labelled(&window, "되돌릴 수 있음 2개", AccessibleRole::Text).is_empty());
+    labelled(&window, "펼치기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["toggled"]);
+
+    // Open: the two lists, each under its head; the button of the first row of each list can
+    // be pressed, the others are off.
+    let mut redo_row = history_row("이름 바꾸기: x → y", "다음에 다시 실행할 작업", 2, 0, 2);
+    redo_row.redo = true;
+    redo_row.button = "다시 실행".into();
+    let mut dimmed = history_row(
+        "복사: c.txt → 백업",
+        "복사한 뒤 항목이 바뀌어 되돌릴 수 없습니다",
+        1,
+        1,
+        1,
+    );
+    dimmed.dimmed = true;
+    let rows = Rc::new(slint::VecModel::from(vec![
+        history_head("되돌릴 수 있음 2개", 0),
+        history_row("이름 바꾸기: a.txt → b.txt", "다음에 되돌릴 작업", 0, 0, 1),
+        dimmed,
+        history_head("다시 실행할 수 있음 1개", 1),
+        redo_row,
+    ]));
+    window.set_history_rows(ModelRc::from(Rc::clone(&rows)));
+    window.set_history_heads(2);
+    window.set_history_open(true);
+    assert_eq!(labelled(&window, "접기", AccessibleRole::Button).len(), 1);
+    for text in [
+        "되돌릴 수 있음 2개",
+        "다시 실행할 수 있음 1개",
+        "이름 바꾸기: a.txt → b.txt",
+        "다음에 되돌릴 작업",
+        "복사한 뒤 항목이 바뀌어 되돌릴 수 없습니다",
+        "이름 바꾸기: x → y",
+    ] {
+        assert_eq!(
+            labelled(&window, text, AccessibleRole::Text).len(),
+            1,
+            "{text}"
+        );
+    }
+    // The toolbar has a 되돌리기 too: the rows' are those under the panel's top.
+    let (panel_at, _) = shown_pane(&window, "작업");
+    let in_panel = |label: &str| -> Vec<ElementHandle> {
+        labelled(&window, label, AccessibleRole::Button)
+            .into_iter()
+            .filter(|button| button.absolute_position().y >= panel_at.y)
+            .collect()
+    };
+    let undo = in_panel("되돌리기");
+    assert_eq!(undo.len(), 2);
+    assert_eq!(
+        undo.iter()
+            .map(ElementHandle::accessible_enabled)
+            .collect::<Vec<_>>(),
+        [Some(true), Some(false)]
+    );
+    undo[1].invoke_accessible_default_action();
+    assert_eq!(calls.take(), Vec::<String>::new());
+    undo[0].invoke_accessible_default_action();
+    in_panel("다시 실행")[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["run false 0", "run true 0"]);
+
+    // Its rows are in the panel the keys reach: the head and the buttons take the keys' border
+    // by place (the head after the jobs' rows, then the rows).
+    window.set_panel_line(0);
+    window.set_panel_button(0);
+    window.invoke_focus_panel();
+    assert_eq!(window.get_panel_line(), 0);
 }

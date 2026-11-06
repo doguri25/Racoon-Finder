@@ -65,7 +65,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use jiff::tz::TimeZone;
 use rf_core::{Os, VPath};
@@ -108,8 +108,8 @@ use crate::ui_bridge::{
     RowSlot, TreeRows, post,
 };
 use crate::{
-    DialogKind, DragPointer, DropPlace, FolderMenuRow, ItemMenu, JobRowView, MainWindow,
-    RecentRowView, TabDrop, open, words,
+    DialogKind, DragPointer, DropPlace, FolderMenuRow, HistoryRowView, ItemMenu, JobRowView,
+    MainWindow, RecentRowView, StatusFit, TabDrop, open, words,
 };
 
 pub mod clipboard;
@@ -1271,6 +1271,21 @@ fn connect_report(window: &MainWindow) {
     window.on_recent_save(|i| {
         with(|c| c.update_at(i, AppState::save_log_asked));
     });
+    window.on_history_toggled(|| {
+        with(|c| {
+            c.update(|state| {
+                state.history_toggled();
+                Vec::new()
+            });
+        });
+    });
+    window.on_history_run(|redo, i| {
+        with(|c| c.update_at(i, |state, i| state.history_run(redo, i)));
+    });
+    // The status lines of the panes take as many of their parts as the pane is wide.
+    window
+        .global::<StatusFit<'_>>()
+        .on_fit(|parts, cells| ui_bridge::fit_status(&parts, cells).into());
     window.on_confirm_alternative(|| {
         with(|c| c.update(AppState::confirm_alternative));
     });
@@ -1473,6 +1488,8 @@ pub struct Controller {
     open_with_apps: Rc<VecModel<slint::SharedString>>,
     /// The lines of the job panel's 최근 완료.
     recent_rows: Rc<VecModel<RecentRowView>>,
+    /// The rows of the job panel's 되돌리기 기록.
+    history_rows: Rc<VecModel<HistoryRowView>>,
     /// The app's folder for logs, until the state has it.
     log_dir: RefCell<Option<VPath>>,
     /// Shows the notifications of the system.
@@ -1511,6 +1528,8 @@ impl Controller {
         window.set_open_with_apps(ModelRc::from(Rc::clone(&open_with_apps)));
         let recent_rows = Rc::new(VecModel::default());
         window.set_recent_rows(ModelRc::from(Rc::clone(&recent_rows)));
+        let history_rows = Rc::new(VecModel::default());
+        window.set_history_rows(ModelRc::from(Rc::clone(&history_rows)));
         // A payload from the start: a drag only begins on a press whose area has one, and the
         // press readies the drag's own.
         window.set_drag_data(ui_bridge::drag_payload(0));
@@ -1598,6 +1617,7 @@ impl Controller {
             clipboard_timer: slint::Timer::default(),
             open_with_apps,
             recent_rows,
+            history_rows,
             log_dir: RefCell::new(None),
             notifier: OsNotifier::system(),
             tray: Tray::new(Box::new(SlintTray::new(|command| {
@@ -3268,7 +3288,11 @@ impl Controller {
                 let pane = &state.panes()[side];
                 self.panes[side].set_show_extensions(state.show_extensions());
                 self.panes[side].set_cut(state.cut_names(pane.active_tab().location()));
-                let mut view = self.panes[side].view(pane, side == state.active());
+                let mut view = self.panes[side].view_with(
+                    pane,
+                    side == state.active(),
+                    state.drive_free_of(pane.active_tab().location()),
+                );
                 view.own_view = state.views().own(pane.active_tab().location()).is_some();
                 let chevron = state
                     .subfolders()
@@ -3448,6 +3472,7 @@ impl Controller {
                 .collect(),
         );
         window.set_recent_open(state.recent_open());
+        self.show_history(window, state);
         let (line, button) = state
             .panel_cursor()
             .map_or((-1, -1), |(line, button)| (number(line), number(button)));
@@ -3455,6 +3480,26 @@ impl Controller {
         window.set_panel_button(button);
         self.tray
             .follow(state.tray_view(rf_core::identity::DISPLAY_NAME));
+    }
+
+    /// The job panel's 되돌리기 기록: its head always, its rows while it is open.
+    fn show_history(&self, window: &MainWindow, state: &AppState) {
+        let (undo, redo) = state.history_counts();
+        let title = if undo + redo == 0 {
+            String::new()
+        } else {
+            words::history_head(undo + redo)
+        };
+        window.set_history_title(title.into());
+        window.set_history_open(state.history_open());
+        let (rows, heads) = if state.history_open() {
+            let view = state.history_view(&self.tz.borrow(), SystemTime::now());
+            ui_bridge::history_rows(&view)
+        } else {
+            (Vec::new(), 0)
+        };
+        ui_bridge::set_rows(&self.history_rows, rows);
+        window.set_history_heads(heads);
     }
 
     /// The window's drop target goes on the handle the window has now, unless it is there

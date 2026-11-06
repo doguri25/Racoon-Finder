@@ -1,10 +1,13 @@
 // The job panel under the panes: one row for each job a worker runs, with its title, what it
 // works on, its bar and its progress line, and its pause and cancel buttons; under them the
 // head of 최근 완료, the jobs that ended (XFER-14), and, while it is open, their lines: how each
-// ended, what it did and how long it took, its 자세히 and its 로그 저장…. It takes room only
-// while a job runs or a finished one is listed (the window gives it no height otherwise). F6
-// gives it the keys after the tree (KEY-02): the button they are on has the dialogs' focus
-// border.
+// ended, what it did and how long it took, its 자세히 and its 로그 저장…. Under that the head of
+// 되돌리기 기록 (OPS-12) and, while it is open, what can be undone and what can be done again,
+// the latest first, each with what was done, when, and the button of the same name as Ctrl+Z
+// and Ctrl+Y, which only the first row of a list can press. It takes room only while a job
+// runs, a finished one is listed or the history holds a record (the window gives it no height
+// otherwise). F6 gives it the keys after the tree (KEY-02): the button they are on has the
+// dialogs' focus border.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -35,6 +38,35 @@ export struct RecentRowView {
     ok: bool,
 }
 
+// One row of 되돌리기 기록, as Rust words it: the head of one of its two lists, or a record.
+export struct HistoryRowView {
+    // The head of a list (only `title` is set).
+    head: bool,
+    // What was done (or what doing it again does), or the head's words.
+    title: string,
+    // When: 14:32.
+    time: string,
+    // The second line: whether it is the next one, why it waits, or why it cannot run.
+    note: string,
+    // The row the list's button acts on.
+    next: bool,
+    // Its button can be pressed.
+    enabled: bool,
+    // The record can no longer be undone (or done again).
+    dimmed: bool,
+    // It stands in the list of what can be done again.
+    redo: bool,
+    // The button's words: 되돌리기 or 다시 실행.
+    button: string,
+    // The place of the row among the rows of the keys (0 for the first row of the undo list);
+    // -1 for a head.
+    line: int,
+    // The row's place in its own list, for the button.
+    index: int,
+    // How many heads come before this row.
+    heads-before: int,
+}
+
 export component JobPanel inherits Rectangle {
     in property <[JobRowView]> rows;
     in property <[RecentRowView]> recent;
@@ -46,6 +78,15 @@ export component JobPanel inherits Rectangle {
     // or 접기, 1 지우기), then its lines (자세히 where it shows, then 로그 저장…).
     in property <int> focus-line: -1;
     in property <int> focus-button: -1;
+    // 되돌리기 기록: the head's words (empty while the history holds nothing, and then the group
+    // does not show), whether its rows show, the rows, and how many of them are heads.
+    in property <string> history-title;
+    in property <bool> history-open;
+    in property <[HistoryRowView]> history;
+    in property <int> history-heads;
+    // How many records of the history show at once besides the heads; the list scrolls for the
+    // others.
+    in property <int> history-lines: 3;
     callback pause(index: int);
     callback resume(index: int);
     callback cancel(index: int);
@@ -53,10 +94,19 @@ export component JobPanel inherits Rectangle {
     callback recent-cleared();
     callback recent-details(index: int);
     callback recent-save(index: int);
+    callback history-toggled();
+    // The button of row `index` of the list of what can be undone (or, with `redo`, done again).
+    callback history-run(redo: bool, index: int);
 
     // The line of the head of 최근 완료.
     private property <int> head-line: root.rows.length;
     private property <length> recent-height: 52px;
+    // The line of the head of 되돌리기 기록: after the jobs' rows, the head of 최근 완료 and its
+    // lines while they show.
+    private property <int> history-head-line: root.rows.length + (root.recent.length > 0 ? 1 + (root.recent-open ? root.recent.length : 0) : 0);
+    private property <length> history-row-height: 52px;
+    private property <length> history-head-height: 28px;
+    private property <length> history-content: (root.history.length - root.history-heads) * root.history-row-height + root.history-heads * root.history-head-height;
 
     background: Theme.panel;
     accessible-role: groupbox;
@@ -285,6 +335,148 @@ export component JobPanel inherits Rectangle {
                             focused: root.focus-line == root.head-line + 1 + i && root.focus-button == (entry.details ? 1 : 0);
                             clicked => {
                                 root.recent-save(i);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+
+        // The head of 되돌리기 기록: how many records it lists, and its button.
+        if root.history-title != "": Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: Theme.gap-s;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.history-title;
+                    font-weight: 600;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: root.history-open ? "접기" : "펼치기";
+                    focused: root.focus-line == root.history-head-line && root.focus-button == 0;
+                    clicked => {
+                        root.history-toggled();
+                    }
+                }
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // What can be undone, then what can be done again, the latest first.
+        history-list := ScrollView {
+            visible: root.history-open && root.history-title != "";
+            height: self.visible ? min(root.history-content, root.history-lines * root.history-row-height + root.history-head-height) : 0px;
+            content-width: self.visible-width;
+            content-height: root.history-content;
+            accessible-role: list;
+            accessible-label: "되돌리기 기록";
+
+            for entry[i] in root.history: Rectangle {
+                // The keys are on this row: it scrolls into view.
+                private property <bool> keys-here: !entry.head && root.focus-line == root.history-head-line + 1 + entry.line;
+
+                y: (i - entry.heads-before) * root.history-row-height + entry.heads-before * root.history-head-height;
+                width: parent.width;
+                height: entry.head ? root.history-head-height : root.history-row-height;
+
+                changed keys-here => {
+                    if (self.keys-here) {
+                        if (self.y < -history-list.content-y) {
+                            history-list.content-y = -self.y;
+                        } else if (self.y + self.height > -history-list.content-y + history-list.visible-height) {
+                            history-list.content-y = history-list.visible-height - self.y - self.height;
+                        }
+                    }
+                }
+
+                if entry.head: Rectangle {
+                    background: Theme.raised;
+
+                    Text {
+                        x: 20px;
+                        width: parent.width - 40px;
+                        text: entry.title;
+                        font-size: Theme.font-small;
+                        font-weight: 600;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                if !entry.head: HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            if entry.next && !entry.dimmed: Text {
+                                horizontal-stretch: 0;
+                                text: "다음";
+                                font-size: Theme.font-small;
+                                font-weight: 700;
+                                color: Theme.accent;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: entry.title;
+                                font-weight: 600;
+                                color: entry.dimmed ? Theme.faint : Theme.text;
+                                overflow: elide;
+                            }
+                            Text {
+                                horizontal-stretch: 0;
+                                text: entry.time;
+                                font-size: Theme.font-small;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: entry.note;
+                            font-size: Theme.font-small;
+                            color: entry.dimmed ? Theme.faint : Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: entry.button;
+                            enabled: entry.enabled;
+                            focused: root.focus-line == root.history-head-line + 1 + entry.line && root.focus-button == 0;
+                            clicked => {
+                                root.history-run(entry.redo, entry.index);
                             }
                         }
                     }

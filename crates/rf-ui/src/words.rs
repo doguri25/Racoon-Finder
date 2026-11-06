@@ -6,12 +6,14 @@
 //! engine works.
 
 use std::fmt::Write as _;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use rf_core::{EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{
-    Compared, ConflictPolicy, CopyFound, DeleteMethod, FailureReason, IssueKind, ItemFailure,
-    JobKind, JobSpec, JobState, Outcome, Severity, TransferMode, UndoRecord,
+    Compared, ConflictPolicy, CopyFound, CreateKind, DeleteMethod, FailureReason, IssueKind,
+    ItemFailure, JobKind, JobSpec, JobState, Outcome, Severity, TransferMode, UndoRecord,
 };
 use rf_platform::dnd::DropEffect;
 use rf_platform::shell::App;
@@ -399,63 +401,122 @@ pub fn drive_space(available: u64, total: u64) -> String {
     )
 }
 
-/// The status bar of a folder: `항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB`.
+/// What a pane's status line has to tell (NAV-12).
+#[derive(Clone, Copy, Debug)]
+pub struct StatusFacts<'a> {
+    /// The rows that show.
+    pub items: usize,
+    /// The selected rows, of every kind.
+    pub selected: usize,
+    /// The sizes of the selected files added up; `None` when no file is selected (a folder, a
+    /// link has no size to add: nothing looks at what is inside a folder).
+    pub selected_bytes: Option<u64>,
+    /// The selected rows that are folders.
+    pub selected_folders: usize,
+    /// The toolbar's filter, while it hides rows.
+    pub filter: Option<StatusFilter<'a>>,
+    /// The bytes the user can still write on the folder's drive, once known.
+    pub free: Option<u64>,
+}
+
+/// The toolbar's filter, as the status line tells of it.
+#[derive(Clone, Copy, Debug)]
+pub struct StatusFilter<'a> {
+    pub text: &'a str,
+    /// How many rows show, of `of`.
+    pub shown: usize,
+    pub of: usize,
+}
+
+/// The parts of a pane's status line, the most worth first: what is selected (`3개 선택`, `크기
+/// 1.4 MB`, `+폴더 1개`), then `항목 9개`, then `거르기: *.jpg · 4/9` while a filter hides rows,
+/// then `남은 공간 212 GB`. [`fit_status`] drops them from the right when the pane is narrow.
 ///
-/// `items` is the number of rows and `selected` the number of selected ones; the selection
-/// part shows only when there is one. `selected_bytes` is the size of the selected files, and
-/// `None` when only folders or links are selected, which have no size to add up. `free` is
-/// the space left on the volume, shown once known and rounded down like the sidebar's
-/// [`drive_space`], so the two never show different numbers for the same volume.
-pub fn status_line(
-    items: usize,
-    selected: usize,
-    selected_bytes: Option<u64>,
-    free: Option<u64>,
-) -> String {
-    status_parts(
-        vec![format!("항목 {items}개")],
-        selected,
-        selected_bytes,
-        free,
-    )
-}
-
-/// The status bar of a folder while the toolbar's filter shows only the rows whose names hold
-/// `filter`: `거르는 중: ‘보고’ · 항목 2개 / 9개 · 선택 1개 · 남은 공간 212 GB`, where `shown` is
-/// how many rows show and of how many there are (`(2, 9)`); the rest as in [`status_line`].
-pub fn filtered_status_line(
-    filter: &str,
-    (shown, of): (usize, usize),
-    selected: usize,
-    selected_bytes: Option<u64>,
-    free: Option<u64>,
-) -> String {
-    let parts = vec![
-        format!("거르는 중: ‘{filter}’"),
-        format!("항목 {shown}개 / {of}개"),
-    ];
-    status_parts(parts, selected, selected_bytes, free)
-}
-
-/// `parts`, then the selection and the free space of [`status_line`], joined.
-fn status_parts(
-    mut parts: Vec<String>,
-    selected: usize,
-    selected_bytes: Option<u64>,
-    free: Option<u64>,
-) -> String {
-    match (selected, selected_bytes) {
-        (0, _) => {}
-        (count, Some(bytes)) => parts.push(format!("선택 {count}개 ({})", format_size(bytes))),
-        (count, None) => parts.push(format!("선택 {count}개")),
+/// The size is the sum of the selected files; a folder is told apart (`+폴더`, or `폴더` when
+/// no file is selected) and its size is never looked for. The room is rounded down like the
+/// sidebar's [`drive_space`], so the two never show different numbers for the same volume.
+pub fn status_parts(facts: &StatusFacts<'_>) -> Vec<String> {
+    let mut parts = Vec::new();
+    if facts.selected > 0 {
+        parts.push(format!("{}개 선택", facts.selected));
+        if let Some(bytes) = facts.selected_bytes {
+            parts.push(format!("크기 {}", format_size(bytes)));
+        }
+        if facts.selected_folders > 0 {
+            let plus = if facts.selected_bytes.is_some() {
+                "+"
+            } else {
+                ""
+            };
+            parts.push(format!("{plus}폴더 {}개", facts.selected_folders));
+        }
     }
-    if let Some(free) = free {
+    parts.push(format!("항목 {}개", facts.items));
+    if let Some(filter) = facts.filter {
+        parts.push(format!(
+            "거르기: {} · {}/{}",
+            clip_end(filter.text, STATUS_FILTER_CELLS),
+            filter.shown,
+            filter.of
+        ));
+    }
+    if let Some(free) = facts.free {
         parts.push(format!(
             "남은 공간 {}",
             format_size_rounded(free, Rounding::Down)
         ));
     }
-    parts.join(" · ")
+    parts
+}
+
+/// How many cells one character takes on a line: a Hangul syllable or another wide character
+/// two, the rest one.
+fn char_cells(c: char) -> usize {
+    match c {
+        '\u{1100}'..='\u{11FF}'
+        | '\u{2E80}'..='\u{A4CF}'
+        | '\u{AC00}'..='\u{D7A3}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE30}'..='\u{FE6F}'
+        | '\u{FF00}'..='\u{FF60}'
+        | '\u{FFE0}'..='\u{FFE6}' => 2,
+        _ => 1,
+    }
+}
+
+/// How many cells `text` takes on a line: a Hangul syllable or another wide character two, the
+/// rest one. The pane turns its width into cells by the size of its font.
+pub fn text_cells(text: &str) -> usize {
+    text.chars().map(char_cells).sum()
+}
+
+/// What stands between the parts of a status line.
+const STATUS_SEPARATOR: &str = " · ";
+
+/// `parts` joined with ` · `, fewer of them from the right until the line is at most `cells`
+/// wide: a part is left out whole, never cut. The first part stays whatever the width.
+pub fn fit_status<S: AsRef<str>>(parts: &[S], cells: usize) -> String {
+    let separator = text_cells(STATUS_SEPARATOR);
+    let mut line = String::new();
+    let mut used = 0;
+    for part in parts
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|part| !part.is_empty())
+    {
+        let width = text_cells(part);
+        if line.is_empty() {
+            line.push_str(part);
+            used = width;
+        } else if used + separator + width <= cells {
+            line.push_str(STATUS_SEPARATOR);
+            line.push_str(part);
+            used += separator + width;
+        } else {
+            break;
+        }
+    }
+    line
 }
 
 /// The sidebar name of one of the user's well-known folders.
@@ -1259,6 +1320,240 @@ pub fn undo_order() -> &'static str {
 /// The notice when an undo or a redo is asked for while one is under way: one runs at a time.
 pub fn undo_busy() -> &'static str {
     "되돌리기나 다시 실행이 진행 중입니다. 끝난 뒤에 다시 해 보세요"
+}
+
+// ---- 되돌리기 기록 (OPS-12) ----
+
+/// How many rows of each list the 되돌리기 기록 shows at most; the engine keeps more
+/// ([`rf_jobs::UNDO_LIMIT`]).
+pub const HISTORY_SHOWN: usize = 50;
+
+/// Why a record of the history can no longer be undone (or done again), as far as the folders
+/// on screen tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stale {
+    /// An item the undo works on is gone.
+    Missing,
+    /// A copied item is not as the copy left it.
+    Changed,
+}
+
+/// The head of the group in the job panel.
+pub fn history_head(count: usize) -> String {
+    format!("되돌리기 기록 {count}개")
+}
+
+/// The head of the list of what can be undone.
+pub fn history_undo_section(count: usize) -> String {
+    format!("되돌릴 수 있음 {count}개")
+}
+
+/// The head of the list of what can be done again.
+pub fn history_redo_section(count: usize) -> String {
+    format!("다시 실행할 수 있음 {count}개")
+}
+
+/// How many cells the name of an item takes at most in a row of the history.
+const HISTORY_NAME_CELLS: usize = 28;
+
+/// The cells the text of a filter takes at most in the status line.
+const STATUS_FILTER_CELLS: usize = 20;
+
+/// What the record does, short. With `redo` false it tells what the job did, as the list of
+/// what can be undone shows it (`이름 바꾸기: a.txt → b.txt`); with `redo` true it tells what
+/// the record's own undo does, which is what a row of the list of what can be done again
+/// stands for: its button runs that undo.
+pub fn history_action(record: &UndoRecord, redo: bool) -> String {
+    fn named(path: &VPath) -> String {
+        clip_middle(&name_of(path), HISTORY_NAME_CELLS)
+    }
+    fn folder_of(path: &VPath) -> String {
+        path.parent().map_or_else(String::new, |parent| {
+            clip_middle(&name_of(&parent), HISTORY_NAME_CELLS)
+        })
+    }
+    /// The one name among `paths`, or the count of them.
+    fn items(paths: &[&VPath]) -> String {
+        match paths {
+            [one] => named(one),
+            many => format!("{}개 항목", many.len()),
+        }
+    }
+    let put = |label: &str, what: String| format!("{label}: {what}");
+    let make = |kind: &CreateKind, path: &VPath| {
+        let label = match kind {
+            CreateKind::File => "새 파일",
+            CreateKind::Dir => "새 폴더",
+        };
+        put(label, named(path))
+    };
+    match (record, redo) {
+        (UndoRecord::Renamed { from, to }, false) => {
+            put("이름 바꾸기", format!("{} → {}", named(from), named(to)))
+        }
+        (UndoRecord::Renamed { from, to }, true) => {
+            put("이름 바꾸기", format!("{} → {}", named(to), named(from)))
+        }
+        (UndoRecord::Moved { moves, .. }, false) => {
+            let moved: Vec<&VPath> = moves.iter().map(|m| &m.to).collect();
+            let into = moves.first().map(|m| folder_of(&m.to)).unwrap_or_default();
+            put("이동", format!("{} → {into}", items(&moved)))
+        }
+        (UndoRecord::Moved { moves, .. }, true) => {
+            let moved: Vec<&VPath> = moves.iter().map(|m| &m.from).collect();
+            let into = moves
+                .first()
+                .map(|m| folder_of(&m.from))
+                .unwrap_or_default();
+            put("이동", format!("{} → {into}", items(&moved)))
+        }
+        (UndoRecord::Copied { created, .. }, false) => {
+            let made: Vec<&VPath> = created.iter().map(|item| &item.path).collect();
+            let into = created
+                .first()
+                .map(|item| folder_of(&item.path))
+                .unwrap_or_default();
+            put("복사", format!("{} → {into}", items(&made)))
+        }
+        (UndoRecord::Copied { created, .. }, true) => put(
+            "휴지통으로",
+            items(&created.iter().map(|item| &item.path).collect::<Vec<_>>()),
+        ),
+        (UndoRecord::Created { path, kind }, false)
+        | (UndoRecord::Removed { path, kind }, true) => make(kind, path),
+        (UndoRecord::Created { path, .. }, true) | (UndoRecord::Removed { path, .. }, false) => {
+            put("삭제", named(path))
+        }
+        (UndoRecord::Trashed { items: trashed }, false)
+        | (UndoRecord::Restored { items: trashed }, true) => put(
+            "휴지통으로",
+            items(
+                &trashed
+                    .iter()
+                    .map(|item| &item.original)
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+        (UndoRecord::Trashed { items: trashed }, true)
+        | (UndoRecord::Restored { items: trashed }, false) => put(
+            "휴지통에서 꺼내기",
+            items(
+                &trashed
+                    .iter()
+                    .map(|item| &item.original)
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+        (UndoRecord::LinksMade { at: links }, false)
+        | (UndoRecord::LinksRemoved { links }, true) => put(
+            "링크 만들기",
+            items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
+        ),
+        (UndoRecord::LinksMade { at: links }, true)
+        | (UndoRecord::LinksRemoved { links }, false) => put(
+            "링크 지우기",
+            items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
+        ),
+        // A record added after this was written.
+        _ => "작업".to_owned(),
+    }
+}
+
+/// `text` shortened in the middle to at most `max` cells with `…`, at whole characters, so that
+/// the end of a name (its extension) stays in view.
+fn clip_middle(text: &str, max: usize) -> String {
+    if text_cells(text) <= max {
+        return text.to_owned();
+    }
+    let room = max.saturating_sub(1);
+    let (head_room, tail_room) = (room.div_ceil(2), room / 2);
+    let mut head = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let width = char_cells(c);
+        if used + width > head_room {
+            break;
+        }
+        head.push(c);
+        used += width;
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let width = char_cells(c);
+        if used + width > tail_room {
+            break;
+        }
+        tail.push(c);
+        used += width;
+    }
+    tail.reverse();
+    format!("{head}…{}", tail.into_iter().collect::<String>())
+}
+
+/// `text` shortened at the end to at most `max` cells with `…`, at whole characters.
+fn clip_end(text: &str, max: usize) -> String {
+    if text_cells(text) <= max {
+        return text.to_owned();
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let width = char_cells(c);
+        if used + width > max.saturating_sub(1) {
+            break;
+        }
+        kept.push(c);
+        used += width;
+    }
+    kept.push('…');
+    kept
+}
+
+/// The second line of a row of the history: why it cannot run (`stale`), else that it is the
+/// `next` one of its list, else why it waits.
+pub fn history_note(redo: bool, next: bool, stale: Option<Stale>) -> String {
+    let cannot = if redo {
+        "다시 실행할 수 없습니다"
+    } else {
+        "되돌릴 수 없습니다"
+    };
+    match (stale, next, redo) {
+        (Some(Stale::Missing), _, _) => format!("항목이 없어져 {cannot}"),
+        (Some(Stale::Changed), _, _) => format!("복사한 뒤 항목이 바뀌어 {cannot}"),
+        (None, true, false) => "다음에 되돌릴 작업".to_owned(),
+        (None, true, true) => "다음에 다시 실행할 작업".to_owned(),
+        (None, false, false) => undo_order().to_owned(),
+        (None, false, true) => "먼저 다시 실행할 작업이 있습니다".to_owned(),
+    }
+}
+
+/// The time of a row: `14:32` for today (the day of `now` in `tz`), `10월 30일 14:32` before.
+/// Nothing for a record whose time is not known (the epoch).
+pub fn history_time(at: SystemTime, now: SystemTime, tz: &TimeZone) -> String {
+    if at <= SystemTime::UNIX_EPOCH {
+        return String::new();
+    }
+    let Ok(stamp) = Timestamp::try_from(at) else {
+        return String::new();
+    };
+    let when = tz.to_datetime(stamp);
+    let hour_minute = format!("{:02}:{:02}", when.hour(), when.minute());
+    let today = Timestamp::try_from(now).map(|now| tz.to_datetime(now).date());
+    if today.is_ok_and(|today| today == when.date()) {
+        hour_minute
+    } else {
+        format!("{}월 {}일 {hour_minute}", when.month(), when.day())
+    }
+}
+
+/// The label of a row's button.
+pub fn history_button(redo: bool) -> &'static str {
+    if redo {
+        "다시 실행"
+    } else {
+        "되돌리기"
+    }
 }
 
 /// The default name of a new folder.
@@ -2236,38 +2531,314 @@ mod tests {
     }
 
     #[test]
-    fn status_line_matches_mockup() {
+    fn the_status_line_lists_its_parts_in_the_order_of_their_worth() {
         const GB: u64 = 1 << 30;
+        let facts = |selected, bytes, folders, filter, free| StatusFacts {
+            items: 9,
+            selected,
+            selected_bytes: bytes,
+            selected_folders: folders,
+            filter,
+            free,
+        };
+        // Nothing selected: the count, then the room.
         assert_eq!(
-            status_line(9, 2, Some(1_477_427), Some(212 * GB)),
-            "항목 9개 · 선택 2개 (1.4 MB) · 남은 공간 212 GB"
+            status_parts(&facts(0, None, 0, None, Some(212 * GB))),
+            ["항목 9개", "남은 공간 212 GB"]
         );
-        // Folders alone have no size; nothing selected shows no selection.
+        // The room is left out while it is not known.
+        assert_eq!(status_parts(&facts(0, None, 0, None, None)), ["항목 9개"]);
+        // Files and a folder: the folder adds to the count but not to the size.
         assert_eq!(
-            status_line(9, 1, None, Some(212 * GB)),
-            "항목 9개 · 선택 1개 · 남은 공간 212 GB"
+            status_parts(&facts(3, Some(1_477_427), 1, None, Some(212 * GB))),
+            [
+                "3개 선택",
+                "크기 1.4 MB",
+                "+폴더 1개",
+                "항목 9개",
+                "남은 공간 212 GB"
+            ]
+        );
+        // Files alone have no folder note; folders alone have no size.
+        assert_eq!(
+            status_parts(&facts(2, Some(0), 0, None, None)),
+            ["2개 선택", "크기 0 바이트", "항목 9개"]
         );
         assert_eq!(
-            status_line(9, 0, None, Some(212 * GB)),
-            "항목 9개 · 남은 공간 212 GB"
+            status_parts(&facts(2, None, 2, None, None)),
+            ["2개 선택", "폴더 2개", "항목 9개"]
         );
-        assert_eq!(status_line(0, 0, None, None), "항목 0개");
-        // Free space rounds down, as in the sidebar: 4.66 GB is 4.6 GB in both places.
+        // A link or another item alone: counted, with nothing to add up.
+        assert_eq!(
+            status_parts(&facts(1, None, 0, None, None)),
+            ["1개 선택", "항목 9개"]
+        );
+        // A filter comes after the count and says how many rows show of how many.
+        let filter = Some(StatusFilter {
+            text: "*.jpg",
+            shown: 4,
+            of: 9,
+        });
+        assert_eq!(
+            status_parts(&facts(0, None, 0, filter, Some(212 * GB))),
+            ["항목 9개", "거르기: *.jpg · 4/9", "남은 공간 212 GB"]
+        );
+        // Every part at once, in order.
+        assert_eq!(
+            status_parts(&facts(3, Some(1_477_427), 1, filter, Some(212 * GB))),
+            [
+                "3개 선택",
+                "크기 1.4 MB",
+                "+폴더 1개",
+                "항목 9개",
+                "거르기: *.jpg · 4/9",
+                "남은 공간 212 GB"
+            ]
+        );
+        // An empty folder.
+        let empty = StatusFacts {
+            items: 0,
+            ..facts(0, None, 0, None, None)
+        };
+        assert_eq!(status_parts(&empty), ["항목 0개"]);
+        // The room is rounded down, as in the sidebar.
         let free = 4 * GB + 2 * GB / 3;
         assert_eq!(
-            status_line(1, 0, None, Some(free)),
-            "항목 1개 · 남은 공간 4.6 GB"
+            status_parts(&facts(0, None, 0, None, Some(free)))[1],
+            "남은 공간 4.6 GB"
         );
         assert!(drive_space(free, 64 * GB).starts_with("4.6 GB 남음"));
+    }
+
+    #[test]
+    fn a_long_filter_is_cut_at_a_whole_character() {
+        let text = "아주아주아주아주아주아주아주아주 긴 거르기 글";
+        let parts = status_parts(&StatusFacts {
+            items: 3,
+            selected: 0,
+            selected_bytes: None,
+            selected_folders: 0,
+            filter: Some(StatusFilter {
+                text,
+                shown: 1,
+                of: 3,
+            }),
+            free: None,
+        });
+        let filter = &parts[1];
+        assert!(filter.starts_with("거르기: 아주아주"), "{filter}");
+        assert!(filter.ends_with("… · 1/3"), "{filter}");
+        assert!(text_cells(filter) < text_cells(text), "{filter}");
+    }
+
+    #[test]
+    fn text_cells_count_a_hangul_syllable_as_two() {
+        assert_eq!(text_cells(""), 0);
+        assert_eq!(text_cells("abc 12"), 6);
+        assert_eq!(text_cells("선택 2개"), 4 + 1 + 1 + 2);
+        assert_eq!(text_cells("…"), 1);
+    }
+
+    #[test]
+    fn a_narrow_status_line_drops_its_parts_from_the_right() {
+        let parts = [
+            "3개 선택",
+            "크기 1.4 MB",
+            "+폴더 1개",
+            "항목 9개",
+            "남은 공간 212 GB",
+        ];
+        let at = |cells| fit_status(&parts, cells);
+        let all = "3개 선택 · 크기 1.4 MB · +폴더 1개 · 항목 9개 · 남은 공간 212 GB";
+        assert_eq!(text_cells(all), 64);
+        assert_eq!(at(64), all);
+        assert_eq!(at(1000), all);
+        // The room goes first, then the count, then the folders, then the size.
+        assert_eq!(at(63), "3개 선택 · 크기 1.4 MB · +폴더 1개 · 항목 9개");
+        assert_eq!(at(45), "3개 선택 · 크기 1.4 MB · +폴더 1개 · 항목 9개");
+        assert_eq!(at(44), "3개 선택 · 크기 1.4 MB · +폴더 1개");
+        assert_eq!(at(34), "3개 선택 · 크기 1.4 MB · +폴더 1개");
+        assert_eq!(at(33), "3개 선택 · 크기 1.4 MB");
+        assert_eq!(at(22), "3개 선택 · 크기 1.4 MB");
+        assert_eq!(at(21), "3개 선택");
+        // What comes first stays, however narrow, and is never cut in the middle.
+        assert_eq!(at(8), "3개 선택");
+        assert_eq!(at(1), "3개 선택");
+        assert_eq!(at(0), "3개 선택");
+        assert_eq!(fit_status(&[] as &[&str], 10), "");
+    }
+
+    #[test]
+    fn the_status_line_of_a_filtered_folder_fits_a_narrow_pane() {
+        const GB: u64 = 1 << 30;
+        let parts = status_parts(&StatusFacts {
+            items: 4,
+            selected: 0,
+            selected_bytes: None,
+            selected_folders: 0,
+            filter: Some(StatusFilter {
+                text: "*.jpg",
+                shown: 4,
+                of: 9,
+            }),
+            free: Some(212 * GB),
+        });
+        let line = |cells| fit_status(&parts, cells);
         assert_eq!(
-            status_line(3, 3, Some(0), None),
-            "항목 3개 · 선택 3개 (0 바이트)"
+            line(80),
+            "항목 4개 · 거르기: *.jpg · 4/9 · 남은 공간 212 GB"
         );
-        // While a filter hides rows, the line says so and counts both.
+        // 8 + 3 + 19 = 30 cells for the first two.
+        assert_eq!(line(40), "항목 4개 · 거르기: *.jpg · 4/9");
+        assert_eq!(line(29), "항목 4개");
+    }
+
+    #[test]
+    fn history_rows_say_what_was_done() {
+        let names = |from: &str, to: &str| (path(from), path(to));
+        let (from, to) = names("a.txt", "b.txt");
+        let renamed = UndoRecord::Renamed { from, to };
         assert_eq!(
-            filtered_status_line("보고", (2, 9), 1, None, Some(212 * GB)),
-            "거르는 중: ‘보고’ · 항목 2개 / 9개 · 선택 1개 · 남은 공간 212 GB"
+            history_action(&renamed, false),
+            "이름 바꾸기: a.txt → b.txt"
         );
+        // Doing it again after an undo renames the other way round: the record is the undo's.
+        assert_eq!(history_action(&renamed, true), "이름 바꾸기: b.txt → a.txt");
+
+        let moved = |count: usize| UndoRecord::Moved {
+            moves: (0..count)
+                .map(|i| rf_jobs::MovedItem {
+                    from: path(&format!("src/f{i}.txt")),
+                    to: path(&format!("dest/f{i}.txt")),
+                })
+                .collect(),
+            created_dirs: Vec::new(),
+            removed_dirs: Vec::new(),
+            overwritten: 0,
+            copied_dirs: Vec::new(),
+        };
+        assert_eq!(history_action(&moved(3), false), "이동: 3개 항목 → dest");
+        assert_eq!(history_action(&moved(1), false), "이동: f0.txt → dest");
+        assert_eq!(history_action(&moved(3), true), "이동: 3개 항목 → src");
+
+        let copied = UndoRecord::Copied {
+            created: vec![rf_jobs::CreatedItem {
+                path: path("dest/c.txt"),
+                is_dir: false,
+                size: 1,
+                modified: None,
+                identity: None,
+            }],
+            overwritten: 0,
+            at: None,
+        };
+        assert_eq!(history_action(&copied, false), "복사: c.txt → dest");
+        // Doing a copy's undo again takes the copy out of the trash.
+        assert_eq!(history_action(&copied, true), "휴지통으로: c.txt");
+
+        let made = |kind| UndoRecord::Created {
+            path: path("새 폴더"),
+            kind,
+        };
+        assert_eq!(
+            history_action(&made(CreateKind::Dir), false),
+            "새 폴더: 새 폴더"
+        );
+        assert_eq!(
+            history_action(&made(CreateKind::File), false),
+            "새 파일: 새 폴더"
+        );
+        // Doing the creation again after its undo is a record of a removal.
+        let removed = UndoRecord::Removed {
+            path: path("새 폴더"),
+            kind: CreateKind::Dir,
+        };
+        assert_eq!(history_action(&removed, true), "새 폴더: 새 폴더");
+        assert_eq!(
+            history_action(&made(CreateKind::Dir), true),
+            "삭제: 새 폴더"
+        );
+
+        let trashed = |count: usize| UndoRecord::Trashed {
+            items: (0..count)
+                .map(|i| rf_jobs::TrashedItem {
+                    original: path(&format!("t{i}.txt")),
+                    location: None,
+                })
+                .collect(),
+        };
+        assert_eq!(history_action(&trashed(1), false), "휴지통으로: t0.txt");
+        assert_eq!(history_action(&trashed(4), false), "휴지통으로: 4개 항목");
+        assert_eq!(
+            history_action(&trashed(4), true),
+            "휴지통에서 꺼내기: 4개 항목"
+        );
+
+        let links = UndoRecord::LinksMade {
+            at: vec![(path("l.lnk"), LinkKind::Shortcut, path("t"))],
+        };
+        assert_eq!(history_action(&links, false), "링크 만들기: l.lnk");
+        assert_eq!(history_action(&links, true), "링크 지우기: l.lnk");
+    }
+
+    #[test]
+    fn a_long_name_in_a_history_row_is_cut_in_the_middle() {
+        let long = "가".repeat(40);
+        let renamed = UndoRecord::Renamed {
+            from: path(&long),
+            to: path("b.txt"),
+        };
+        let text = history_action(&renamed, false);
+        assert!(text.starts_with("이름 바꾸기: 가가"), "{text}");
+        assert!(text.contains('…') && text.ends_with(" → b.txt"), "{text}");
+        assert!(text_cells(&text) < 70, "{text}");
+    }
+
+    #[test]
+    fn history_notes_mark_the_next_row_and_say_why_a_row_waits_or_cannot_run() {
+        assert_eq!(history_note(false, true, None), "다음에 되돌릴 작업");
+        assert_eq!(history_note(true, true, None), "다음에 다시 실행할 작업");
+        assert_eq!(history_note(false, false, None), undo_order());
+        assert_eq!(
+            history_note(true, false, None),
+            "먼저 다시 실행할 작업이 있습니다"
+        );
+        assert_eq!(
+            history_note(false, true, Some(Stale::Missing)),
+            "항목이 없어져 되돌릴 수 없습니다"
+        );
+        assert_eq!(
+            history_note(false, true, Some(Stale::Changed)),
+            "복사한 뒤 항목이 바뀌어 되돌릴 수 없습니다"
+        );
+        assert_eq!(
+            history_note(true, true, Some(Stale::Missing)),
+            "항목이 없어져 다시 실행할 수 없습니다"
+        );
+        // Why it cannot run comes before where it stands in the order.
+        assert_eq!(
+            history_note(false, false, Some(Stale::Missing)),
+            "항목이 없어져 되돌릴 수 없습니다"
+        );
+        assert_eq!(history_button(false), "되돌리기");
+        assert_eq!(history_button(true), "다시 실행");
+        assert_eq!(history_head(3), "되돌리기 기록 3개");
+        assert_eq!(history_undo_section(2), "되돌릴 수 있음 2개");
+        assert_eq!(history_redo_section(1), "다시 실행할 수 있음 1개");
+    }
+
+    #[test]
+    fn history_times_show_the_day_only_when_it_is_not_today() {
+        use std::time::{Duration, SystemTime};
+        let seoul = TimeZone::get("Asia/Seoul").expect("Asia/Seoul is in the database");
+        // 2026-10-30 05:32:00 UTC is 14:32 in Seoul.
+        let at = SystemTime::UNIX_EPOCH + Duration::from_mins(29_888_972);
+        let same_day = at + Duration::from_hours(3);
+        let next_day = at + Duration::from_hours(24);
+        assert_eq!(history_time(at, same_day, &seoul), "14:32");
+        assert_eq!(history_time(at, next_day, &seoul), "10월 30일 14:32");
+        // A row that was never stamped shows no time.
+        assert_eq!(history_time(SystemTime::UNIX_EPOCH, same_day, &seoul), "");
     }
 
     #[test]

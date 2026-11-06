@@ -453,6 +453,7 @@ pub(super) fn run_move(
     state.set_history(History {
         top: Some(moved_x()),
         can_redo: false,
+        ..History::default()
     });
     state.track(Started {
         id,

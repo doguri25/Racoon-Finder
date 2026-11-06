@@ -7,7 +7,9 @@
 //! 일시정지 (or 계속) and 취소; the head of 최근 완료 has 펼치기 (or 접기) and 지우기; and while
 //! that list is open, each finished job's line has 자세히, when it has items to tell of, and 로그
 //! 저장…, which is also the way of the keys to the 자세히 of a toast: the toast's job is in the
-//! list. The keys of [`PanelKey`] move among them, as among a dialog's
+//! list; and the head of 되돌리기 기록 (module `undo_list`) has 펼치기 (or 접기), and, while it
+//! is open, each of its rows has its 되돌리기 or 다시 실행, which only the first row of a list
+//! can press. The keys of [`PanelKey`] move among them, as among a dialog's
 //! buttons, and press the one the keys are on; Esc, Tab and F6 give the keys back to the active
 //! pane. While the panel has the keys, the window's other commands work as from the panes, and
 //! those of the panes' rows do nothing
@@ -32,32 +34,50 @@ pub enum PanelButton {
     Details(usize),
     /// 로그 저장… of line `index` of 최근 완료.
     SaveLog(usize),
+    /// 펼치기 or 접기 of 되돌리기 기록.
+    ToggleHistory,
+    /// 되돌리기 (or, with `redo`, 다시 실행) of row `index` of its list of what can be undone
+    /// (of what can be done again). Only the first row of a list does anything.
+    RunHistory { redo: bool, index: usize },
 }
 
 impl AppState {
     /// The buttons of the job panel, a line at a time, in the order they show: one line for
-    /// each job's row, then the head of 최근 완료, then, while it is open, each of its lines.
-    /// Empty while the panel does not show.
+    /// each job's row, then the head of 최근 완료 and, while it is open, each of its lines,
+    /// then the head of 되돌리기 기록 and, while it is open, a line for each of its rows (the
+    /// list of what can be undone, then what can be done again). Empty while the panel does
+    /// not show.
     pub fn panel_lines(&self) -> Vec<Vec<PanelButton>> {
         let mut lines: Vec<Vec<PanelButton>> = (0..self.jobs.rows().len())
             .map(|row| vec![PanelButton::PauseOrResume(row), PanelButton::Cancel(row)])
             .collect();
-        if self.recent_jobs.is_empty() {
-            return lines;
-        }
-        lines.push(vec![PanelButton::ToggleRecent, PanelButton::ClearRecent]);
-        if self.recent_open {
-            for index in 0..self.recent_jobs.len() {
-                let mut line = Vec::new();
-                if self
-                    .recent_jobs
-                    .get(index)
-                    .is_some_and(Finished::has_details)
-                {
-                    line.push(PanelButton::Details(index));
+        if !self.recent_jobs.is_empty() {
+            lines.push(vec![PanelButton::ToggleRecent, PanelButton::ClearRecent]);
+            if self.recent_open {
+                for index in 0..self.recent_jobs.len() {
+                    let mut line = Vec::new();
+                    if self
+                        .recent_jobs
+                        .get(index)
+                        .is_some_and(Finished::has_details)
+                    {
+                        line.push(PanelButton::Details(index));
+                    }
+                    line.push(PanelButton::SaveLog(index));
+                    lines.push(line);
                 }
-                line.push(PanelButton::SaveLog(index));
-                lines.push(line);
+            }
+        }
+        if self.history_any() {
+            lines.push(vec![PanelButton::ToggleHistory]);
+            if self.history_open {
+                let (undo, redo) = self.history_shown();
+                lines.extend(
+                    (0..undo).map(|index| vec![PanelButton::RunHistory { redo: false, index }]),
+                );
+                lines.extend(
+                    (0..redo).map(|index| vec![PanelButton::RunHistory { redo: true, index }]),
+                );
             }
         }
         lines
@@ -121,6 +141,11 @@ impl AppState {
             }
             PanelButton::Details(index) => self.recent_details(index),
             PanelButton::SaveLog(index) => self.save_log_asked(index),
+            PanelButton::ToggleHistory => {
+                self.history_toggled();
+                Vec::new()
+            }
+            PanelButton::RunHistory { redo, index } => self.history_run(redo, index),
         }
     }
 }

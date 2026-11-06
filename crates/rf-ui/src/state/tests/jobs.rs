@@ -379,6 +379,7 @@ fn a_finished_move_offers_its_undo_while_it_is_next() {
     state.set_history(History {
         top: Some(record.clone()),
         can_redo: false,
+        ..History::default()
     });
     let effects = finish(&mut state, 1, &spec, JobWork::Move, |report| {
         report.undo = Some(record.clone());
@@ -415,6 +416,7 @@ fn a_finished_move_offers_its_undo_while_it_is_next() {
             to: in_a("y"),
         }),
         can_redo: false,
+        ..History::default()
     });
     assert_eq!(
         state.toast_clicked(token),
@@ -434,6 +436,7 @@ fn undo_is_off_while_an_undo_runs() {
     state.set_history(History {
         top: Some(record.clone()),
         can_redo: false,
+        ..History::default()
     });
     assert_eq!(
         press(&mut state, "z", CTRL),
@@ -450,6 +453,7 @@ fn undo_is_off_while_an_undo_runs() {
     state.set_history(History {
         top: None,
         can_redo: false,
+        ..History::default()
     });
     assert!(!state.can_undo() && !state.can_redo());
     assert_eq!(press(&mut state, "z", CTRL), Some(vec![]));
@@ -458,6 +462,7 @@ fn undo_is_off_while_an_undo_runs() {
     state.set_history(History {
         top: None,
         can_redo: true,
+        ..History::default()
     });
     let spec = JobSpec::Undo(record);
     let mut report = JobReport::new(JobId(9), &spec);
@@ -936,6 +941,7 @@ fn a_partly_refused_trash_tells_what_went_and_asks_about_the_rest() {
     state.set_history(History {
         top: Some(record.clone()),
         can_redo: false,
+        ..History::default()
     });
     let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
         report.outcome = Outcome::CompletedWithErrors;
@@ -1167,6 +1173,7 @@ fn the_toast_button_hides_once_it_would_not_undo() {
     state.set_history(History {
         top: Some(record.clone()),
         can_redo: false,
+        ..History::default()
     });
     let effects = finish(&mut state, 1, &spec, JobWork::Move, |report| {
         report.undo = Some(record.clone());
@@ -1203,6 +1210,7 @@ fn the_toast_button_hides_once_it_would_not_undo() {
     state.set_history(History {
         top: Some(moved("other.txt")),
         can_redo: false,
+        ..History::default()
     });
     assert!(!state.toast_button_live());
     assert_eq!(
@@ -1359,10 +1367,12 @@ fn a_job_that_ends_reads_the_free_space_of_the_drives_it_touched() {
         generation: right,
         available: 5 * 1024 * 1024 * 1024,
     });
-    assert!(
+    assert_eq!(
         state.panes()[RIGHT]
             .active_tab()
-            .status_line()
-            .ends_with("남은 공간 5 GB")
+            .status_parts(None)
+            .last()
+            .map(String::as_str),
+        Some("남은 공간 5 GB")
     );
 }

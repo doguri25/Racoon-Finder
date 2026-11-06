@@ -77,6 +77,7 @@ mod shell;
 mod sidebar;
 mod tabs;
 mod tray;
+mod undo_list;
 mod view;
 
 pub use address::{
@@ -103,6 +104,7 @@ pub use preview::{
 pub use select::{MATCH_STRETCH, MatchRequest, Matched, SelectState};
 pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
 pub use tray::TrayCommand;
+pub use undo_list::{HistoryLine, HistoryView};
 pub use view::{
     Chosen, Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
     MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
@@ -356,6 +358,11 @@ pub struct AppState {
     jobs: JobRows,
     /// What the engine's history can undo and redo next, as the engine last told.
     history: History,
+    /// When each record of [`history`](Self::history) was first seen (module `undo_list`), in
+    /// the order of the undo list, then the redo list.
+    history_stamps: Vec<(UndoRecord, SystemTime)>,
+    /// Whether the job panel's 되돌리기 기록 shows its rows below its head.
+    history_open: bool,
     /// The window over the main window, if one shows.
     modal: Option<Modal>,
     /// The windows waiting for the one that shows to close, in the order they came.
@@ -518,6 +525,8 @@ impl AppState {
             pending_reloads: HashSet::new(),
             jobs: JobRows::default(),
             history: History::default(),
+            history_stamps: Vec::new(),
+            history_open: false,
             modal: None,
             later: VecDeque::new(),
             toast: None,
@@ -926,6 +935,20 @@ impl AppState {
                 place.space = Some(space);
             }
         }
+    }
+
+    /// The room the sidebar knows on the drive that holds `path`, the deepest drive of the
+    /// places, once a worker has read it: what a pane's status line shows until the pane has
+    /// read the room of its own folder (NAV-12). Nothing looks at the disk here.
+    pub fn drive_free_of(&self, path: &VPath) -> Option<u64> {
+        self.places
+            .iter()
+            .filter(|place| {
+                place.kind == crate::places::PlaceKind::Drive && path.starts_with(&place.path)
+            })
+            .max_by_key(|place| ancestors(&place.path).len())
+            .and_then(|place| place.space)
+            .map(|space| space.available)
     }
 
     /// What a job that changed the folders `folders` has to have read again: the free space of

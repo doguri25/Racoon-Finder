@@ -47,18 +47,29 @@ use crate::selection::Selection;
 use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
-    Column, Completion, DropSpot, LEFT, LinkFacts, MenuFacts, Names, PathForm, PreviewShown, RIGHT,
-    RecentAt, SelectState,
+    Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names, PathForm,
+    PreviewShown, RIGHT, RecentAt, SelectState,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
-    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, ItemMenu, JobRowView, LinkEntry,
-    MainWindow, MessageView, NameView, PaneView, PatternView, PickTarget, PickView, PreflightView,
-    PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView, RowKind, SectionHead,
-    Shortcuts, TabItem, TreeRow,
+    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu,
+    JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView, PatternView, PickTarget,
+    PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
+    RowKind, SectionHead, Shortcuts, TabItem, TreeRow,
 };
+
+/// What separates the parts of a pane's status line in `PaneView.status`:
+/// the window picks as many of them as the pane's width takes ([`fit_status`]).
+pub const STATUS_SEPARATOR: &str = "\n";
+
+/// The status line of `joined` (the parts of `PaneView.status`, apart by
+/// [`STATUS_SEPARATOR`]) for a pane `cells` wide ([`words::fit_status`]).
+pub fn fit_status(joined: &str, cells: i32) -> String {
+    let parts: Vec<&str> = joined.split(STATUS_SEPARATOR).collect();
+    words::fit_status(&parts, usize::try_from(cells).unwrap_or(0))
+}
 
 /// How many characters the folder of a conflict card shows, and the folder in its sentence;
 /// the middle of a longer path is left out, so that its end stays in view.
@@ -152,6 +163,12 @@ impl PaneModels {
     /// What `pane` shows; `active` when it has the keyboard. The models are brought up to
     /// date and handed over as they are.
     pub fn view(&self, pane: &Pane, active: bool) -> PaneView {
+        self.view_with(pane, active, None)
+    }
+
+    /// [`PaneModels::view`], the status line's room taken from `drive_free`, the sidebar's
+    /// knowledge of the drive, while the pane has not read its own.
+    pub fn view_with(&self, pane: &Pane, active: bool, drive_free: Option<u64>) -> PaneView {
         let tab = pane.active_tab();
         self.rows.set_folder(tab.location().as_local());
         self.rows.sync(tab.visible(), tab.selection());
@@ -232,7 +249,9 @@ impl PaneModels {
             // A folder that could not be listed has no items to count.
             status: match tab.status() {
                 LoadStatus::Failed(_) => SharedString::new(),
-                LoadStatus::Loading | LoadStatus::Ready => tab.status_line().into(),
+                LoadStatus::Loading | LoadStatus::Ready => {
+                    tab.status_parts(drive_free).join(STATUS_SEPARATOR).into()
+                }
             },
             loading: tab.status() == LoadStatus::Loading,
             error: match tab.status() {
@@ -1557,6 +1576,56 @@ pub fn job_row_view(row: &JobRow) -> JobRowView {
         paused: row.paused,
         waiting: row.waiting,
     }
+}
+
+/// The rows of the job panel's 되돌리기 기록: the head of the list of what can be undone and its
+/// rows, then the head of what can be done again and its rows, each list latest first, and how
+/// many heads there are. A list without rows has no head. The rows number their places among
+/// the rows of the keys, as [`AppState::panel_lines`](crate::state::AppState::panel_lines) does.
+pub fn history_rows(view: &HistoryView) -> (Vec<HistoryRowView>, i32) {
+    let count = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+    let mut rows = Vec::new();
+    let mut heads = 0_usize;
+    let mut line = 0_usize;
+    for (lines, redo, total) in [
+        (&view.undo, false, view.undo_total),
+        (&view.redo, true, view.redo_total),
+    ] {
+        if lines.is_empty() {
+            continue;
+        }
+        let title = if redo {
+            words::history_redo_section(total)
+        } else {
+            words::history_undo_section(total)
+        };
+        rows.push(HistoryRowView {
+            head: true,
+            title: title.into(),
+            line: -1,
+            heads_before: count(heads),
+            ..HistoryRowView::default()
+        });
+        heads += 1;
+        for (index, each) in lines.iter().enumerate() {
+            rows.push(HistoryRowView {
+                head: false,
+                title: each.text.as_str().into(),
+                time: each.time.as_str().into(),
+                note: each.note.as_str().into(),
+                next: each.next,
+                enabled: each.runnable,
+                dimmed: each.dimmed,
+                redo,
+                button: words::history_button(redo).into(),
+                line: count(line),
+                index: count(index),
+                heads_before: count(heads),
+            });
+            line += 1;
+        }
+    }
+    (rows, count(heads))
 }
 
 /// A line of the job panel's 최근 완료.

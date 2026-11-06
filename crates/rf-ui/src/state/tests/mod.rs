@@ -40,6 +40,7 @@ mod shell;
 mod sidebar;
 mod tabs;
 mod tray;
+mod undo_list;
 mod view;
 
 fn folder(name: &str) -> VPath {

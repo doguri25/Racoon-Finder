@@ -35,6 +35,13 @@ export struct FolderMenuView {
     pending: bool,
 }
 
+// The status line of a pane (NAV-12). `PaneView.status` holds its parts, the most worth first, one
+// to a line; Rust picks as many of them as the pane's width takes and joins them (never cutting
+// one in the middle). A cell is the width of a digit; a Hangul syllable takes two.
+export global StatusFit {
+    pure callback fit(parts: string, cells: int) -> string;
+}
+
 // How a list of folder names is measured: rows of `row` height between `padding` above and
 // below, and a note line of `row` height when it has one. A list shows ten rows at most.
 export global MenuRoom {
@@ -223,6 +230,7 @@ export struct PaneView {
     folders-first: bool,
     // The folder has a view of its own (기본값으로 되돌리기 has something to undo).
     own-view: bool,
+    // The parts of the status line, the most worth first, one to a line (`StatusFit`).
     status: string,
     // A listing is on its way.
     loading: bool,
@@ -1413,7 +1421,11 @@ export component Pane inherits Rectangle {
             Text {
                 x: 16px;
                 width: parent.width - 32px;
-                text: root.view.status;
+                // A cell is half the font's size: a Hangul syllable (two cells) is a little
+                // narrower than the font's size and a digit a little wider than half of it, so a
+                // line made of both fits by its pixels as it does by its cells; `elide` is for
+                // a line of wider letters.
+                text: StatusFit.fit(root.view.status, floor(self.width / (Theme.font-small * 0.5)));
                 font-size: Theme.font-small;
                 color: Theme.muted;
                 vertical-alignment: center;

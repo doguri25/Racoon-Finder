@@ -22,10 +22,10 @@ import { Shortcuts } from "shortcuts.slint";
 import { FileRow, ColumnView } from "file-list.slint";
 import {
     Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
-    MenuRoom
+    MenuRoom, StatusFit
 } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead, RowKind } from "sidebar.slint";
-import { JobPanel, JobRowView, RecentRowView } from "job-panel.slint";
+import { JobPanel, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
 import { JobTray } from "tray.slint";
 import {
     NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
@@ -41,7 +41,7 @@ import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properti
 import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing, DropPlace, DropAt } from "list-parts.slint";
 
 export {
-    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, JobTray, NameView,
+    Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, HistoryRowView, StatusFit, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt
@@ -97,7 +97,13 @@ export component MainWindow inherits Window {
     // The jobs that ended (최근 완료), and whether their lines show below its head.
     in property <[RecentRowView]> recent-rows;
     in property <bool> recent-open;
-    private property <bool> panel-shows: root.job-rows.length > 0 || root.recent-rows.length > 0;
+    // 되돌리기 기록 (OPS-12): its head's words (empty while the history holds nothing), whether
+    // its rows show, the rows and how many of them are heads.
+    in property <string> history-title;
+    in property <bool> history-open;
+    in property <[HistoryRowView]> history-rows;
+    in property <int> history-heads;
+    private property <bool> panel-shows: root.job-rows.length > 0 || root.recent-rows.length > 0 || root.history-title != "";
     // How many lines of 최근 완료 show at once: a window below 700px high (it can be 560px)
     // keeps room for the panes with two. Set by the handlers of the height, as `compact` is:
     // the window's height depends on the panel's.
@@ -371,6 +377,8 @@ export component MainWindow inherits Window {
     callback recent-cleared();
     callback recent-details(index: int);
     callback recent-save(index: int);
+    callback history-toggled();
+    callback history-run(redo: bool, index: int);
     // The confirmation's third answer (트레이에서 계속).
     callback confirm-alternative();
     // The button of the toast `token`, and its end (closed, or its time ran out).
@@ -1622,6 +1630,13 @@ export component MainWindow inherits Window {
                     recent: root.recent-rows;
                     recent-open: root.recent-open;
                     recent-lines: root.recent-lines;
+                    history-title: root.history-title;
+                    history-open: root.history-open;
+                    history: root.history-rows;
+                    history-heads: root.history-heads;
+                    // Both lists open at once would leave the panes little room in a window
+                    // as low as 560px.
+                    history-lines: root.recent-open ? 1 : root.recent-lines;
                     focus-line: panel-keys.has-focus ? root.panel-line : -1;
                     focus-button: panel-keys.has-focus ? root.panel-button : -1;
                     pause(index) => {
@@ -1644,6 +1659,12 @@ export component MainWindow inherits Window {
                     }
                     recent-save(index) => {
                         root.recent-save(index);
+                    }
+                    history-toggled => {
+                        root.history-toggled();
+                    }
+                    history-run(redo, index) => {
+                        root.history-run(redo, index);
                     }
                 }
             }

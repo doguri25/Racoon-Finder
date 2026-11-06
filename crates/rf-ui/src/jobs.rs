@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use jiff::tz::TimeZone;
 use rf_jobs::{
@@ -103,13 +103,34 @@ pub struct Started {
     pub via_history: bool,
 }
 
-/// What the history can do next, as the toolbar shows it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What the history can do next, as the toolbar shows it, and what it holds, as the job
+/// panel's 되돌리기 기록 lists it (OPS-12).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct History {
     /// The record [`JobEngine::undo`] undoes next.
     pub top: Option<UndoRecord>,
     /// Whether there is anything to redo.
     pub can_redo: bool,
+    /// What can be undone, the oldest first: the last one is undone next
+    /// (`JobEngine::undo_history`).
+    pub undo: Vec<UndoRecord>,
+    /// What can be done again, the oldest first: the last one is redone next.
+    pub redo: Vec<UndoRecord>,
+    /// When the history was read: a record not seen before is taken to be as old as this. The
+    /// epoch for a history that does not tell, which then shows no times.
+    pub at: SystemTime,
+}
+
+impl Default for History {
+    fn default() -> History {
+        History {
+            top: None,
+            can_redo: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            at: SystemTime::UNIX_EPOCH,
+        }
+    }
 }
 
 impl Jobs {
@@ -227,9 +248,14 @@ impl Jobs {
 
     /// What the history can do next.
     pub fn history(&self) -> History {
+        let undo = self.engine.undo_history();
+        let redo = self.engine.redo_history();
         History {
-            top: self.engine.undo_history().pop(),
-            can_redo: !self.engine.redo_history().is_empty(),
+            top: undo.last().cloned(),
+            can_redo: !redo.is_empty(),
+            undo,
+            redo,
+            at: SystemTime::now(),
         }
     }
 

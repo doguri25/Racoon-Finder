@@ -235,6 +235,7 @@ fn an_undo_the_trash_refused_offers_the_copies_once_their_originals_are_found() 
     state.set_history(History {
         top: Some(record.clone()),
         can_redo: false,
+        ..History::default()
     });
     let copies = [in_b("a.txt"), in_b("b.txt")];
     let effects = undo_refused(&mut state, 2, &record, &copies);

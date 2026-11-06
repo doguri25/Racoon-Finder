@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_jobs::{
@@ -588,6 +588,65 @@ fn move_then_undo_restores() {
 }
 
 #[test]
+fn the_history_rows_follow_the_engine_and_their_buttons_undo_and_redo() {
+    let (dir, left, right) = folders();
+    write(&left.join("m.txt"), "M");
+    // The panes show other folders, so nothing on screen judges the rows (that is for the
+    // state's own tests: a listing here would wait for a watch this harness has not got).
+    let (view_a, view_b) = (dir.path().join("view-a"), dir.path().join("view-b"));
+    std::fs::create_dir_all(&view_a).expect("view-a");
+    std::fs::create_dir_all(&view_b).expect("view-b");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&view_a, &view_b);
+    let rows = |state: &AppState| state.history_view(&jiff::tz::TimeZone::UTC, SystemTime::now());
+
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Move,
+            &[local(&left.join("m.txt"))],
+            &local(&right),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    let effects = vec![Effect::Job(JobEffect::Submit { spec, origin: None })];
+    harness.run(&mut state, effects);
+    // The move is the one record: the next to undo, and nothing to do again. The record the
+    // engine kept says what the row says.
+    let view = rows(&state);
+    let said = "이동: m.txt → right";
+    assert_eq!(view.undo.len(), 1, "{view:?}");
+    assert_eq!(view.undo[0].text, said);
+    assert!(view.undo[0].next && view.undo[0].runnable);
+    assert_eq!(view.redo, []);
+    // A record the engine noted just now has a time, not the epoch's blank.
+    assert_eq!(view.undo[0].time.len(), 5, "{view:?}");
+
+    // The row's button is the key's: it undoes the move, and the move moves to the other list.
+    let effects = state.history_run(false, 0);
+    assert_eq!(effects, [Effect::Job(JobEffect::Undo)]);
+    harness.run(&mut state, effects);
+    assert_eq!(read(&left.join("m.txt")), "M");
+    let view = rows(&state);
+    assert!(view.undo.is_empty(), "{view:?}");
+    assert_eq!(view.redo.len(), 1, "{view:?}");
+    // What doing it again does is the move it undid.
+    assert_eq!(view.redo[0].text, said);
+    assert!(view.redo[0].next && view.redo[0].runnable);
+
+    // And its button redoes it, which puts the move back first in the list of what can be
+    // undone, worded as it was.
+    let effects = state.history_run(true, 0);
+    assert_eq!(effects, [Effect::Job(JobEffect::Redo)]);
+    harness.run(&mut state, effects);
+    assert_eq!(read(&right.join("m.txt")), "M");
+    let view = rows(&state);
+    assert_eq!(view.undo.len(), 1, "{view:?}");
+    assert_eq!(view.undo[0].text, said);
+    assert_eq!(view.redo, []);
+}
+
+#[test]
 fn a_dragged_move_offers_its_undo_for_a_moment() {
     let (_dir, left, right) = folders();
     write(&left.join("m.txt"), "M");
@@ -865,11 +924,7 @@ mod without_a_trash {
 
     /// A check of copies a worker is to make: its token, each copy as the copy left it with its
     /// original, and the copy's time.
-    type Check = (
-        u64,
-        Vec<(CreatedItem, VPath)>,
-        Option<std::time::SystemTime>,
-    );
+    type Check = (u64, Vec<(CreatedItem, VPath)>, Option<SystemTime>);
 
     /// The one check of copies among `effects`.
     fn the_check(effects: &[Effect]) -> Check {

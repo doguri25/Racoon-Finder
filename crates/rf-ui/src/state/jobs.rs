@@ -19,7 +19,7 @@ use crate::dialogs::{
     Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
     NameCheck, NameDialog, NamePurpose, PreflightQuestion, Recovery,
 };
-use crate::jobs::{Ended, History, JobEffect, JobRow, Started};
+use crate::jobs::{Ended, JobEffect, JobRow, Started};
 use crate::loader::LoadRequest;
 use crate::pane::{LoadStatus, Pane, Tab};
 use crate::resolver::{Asked, Question};
@@ -97,11 +97,6 @@ impl AppState {
             .collect();
         self.selections_at_submit.insert(started.id, marks);
         self.jobs.track(started);
-    }
-
-    /// Takes what the engine's history can undo and redo next.
-    pub fn set_history(&mut self, history: History) {
-        self.history = history;
     }
 
     /// Takes the lanes the engine runs the jobs in ([`Jobs::lanes`](crate::jobs::Jobs::lanes)),
