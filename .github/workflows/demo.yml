@@ -190,8 +190,12 @@ jobs:
             }
             foreach ($candidate in $found | Select-Object -Unique) {
               try {
-                $v = [version]((Get-Item $candidate).VersionInfo.FileVersionRaw.ToString())
-                if ($v -ge [version]'6.3.0' -and $v.Major -eq 6) { return $candidate }
+                $info = (Get-Item $candidate).VersionInfo
+                Write-Host "candidate: $candidate file=$($info.FileVersionRaw) product=$($info.ProductVersion)"
+                # ISCC.exe's own file version need not equal the Inno Setup version, so also trust
+                # the 'Inno Setup 6' install folder (Inno Setup 7 installs elsewhere).
+                $v = [version]($info.FileVersionRaw.ToString())
+                if (($v -ge [version]'6.3.0' -and $v.Major -eq 6) -or $candidate -like '*\Inno Setup 6\ISCC.exe') { return $candidate }
               } catch { Write-Host "skipping ${candidate}: $_" }
             }
             return $null
