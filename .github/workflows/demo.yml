@@ -177,14 +177,16 @@ jobs:
           }
           $iscc = Find-Iscc
           if (-not $iscc) {
-            # 6.4.3 is a guess at a 6.x (>= 6.3) that choco has; it was not looked up.
-            choco install innosetup --version=6.4.3 -y --no-progress --allow-downgrade --force
-            $iscc = Find-Iscc
-            if (-not $iscc) {
-              Get-ChildItem -Path 'C:\Program Files*' -Filter 'Inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "found dir: $($_.FullName)" }
-              Get-ChildItem -Path 'C:\ProgramData\chocolatey\lib' -Filter 'inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "choco lib: $($_.FullName)" }
-              throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)"
-            }
+            # The image has no usable ISCC.exe and chocolatey has no 6.4.3: fetch the official
+            # installer of a 6.x (>= 6.3) from the Inno Setup project and install it per user.
+            $setupExe = Join-Path $env:RUNNER_TEMP 'innosetup-6.4.3.exe'
+            Invoke-WebRequest -Uri 'https://files.jrsoftware.org/is/6/innosetup-6.4.3.exe' -OutFile $setupExe
+            $innoDir = Join-Path $env:RUNNER_TEMP 'inno6'
+            $p = Start-Process -FilePath $setupExe -Wait -PassThru -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', "/DIR=$innoDir")
+            if ($p.ExitCode -ne 0) { throw "the Inno Setup installer exited with $($p.ExitCode)" }
+            $iscc = Join-Path $innoDir 'ISCC.exe'
+            if (-not (Test-Path $iscc)) { throw "ISCC.exe is not in $innoDir" }
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
           Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
