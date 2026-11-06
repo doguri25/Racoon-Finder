@@ -138,6 +138,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         saver: saver.clone(),
         log_dir: rf_core::VPath::local(paths.log_dir()).ok(),
         cache_dir: paths.cache_dir().to_owned(),
+        settings_backup: loaded.backup,
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     // A second start of the app shows this one's window. Without the look (no thread), a second

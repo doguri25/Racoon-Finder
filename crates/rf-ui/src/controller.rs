@@ -234,6 +234,9 @@ pub struct Startup {
     pub log_dir: Option<VPath>,
     /// The app's cache folder, which the thumbnails' disk cache is under.
     pub cache_dir: PathBuf,
+    /// Where the settings file that could not be used was moved to ([`crate::settings::Loaded::backup`]): the
+    /// window says so once it is open.
+    pub settings_backup: Option<PathBuf>,
 }
 
 /// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
@@ -247,6 +250,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         saver,
         log_dir,
         cache_dir,
+        settings_backup,
     } = startup;
     if let Some((width, height)) = settings.window_size() {
         window.set_start_width(logical(width));
@@ -314,6 +318,10 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
             post(move |c| c.update(|state| state.restored_folder(&path, what)));
         }
     });
+    if let Some(backup) = settings_backup {
+        // Runs once the event loop does, that is, once the window is open.
+        post(move |c| c.notice(&words::settings_backed_up(&backup)));
+    }
     spawn_worker("rf-ui-places", || {
         let mut found = places::favorites();
         found.extend(places::drives());

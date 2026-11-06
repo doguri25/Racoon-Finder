@@ -727,6 +727,15 @@ pub fn already_running() -> &'static str {
     "이미 실행 중입니다. 먼저 연 창을 쓰세요."
 }
 
+/// The notice, once the window is open, when the settings file could not be used: it was moved
+/// to `backup` and the app started with the defaults (INST-08).
+pub fn settings_backed_up(backup: &std::path::Path) -> String {
+    format!(
+        "설정 파일을 읽을 수 없어 백업하고 기본값으로 시작했습니다: {}",
+        backup.display()
+    )
+}
+
 /// The title of the window that says the app could not start.
 pub fn startup_failed() -> &'static str {
     "앱을 시작하지 못했습니다"

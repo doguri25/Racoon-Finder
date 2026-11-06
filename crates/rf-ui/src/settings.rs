@@ -14,11 +14,21 @@
 //! the last ten folders visited (`recent_folders`) and whether their group is folded
 //! (`recent_folded`).
 //!
+//! The file carries its version (`version`, [`SETTINGS_VERSION`], INST-08). One without the key
+//! is version 0: [`migrate`] brings it to the current version when it is read, and the next save
+//! writes the key, so the file is upgraded in place by the save after the run that read it. A
+//! file of a newer version that this version can read all the same (every known key falls back
+//! to its default, the keys it does not know stay in `extra`) is kept as it is, its version
+//! with it, and is not backed up.
+//!
 //! [`load`] reads them once at the start, before the window shows; nothing here fails the start.
-//! A file that is broken (it does not parse, is not text, or is far too large) is moved aside to
-//! `settings.toml.bad` (one is kept: a newer one replaces it) and the app starts with the
-//! defaults. A file that is there but cannot be read, or cannot be moved aside, is left alone:
-//! the app starts with the defaults and does not save over it ([`Loaded::writable`]).
+//! A file that cannot be used (it does not parse, is not text, or is far too large; a newer
+//! version's included, when even that tolerant read fails) is moved, never copied over, to
+//! `settings.toml.bak-<YYYYMMDD-HHMMSS>` in the local time of the move (a name taken gets `-2`,
+//! `-3`, … after it), and the app starts with the defaults and tells where the file went
+//! ([`Loaded::backup`]). A file that is there but cannot be read, or cannot be moved, is left
+//! alone: the app starts with the defaults and does not save over it ([`Loaded::writable`]), so
+//! a save never replaces a file that was not backed up first.
 //!
 //! [`Saver`] writes them atomically, on worker threads, one at a time: to `settings.toml.tmp` in
 //! the same folder, synced to the disk, then renamed over the old file, so a crash leaves the
@@ -60,8 +70,12 @@ use crate::state::{
 
 /// The name of the settings file in the config folder.
 pub const FILE_NAME: &str = "settings.toml";
-/// Where a broken settings file is moved to.
-pub const BAD_FILE_NAME: &str = "settings.toml.bad";
+/// The start of the name a settings file that cannot be used is moved to; the time of the move
+/// follows ([`backup_name`]).
+pub const BACKUP_PREFIX: &str = "settings.toml.bak-";
+/// The version of the settings file this build writes (INST-08). Version 0 is a file without the
+/// key; 1 added the key.
+pub const SETTINGS_VERSION: u32 = 1;
 /// The file a save writes before it takes the place of the settings file.
 pub const TEMP_FILE_NAME: &str = "settings.toml.tmp";
 /// A settings file larger than this is no file this app wrote; it is treated as broken. The
@@ -208,6 +222,12 @@ impl LayoutSettings {
     reason = "each key is a separate choice of the user's, kept as the file has it"
 )]
 pub struct Settings {
+    /// The version of the file these settings were read from, brought up to
+    /// [`SETTINGS_VERSION`] by [`migrate`] when it was older (0 for a file without the key
+    /// before that), and as it was when it is newer. Saved as the greater of this and
+    /// [`SETTINGS_VERSION`].
+    #[serde(default = "no_version", deserialize_with = "version_or_zero")]
+    pub version: u32,
     #[serde(deserialize_with = "or_default")]
     pub theme: ThemeChoice,
     #[serde(deserialize_with = "or_default")]
@@ -297,6 +317,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
+            version: SETTINGS_VERSION,
             theme: ThemeChoice::default(),
             show_hidden: false,
             hide_extensions: false,
@@ -573,6 +594,57 @@ where
     Ok(value.as_bool().unwrap_or(true))
 }
 
+/// The version of a file that says none.
+fn no_version() -> u32 {
+    0
+}
+
+/// The file's version: a whole number from 0 up, or 0 for anything else.
+fn version_or_zero<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(version_of_value(Some(&value)))
+}
+
+fn version_of_value(value: Option<&toml::Value>) -> u32 {
+    value
+        .and_then(toml::Value::as_integer)
+        .and_then(|number| u32::try_from(number).ok())
+        .unwrap_or(0)
+}
+
+/// Why [`migrate`] could not bring a file to the current version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MigrateError {
+    /// The file is of a newer version than this build writes; it is read as it is, not
+    /// migrated.
+    #[error("settings of version {found} are newer than version {SETTINGS_VERSION}")]
+    Newer { found: u32 },
+}
+
+/// Brings the settings file `doc`, of version `from`, up to [`SETTINGS_VERSION`], one version at
+/// a time. Pure: it reads and writes no file.
+///
+/// - 0 → 1: the file gets `version = 1`. Nothing else changes.
+///
+/// A file already at the current version comes back as it is; a newer one is
+/// [`MigrateError::Newer`].
+pub fn migrate(mut doc: toml::Table, from: u32) -> Result<toml::Table, MigrateError> {
+    if from > SETTINGS_VERSION {
+        return Err(MigrateError::Newer { found: from });
+    }
+    let mut at = from;
+    while at < SETTINGS_VERSION {
+        if at == 0 {
+            doc.insert("version".to_owned(), toml::Value::Integer(1));
+        }
+        at += 1;
+    }
+    Ok(doc)
+}
+
 /// How long a long press is held by default, in milliseconds.
 pub const LONG_PRESS_DEFAULT_MS: u16 = 500;
 /// The shortest and the longest time a long press can be set to, in milliseconds.
@@ -779,9 +851,12 @@ impl Session {
 pub struct Loaded {
     pub settings: Settings,
     /// Whether the settings may be written back. `false` when a settings file is there that
-    /// could not be read (an I/O error) or could not be moved aside: a save would replace it
-    /// unread, so the run keeps what it changes to itself.
+    /// could not be read (an I/O error) or could not be moved to its backup: a save would
+    /// replace it unread, so the run keeps what it changes to itself.
     pub writable: bool,
+    /// Where the settings file that could not be used was moved to ([`BACKUP_PREFIX`]): the
+    /// window tells of it once it is open ([`crate::words::settings_backed_up`]).
+    pub backup: Option<PathBuf>,
 }
 
 impl Settings {
@@ -920,6 +995,7 @@ impl Settings {
     /// is made once for each set of them, and put after the rest.
     pub fn to_text(&self) -> io::Result<String> {
         let head = Settings {
+            version: self.version.max(SETTINGS_VERSION),
             theme: self.theme,
             show_hidden: self.show_hidden,
             hide_extensions: self.hide_extensions,
@@ -1030,31 +1106,54 @@ fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Reads `settings.toml` in `config_dir`. Without one (the first run) the settings are the
-/// defaults. A broken one (it does not parse, is not text, or is too large) is moved aside to
-/// `settings.toml.bad`, replacing an older one there, and the settings are the defaults: the
-/// app starts either way, and the broken file stays for a look. One that cannot be read (an
-/// I/O error), or that cannot be moved aside, stays where it is, and the settings are the
-/// defaults but not [`Loaded::writable`]: a save would replace it unread.
+/// defaults. A file of an older version is migrated ([`migrate`]) in memory; the file itself
+/// is upgraded by the next save. A file of a newer version is read as well as it can be and
+/// kept as it is (the keys it does not know in `extra`). One that cannot be used (it does not
+/// parse, is not text, is too large, or a newer version's that even the tolerant read cannot
+/// use) is moved to `settings.toml.bak-<YYYYMMDD-HHMMSS>` ([`BACKUP_PREFIX`], local time, a
+/// name taken gets `-2`, `-3`, …) and the settings are the defaults, with [`Loaded::backup`]
+/// telling where it went. One that cannot be read (an I/O error), or that cannot be moved,
+/// stays where it is, and the settings are the defaults but not [`Loaded::writable`]: a save
+/// would replace it unread.
 ///
 /// It reads a small local file and is called once at the start, before the window shows: the
 /// UI thread may call it then.
 pub fn load(config_dir: &Path) -> Loaded {
+    load_with(config_dir, &local_now, &|from, to| {
+        std::fs::rename(from, to)
+    })
+}
+
+/// The local time, as the name of a backup shows it.
+fn local_now() -> jiff::civil::DateTime {
+    jiff::Zoned::now().datetime()
+}
+
+/// [`load`] with the clock and the move of a file that cannot be used given: the tests set the
+/// time and make the move fail.
+fn load_with(
+    config_dir: &Path,
+    now: &dyn Fn() -> jiff::civil::DateTime,
+    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> Loaded {
     let path = config_dir.join(FILE_NAME);
-    let broken = match read_small(&path) {
-        Ok(text) => match toml::from_str(&text) {
-            Ok(settings) => {
+    let unusable = match read_small(&path) {
+        Ok(text) => match parse(&text) {
+            Some(settings) => {
                 return Loaded {
                     settings,
                     writable: true,
+                    backup: None,
                 };
             }
-            Err(_) => true,
+            None => true,
         },
         Err(error) => match error.kind() {
             io::ErrorKind::NotFound => {
                 return Loaded {
                     settings: Settings::default(),
                     writable: true,
+                    backup: None,
                 };
             }
             // Not text, or far too large: no settings file this app wrote.
@@ -1062,12 +1161,53 @@ pub fn load(config_dir: &Path) -> Loaded {
             _ => false,
         },
     };
-    let writable = broken && std::fs::rename(&path, config_dir.join(BAD_FILE_NAME)).is_ok();
+    let backup = unusable
+        .then(|| {
+            let to = backup_path(config_dir, &backup_name(now()));
+            rename(&path, &to).is_ok().then_some(to)
+        })
+        .flatten();
     Loaded {
         settings: Settings::default(),
-        writable,
+        // Only a file that is out of the way may be written over.
+        writable: backup.is_some(),
+        backup,
     }
 }
+
+/// The settings `text` says: its version found, migrated if older, and read leniently. `None`
+/// for text that does not parse, or that no version of the reader can use.
+fn parse(text: &str) -> Option<Settings> {
+    let doc: toml::Table = toml::from_str(text).ok()?;
+    let from = version_of_value(doc.get("version"));
+    let doc = if from < SETTINGS_VERSION {
+        migrate(doc, from).ok()?
+    } else {
+        doc
+    };
+    doc.try_into().ok()
+}
+
+/// The name a settings file is moved to at `at`: `settings.toml.bak-20261106-143207`.
+pub fn backup_name(at: jiff::civil::DateTime) -> String {
+    format!("{BACKUP_PREFIX}{}", at.strftime("%Y%m%d-%H%M%S"))
+}
+
+/// The first of `name`, `name-2`, `name-3`, … in `config_dir` that nothing is at: a backup is
+/// never put over another file.
+fn backup_path(config_dir: &Path, name: &str) -> PathBuf {
+    let mut path = config_dir.join(name);
+    let mut number = 1_u32;
+    while std::fs::symlink_metadata(&path).is_ok() && number < BACKUP_TRIES {
+        number += 1;
+        path = config_dir.join(format!("{name}-{number}"));
+    }
+    path
+}
+
+/// How many names [`backup_path`] tries before it goes on with the last one (and the move then
+/// fails if a file is there).
+const BACKUP_TRIES: u32 = 1000;
 
 /// The theme of `settings.toml` in `config_dir`, for a window shown while another instance
 /// runs (it says so): the file is only read. Without a file, or with one [`load`] would not
@@ -1075,7 +1215,7 @@ pub fn load(config_dir: &Path) -> Loaded {
 pub fn peek_theme(config_dir: &Path) -> ThemeChoice {
     read_small(&config_dir.join(FILE_NAME))
         .ok()
-        .and_then(|text| toml::from_str::<Settings>(&text).ok())
+        .and_then(|text| parse(&text))
         .map(|settings| settings.theme)
         .unwrap_or_default()
 }
@@ -1283,7 +1423,36 @@ mod tests {
         Loaded {
             settings,
             writable: true,
+            backup: None,
         }
+    }
+
+    /// The names in `dir` that start like a backup, sorted.
+    fn backups(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("the folder")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .into_string()
+                    .expect("text")
+            })
+            .filter(|name| name.starts_with(BACKUP_PREFIX))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 2026-11-06 14:32:07, the time every test of the backups runs at.
+    fn at() -> jiff::civil::DateTime {
+        jiff::civil::date(2026, 11, 6).at(14, 32, 7, 0)
+    }
+
+    const STAMPED: &str = "settings.toml.bak-20261106-143207";
+
+    fn load_at(dir: &Path) -> Loaded {
+        load_with(dir, &at, &|from, to| std::fs::rename(from, to))
     }
 
     #[test]
@@ -1343,7 +1512,7 @@ mod tests {
     fn missing_file_gives_the_defaults() {
         let dir = tempfile::tempdir().expect("a temp dir");
         assert_eq!(load(dir.path()), writable(Settings::default()));
-        assert!(!dir.path().join(BAD_FILE_NAME).exists());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
         assert_eq!(Settings::default().theme, ThemeChoice::System);
         assert_eq!(Settings::default().window_size(), None);
     }
@@ -1361,7 +1530,7 @@ mod tests {
         std::fs::write(&file, broken).expect("written");
         assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
         assert_eq!(std::fs::read_to_string(&file).expect("read"), broken);
-        assert!(!dir.path().join(BAD_FILE_NAME).exists());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
     }
 
     #[test]
@@ -1943,7 +2112,7 @@ mod tests {
         let loaded = load(dir.path());
 
         assert!(loaded.writable);
-        assert!(!dir.path().join(BAD_FILE_NAME).exists());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
         let settings = loaded.settings;
         assert_eq!(settings.theme, ThemeChoice::System);
         assert!(!settings.show_hidden);
@@ -2011,43 +2180,206 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_is_moved_aside() {
+    fn a_file_without_a_version_is_version_zero_and_upgraded_by_the_next_save() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let file = dir.path().join(FILE_NAME);
-        let bad = dir.path().join(BAD_FILE_NAME);
-        std::fs::write(&bad, "an older broken file").expect("written");
+        let old = "theme = \"dark\"\nshow_hidden = true\n";
+        std::fs::write(&file, old).expect("written");
 
-        for broken in [
-            &b"theme = \"dark\"\npanes = [[[[\n"[..],
-            b"theme = \"dark\"\ntheme = \"light\"\n",
-            b"\xFF\xFE not text",
-        ] {
-            std::fs::write(&file, broken).expect("written");
-            assert_eq!(load(dir.path()), writable(Settings::default()));
-            assert!(!file.exists(), "{broken:?} stays in place");
-            // The newest broken file replaces the older one.
-            assert_eq!(std::fs::read(&bad).expect("set aside"), broken);
-        }
+        let loaded = load(dir.path());
 
-        // Settings saved after that load as usual.
-        full(dir.path()).save(dir.path()).expect("saved");
-        assert_eq!(load(dir.path()), writable(full(dir.path())));
+        // 0 → 1 in memory: read as it says, no backup, the file as it was.
+        assert!(loaded.writable);
+        assert_eq!(loaded.backup, None);
+        assert_eq!(loaded.settings.version, SETTINGS_VERSION);
+        assert_eq!(loaded.settings.theme, ThemeChoice::Dark);
+        assert!(loaded.settings.show_hidden);
+        assert_eq!(std::fs::read_to_string(&file).expect("kept"), old);
+        // The next save writes the version, first, and nothing else is lost.
+        loaded.settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("saved");
+        assert!(text.starts_with("version = 1\n"), "{text}");
+        assert_eq!(load(dir.path()), writable(loaded.settings));
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
+        // A fresh start writes it too.
+        assert!(
+            Settings::default()
+                .to_text()
+                .expect("text")
+                .starts_with("version = 1\n")
+        );
     }
 
     #[test]
-    fn a_huge_file_is_moved_aside() {
+    fn migrating_from_zero_adds_the_version_and_changes_nothing_else() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut zero: toml::Table =
+            toml::from_str(&full(dir.path()).to_text().expect("text")).expect("a table");
+        zero.remove("version").expect("written with a version");
+        let mut one = zero.clone();
+        one.insert("version".to_owned(), toml::Value::Integer(1));
+
+        assert_eq!(migrate(zero.clone(), 0), Ok(one.clone()));
+        // A file at the current version stays as it is; a newer one is not migrated.
+        assert_eq!(migrate(one.clone(), 1), Ok(one.clone()));
+        assert_eq!(migrate(one, 2), Err(MigrateError::Newer { found: 2 }));
+        // A version that says nothing readable counts as 0.
+        for odd in ["version = \"one\"\n", "version = -3\n", "version = 1.5\n"] {
+            let doc: toml::Table = toml::from_str(odd).expect("a table");
+            let from = version_of_value(doc.get("version"));
+            assert_eq!(from, 0, "{odd}");
+            assert_eq!(parse(odd).expect("read").version, 1, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_is_moved_to_a_backup_and_the_app_starts_with_the_defaults() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+
+        for (n, broken) in [
+            &b"theme = \"dark\"\npanes = [[[[\n"[..],
+            b"theme = \"dark\"\ntheme = \"light\"\n",
+            b"\xFF\xFE not text",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(&file, broken).expect("written");
+            let loaded = load_at(dir.path());
+            let name = if n == 0 {
+                STAMPED.to_owned()
+            } else {
+                format!("{STAMPED}-{}", n + 1)
+            };
+            let backup = dir.path().join(&name);
+            assert_eq!(
+                loaded,
+                Loaded {
+                    settings: Settings::default(),
+                    writable: true,
+                    backup: Some(backup.clone()),
+                }
+            );
+            // Moved, not copied: the file is gone, the backup holds its bytes.
+            assert!(!file.exists(), "{broken:?} stays in place");
+            assert_eq!(std::fs::read(&backup).expect("backed up"), broken);
+            // The notice, once the window is open, names the backup.
+            assert_eq!(
+                crate::words::settings_backed_up(&backup),
+                format!(
+                    "설정 파일을 읽을 수 없어 백업하고 기본값으로 시작했습니다: {}",
+                    backup.display()
+                )
+            );
+        }
+        // Every file that was moved is still there.
+        assert_eq!(
+            backups(dir.path()),
+            [STAMPED, &format!("{STAMPED}-2"), &format!("{STAMPED}-3")]
+        );
+
+        // Settings saved after that load as usual, and nothing is backed up again.
+        full(dir.path()).save(dir.path()).expect("saved");
+        assert_eq!(load_at(dir.path()), writable(full(dir.path())));
+        assert_eq!(backups(dir.path()).len(), 3);
+    }
+
+    #[test]
+    fn a_backup_never_takes_the_place_of_a_file_that_is_there() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        // The name of this second, and the next two, are taken.
+        for taken in [STAMPED.to_owned(), format!("{STAMPED}-2")] {
+            std::fs::write(dir.path().join(taken), "an older backup").expect("written");
+        }
+        std::fs::write(&file, "theme = [[[").expect("written");
+
+        let loaded = load_at(dir.path());
+
+        assert_eq!(loaded.backup, Some(dir.path().join(format!("{STAMPED}-3"))));
+        assert!(loaded.writable);
+        for taken in [STAMPED.to_owned(), format!("{STAMPED}-2")] {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(taken)).expect("kept"),
+                "an older backup"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(format!("{STAMPED}-3"))).expect("moved"),
+            "theme = [[["
+        );
+        assert_eq!(backup_name(at()), STAMPED);
+    }
+
+    #[test]
+    fn a_file_of_a_newer_version_that_can_be_read_is_kept_as_it_is() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let newer = "version = 7\ntheme = \"neon\"\nshow_hidden = true\nzoom = 3\n\
+                     [sparkle]\nlevel = 9\n";
+        std::fs::write(&file, newer).expect("written");
+
+        let loaded = load_at(dir.path());
+
+        // Read as far as it goes, not backed up, not moved.
+        assert!(loaded.writable);
+        assert_eq!(loaded.backup, None);
+        assert!(file.is_file());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
+        let settings = loaded.settings;
+        assert_eq!(settings.version, 7);
+        assert_eq!(
+            settings.theme,
+            ThemeChoice::System,
+            "a theme it does not know"
+        );
+        assert!(settings.show_hidden);
+        // Its keys and its version are written back.
+        let text = settings.to_text().expect("text");
+        assert!(text.starts_with("version = 7\n"), "{text}");
+        assert!(text.contains("zoom = 3"), "{text}");
+        assert!(text.contains("[sparkle]"), "{text}");
+        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+    }
+
+    #[test]
+    fn a_file_of_a_newer_version_that_cannot_be_read_is_backed_up() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let newer = "version = 7\nwhen = tomorrow at noon\n";
+        std::fs::write(&file, newer).expect("written");
+
+        let loaded = load_at(dir.path());
+
+        let backup = dir.path().join(STAMPED);
+        assert_eq!(
+            loaded,
+            Loaded {
+                settings: Settings::default(),
+                writable: true,
+                backup: Some(backup.clone()),
+            }
+        );
+        assert!(!file.exists());
+        assert_eq!(std::fs::read_to_string(backup).expect("moved"), newer);
+    }
+
+    #[test]
+    fn a_huge_file_is_moved_to_a_backup() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let huge = format!(
             "# {}\n",
             "x".repeat(usize::try_from(MAX_FILE_SIZE).unwrap())
         );
         std::fs::write(dir.path().join(FILE_NAME), huge).expect("written");
-        assert_eq!(load(dir.path()), writable(Settings::default()));
-        assert!(dir.path().join(BAD_FILE_NAME).is_file());
+        assert_eq!(load(dir.path()).settings, Settings::default());
+        assert_eq!(backups(dir.path()).len(), 1);
+        assert!(!dir.path().join(FILE_NAME).exists());
     }
 
     #[test]
-    fn a_file_that_cannot_be_read_or_set_aside_is_never_replaced() {
+    fn a_file_that_cannot_be_read_or_backed_up_is_never_replaced() {
         // A folder in the place of the file: it cannot be read, and stays.
         let dir = tempfile::tempdir().expect("a temp dir");
         let file = dir.path().join(FILE_NAME);
@@ -2056,19 +2388,21 @@ mod tests {
         let loaded = load(dir.path());
         assert_eq!(loaded.settings, Settings::default());
         assert!(!loaded.writable);
+        assert_eq!(loaded.backup, None);
         assert!(file.join("keep").is_file());
-        assert!(!dir.path().join(BAD_FILE_NAME).exists());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
 
-        // A broken file whose place aside is taken by a folder that is not empty: it stays,
-        // and the run that starts with the defaults never saves over it.
+        // A broken file that cannot be moved: it stays, nothing is told, and the run that
+        // starts with the defaults never saves over it.
         let dir = tempfile::tempdir().expect("a temp dir");
         let file = dir.path().join(FILE_NAME);
-        let bad = dir.path().join(BAD_FILE_NAME);
-        std::fs::create_dir(&bad).expect("made");
-        std::fs::write(bad.join("x"), "x").expect("written");
         std::fs::write(&file, "theme = [[[").expect("written");
-        let loaded = load(dir.path());
+        let loaded = load_with(dir.path(), &at, &|_, _| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(loaded.settings, Settings::default());
         assert!(!loaded.writable);
+        assert_eq!(loaded.backup, None);
         let saver = Saver::new(dir.path().to_owned(), loaded.writable);
         let text = full(dir.path()).to_text().expect("text");
         assert!(matches!(
@@ -2079,6 +2413,8 @@ mod tests {
             std::fs::read_to_string(&file).expect("still there"),
             "theme = [[["
         );
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
+        assert!(!dir.path().join(TEMP_FILE_NAME).exists());
     }
 
     #[test]
