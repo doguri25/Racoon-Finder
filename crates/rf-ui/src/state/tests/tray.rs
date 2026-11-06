@@ -332,6 +332,25 @@ fn a_second_start_shows_the_window() {
 }
 
 #[test]
+fn the_clean_removal_has_the_app_end_as_the_close_button_does() {
+    // No job runs: it ends at once, without a question, and only once.
+    let mut idle = ready(vec![], vec![]);
+    assert_eq!(idle.quit_asked(), [Effect::Quit]);
+    assert!(idle.quitting());
+    assert_eq!(idle.quit_asked(), []);
+
+    // Jobs run, and the window is behind the tray icon: it comes back with the usual question,
+    // and nothing ends until it is answered.
+    let mut state = with_jobs(&[1]);
+    to_tray(&mut state);
+    assert_eq!(state.quit_asked(), [Effect::FromTray]);
+    assert!(!state.background() && !state.quitting());
+    assert_eq!(the_confirm(&state).purpose, ConfirmPurpose::Quit);
+    assert_eq!(state.confirm_accepted(), [Effect::Quit]);
+    assert!(state.quitting());
+}
+
+#[test]
 fn a_tray_icon_that_could_not_be_made_leaves_the_window_and_the_offer_goes() {
     let mut state = with_jobs(&[1]);
     to_tray(&mut state);

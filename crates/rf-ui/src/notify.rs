@@ -73,9 +73,10 @@ impl OsNotifier {
         }
     }
 
-    /// The system's notifications ([`rf_platform::desktop::notify`]).
-    pub fn system() -> OsNotifier {
-        OsNotifier::new(rf_platform::desktop::notify)
+    /// The system's notifications ([`rf_platform::desktop::notify`]), under `app_id` on Windows
+    /// ([`rf_platform::desktop::notification_app_id`]).
+    pub fn system(app_id: Option<&'static str>) -> OsNotifier {
+        OsNotifier::new(move |title, body| rf_platform::desktop::notify(app_id, title, body))
     }
 
     /// One more notification on its way (`1`), or one less (`-1`).

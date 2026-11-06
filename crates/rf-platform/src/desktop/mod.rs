@@ -3,10 +3,12 @@
 //! tray while its window is hidden (XFER-15).
 //!
 //! - **Windows:** a toast (the Windows Runtime's `ToastNotificationManager`, through `notify-rust`). Windows shows
-//!   a toast only for an app id that a shortcut in the Start menu names, and the demo has no
-//!   installer to make one, so the toasts go under the id of Windows PowerShell, which every
-//!   Windows has: they show "Windows PowerShell" as their app, a gap until an installer registers
-//!   the app's own id. The tray icon is the notification area's (`Shell_NotifyIconW`).
+//!   a toast only for an app id that a shortcut in the Start menu names. The installer's
+//!   shortcut carries the app's `AppUserModelID` (`identity::AUMID`), and an installed app sends
+//!   its toasts under it ([`notification_app_id`]), so they show its name and icon. A portable
+//!   app has no shortcut, so its toasts go under the id of Windows PowerShell, which every
+//!   Windows has: they show "Windows PowerShell" as their app. The tray icon is the
+//!   notification area's (`Shell_NotifyIconW`).
 //! - **macOS:** the User Notifications framework (`UNUserNotificationCenter`), which asks the user
 //!   once whether the app may notify. A delegate of the app's has each notification shown as a
 //!   banner and in the list even while the app is in front, as it still is after its window hid
@@ -26,6 +28,9 @@
 use std::io;
 use std::time::Duration;
 
+use rf_core::InstallMode;
+use rf_core::identity::AUMID;
+
 #[cfg(target_os = "macos")]
 use self::macos as imp;
 #[cfg(not(target_os = "macos"))]
@@ -44,16 +49,35 @@ pub const TRAY: bool = imp::TRAY;
 /// first time it asks, and then for the system to take the notification. Past it nothing shows.
 pub const ASK_WAIT: Duration = Duration::from_secs(60);
 
-/// Shows a notification with `title` and `body`, in the system's own place for them. Blocks;
-/// `Unsupported` where the system offers none to this program (macOS outside an app bundle),
-/// `PermissionDenied` when the user said no to them, and any other error the system gave.
-pub fn notify(title: &str, body: &str) -> io::Result<()> {
-    imp::notify(title, body)
+/// The app id the notifications go out under for an app installed as `mode` (Windows reads
+/// it; the other systems name the app by its bundle or its D-Bus name): the app's
+/// `AppUserModelID` for an installed app, whose Start menu shortcut carries it; none for a
+/// portable one, which has no shortcut and so no id Windows would show a toast for.
+pub fn notification_app_id(mode: InstallMode) -> Option<&'static str> {
+    match mode {
+        InstallMode::Installed => Some(AUMID),
+        InstallMode::Portable => None,
+    }
+}
+
+/// Shows a notification with `title` and `body`, in the system's own place for them, under
+/// `app_id` on Windows ([`notification_app_id`]; the default one when `None`, and ignored
+/// elsewhere). Blocks; `Unsupported` where the system offers none to this program (macOS
+/// outside an app bundle), `PermissionDenied` when the user said no to them, and any other error
+/// the system gave.
+pub fn notify(app_id: Option<&str>, title: &str, body: &str) -> io::Result<()> {
+    imp::notify(app_id, title, body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_installed_app_notifies_under_its_own_id_and_a_portable_one_under_none() {
+        assert_eq!(notification_app_id(InstallMode::Installed), Some(AUMID));
+        assert_eq!(notification_app_id(InstallMode::Portable), None);
+    }
 
     #[test]
     fn the_tray_is_offered_on_windows_and_macos_only() {

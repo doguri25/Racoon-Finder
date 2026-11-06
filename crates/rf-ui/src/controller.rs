@@ -180,6 +180,13 @@ pub fn show_requested() {
     post(|c| c.update(AppState::show_asked));
 }
 
+/// The clean removal (`--cleanup`) asked this one to end ([`crate::instance`]),
+/// from the thread that looks for such requests: it ends as its close button does, with the
+/// question about running jobs, for which the window comes back from behind the tray icon.
+pub fn quit_requested() {
+    post(|c| c.update(AppState::quit_asked));
+}
+
 /// The window shows (its first show, its return from the tray): once its winit window is
 /// there, which it is not until the event loop runs at the first show and which may be a new
 /// one after the tray, the window's drop target takes the system's drags on it (DND-05 받기).
@@ -237,6 +244,9 @@ pub struct Startup {
     /// Where the settings file that could not be used was moved to ([`crate::settings::Loaded::backup`]): the
     /// window says so once it is open.
     pub settings_backup: Option<PathBuf>,
+    /// The app id the notifications go out under on Windows
+    /// ([`rf_platform::desktop::notification_app_id`]).
+    pub notification_app_id: Option<&'static str>,
 }
 
 /// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
@@ -251,6 +261,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         log_dir,
         cache_dir,
         settings_backup,
+        notification_app_id,
     } = startup;
     if let Some((width, height)) = settings.window_size() {
         window.set_start_width(logical(width));
@@ -266,7 +277,9 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     window
         .global::<ItemMenu<'_>>()
         .set_shares(rf_platform::shell::SHARES);
-    let controller = Rc::new(Controller::new(window, jobs, settings, saver));
+    let mut controller = Controller::new(window, jobs, settings, saver);
+    controller.notifier = OsNotifier::system(notification_app_id);
+    let controller = Rc::new(controller);
     *controller.log_dir.borrow_mut() = log_dir;
     *controller.thumber.cache_dir.borrow_mut() = Some(cache_dir);
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
@@ -1627,7 +1640,7 @@ impl Controller {
             recent_rows,
             history_rows,
             log_dir: RefCell::new(None),
-            notifier: OsNotifier::system(),
+            notifier: OsNotifier::system(None),
             tray: Tray::new(Box::new(SlintTray::new(|command| {
                 with(|c| c.update(|state| state.tray_command(command)));
             }))),

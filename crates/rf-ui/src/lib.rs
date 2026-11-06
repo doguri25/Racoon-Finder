@@ -139,11 +139,14 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         log_dir: rf_core::VPath::local(paths.log_dir()).ok(),
         cache_dir: paths.cache_dir().to_owned(),
         settings_backup: loaded.backup,
+        notification_app_id: rf_platform::desktop::notification_app_id(paths.mode()),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     // A second start of the app shows this one's window. Without the look (no thread), a second
     // start says that the app runs, as before. The app's end stops the look as it begins.
-    let requests = lock.watch_requests(controller::show_requested).ok();
+    let requests = lock
+        .watch_requests(controller::show_requested, controller::quit_requested)
+        .ok();
     if let Some(requests) = &requests {
         controller::stop_requests_at_quit(requests.stopper());
     }

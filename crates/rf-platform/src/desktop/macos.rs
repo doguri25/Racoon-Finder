@@ -83,7 +83,7 @@ fn present_in_front(center: &UNUserNotificationCenter) {
     });
 }
 
-pub fn notify(title: &str, body: &str) -> io::Result<()> {
+pub fn notify(_app_id: Option<&str>, title: &str, body: &str) -> io::Result<()> {
     autoreleasepool(|_| {
         if !in_app_bundle() {
             return Err(io::Error::new(
@@ -157,7 +157,7 @@ mod tests {
         // A test runs from a plain program, which is no app bundle: the framework is not
         // touched (it would raise), and the call says why nothing showed.
         assert!(!in_app_bundle());
-        let error = notify("제목", "본문").expect_err("no bundle");
+        let error = notify(None, "제목", "본문").expect_err("no bundle");
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 }

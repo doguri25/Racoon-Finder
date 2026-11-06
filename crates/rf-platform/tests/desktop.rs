@@ -7,7 +7,7 @@ use rf_platform::desktop;
 #[test]
 #[ignore = "needs an interactive session"]
 fn a_notification_shows() {
-    let shown = desktop::notify("복사를 마쳤습니다 · 항목 3개", "assets → 백업");
+    let shown = desktop::notify(None, "복사를 마쳤습니다 · 항목 3개", "assets → 백업");
     if cfg!(target_os = "macos") {
         // A test is no app bundle: the demo's .app shows one, the test only checks that
         // nothing breaks.

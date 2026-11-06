@@ -736,6 +736,119 @@ pub fn settings_backed_up(backup: &std::path::Path) -> String {
     )
 }
 
+/// What `--cleanup` says of a portable install, which has no uninstaller.
+pub fn cleanup_portable() -> &'static str {
+    "포터블 설치는 폴더를 지우면 됩니다."
+}
+
+/// What `--cleanup` says when the app still runs after the wait (exit code 3).
+pub fn cleanup_still_running() -> &'static str {
+    "앱이 아직 실행 중입니다. 앱을 끝낸 뒤 다시 시도하세요."
+}
+
+/// What `--cleanup-plan` says when there is nothing to delete.
+pub fn cleanup_plan_empty() -> &'static str {
+    "지울 것이 없습니다."
+}
+
+/// A step of the plan: the settings are copied to a file first.
+pub fn cleanup_step_backup(from: &std::path::Path, to: &std::path::Path) -> String {
+    format!("설정 백업: {} → {}", from.display(), to.display())
+}
+
+/// A step of the plan: a recorded change of the system is put back.
+pub fn cleanup_step_revert(change: &str) -> String {
+    format!("시스템 변경 되돌리기: {change}")
+}
+
+/// A step of the plan: the app's preferences are cleared from the system (macOS).
+pub fn cleanup_step_clear_domain(domain: &str) -> String {
+    format!("환경설정 지우기: {domain}")
+}
+
+/// A step of the plan: a file or folder is deleted.
+pub fn cleanup_step_delete(path: &std::path::Path) -> String {
+    format!("삭제: {}", path.display())
+}
+
+/// A step of the plan: a folder is deleted if it is empty.
+pub fn cleanup_step_remove_if_empty(path: &std::path::Path) -> String {
+    format!("비어 있으면 삭제: {}", path.display())
+}
+
+/// A step of the plan: the shared temporary folder is listed for what the app left there.
+pub fn cleanup_step_list_temp(path: &std::path::Path) -> String {
+    format!("임시 폴더에서 앱의 파일 찾기: {}", path.display())
+}
+
+/// A step of a kind this wording does not know.
+pub fn cleanup_step_other() -> &'static str {
+    "그 밖의 정리 단계"
+}
+
+/// The settings were copied to `copy`.
+pub fn cleanup_backup_done(copy: &std::path::Path) -> String {
+    format!("설정을 백업했습니다: {}", copy.display())
+}
+
+/// There was no settings file to back up.
+pub fn cleanup_backup_none() -> &'static str {
+    "백업할 설정 파일이 없습니다."
+}
+
+/// The settings could not be copied to `to`; nothing was deleted (exit code 4).
+pub fn cleanup_backup_failed(to: &std::path::Path, reason: &str) -> String {
+    format!(
+        "설정을 백업하지 못해 아무것도 지우지 않았습니다: {} ({reason})",
+        to.display()
+    )
+}
+
+/// The clean removal could not run (the ledger file is refused, the lock cannot be taken).
+pub fn cleanup_failed(reason: &str) -> String {
+    format!("정리하지 못했습니다: {reason}")
+}
+
+/// `count` changes of the system were put back.
+pub fn cleanup_reverted(count: usize) -> String {
+    format!("되돌린 시스템 변경: {count}개")
+}
+
+/// A change of the system that could not be put back.
+pub fn cleanup_revert_failed(change: &str, reason: &str) -> String {
+    format!("되돌리지 못함: {change} ({reason})")
+}
+
+/// Nothing was deleted because a change of the system could not be put back.
+pub fn cleanup_deletes_skipped() -> &'static str {
+    "시스템 변경을 되돌리지 못해 아무것도 지우지 않았습니다. 다시 실행하면 남은 것부터 이어서 합니다."
+}
+
+/// A step that was done.
+pub fn cleanup_done_line(step: &str) -> String {
+    format!("완료 · {step}")
+}
+
+/// A step that was not done, and why.
+pub fn cleanup_remaining_line(step: &str, reason: &str) -> String {
+    format!("남음 · {step} ({reason})")
+}
+
+/// The clean removal is complete.
+pub fn cleanup_complete() -> &'static str {
+    "정리를 마쳤습니다."
+}
+
+/// Part of the clean removal remains (exit code 5).
+pub fn cleanup_partial() -> &'static str {
+    "일부를 정리하지 못했습니다."
+}
+
+/// What is said of arguments `--cleanup` does not understand (exit code 2).
+pub fn cleanup_usage() -> &'static str {
+    "사용법: --cleanup [--backup-settings <파일>] | --cleanup-plan [--backup-settings <파일>]"
+}
+
 /// The title of the window that says the app could not start.
 pub fn startup_failed() -> &'static str {
     "앱을 시작하지 못했습니다"

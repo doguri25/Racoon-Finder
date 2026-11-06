@@ -10,6 +10,11 @@ pub const DATA_DIR_NAME: &str = "RacoonFinder";
 /// Reverse-DNS bundle identifier (proposed by the plan; revisit with PRD Q1).
 pub const BUNDLE_ID: &str = "io.github.doguri25.RacoonFinder";
 
+/// The Windows `AppUserModelID` of the app (PRD INST-01): the Start menu shortcut the installer
+/// makes carries it, and an installed app's notifications go out under it, so that they show
+/// the app's name and icon. The same value as [`BUNDLE_ID`], under the name Windows gives it.
+pub const AUMID: &str = "io.github.doguri25.RacoonFinder";
+
 /// Custom URL scheme registered by the app (PRD MACX-02).
 pub const URL_SCHEME: &str = "racoonfinder";
 
@@ -24,3 +29,13 @@ pub const PORTABLE_DATA_DIR: &str = "data";
 
 /// Crate version, shared by every workspace member.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_id_is_the_bundle_id() {
+        assert_eq!(AUMID, BUNDLE_ID);
+    }
+}

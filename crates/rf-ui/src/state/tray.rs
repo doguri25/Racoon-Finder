@@ -166,6 +166,20 @@ impl AppState {
         self.come_back()
     }
 
+    /// The clean removal asked this one to end (module `instance`): as the window's close button
+    /// does, it ends at once when no job runs, and asks first when jobs do, for which the window
+    /// comes back from behind the tray icon, or to the front.
+    pub fn quit_asked(&mut self) -> Vec<Effect> {
+        if self.quitting {
+            return Vec::new();
+        }
+        let mut effects = self.request_close();
+        if !self.quitting {
+            effects.extend(self.come_back());
+        }
+        effects
+    }
+
     /// The window could not make the tray icon: it stays shown, and the tray is not offered
     /// any more.
     pub fn tray_unavailable(&mut self) -> Vec<Effect> {
