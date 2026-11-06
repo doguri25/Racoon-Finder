@@ -381,7 +381,9 @@ mod tests {
 
         let lines = plan_lines(&paths, Some(&bundle)).expect("a list");
 
-        for owned in paths.owned_paths() {
+        // The folders made above. (On macOS the preferences are a defaults domain the cleanup
+        // clears, not a file it lists, and no such file was made.)
+        for owned in paths.owned_paths().iter().filter(|owned| owned.exists()) {
             assert!(
                 lines
                     .iter()
@@ -434,6 +436,12 @@ mod tests {
         )
         .expect("a ledger file");
         let called = std::cell::Cell::new(false);
+        // What exists to be kept (the macOS preferences are a defaults domain, not a file).
+        let existing: Vec<_> = paths
+            .owned_paths()
+            .iter()
+            .filter(|owned| owned.exists())
+            .collect();
 
         let outcome = remove(&paths, Box::new(FakeBackend::new()), || {
             called.set(true);
@@ -445,7 +453,8 @@ mod tests {
             panic!("expected an incomplete removal");
         };
         assert_eq!(lines.len(), 1, "{lines:?}");
-        for owned in paths.owned_paths() {
+        assert_ne!(existing.len(), 0);
+        for owned in existing {
             assert!(owned.exists(), "{owned:?} stays");
         }
     }
