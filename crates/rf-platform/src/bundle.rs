@@ -1,5 +1,5 @@
 //! The app bundle of the running app (macOS, PRD INST-05): where it is, and moving it to the
-//! trash as the last step of "Racoon Finder 완전 삭제…".
+//! trash as the last step of the complete removal of the app.
 //!
 //! A bundle is a folder `<Name>.app` with the executable at `Contents/MacOS/<executable>`
 //! ([`app_bundle_of`]); only an executable in exactly that place counts, so a program run from a
@@ -167,15 +167,15 @@ mod tests {
 
     #[test]
     fn the_bundle_is_found_from_an_executable_in_its_place() {
-        let exe = Path::new("/Applications/Racoon Finder.app/Contents/MacOS/racoon-finder");
+        let exe = Path::new("/Applications/Demo.app/Contents/MacOS/demo-bin");
         assert_eq!(
             app_bundle_of(exe),
-            Some(PathBuf::from("/Applications/Racoon Finder.app"))
+            Some(PathBuf::from("/Applications/Demo.app"))
         );
         // Wherever the bundle is, and however its extension is cased.
         assert_eq!(
-            app_bundle_of(Path::new("/Users/a/Downloads/Racoon.APP/Contents/MacOS/x")),
-            Some(PathBuf::from("/Users/a/Downloads/Racoon.APP"))
+            app_bundle_of(Path::new("/Users/a/Downloads/Demo.APP/Contents/MacOS/x")),
+            Some(PathBuf::from("/Users/a/Downloads/Demo.APP"))
         );
     }
 
@@ -183,20 +183,20 @@ mod tests {
     fn a_program_that_is_not_in_a_bundle_is_refused() {
         for odd in [
             // A build folder, a portable folder.
-            "/home/a/Racoon-Finder/target/debug/racoon-finder",
-            "/opt/racoon/racoon-finder",
+            "/home/a/demo-tree/target/debug/demo-bin",
+            "/opt/demo/demo-bin",
             // An `.app` somewhere above, but not in the layout of a bundle.
-            "/Applications/Racoon Finder.app/racoon-finder",
-            "/Applications/Racoon Finder.app/Contents/racoon-finder",
-            "/Applications/Racoon Finder.app/Contents/Resources/racoon-finder",
-            "/Applications/Racoon Finder.app/Contents/MacOS/bin/racoon-finder",
+            "/Applications/Demo.app/demo-bin",
+            "/Applications/Demo.app/Contents/demo-bin",
+            "/Applications/Demo.app/Contents/Resources/demo-bin",
+            "/Applications/Demo.app/Contents/MacOS/bin/demo-bin",
             // The folders of the layout under a folder that is no `.app`.
-            "/Applications/Racoon Finder/Contents/MacOS/racoon-finder",
-            "/Applications/.app/Contents/MacOS/racoon-finder",
+            "/Applications/Demo/Contents/MacOS/demo-bin",
+            "/Applications/.app/Contents/MacOS/demo-bin",
             // Too short to have a bundle.
-            "racoon-finder",
-            "/racoon-finder",
-            "/MacOS/racoon-finder",
+            "demo-bin",
+            "/demo-bin",
+            "/MacOS/demo-bin",
         ] {
             assert_eq!(app_bundle_of(Path::new(odd)), None, "{odd}");
         }
@@ -204,12 +204,11 @@ mod tests {
 
     #[test]
     fn a_translocated_copy_is_blocked_by_its_path() {
-        let moved =
-            Path::new("/private/var/folders/x/AppTranslocation/ABC-123/d/Racoon Finder.app");
+        let moved = Path::new("/private/var/folders/x/AppTranslocation/ABC-123/d/Demo.app");
         assert_eq!(trash_block_by_path(moved), Some(TrashBlock::Translocated));
         for fine in [
-            "/Applications/Racoon Finder.app",
-            "/Users/a/AppTranslocationNot/Racoon.app",
+            "/Applications/Demo.app",
+            "/Users/a/AppTranslocationNot/Demo.app",
         ] {
             assert_eq!(trash_block_by_path(Path::new(fine)), None, "{fine}");
         }
@@ -218,14 +217,14 @@ mod tests {
     #[test]
     fn a_bundle_in_a_folder_that_can_be_written_may_be_trashed() {
         let dir = tempfile::tempdir().unwrap();
-        let macos = dir.path().join("Racoon.app").join("Contents").join("MacOS");
+        let macos = dir.path().join("Demo.app").join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
-        let exe = macos.join("racoon-finder");
+        let exe = macos.join("demo-bin");
         std::fs::write(&exe, "x").unwrap();
         let bundle = can_trash_app_bundle(&exe).expect("movable");
         assert_eq!(
             bundle,
-            std::fs::canonicalize(dir.path().join("Racoon.app")).unwrap()
+            std::fs::canonicalize(dir.path().join("Demo.app")).unwrap()
         );
         // A program outside a bundle is no candidate, and one that is gone is not either.
         let plain = dir.path().join("plain");
@@ -239,9 +238,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let apps = dir.path().join("apps");
-        let macos = apps.join("Racoon.app").join("Contents").join("MacOS");
+        let macos = apps.join("Demo.app").join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
-        let exe = macos.join("racoon-finder");
+        let exe = macos.join("demo-bin");
         std::fs::write(&exe, "x").unwrap();
         std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o555)).unwrap();
         // The administrator may write anywhere: the check has nothing to say then.

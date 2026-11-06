@@ -3742,7 +3742,7 @@ impl Controller {
                 let text = if state.removing() {
                     words::removing()
                 } else {
-                    words::closing()
+                    words::closing().to_owned()
                 };
                 window.set_closing_text(text.into());
             }

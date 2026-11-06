@@ -109,7 +109,7 @@ pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
 fn temp_beside(at: &Path) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let number = NEXT.fetch_add(1, Ordering::Relaxed);
-    at.with_file_name(format!(".racoon-link-{}-{number}.lnk", std::process::id()))
+    at.with_file_name(format!(".rf-link-{}-{number}.lnk", std::process::id()))
 }
 
 /// Renames `temp` to `at` and never replaces `at`: a file there fails with `AlreadyExists` and

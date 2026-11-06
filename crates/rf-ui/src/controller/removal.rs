@@ -227,7 +227,7 @@ fn back_up_first(
     let _ = save();
     let Some(documents) = documents else {
         return Err(words::cleanup_backup_failed(
-            Path::new(removal::BACKUP_FILE_NAME),
+            Path::new(&removal::backup_file_name()),
             "the documents folder is not known",
         ));
     };
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(
             copy.canonicalize().expect("exists"),
             documents
-                .join(removal::BACKUP_FILE_NAME)
+                .join(removal::backup_file_name())
                 .canonicalize()
                 .expect("exists")
         );
@@ -324,6 +324,11 @@ mod tests {
         let error = back_up_first(&paths, true, Some(inside), || None).expect_err("refused");
         assert!(error.contains("아무것도 지우지 않았습니다"), "{error}");
         assert!(paths.config_dir().join(settings::FILE_NAME).is_file());
-        assert!(!paths.config_dir().join(removal::BACKUP_FILE_NAME).exists());
+        assert!(
+            !paths
+                .config_dir()
+                .join(removal::backup_file_name())
+                .exists()
+        );
     }
 }

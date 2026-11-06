@@ -875,13 +875,16 @@ pub fn removal_step_bundle(bundle: &std::path::Path) -> String {
 }
 
 /// The title of the window of 완전 삭제….
-pub fn removal_title() -> &'static str {
-    "Racoon Finder 완전 삭제"
+pub fn removal_title() -> String {
+    format!("{} 완전 삭제", rf_core::identity::DISPLAY_NAME)
 }
 
 /// What the window of 완전 삭제… says before the list of what goes.
-pub fn removal_message() -> &'static str {
-    "이 컴퓨터에서 Racoon Finder를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 마지막으로 앱을 휴지통으로 옮깁니다(옮길 수 없으면 알려 드립니다). 지운 데이터는 되돌릴 수 없습니다."
+pub fn removal_message() -> String {
+    format!(
+        "이 컴퓨터에서 {}를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 마지막으로 앱을 휴지통으로 옮깁니다(옮길 수 없으면 알려 드립니다). 지운 데이터는 되돌릴 수 없습니다.",
+        rf_core::identity::DISPLAY_NAME
+    )
 }
 
 /// The checkbox of the window of 완전 삭제…: the settings are copied to the documents folder
@@ -894,7 +897,7 @@ pub fn removal_backup_label() -> &'static str {
 pub fn removal_backup_note() -> String {
     format!(
         "설정 백업을 켜면 지우기 전에 문서 폴더의 {}로 복사합니다. 같은 이름의 파일이 있으면 덮어쓰지 않고 다른 이름으로 저장하며, 백업하지 못하면 아무것도 지우지 않습니다.",
-        crate::removal::BACKUP_FILE_NAME
+        crate::removal::backup_file_name()
     )
 }
 
@@ -927,8 +930,8 @@ pub fn removal_plan_failed(reason: &str) -> String {
 }
 
 /// What the window shows while 완전 삭제… works.
-pub fn removing() -> &'static str {
-    "Racoon Finder를 지우는 중…"
+pub fn removing() -> String {
+    format!("{}를 지우는 중…", rf_core::identity::DISPLAY_NAME)
 }
 
 /// The title of the window that tells how far 완전 삭제… got when it stopped.

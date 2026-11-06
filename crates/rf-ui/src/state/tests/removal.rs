@@ -17,8 +17,8 @@ fn menu(offer: Option<Offer>) -> AppState {
 
 fn plan() -> Vec<String> {
     vec![
-        "삭제: /Users/a/Library/Application Support/io.github.doguri25.RacoonFinder".to_owned(),
-        "앱을 휴지통으로 옮기기: /Applications/Racoon Finder.app".to_owned(),
+        "삭제: /Users/a/Library/Application Support/demo.data".to_owned(),
+        "앱을 휴지통으로 옮기기: /Applications/Demo.app".to_owned(),
     ]
 }
 
@@ -84,7 +84,7 @@ fn the_list_comes_in_a_confirmation_with_a_backup_checkbox_that_starts_off() {
 
     let confirm = the_confirm(&state);
     assert_eq!(confirm.purpose, ConfirmPurpose::RemoveApp);
-    assert_eq!(confirm.title, "Racoon Finder 완전 삭제");
+    assert_eq!(confirm.title, words::removal_title());
     assert_eq!(confirm.lines, plan());
     assert_eq!(confirm.check, "문서 폴더에 설정 백업");
     assert!(!confirm.checked);

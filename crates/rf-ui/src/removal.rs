@@ -1,5 +1,5 @@
 //! Removing the app from the computer (PRD INST-04, INST-05): what the settings menu offers
-//! at its bottom, and the steps of "Racoon Finder 완전 삭제…" that need no window.
+//! at its bottom, and the steps of the complete removal (완전 삭제…) that need no window.
 //!
 //! - **macOS:** 완전 삭제… puts every recorded change of the system back, deletes what the app
 //!   owns (Application Support, Caches, Logs, the preferences) and moves the app bundle to the
@@ -28,7 +28,9 @@ use crate::{settings, words};
 pub const UNINSTALLER: &str = "unins000.exe";
 
 /// The name of the file the settings are copied to in the documents folder.
-pub const BACKUP_FILE_NAME: &str = "RacoonFinder-settings-backup.toml";
+pub fn backup_file_name() -> String {
+    format!("{}-settings-backup.toml", rf_core::identity::DATA_DIR_NAME)
+}
 
 /// How many names a backup file tries before it gives up.
 const BACKUP_TRIES: u32 = 1000;
@@ -36,7 +38,7 @@ const BACKUP_TRIES: u32 = 1000;
 /// What the bottom of 보기 ▸ 설정 offers for removing the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Offer {
-    /// "Racoon Finder 완전 삭제…" (macOS).
+    /// the complete removal (macOS).
     DeleteCompletely,
     /// "제거 프로그램 열기" (an installed app on Windows).
     OpenUninstaller,
@@ -93,7 +95,7 @@ pub fn detect(paths: &AppPaths, exe: Option<&Path>) -> Option<Offer> {
 /// The file the settings are copied to when 설정 백업 is chosen: in the documents folder
 /// `documents`.
 pub fn backup_target(documents: &Path) -> PathBuf {
-    documents.join(BACKUP_FILE_NAME)
+    documents.join(backup_file_name())
 }
 
 /// What 완전 삭제… will do, a line each, for the window to list: the steps of
@@ -347,8 +349,8 @@ mod tests {
     #[test]
     fn the_uninstaller_is_the_file_beside_the_executable() {
         assert_eq!(
-            uninstaller_beside(Path::new("/p/RacoonFinder/racoon-finder.exe")),
-            Path::new("/p/RacoonFinder").join(UNINSTALLER)
+            uninstaller_beside(Path::new("/p/demo/demo-bin.exe")),
+            Path::new("/p/demo").join(UNINSTALLER)
         );
     }
 
@@ -366,7 +368,7 @@ mod tests {
     fn the_backup_goes_to_the_documents_folder_under_its_name() {
         assert_eq!(
             backup_target(Path::new("/home/a/Documents")),
-            Path::new("/home/a/Documents").join("RacoonFinder-settings-backup.toml")
+            Path::new("/home/a/Documents").join(backup_file_name())
         );
     }
 
@@ -375,7 +377,7 @@ mod tests {
         let root = tempfile::tempdir().expect("a temp dir");
         let paths = installed_under(root.path());
         paths.ensure_dirs().expect("folders");
-        let bundle = root.path().join("Racoon Finder.app");
+        let bundle = root.path().join("Demo.app");
 
         let lines = plan_lines(&paths, Some(&bundle)).expect("a list");
 
@@ -407,7 +409,7 @@ mod tests {
         let root = tempfile::tempdir().expect("a temp dir");
         let paths = installed_under(root.path());
         paths.ensure_dirs().expect("folders");
-        let trashed = root.path().join("Trash").join("Racoon Finder.app");
+        let trashed = root.path().join("Trash").join("Demo.app");
         let seen = std::cell::Cell::new(false);
 
         let outcome = remove(&paths, Box::new(FakeBackend::new()), || {

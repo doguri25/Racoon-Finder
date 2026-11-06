@@ -1881,8 +1881,8 @@ fn a_confirm_with_a_checkbox_flips_it_by_the_pointer_and_from_the_keyboard() {
     let label = "문서 폴더에 설정 백업";
     let show = |checked: bool| {
         window.set_confirm_view(ConfirmView {
-            title: "Racoon Finder 완전 삭제".into(),
-            message: "이 컴퓨터에서 Racoon Finder를 지웁니다.".into(),
+            title: "앱 완전 삭제".into(),
+            message: "이 컴퓨터에서 앱을 지웁니다.".into(),
             lines: ModelRc::new(slint::VecModel::from(vec!["삭제: /a".into()])),
             ok_text: "완전 삭제".into(),
             danger: true,
@@ -5131,7 +5131,8 @@ fn the_view_menu_s_settings_end_with_the_way_to_remove_the_app() {
     let windows_menu = "오른쪽 클릭에 Windows 메뉴 바로 띄우기";
 
     // The way to remove the app is the last thing in 설정, where the system offers one (INST-05).
-    let delete = "Racoon Finder 완전 삭제…";
+    let delete_title = format!("{} 완전 삭제…", rf_core::identity::DISPLAY_NAME);
+    let delete = delete_title.as_str();
     let uninstall = "제거 프로그램 열기";
     let shown = |title: &str| {
         ElementHandle::find_by_accessible_label(&window, title)

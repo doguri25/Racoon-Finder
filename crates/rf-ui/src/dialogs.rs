@@ -494,8 +494,8 @@ impl Confirm {
     pub fn remove_app(lines: Vec<String>) -> Confirm {
         Confirm {
             purpose: ConfirmPurpose::RemoveApp,
-            title: words::removal_title().to_owned(),
-            message: words::removal_message().to_owned(),
+            title: words::removal_title(),
+            message: words::removal_message(),
             detail: words::removal_backup_note(),
             lines,
             question: String::new(),

@@ -1,5 +1,4 @@
-//! Removing the app from the window's menu (PRD INST-05): 보기 ▸ 설정 ▸ "Racoon Finder 완전
-//! 삭제…" on macOS and "제거 프로그램 열기" for an installed app on Windows ([`Offer`], chosen
+//! Removing the app from the window's menu (PRD INST-05): 보기 ▸ 설정 ▸ "완전 삭제…" on macOS and "제거 프로그램 열기" for an installed app on Windows ([`Offer`], chosen
 //! once at the start). A child of [`state`](super), so these methods see the fields of
 //! [`AppState`].
 //!
