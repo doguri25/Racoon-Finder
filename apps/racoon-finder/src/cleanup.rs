@@ -737,7 +737,14 @@ mod tests {
 
         let copy = back_up(&from, &to, &[]).expect("copied").expect("a copy");
 
-        assert_eq!(copy, root.path().join("backup-3.toml"));
+        // `back_up` may hand the path back canonical (macOS /private, Windows \\?\ and short names).
+        assert_eq!(
+            copy.canonicalize().expect("exists"),
+            root.path()
+                .join("backup-3.toml")
+                .canonicalize()
+                .expect("exists")
+        );
         assert_eq!(
             std::fs::read_to_string(&to).expect("kept"),
             "an older backup"

@@ -162,7 +162,7 @@ jobs:
             $found = @()
             $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
             if ($cmd) { $found += $cmd.Source }
-            foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, 'C:\ProgramData\chocolatey\lib\innosetup\tools')) {
+            foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LOCALAPPDATA 'Programs'), 'C:\ProgramData\chocolatey\lib', 'C:\ProgramData\chocolatey\bin')) {
               if ($dir -and (Test-Path $dir)) {
                 $found += Get-ChildItem -Path $dir -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object FullName
               }
@@ -178,9 +178,13 @@ jobs:
           $iscc = Find-Iscc
           if (-not $iscc) {
             # 6.4.3 is a guess at a 6.x (>= 6.3) that choco has; it was not looked up.
-            choco install innosetup --version=6.4.3 -y --no-progress
+            choco install innosetup --version=6.4.3 -y --no-progress --allow-downgrade --force
             $iscc = Find-Iscc
-            if (-not $iscc) { throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)" }
+            if (-not $iscc) {
+              Get-ChildItem -Path 'C:\Program Files*' -Filter 'Inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "found dir: $($_.FullName)" }
+              Get-ChildItem -Path 'C:\ProgramData\chocolatey\lib' -Filter 'inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "choco lib: $($_.FullName)" }
+              throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)"
+            }
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
           Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
