@@ -198,19 +198,16 @@ jobs:
           }
           $iscc = Find-Iscc
           if (-not $iscc) {
-            # The image has no usable ISCC.exe and chocolatey has no 6.4.3 (its 6.7.1 record has no
-            # compiler on disk): fetch the project's current stable installer and install it per
-            # user into a known folder. The version check below keeps a future 7.x out.
-            $setupExe = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
-            Invoke-WebRequest -Uri 'https://jrsoftware.org/download.php/is.exe' -OutFile $setupExe -MaximumRetryCount 3 -RetryIntervalSec 5
-            $innoDir = Join-Path $env:RUNNER_TEMP 'inno6'
-            $p = Start-Process -FilePath $setupExe -Wait -PassThru -ArgumentList @(
-              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/CURRENTUSER', "/DIR=$innoDir")
-            if ($p.ExitCode -ne 0) { throw "the Inno Setup installer exited with $($p.ExitCode)" }
-            $iscc = Join-Path $innoDir 'ISCC.exe'
-            if (-not (Test-Path $iscc)) { throw "ISCC.exe is not in $innoDir" }
-            $got = [version](Get-Item $iscc).VersionInfo.FileVersionRaw.ToString()
-            if ($got.Major -ne 6 -or $got -lt [version]'6.3.0') { throw "need Inno Setup 6.3 or newer 6.x, got $got" }
+            # The image's chocolatey record says InnoSetup 6.7.1 is installed but no compiler is on
+            # disk (and 6.4.3 is not in the feed): reinstall the package that is known to exist.
+            choco install innosetup --version=6.7.1 --force -y --no-progress
+            $iscc = Find-Iscc
+            if (-not $iscc) {
+              Get-ChildItem -Path 'C:\Program Files*' -Filter 'Inno*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "found dir: $($_.FullName)" }
+              Get-ChildItem -Path 'C:\ProgramData\chocolatey\lib\InnoSetup' -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Host "choco lib: $($_.FullName)" }
+              Get-ChildItem -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'Inno Setup*' } | ForEach-Object { Write-Host "uninstall key: $($_.PSChildName) -> $((Get-ItemProperty $_.PSPath).InstallLocation)" }
+              throw "no Inno Setup 6.3+ found (choco exit $LASTEXITCODE)"
+            }
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
           Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
