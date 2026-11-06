@@ -379,6 +379,11 @@ mod tests {
         paths.ensure_dirs().expect("folders");
         let bundle = root.path().join("Demo.app");
 
+        let existing: Vec<_> = paths
+            .owned_paths()
+            .into_iter()
+            .filter(|owned| owned.exists())
+            .collect();
         let lines = plan_lines(&paths, Some(&bundle)).expect("a list");
 
         // The folders made above. (On macOS the preferences are a defaults domain the cleanup
@@ -401,7 +406,7 @@ mod tests {
         let plain = plan_lines(&paths, None).expect("a list");
         assert_eq!(plain, lines[..lines.len() - 1]);
         // Listing deletes nothing.
-        for owned in paths.owned_paths() {
+        for owned in existing {
             assert!(owned.exists(), "{owned:?}");
         }
     }
