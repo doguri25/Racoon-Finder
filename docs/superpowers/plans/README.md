@@ -14,7 +14,7 @@
 | 6 | [M1-05 데모 UI 셸](2026-10-29-m1-05-demo-ui-shell.md) | `rf-ui`(Slint) 듀얼 패널 데모 앱: 탐색, 탭, 폴더 트리, 새 폴더·이름 바꾸기·휴지통·복사·이동(PICK)·충돌·되돌리기, 설정, OS별 데모 산출물 | Linux에서 가능(Xvfb 스크린샷, Windows·macOS 실행 파일은 CI가 만듦) |
 | 7 | [M1-06 데모 2판](2026-10-29-m1-06-demo-2.md) **(완료, 0.2.0)** | OS별 단축키 배정표, 레이아웃 전환·분할선, 탭·주소창 고급, 보기 모드·열·폴더별 보기, 선택 도구, 빠른 보기·미리보기 패널, OS 호환 클립보드·경로 복사, 속성·체크섬, 연결 프로그램·터미널, 완료 보고·OS 알림·트레이, 코어 후속 정리, 0.2.0 | Linux에서 구현(OS 코드는 CI가 검증, 대화형 세션이 필요한 검사는 손으로) |
 | 8 | [M1-07 데모 3판](2026-11-02-m1-07-demo-3.md) **(완료, 0.3.0)** | 다른 앱과 주고받는 끌어 놓기(Windows OLE, macOS NSDragging), 놓을 때의 동작(OS별 보조키·설정·묻기), 머무르면 열기·자동 스크롤·이동 되돌리기 알림, Windows 셸 메뉴, macOS 공유, 0.3.0 | Linux에서 구현(OS 코드는 CI가 검증, 실제 끌기와 메뉴는 손으로) |
-| 9 | [M1-08 데모 4판](2026-11-05-m1-08-demo-4.md) **(진행 중)** | OS 썸네일(VIEW-09), 즐겨찾기 편집·끌어 놓아 추가·최근 폴더, 링크 만들기(바로 가기·별칭·심볼릭 링크·정션), 마우스 4·5번·트랙패드·길게 누르기·체크박스 선택, 되돌리기 기록·상태 표시줄, Windows 설치 프로그램(사용자 단위, AUMID, 클린 삭제), macOS 디스크 이미지와 완전 삭제, 설정 버전, 0.4.0 | Linux에서 구현(OS 코드는 CI가 검증, 썸네일·링크·설치는 손으로) |
+| 9 | [M1-08 데모 4판](2026-11-05-m1-08-demo-4.md) **(완료, 0.4.0)** | OS 썸네일(VIEW-09), 즐겨찾기 편집·끌어 놓아 추가·최근 폴더, 링크 만들기(바로 가기·별칭·심볼릭 링크·정션), 마우스 4·5번·트랙패드·길게 누르기·체크박스 선택, 되돌리기 기록·상태 표시줄, Windows 설치 프로그램(사용자 단위, AUMID, 클린 삭제), macOS 디스크 이미지와 완전 삭제, 설정 버전, 0.4.0 | Linux에서 구현(OS 코드는 CI가 검증, 썸네일·링크·설치는 손으로) |
 
 - M1-04는 M1-01 뒤라면 언제 실행해도 된다. M1-02와 M1-03은 이 순서대로 실행한다.
 - M1-01~04는 UI와 무관한 코어라서 M0와 병행할 수 있다. 다만 최소 Rust 버전은 M0의 결정 D2를 따른다(아래 참고).
@@ -42,6 +42,12 @@ M0 결정에 영향을 주는 사항이다.
    - **Windows의 받는 곳.** winit이 등록한 드롭 대상을 `RevokeDragDrop` 뒤 `RegisterDragDrop`으로 앱의 것으로 바꾼다. winit의 `FileDropHandler`는 `QueryInterface`가 `unimplemented!()`라서 감싸 쓸 수 없다.
    - **Windows의 모달 루프.** `SHDoDragDrop`(끌어내기)과 `TrackPopupMenuEx`(셸 메뉴)가 도는 동안 winit은 이벤트를 모아 두기만 해서 창이 다시 그려지지 않는다(winit 0.30 소스로 확인. 실제 PC에서는 keyboard.md "끌어 놓기"의 31번으로 확인).
    - **Slint의 끌기를 놓기 없이 끝내기.** `PointerExited`를 보내면 끌기가 `drag-finished`의 `none`으로 끝나고 놓이지 않는다. 창 밖으로 나간 끌기를 OS의 끌기로 넘길 때 쓴다.
+6. **썸네일, 제스처, 설치 도구(M1-08에서 확인).**
+   - **macOS QuickLook의 스레드.** `QLThumbnailGenerator`는 주 스레드가 필요 없다. 헤더와 `objc2-quick-look-thumbnailing`의 바인딩 어디에도 `QLThumbnailGenerator`·`QLThumbnailGenerationRequest`·`QLThumbnailRepresentation`에 주 스레드 표시(`MainThreadMarker`)가 없고, 생성기는 완료 핸들러를 자기 큐에서 부른다. 그래서 작업 스레드에서 `generateBestRepresentationForRequest:completionHandler:`를 부르고 채널로 답을 기다리면 된다(30초까지). 실제 Mac에서 번들 밖의 테스트 바이너리로 도는지는 아직 확인하지 못했다(keyboard.md "썸네일 공급자" 2번).
+   - **Windows `IShellItemImageFactory`의 "썸네일 없음" 코드.** 셸이 "이 파일은 썸네일을 줄 수 없다"고 답하는 코드는 `E_FAIL`, `0x8004B200`(`WTS_E_FAILEDEXTRACTION`), `WINCODEC_ERR_COMPONENTNOTFOUND`, `WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT`, `WINCODEC_ERR_UNKNOWNIMAGEFORMAT`, `WINCODEC_ERR_BADHEADER`, `WINCODEC_ERR_BADIMAGE`뿐이다. 이것만 `None`(종류별 아이콘으로 남음)이고 나머지는 모두 `Failed`(다시 시도)다. 파일 내용에서 오는 코드는 파일이 바뀔 때까지 같고(캐시 키에 수정 시각과 크기가 있다), 전송·상태에서 오는 코드(`WTS_E_NOSTORAGEPROVIDERTHUMBNAILHANDLER`, `WTS_E_EXTRACTIONTIMEDOUT`, `WINCODEC_ERR_STREAMREAD`, 공유 위반 등)는 다시 시도해야 하기 때문이다. 셸이 돌려주는 비트맵은 미리 곱한 알파이고 요청보다 클 수 있어(`SIIGBF_BIGGERSIZEOK`) 앱이 줄인다. COM은 STA여야 하므로 작업 스레드는 MTA가 아닌 평범한 스레드여야 한다.
+   - **Inno Setup의 AUMID.** `[Icons]` 항목의 `AppUserModelID:` 매개변수가 시작 메뉴 바로 가기에 AUMID를 적는다. 앱의 `identity::AUMID`와 같은 값(`io.github.doguri25.RacoonFinder`)을 쓰면 설치형 앱의 알림이 "Racoon Finder"라는 이름과 아이콘으로 뜬다. 압축만 푼 포터블은 바로 가기가 없어 AUMID가 없고, 알림은 "Windows PowerShell"로 뜬다. 시작 메뉴 바로 가기가 없으면 AUMID를 단 알림이 뜨지 않을 수 있다.
+   - **winit의 제스처.** winit 0.30.13의 `PanGesture`는 iOS에서만 온다(문서: "Only available on iOS"). 데스크톱에서는 트랙패드 두 손가락 스와이프로 뒤로·앞으로를 할 수 없다. macOS는 두 손가락 가로 스크롤을 `MouseWheel`로 주고 세 손가락 스와이프(`swipeWithEvent:`)는 내놓지 않으며, Windows 정밀 터치패드의 스와이프는 가로 휠로 온다. `PinchGesture`는 macOS에서 온다. 마우스 4·5번 버튼은 `MouseButton::Back`·`Forward`로 온다(Windows XBUTTON1·2, macOS 다른 버튼 3·4, X11 8·9).
+   - **Inno Setup 설치와 `ISCC` 찾기.** 스크립트는 Inno Setup 6.3 이상이 필요하다(6.3이 `x64compatible`과 공식 한국어 번역 `Languages\Korean.isl`을 더했다). 러너(windows-latest) 이미지의 chocolatey 기록(6.7.1)에는 컴파일러(`ISCC.exe`)가 디스크에 없었고 6.4.3 패키지도 없다. 그래서 CI는 이미 설치된 6.3 이상 6.x의 `ISCC.exe`를 찾고(`PATH`, 프로그램 폴더, chocolatey 폴더), 없으면 jrsoftware의 내려받기 페이지(`https://jrsoftware.org/download.php/is.exe`)에서 현재 안정판 설치 프로그램을 받아 사용자 단위로 알려진 폴더에 설치한 뒤 버전을 확인한다(7.x는 거절).
 
 ## 실행 방법
 
