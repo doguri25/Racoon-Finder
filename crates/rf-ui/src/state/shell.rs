@@ -242,7 +242,7 @@ impl AppState {
         let links = link_facts(
             Os::CURRENT,
             &entries,
-            rf_platform::symlink_needs_privilege(),
+            rf_platform::symlink_needs_privilege_cached(),
         );
         self.shell.menu = menu;
         self.shell.links = links;

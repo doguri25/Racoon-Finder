@@ -1716,17 +1716,19 @@ fn clip_end(text: &str, max: usize) -> String {
     kept
 }
 
-/// The second line of a row of the history: why it cannot run (`stale`), else that it is the
-/// `next` one of its list, else why it waits.
+/// The second line of a row of the history: why it may not run (`stale`), else that it is the
+/// `next` one of its list, else why it waits. A row that may not run still has its button when it
+/// is the next one: the folders on screen can lag behind the disk, and the undo looks again
+/// itself.
 pub fn history_note(redo: bool, next: bool, stale: Option<Stale>) -> String {
-    let cannot = if redo {
-        "다시 실행할 수 없습니다"
+    let maybe = if redo {
+        "다시 실행하지 못할 수 있습니다"
     } else {
-        "되돌릴 수 없습니다"
+        "되돌리지 못할 수 있습니다"
     };
     match (stale, next, redo) {
-        (Some(Stale::Missing), _, _) => format!("항목이 없어져 {cannot}"),
-        (Some(Stale::Changed), _, _) => format!("복사한 뒤 항목이 바뀌어 {cannot}"),
+        (Some(Stale::Missing), _, _) => format!("항목이 목록에 보이지 않아 {maybe}"),
+        (Some(Stale::Changed), _, _) => format!("복사한 뒤 항목이 바뀌어 {maybe}"),
         (None, true, false) => "다음에 되돌릴 작업".to_owned(),
         (None, true, true) => "다음에 다시 실행할 작업".to_owned(),
         (None, false, false) => undo_order().to_owned(),
@@ -3001,7 +3003,7 @@ mod tests {
     }
 
     #[test]
-    fn history_notes_mark_the_next_row_and_say_why_a_row_waits_or_cannot_run() {
+    fn history_notes_mark_the_next_row_and_say_why_a_row_waits_or_may_not_run() {
         assert_eq!(history_note(false, true, None), "다음에 되돌릴 작업");
         assert_eq!(history_note(true, true, None), "다음에 다시 실행할 작업");
         assert_eq!(history_note(false, false, None), undo_order());
@@ -3011,20 +3013,20 @@ mod tests {
         );
         assert_eq!(
             history_note(false, true, Some(Stale::Missing)),
-            "항목이 없어져 되돌릴 수 없습니다"
+            "항목이 목록에 보이지 않아 되돌리지 못할 수 있습니다"
         );
         assert_eq!(
             history_note(false, true, Some(Stale::Changed)),
-            "복사한 뒤 항목이 바뀌어 되돌릴 수 없습니다"
+            "복사한 뒤 항목이 바뀌어 되돌리지 못할 수 있습니다"
         );
         assert_eq!(
             history_note(true, true, Some(Stale::Missing)),
-            "항목이 없어져 다시 실행할 수 없습니다"
+            "항목이 목록에 보이지 않아 다시 실행하지 못할 수 있습니다"
         );
-        // Why it cannot run comes before where it stands in the order.
+        // Why it may not run comes before where it stands in the order.
         assert_eq!(
             history_note(false, false, Some(Stale::Missing)),
-            "항목이 없어져 되돌릴 수 없습니다"
+            "항목이 목록에 보이지 않아 되돌리지 못할 수 있습니다"
         );
         assert_eq!(history_button(false), "되돌리기");
         assert_eq!(history_button(true), "다시 실행");

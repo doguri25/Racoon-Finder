@@ -619,8 +619,9 @@ fn the_history_rows_follow_the_engine_and_their_buttons_undo_and_redo() {
     assert_eq!(view.undo[0].text, said);
     assert!(view.undo[0].next && view.undo[0].runnable);
     assert_eq!(view.redo, []);
-    // A record the engine noted just now has a time, not the epoch's blank.
-    assert_eq!(view.undo[0].time.len(), 5, "{view:?}");
+    // A record the engine noted just now has a time, not the epoch's blank (`14:32`, or with the
+    // day when the date changed since the job ended).
+    assert!(!view.undo[0].time.is_empty(), "{view:?}");
 
     // The row's button is the key's: it undoes the move, and the move moves to the other list.
     let effects = state.history_run(false, 0);

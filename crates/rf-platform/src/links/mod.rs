@@ -22,6 +22,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use rf_core::Os;
 use serde::{Deserialize, Serialize};
@@ -95,6 +97,11 @@ pub fn link_name(target_name: &OsStr, kind: LinkKind, os: Os) -> OsString {
 ///
 /// A symbolic link to a folder on Windows is made as a folder link; every other target gets a
 /// file link.
+///
+/// A symbolic link always points to the absolute path it is given, never to a path relative to
+/// its own folder: it keeps working wherever the link is moved to, and stops working if the
+/// target (or a folder above it) is moved or renamed, also together with the link. The same holds
+/// for a shortcut, an alias and a junction, which keep an absolute path too.
 pub fn make_link(kind: LinkKind, target: &Path, at: &Path) -> io::Result<()> {
     if fs::symlink_metadata(at).is_ok() {
         return Err(io::ErrorKind::AlreadyExists.into());
@@ -179,9 +186,46 @@ fn is_dir_link(_at: &Path) -> bool {
 
 /// Whether a symbolic link cannot be made without more rights: on Windows when Developer Mode
 /// is off and the process is not elevated (only the registry and the process token are read);
-/// never elsewhere. A menu greys the symbolic link out then, and no job tries it.
+/// never elsewhere. No job tries a symbolic link then. Reads the system every time it is called.
 pub fn symlink_needs_privilege() -> bool {
     imp::symlink_needs_privilege()
+}
+
+/// How long [`symlink_needs_privilege_cached`] keeps an answer: long enough that a menu opened
+/// again and again reads the system once, short enough that a user who has just turned
+/// Developer Mode on finds the entry live after a moment, without starting the app again.
+pub const PRIVILEGE_KEPT: Duration = Duration::from_secs(30);
+
+/// [`symlink_needs_privilege`] for a menu, which asks at every opening on the UI thread: the
+/// answer of the last [`PRIVILEGE_KEPT`], read from the system when there is none. The first
+/// call reads the system, so a worker makes it ahead of the first menu. A job still asks the
+/// system itself.
+pub fn symlink_needs_privilege_cached() -> bool {
+    static LAST: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    kept(
+        &LAST,
+        Instant::now(),
+        PRIVILEGE_KEPT,
+        symlink_needs_privilege,
+    )
+}
+
+/// The answer in `slot` if it is younger than `kept` at `now`; else `read`, which is stored.
+fn kept(
+    slot: &Mutex<Option<(Instant, bool)>>,
+    now: Instant,
+    kept: Duration,
+    read: impl FnOnce() -> bool,
+) -> bool {
+    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, answer)) = *slot
+        && now.saturating_duration_since(at) < kept
+    {
+        return answer;
+    }
+    let answer = read();
+    *slot = Some((now, answer));
+    answer
 }
 
 /// `IO_REPARSE_TAG_MOUNT_POINT`.
@@ -300,7 +344,49 @@ pub fn mount_point_target(buffer: &[u8]) -> Option<Vec<u16>> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    #[test]
+    fn an_answer_is_kept_for_a_while_and_read_again_after() {
+        let slot = Mutex::new(None);
+        let kept_for = Duration::from_secs(30);
+        let start = Instant::now();
+        let reads = Cell::new(0);
+        let reads_ref = &reads;
+        let read = |answer: bool| {
+            move || {
+                reads_ref.set(reads_ref.get() + 1);
+                answer
+            }
+        };
+        // The first call reads the system.
+        assert!(kept(&slot, start, kept_for, read(true)));
+        assert_eq!(reads.get(), 1);
+        // A menu opened again soon after gets the same answer without a read, even if the
+        // system would say otherwise now.
+        for seconds in [0, 1, 29] {
+            let now = start + Duration::from_secs(seconds);
+            assert!(kept(&slot, now, kept_for, read(false)), "{seconds} s");
+        }
+        assert_eq!(reads.get(), 1);
+        // After the time, the system is asked again, and its new answer is kept.
+        let later = start + Duration::from_secs(31);
+        assert!(!kept(&slot, later, kept_for, read(false)));
+        assert_eq!(reads.get(), 2);
+        assert!(!kept(
+            &slot,
+            later + Duration::from_secs(5),
+            kept_for,
+            read(true)
+        ));
+        assert_eq!(reads.get(), 2);
+        // The public one agrees with the system on a system that never needs a privilege.
+        if !cfg!(windows) {
+            assert!(!symlink_needs_privilege_cached());
+        }
+    }
 
     #[test]
     fn each_system_offers_its_own_kinds() {

@@ -15,7 +15,9 @@ use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use rf_core::VPath;
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Com::{
@@ -67,14 +69,14 @@ fn on_com_thread<T: Send>(work: impl FnOnce() -> io::Result<T> + Send) -> io::Re
 
 pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
     on_com_thread(|| {
-        let (target_units, at_units) = (wide(target.as_os_str()), wide(at.as_os_str()));
+        let target_units = wide(target.as_os_str());
         // SAFETY: a class of the shell, created in this thread's apartment, which ends after
         // every object below is released.
         let link: IShellLinkW =
             unsafe { CoCreateInstance(&ShellLink, None::<&IUnknown>, CLSCTX_INPROC_SERVER) }
                 .map_err(|e| to_io(&e))?;
-        // SAFETY: `target_units` and `at_units` are NUL-terminated and outlive these calls, which
-        // copy what they are given.
+        // SAFETY: `target_units` is NUL-terminated and outlives these calls, which copy what they
+        // are given.
         unsafe {
             link.SetPath(PCWSTR(target_units.as_ptr()))
                 .map_err(|e| to_io(&e))?;
@@ -85,8 +87,39 @@ pub(super) fn make_shortcut(target: &Path, at: &Path) -> io::Result<()> {
             }
         }
         let file: IPersistFile = link.cast().map_err(|e| to_io(&e))?;
-        // SAFETY: as above. `Save` replaces a file that is there; the caller made sure none is.
-        unsafe { file.Save(PCWSTR(at_units.as_ptr()), true) }.map_err(|e| to_io(&e))
+        // `Save` replaces a file that is there, and a file another process made at `at` since
+        // the caller looked must stay: the shortcut is saved under a name of its own, beside
+        // `at`, and moved into place without replacing anything.
+        let temp = temp_beside(at);
+        let temp_units = wide(temp.as_os_str());
+        // SAFETY: as above, with `temp_units`; the shortcut is not remembered as that file.
+        unsafe { file.Save(PCWSTR(temp_units.as_ptr()), false) }.map_err(|e| to_io(&e))?;
+        move_into_place(&temp, at).inspect_err(|_| {
+            let _ = fs::remove_file(&temp);
+        })
+    })
+}
+
+/// A name in the folder of `at` for a shortcut that is saved there before it takes its place;
+/// no two calls get the same one.
+fn temp_beside(at: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let number = NEXT.fetch_add(1, Ordering::Relaxed);
+    at.with_file_name(format!(".racoon-link-{}-{number}.lnk", std::process::id()))
+}
+
+/// Renames `temp` to `at` and never replaces `at`: a file there fails with `AlreadyExists` and
+/// stays as it is.
+fn move_into_place(temp: &Path, at: &Path) -> io::Result<()> {
+    let (Ok(from), Ok(to)) = (VPath::local(temp), VPath::local(at)) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not an absolute path",
+        ));
+    };
+    crate::rename_no_replace(&from, &to).map_err(|error| match error {
+        rf_core::Error::Io { source, .. } => source,
+        other => io::Error::other(other.to_string()),
     })
 }
 
@@ -257,6 +290,35 @@ mod tests {
     fn the_rights_of_a_symbolic_link_can_be_told() {
         // Either answer is right; the reads must not fail or panic.
         let _ = symlink_needs_privilege();
+    }
+
+    #[test]
+    fn a_shortcut_takes_its_place_only_where_nothing_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (temp, at) = (dir.path().join("t.lnk"), dir.path().join("a.lnk"));
+        fs::write(&temp, "new").unwrap();
+        fs::write(&at, "older").unwrap();
+
+        let error = move_into_place(&temp, &at).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&at).unwrap(), "older");
+        assert!(temp.is_file());
+        fs::remove_file(&at).unwrap();
+        move_into_place(&temp, &at).unwrap();
+        assert_eq!(fs::read_to_string(&at).unwrap(), "new");
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn the_name_a_shortcut_is_saved_under_is_beside_it_and_new_each_time() {
+        let at = Path::new(r"C:\Users\a\Desktop\b.lnk");
+        let (first, second) = (temp_beside(at), temp_beside(at));
+        assert_ne!(first, second);
+        for temp in [first, second] {
+            assert_eq!(temp.parent(), at.parent());
+            assert_eq!(temp.extension().and_then(|e| e.to_str()), Some("lnk"));
+        }
     }
 
     #[test]

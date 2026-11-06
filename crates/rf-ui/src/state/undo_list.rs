@@ -3,8 +3,10 @@
 //! button does what Ctrl+Z or Ctrl+Y does ([`AppState::undo`], [`AppState::redo`]) and only the
 //! first row of a list can be pressed: the history is a stack, and nothing in the middle is
 //! undone alone. A row whose items are no longer as its record needs them, as far as the
-//! folders on screen show (nothing here looks at the disk), is dimmed and says why. A child of
-//! [`state`](super), so these methods see the fields of [`AppState`].
+//! folders on screen show (nothing here looks at the disk), is dimmed and says why; its button
+//! stays: the folders lag behind the disk for a moment after a job (a watch tells them), and the
+//! undo looks at the items again itself. A child of [`state`](super), so these methods see the
+//! fields of [`AppState`].
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -33,9 +35,9 @@ pub struct HistoryLine {
     pub note: String,
     /// The row the button of the list acts on: the first of its list.
     pub next: bool,
-    /// Its button can be pressed.
+    /// Its button can be pressed: the first row of a list when nothing else runs, dimmed or not.
     pub runnable: bool,
-    /// The record can no longer be undone (or done again).
+    /// The record may no longer be undone (or done again), as far as the folders on screen show.
     pub dimmed: bool,
 }
 
@@ -98,7 +100,7 @@ impl AppState {
                         time: words::history_time(stamp, now, tz),
                         note: words::history_note(redo_list, next, stale),
                         next,
-                        runnable: next && can && stale.is_none(),
+                        runnable: next && can,
                         dimmed: stale.is_some(),
                     }
                 })
@@ -141,7 +143,8 @@ impl AppState {
 
     /// The button of row `index` of the list of what can be undone, or, with `redo`, of what
     /// can be done again: the same as Ctrl+Z (Ctrl+Y) for the first row, and nothing for the
-    /// others, or for a row that cannot run ([`HistoryLine::runnable`]).
+    /// others. A dimmed first row runs too, as the key would: the engine looks at its items
+    /// again.
     pub fn history_run(&mut self, redo: bool, index: usize) -> Vec<Effect> {
         if index != 0 {
             return Vec::new();
@@ -151,10 +154,7 @@ impl AppState {
         } else {
             &self.history.undo
         };
-        let Some(record) = list.last() else {
-            return Vec::new();
-        };
-        if stale_of(record, &mut Listings::new(self)).is_some() {
+        if list.is_empty() {
             return Vec::new();
         }
         if redo { self.redo() } else { self.undo() }

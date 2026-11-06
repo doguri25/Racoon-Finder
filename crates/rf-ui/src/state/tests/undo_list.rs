@@ -7,7 +7,7 @@ use jiff::tz::TimeZone;
 use rf_jobs::{CreateKind, CreatedItem};
 
 use super::*;
-use crate::jobs::{History, Started};
+use crate::jobs::{History, JobEffect, Started};
 use crate::keys::{PanelKey, TreeKey};
 use crate::words::{HISTORY_SHOWN, JobWork, Stale};
 
@@ -218,12 +218,14 @@ fn history_dims_a_row_whose_items_are_gone_and_says_why() {
     state.set_history(history(&[renamed("a.txt", "y.txt")], &[], t0()));
     let rows = view(&state);
     let line = &rows.undo[0];
-    assert!(line.dimmed && !line.runnable && line.next);
+    // Dimmed, with its reason, but its button stays: the listing may lag behind the disk for a
+    // moment after the rename, and the undo looks again itself.
+    assert!(line.dimmed && line.runnable && line.next);
     assert_eq!(
         line.note,
         words::history_note(false, true, Some(Stale::Missing))
     );
-    assert_eq!(state.history_run(false, 0), []);
+    assert_eq!(state.history_run(false, 0), [Effect::Job(JobEffect::Undo)]);
     // It is there: the row is as any other.
     let mut state = listing(&["y.txt"]);
     state.set_history(history(&[renamed("a.txt", "y.txt")], &[], t0()));

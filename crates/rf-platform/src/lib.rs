@@ -31,7 +31,7 @@ pub use fsops::{
 pub use known::{KnownFolder, known_folder};
 pub use links::{
     LinkKind, drop_kind, kinds_for, link_name, link_points_to, make_link, mount_point_buffer,
-    remove_link, symlink_needs_privilege,
+    remove_link, symlink_needs_privilege, symlink_needs_privilege_cached,
 };
 pub use meta::{copy_extras, set_attributes, set_times};
 pub use natural::{NaturalKey, natural_cmp, portable_natural_cmp};

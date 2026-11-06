@@ -1183,9 +1183,14 @@ mod tests {
         assert_eq!(got.len(), names.len(), "{got:?}");
         assert!(got.iter().all(|(_, _, size)| size.is_none()), "{got:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        // When the stuck calls return, work goes on.
+        // When the stuck calls return, work goes on: once both are back (not after a time that
+        // a loaded machine may overrun).
         drop(release);
-        std::thread::sleep(QUIET);
+        let deadline = Instant::now() + WAIT;
+        while pool.inner.lock().stuck > 0 {
+            assert!(Instant::now() < deadline, "the stuck calls return");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         pool.want(2, vec![want(dir.path(), "f.dat", 0)]);
         let again = collect(&pool, 1);
         // Made, not shed.
@@ -1269,12 +1274,13 @@ mod tests {
         let pool = decoding_pool(
             dir.path(),
             &PERMITS,
-            Duration::from_millis(200),
+            Duration::from_secs(1),
             Duration::from_secs(30),
         );
         pool.want(1, vec![want_pic(dir.path())]);
-        // Longer than the watchdog's timeout, with a permit short.
-        std::thread::sleep(Duration::from_millis(900));
+        // Longer than the watchdog's timeout, with a permit short. The timeout is long enough for
+        // a loaded machine to decode a 30 px picture within it once the permit comes.
+        std::thread::sleep(Duration::from_secs(3));
         assert!(pool.take_ready().is_empty());
         *PERMITS.free.lock().unwrap() += 1;
         PERMITS.freed.notify_one();

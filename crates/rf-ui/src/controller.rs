@@ -306,6 +306,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
             return;
         };
         let mut folders = session.folders();
+        // The first read of the rights of a symbolic link is made here, not by the first menu.
+        let _ = rf_platform::symlink_needs_privilege_cached();
         // `left` is the folder asked for: a gone one adds no tab (`Session::with_start`).
         if started_at && !folders.contains(&left) {
             folders.push(left.clone());
@@ -496,6 +498,36 @@ fn number(value: usize) -> i32 {
 fn connect(window: &MainWindow) {
     window.on_key(|text, ctrl, shift, alt, meta, repeat| {
         let mods = Mods {
+/// Whether Shift counts as held for a choice made in a menu on `os`: where the system tells the
+/// keys held now (`live`, Windows and macOS), that answer alone, since a menu of the system's own
+/// ran a loop in which the window may have missed the release of a Shift it heard pressed (a stale
+/// `heard` would open the picker for a plain click); elsewhere, where winit tells every change
+/// and `live` says nothing, what the window `heard`.
+fn menu_choice_shift(os: Os, live: bool, heard: bool) -> bool {
+    match os {
+        Os::Windows | Os::MacOs => live,
+        Os::Other => heard,
+    }
+}
+
+/// Whether the news of a job needs 되돌리기 기록 drawn again. A progress tick changes neither
+/// the history nor the listings its rows are judged by, and judging them is the work of a
+/// listing's size on the UI thread, at the rate of the ticks; a change of a job's state can
+/// change whether an undo may start, and so the button of the first row.
+fn redraws_history(event: &JobEvent) -> bool {
+    !matches!(event, JobEvent::Progress { .. })
+}
+
+/// Gives the window the payloads of the drags it starts with: a drag only begins on a press whose
+/// area has one, and the press readies the drag's own. The same for a drag of a tab (id 0 is no
+/// tab's), and for a favorite's row, whose press readies its own after the drag area has looked:
+/// this one belongs to no favorite.
+fn set_first_drag_payloads(window: &MainWindow) {
+    window.set_drag_data(ui_bridge::drag_payload(0));
+    window.set_tab_drag_data(ui_bridge::tab_payload(0));
+    window.set_favorite_drag_data(ui_bridge::favorite_payload(usize::MAX, ""));
+}
+
             ctrl,
             shift,
             alt,
@@ -1731,7 +1763,7 @@ impl Controller {
                 None => return,
             };
             if effects.is_empty() {
-                self.redraw_jobs();
+                self.redraw_jobs(history);
             } else {
                 self.apply(effects);
             }
@@ -1749,6 +1781,7 @@ impl Controller {
     }
 
     /// A question of a job.
+            let history = redraws_history(&event);
     fn question(&self, question: Question) {
         if self.state.borrow().is_none() {
             self.early.borrow_mut().push(Early::Question(question));
@@ -2667,9 +2700,9 @@ impl Controller {
     /// read as the system has them now (`rf_platform::dnd::held_mods`): the menu of the system's
     /// own ran a loop of its own, in which the window heard no key change.
     fn make_links(&self, index: usize) {
-        let held = dnd::held_mods().shift;
+        let live = dnd::held_mods().shift;
         self.update(|state| {
-            let pick = held || state.shift_held();
+            let pick = menu_choice_shift(Os::CURRENT, live, state.shift_held());
             state.make_links(index, pick)
         });
     }
@@ -3370,7 +3403,7 @@ impl Controller {
             if self.shown_links.replace(links) != links {
                 ui_bridge::show_item_links(&window, links, Os::CURRENT);
             }
-            self.show_jobs(&window, state);
+            self.show_jobs(&window, state, true);
             self.show_dialog(&window, state);
         }
         for (side, row) in scrolls {
@@ -3464,17 +3497,18 @@ impl Controller {
         }
     }
 
-    /// Shows the job panel and the toolbar's Undo, after a job's progress or state changed.
-    fn redraw_jobs(&self) {
+    /// Shows the job panel and the toolbar's Undo, after a job's progress or state changed;
+    /// `history`: 되돌리기 기록 too ([`redraws_history`]).
+    fn redraw_jobs(&self, history: bool) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
         if let Some(state) = self.state.borrow().as_ref() {
-            self.show_jobs(&window, state);
+            self.show_jobs(&window, state, history);
         }
     }
 
-    fn show_jobs(&self, window: &MainWindow, state: &AppState) {
+    fn show_jobs(&self, window: &MainWindow, state: &AppState, history: bool) {
         let rows = state.job_rows();
         ui_bridge::set_rows(
             &self.job_rows,
@@ -3493,7 +3527,9 @@ impl Controller {
                 .collect(),
         );
         window.set_recent_open(state.recent_open());
-        self.show_history(window, state);
+        if history {
+            self.show_history(window, state);
+        }
         let (line, button) = state
             .panel_cursor()
             .map_or((-1, -1), |(line, button)| (number(line), number(button)));
@@ -3805,6 +3841,37 @@ mod tests {
             notifier: notifier.clone(),
             last: Some("theme = \"dark\"\n".to_owned()),
             cleared: Some(cleared),
+    #[test]
+    fn a_menu_choice_trusts_the_system_s_keys_where_it_tells_them() {
+        // A Shift the window heard pressed and never heard released is no Shift on Windows and
+        // macOS, where the system says what is held now; and a Shift held counts there.
+        for os in [Os::Windows, Os::MacOs] {
+            assert!(!menu_choice_shift(os, false, true), "{os:?}");
+            assert!(menu_choice_shift(os, true, false), "{os:?}");
+            assert!(menu_choice_shift(os, true, true), "{os:?}");
+            assert!(!menu_choice_shift(os, false, false), "{os:?}");
+        }
+        // Elsewhere the system says nothing, and the window's own hearing is all there is.
+        assert!(menu_choice_shift(Os::Other, false, true));
+        assert!(!menu_choice_shift(Os::Other, false, false));
+    }
+
+    #[test]
+    fn a_progress_tick_does_not_judge_the_history_again() {
+        use rf_jobs::{JobId, JobState, Progress};
+        let id = JobId(1);
+        assert!(!redraws_history(&JobEvent::Progress {
+            id,
+            progress: Progress::default(),
+        }));
+        // A job that starts or stops can change whether an undo may start.
+        assert!(redraws_history(&JobEvent::State {
+            id,
+            state: JobState::Running,
+        }));
+        assert!(redraws_history(&JobEvent::Queue { order: vec![id] }));
+    }
+
         });
         answering.join().expect("the answer");
         assert!(jobs.is_closed());
