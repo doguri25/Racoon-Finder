@@ -6,8 +6,12 @@
 ;   AppVersion  plain x.y.z, the workspace version
 ;   Arch        x64 or arm64, which Windows the installer accepts
 ;   Source      folder that holds racoon-finder.exe
-;   KoreanIsl   optional, full path of Korean.isl when the Inno Setup install does not ship it
 
+; Inno Setup 6.3 added the x64compatible architecture identifier and the official Korean translation
+; (Languages\Korean.isl) that this script uses.
+#if Ver < EncodeVer(6, 3, 0)
+  #error Inno Setup 6.3 or newer is needed
+#endif
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z
 #endif
@@ -19,9 +23,6 @@
 #endif
 #if (Arch != "x64") && (Arch != "arm64")
   #error Arch must be x64 or arm64
-#endif
-#ifndef KoreanIsl
-  #define KoreanIsl CompilerPath + "Languages\Korean.isl"
 #endif
 
 [Setup]
@@ -57,10 +58,10 @@ SolidCompression=yes
 WizardStyle=modern
 
 [Languages]
-#if FileExists(KoreanIsl)
-Name: "korean"; MessagesFile: "{#KoreanIsl}"
+#if FileExists(CompilerPath + "Languages\Korean.isl")
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 #else
-  #error Korean.isl not found at KoreanIsl; see installer/windows/README.md
+  #error Languages\Korean.isl is missing from the Inno Setup install (it ships with 6.3 and newer)
 #endif
 
 [Tasks]
@@ -118,15 +119,24 @@ begin
   if not Exec(Exe, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) then
   begin
     Log('could not start ' + Exe + ': ' + SysErrorMessage(Code));
-    SuppressibleMsgBox('앱의 데이터를 정리하는 프로그램을 실행하지 못했습니다. 프로그램은 계속 삭제합니다.' + #13#10 +
-      '%APPDATA%\RacoonFinder 와 %LOCALAPPDATA%\RacoonFinder 폴더가 남아 있으면 직접 지워 주세요.',
-      mbError, MB_OK, IDOK);
+    if not UninstallSilent then
+      SuppressibleMsgBox('앱의 데이터를 정리하는 프로그램을 실행하지 못했습니다. 프로그램은 계속 삭제합니다.' + #13#10 +
+        '%APPDATA%\RacoonFinder 와 %LOCALAPPDATA%\RacoonFinder 폴더가 남아 있으면 직접 지워 주세요.',
+        mbError, MB_OK, IDOK);
   end
   else if Code <> 0 then
   begin
     Log('--cleanup exit code ' + IntToStr(Code));
-    SuppressibleMsgBox('앱의 데이터를 모두 정리하지 못했습니다 (종료 코드 ' + IntToStr(Code) + ').' + #13#10 +
-      '프로그램은 계속 삭제합니다. %APPDATA%\RacoonFinder 와 %LOCALAPPDATA%\RacoonFinder 폴더가 남아 있으면 직접 지워 주세요.',
-      mbError, MB_OK, IDOK);
+    if not UninstallSilent then
+    begin
+      if Code = 4 then
+        SuppressibleMsgBox('설정을 백업하지 못해 앱의 설정과 기록은 지우지 않았습니다 (종료 코드 4).' + #13#10 +
+          '프로그램은 계속 삭제합니다. 설정은 그대로 남아 있습니다.',
+          mbError, MB_OK, IDOK)
+      else
+        SuppressibleMsgBox('앱의 데이터를 모두 정리하지 못했습니다 (종료 코드 ' + IntToStr(Code) + ').' + #13#10 +
+          '프로그램은 계속 삭제합니다. %APPDATA%\RacoonFinder 와 %LOCALAPPDATA%\RacoonFinder 폴더가 남아 있으면 직접 지워 주세요.',
+          mbError, MB_OK, IDOK);
+    end;
   end;
 end;

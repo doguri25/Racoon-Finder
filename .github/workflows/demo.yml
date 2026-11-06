@@ -150,31 +150,27 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $version = ($meta.packages | Where-Object { $_.name -eq 'racoon-finder' }).version
+          # Same source as the release job: the first `version = "..."` line of the root Cargo.toml.
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "need a plain x.y.z version, got '$version'" }
+          "INSTALLER_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          # Inno Setup 6 is on GitHub's Windows images; install it only if it is not.
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) {
-            foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
-              $candidate = Join-Path $dir 'Inno Setup 6\ISCC.exe'
-              if (Test-Path $candidate) { $iscc = $candidate; break }
-            }
+          # The script needs Inno Setup 6.3 or newer (it also checks this itself). Use the
+          # preinstalled one when it is new enough, else install a pinned 6.x. Not the latest
+          # package: a 7.x installs elsewhere and the paths below would not hold.
+          $iscc = $null
+          foreach ($dir in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+            $candidate = Join-Path $dir 'Inno Setup 6\ISCC.exe'
+            if ((Test-Path $candidate) -and ([version](Get-Item $candidate).VersionInfo.ProductVersion -ge [version]'6.3.0')) { $iscc = $candidate; break }
           }
           if (-not $iscc) {
-            choco install innosetup -y --no-progress
+            # 6.4.3 is a guess at a 6.x (>= 6.3) that choco has; it was not looked up.
+            choco install innosetup --version=6.4.3 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed (exit $LASTEXITCODE)" }
             $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found' }
-          Write-Host "ISCC: $iscc"
-
-          # Korean.isl: use the one that ships with Inno Setup, else fetch the unofficial translation.
-          $korean = Join-Path (Split-Path $iscc) 'Languages\Korean.isl'
-          if (-not (Test-Path $korean)) {
-            $korean = Join-Path $env:RUNNER_TEMP 'Korean.isl'
-            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/Korean.isl' -OutFile $korean
-          }
+          Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
 
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $out = (Resolve-Path dist).Path
@@ -183,7 +179,7 @@ jobs:
             $src = Join-Path $env:RUNNER_TEMP "src-$arch"
             Expand-Archive -Path $zip -DestinationPath $src -Force
             if (-not (Test-Path (Join-Path $src 'racoon-finder.exe'))) { throw "$zip has no racoon-finder.exe" }
-            & $iscc "/DAppVersion=$version" "/DArch=$arch" "/DSource=$src" "/DKoreanIsl=$korean" "/O$out" installer/windows/racoon-finder.iss
+            & $iscc "/DAppVersion=$version" "/DArch=$arch" "/DSource=$src" "/O$out" installer/windows/racoon-finder.iss
             if ($LASTEXITCODE -ne 0) { throw "ISCC failed for $arch (exit $LASTEXITCODE)" }
             $setup = Join-Path $out "RacoonFinder-setup-$version-windows-$arch.exe"
             if (-not (Test-Path $setup)) { throw "$setup was not produced" }
@@ -201,15 +197,17 @@ jobs:
           $installLog = Join-Path $env:RUNNER_TEMP 'install.log'
           $uninstallLog = Join-Path $env:RUNNER_TEMP 'uninstall.log'
           try {
-            $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            $p = Start-Process -FilePath $setup -PassThru -ArgumentList @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir", "/LOG=$installLog")
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the installer did not finish in 120 s' }
             if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
             if (-not (Test-Path (Join-Path $dir 'racoon-finder.exe'))) { throw 'racoon-finder.exe was not installed' }
             if (Test-Path (Join-Path $dir 'portable')) { throw 'the installer put a portable marker in the install folder' }
 
             # The uninstaller copies itself to a temp folder and returns early: wait for the folder to go.
-            $p = Start-Process -FilePath (Join-Path $dir 'unins000.exe') -Wait -PassThru -ArgumentList @(
+            $p = Start-Process -FilePath (Join-Path $dir 'unins000.exe') -PassThru -ArgumentList @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$uninstallLog")
+            if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the uninstaller did not finish in 120 s' }
             if ($p.ExitCode -ne 0) { throw "uninstaller exit code $($p.ExitCode)" }
             $deadline = (Get-Date).AddSeconds(90)
             while ((Test-Path $dir) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
@@ -221,15 +219,17 @@ jobs:
             }
           }
 
+      # The workflow knows the version, so the paths are exact (no glob). INSTALLER_VERSION is
+      # set by the build step above.
       - uses: actions/upload-artifact@v7
         with:
-          path: dist/RacoonFinder-setup-*-windows-x64.exe
+          path: dist/RacoonFinder-setup-${{ env.INSTALLER_VERSION }}-windows-x64.exe
           archive: false
           retention-days: 30
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
-          path: dist/RacoonFinder-setup-*-windows-arm64.exe
+          path: dist/RacoonFinder-setup-${{ env.INSTALLER_VERSION }}-windows-arm64.exe
           archive: false
           retention-days: 30
           if-no-files-found: error

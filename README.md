@@ -14,19 +14,21 @@ Windows 11과 macOS 15에서 쓰는 듀얼 패널 파일 관리자입니다. 아
 
 ### 내려받기
 
-버전 태그가 붙은 데모(0.3.0부터)는 저장소의 **Releases**에서도 같은 네 파일을 내려받을 수 있습니다
-([v0.3.0](https://github.com/doguri25/Racoon-Finder/releases/tag/v0.3.0)). 개발 중인 최신 빌드는 아래처럼 Actions에서 받습니다.
+버전 태그가 붙은 데모는 저장소의 **Releases**에서도 내려받을 수 있습니다. 0.3.0
+([v0.3.0](https://github.com/doguri25/Racoon-Finder/releases/tag/v0.3.0))에는 아래 표의 네 파일이 있고, Windows 설치 프로그램은
+버전 0.4.0부터 함께 올라옵니다. 개발 중인 최신 빌드는 아래처럼 Actions에서 받습니다.
 
 1. GitHub에 로그인합니다. Actions 산출물은 로그인해야 내려받을 수 있습니다.
 2. 이 저장소의 **Actions** 탭 → 왼쪽 목록의 **Demo build** → 초록 체크 표시가 붙은 최근 실행을 엽니다. 0.3.0 데모는
    `feat/m1-core` 브랜치(합친 뒤에는 `main`)의 실행입니다. 실행 제목 옆의 브랜치 이름으로 고릅니다.
 3. 아래쪽 **Artifacts**에서 내 PC에 맞는 파일을 내려받습니다. 산출물은 30일 동안 남아 있습니다. 세 OS의 파일은 같은
-   실행에서 함께 만들어집니다: Windows는 zip, macOS는 ad-hoc 서명한 `.app`을 담은 zip, Linux는 tar.gz입니다.
+   실행에서 함께 만들어집니다: Windows는 zip과 설치 프로그램(`.exe`), macOS는 ad-hoc 서명한 `.app`을 담은 zip, Linux는 tar.gz입니다.
 
 | PC | 파일 |
 | --- | --- |
 | Windows 11 (대부분의 PC) | `RacoonFinder-demo-windows-x64.zip` |
 | Windows 11 ARM (Snapdragon 등) | `RacoonFinder-demo-windows-arm64.zip` |
+| Windows 11 설치 프로그램 (x64 / ARM) | `RacoonFinder-setup-<버전>-windows-x64.exe` / `-arm64.exe` (아래 "설치하기") |
 | Apple 실리콘 Mac (M1 이후) | `RacoonFinder-demo-macos-arm64.zip` |
 | Linux x64 (개발용) | `RacoonFinder-demo-linux-x64.tar.gz` |
 
@@ -40,8 +42,8 @@ Windows에서 어느 쪽인지 모르겠으면 설정 → 시스템 → 정보�
 관리자 권한이 필요 없고, 앱은 `%LOCALAPPDATA%\Programs\RacoonFinder`에 들어가며, 시작 메뉴에 **Racoon Finder**
 바로 가기가 생깁니다(바탕 화면 바로 가기는 설치 중에 고르면 만듭니다). 알림도 "Racoon Finder"라는 이름과 아이콘으로 뜹니다.
 
-1. 버전이 붙은 데모는 저장소의 **Releases**에서, 개발 중인 최신 빌드는 위 "내려받기"의 Actions 산출물에서
-   `RacoonFinder-setup-…exe`를 내려받습니다(Windows 11 ARM이면 `-arm64.exe`).
+1. 버전 0.4.0부터는 저장소의 **Releases**에서, 개발 중인 최신 빌드는 위 "내려받기"의 Actions 산출물에서
+   `RacoonFinder-setup-…exe`를 내려받습니다(Windows 11 ARM이면 `-arm64.exe`). 0.3.0에는 설치 프로그램이 없습니다.
 2. 실행합니다. 서명하지 않아서 "Windows의 PC 보호" 창이 뜨면 **추가 정보** → **실행**을 누릅니다.
 3. 안내에 따라 설치합니다. 새 버전은 같은 방법으로 위에 덮어 설치하면 됩니다(실행 중인 앱은 설치 프로그램이 닫습니다).
 

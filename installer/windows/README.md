@@ -13,15 +13,16 @@ ISCC.exe /DAppVersion=0.4.0 /DArch=x64 /DSource=C:\path\to\folder installer\wind
 
 | Define | Meaning |
 | --- | --- |
-| `AppVersion` | plain `x.y.z`, the workspace version (CI reads it with `cargo metadata`) |
+| `AppVersion` | plain `x.y.z`, the workspace version (CI reads it from the root `Cargo.toml`) |
 | `Arch` | `x64` (accepts x64 and Windows on ARM through emulation) or `arm64` (ARM only) |
 | `Source` | folder that holds `racoon-finder.exe` (no `portable` file is installed even if one is there) |
-| `KoreanIsl` | optional full path of `Korean.isl`; default is `Languages\Korean.isl` of the Inno Setup install |
 
 The output is `RacoonFinder-setup-<AppVersion>-windows-<Arch>.exe` in `installer\windows\Output`
-(`/O<dir>` changes it). Inno Setup 6 does not reliably ship `Korean.isl` in `Languages\` (it is an
-"unofficial" translation); the script stops with an error if it is missing. CI downloads it from
-`jrsoftware/issrc` (`Files/Languages/Unofficial/Korean.isl`) when needed and passes `/DKoreanIsl=`.
+(`/O<dir>` changes it). Inno Setup **6.3 or newer** is needed: 6.3 added the `x64compatible`
+identifier and the official Korean translation, which ships as `Languages\Korean.isl` and is used
+as it is. The script stops with an error on an older compiler or when that file is missing. CI uses
+the Inno Setup on the runner image if it is 6.3 or newer, else installs a pinned 6.x with Chocolatey
+(never the latest: a 7.x installs to a different folder).
 
 ## The AppId rule
 
@@ -37,7 +38,7 @@ one instead of upgrading, and leaves two entries in the Apps list.
    deleted): it asks a running app to quit (waits up to 30 s), puts back what the app changed, and
    deletes the settings, cache (thumbnails too), logs and temporary files. Exit codes: 0 done,
    3 app still running, 4 backup failed (nothing deleted), 5 partly done. A nonzero code does not stop
-   the uninstall; a message names the code.
+   the uninstall; a message names the code (none in a silent uninstall; the code goes to the log).
 3. Removes what Inno installed: the exe, the Start menu and desktop shortcuts, the install folder,
    the Apps list entry.
 
