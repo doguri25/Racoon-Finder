@@ -995,6 +995,8 @@ fn winit_touch(window: &slint::Window, touch: &slint::winit_030::winit::event::T
         TouchPhase::Started => {
             with(|c| {
                 c.pointer.set(Some(WindowPoint { x: at.x, y: at.y }));
+                // A finger down is a new press, whatever the last one left.
+                c.press_reset();
                 if c.fingers_changed(true) > 1 {
                     c.press_cancel();
                 } else {
@@ -1028,6 +1030,8 @@ fn winit_mouse_button(state: ElementState, button: MouseButton) -> bool {
         (ElementState::Pressed, MouseButton::Left) => {
             with(|c| {
                 c.left_down.set(true);
+                // Every left press forgets the last one, on a list or not.
+                c.press_reset();
                 if let Some(at) = c.pointer.get() {
                     c.press_began(Spot::new(at.x, at.y), None);
                 }
@@ -1064,6 +1068,9 @@ fn winit_mouse_button(state: ElementState, button: MouseButton) -> bool {
             // The release of a press whose menu opened: Slint was told already.
             opened
         }
+        // The release of the fourth and fifth buttons goes no further than their press did: it
+        // could end the grab of a left press that is held.
+        (ElementState::Released, MouseButton::Back | MouseButton::Forward) => true,
         (ElementState::Released, _) => false,
     }
 }
@@ -1110,6 +1117,8 @@ fn watch_winit_events(window: &MainWindow) {
                 });
             }
             WinitEvent::MouseWheel { delta, .. } => {
+                // The list moves under a press that waits: it is no long press of that row.
+                with(Controller::press_cancel);
                 let (lines, pixels) = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (Some(f64::from(*y)), 0.0),
                     MouseScrollDelta::PixelDelta(at) => {
@@ -1138,7 +1147,7 @@ fn watch_winit_events(window: &MainWindow) {
                 with(Controller::press_cancel);
             }
             WinitEvent::Focused(false) => {
-                with(Controller::press_cancel);
+                with(Controller::press_focus_lost);
             }
             WinitEvent::Touch(touch) => {
                 if winit_touch(window, touch) {
@@ -3902,6 +3911,34 @@ mod tests {
         // The release that follows ends the press and nothing else, and only once.
         assert!(c.press_released());
         assert!(!c.release_swallowed());
+        assert!(!c.press_released());
+    }
+
+    #[test]
+    fn a_press_elsewhere_completes_after_a_long_press_whose_release_never_came() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let (x, y) = (d.row.x, d.row.y);
+        let start = Instant::now();
+        d.move_to(d.row);
+        d.left(true, d.row);
+        c.pointer.set(Some(WindowPoint { x, y }));
+        c.press_began(Spot::new(x, y), None);
+        c.press_tick_at(start + Duration::from_secs(2));
+        assert!(!c.press.machine.borrow().is_armed());
+        // The OS menu's loop took the release. The next press is on the toolbar, which arms
+        // nothing, and its release must reach Slint.
+        c.press_began(Spot::new(x, 4.0), None);
+        assert!(
+            !c.press_released(),
+            "the release of the toolbar press goes on"
+        );
+        // A menu that opened and then lost the window's focus likewise forgets the press.
+        c.press_began(Spot::new(x, y), None);
+        c.press_tick_at(Instant::now() + Duration::from_secs(2));
+        c.fingers_changed(true);
+        c.press_focus_lost();
+        assert_eq!(c.fingers_changed(true), 1, "the fingers count afresh");
         assert!(!c.press_released());
     }
 

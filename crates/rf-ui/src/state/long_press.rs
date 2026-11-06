@@ -165,6 +165,13 @@ impl LongPress {
         }
     }
 
+    /// The press is forgotten, whatever it was, a menu that opened included: the next press
+    /// begins on its own. The release of a press whose menu opened may never come (an OS menu's
+    /// loop takes it), so every new press, a touch and the window losing focus end it.
+    pub fn reset(&mut self) {
+        self.phase = Phase::Idle;
+    }
+
     /// The press and its place, while it waits.
     pub fn armed_at(&self) -> Option<Spot> {
         match self.phase {

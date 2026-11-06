@@ -5007,8 +5007,29 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     assert!(marked_by("썸네일 보이기"));
     choose_item(&window, "썸네일 보이기");
     assert_eq!(calls.take(), ["toggle-thumbnails"]);
-    window.set_system_menu_offered(true);
+    // The checkbox mode is an item of 설정 too, which the keys reach (KEY-02): marked while it
+    // is on, and the same command as the 선택 menu's.
+    window.set_checkbox_select(false);
     open(&["설정"]);
+    assert!(!marked_by("체크박스로 선택"));
+    for _ in 0..2 {
+        press(&window, Key::Escape);
+    }
+    window.set_checkbox_select(true);
+    open(&["설정"]);
+    assert!(marked_by("체크박스로 선택"));
+    choose_item(&window, "체크박스로 선택");
+    assert_eq!(calls.take(), ["toggle-checkboxes"]);
+    window.set_system_menu_offered(true);
+    // With every item there is (the Windows one too), the sub-menu still ends inside a 900x560
+    // window.
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    open(&["설정"]);
+    let last = ElementHandle::find_by_accessible_label(&window, windows_menu)
+        .next()
+        .expect("the menu shows the Windows item");
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "설정 ends at {end}px of 560");
     choose_item(&window, windows_menu);
     assert_eq!(calls.take(), ["toggle-system-menu-first"]);
 }
@@ -7528,14 +7549,18 @@ fn a_press_is_found_on_a_row_and_below_the_rows_but_not_on_the_heads_or_over_a_d
     let below = window.invoke_press_at(x, y + 150.0);
     assert!(below.found && below.index == -1, "{below:?}");
     // The heads are not a place to press for a menu.
-    let head = labelled(&window, "이름", AccessibleRole::Text);
-    if let Some(head) = head.first() {
+    let head = labelled(&window, "이름", AccessibleRole::Button);
+    assert!(!head.is_empty(), "the details head shows its 이름 cell");
+    for head in &head {
         let (hx, hy) = middle(head);
-        assert!(!window.invoke_press_at(hx, hy).found);
+        assert!(!window.invoke_press_at(hx, hy).found, "head at {hx},{hy}");
     }
     // Nor the tab strip, the sidebar or the toolbar.
     assert!(!window.invoke_press_at(x, 4.0).found);
-    assert!(!window.invoke_press_at(20.0, y).found || window.invoke_press_at(20.0, y).side == 0);
+    assert!(
+        !window.invoke_press_at(20.0, y).found,
+        "the sidebar's rows are no place"
+    );
     // Nor a dialog's own place.
     window.set_dialog(DialogKind::Message);
     assert!(!window.invoke_press_at(x, y).found);
@@ -7569,10 +7594,25 @@ fn the_ring_of_a_long_press_shows_beside_the_pointer_and_fills() {
     );
     assert!(at.x < 895.0 && at.y < 555.0, "{at:?}");
     // It takes no pointer: a click through it reaches the row below.
-    global.set_x(0.0);
-    global.set_y(0.0);
+    let rows = labelled(&window, "a.txt", AccessibleRole::ListItem);
+    let (row_x, row_y) = middle(&rows[0]);
+    let clicks = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = Rc::clone(&clicks);
+    window.on_row_clicked(move |side, index, _, _| {
+        record.borrow_mut().push(format!("press {side} {index}"));
+    });
+    global.set_x(row_x - 20.0);
+    global.set_y(row_y - 20.0);
     global.set_progress(1.0);
-    assert!(ring().is_some());
+    global.set_shown(true);
+    let over = ring().expect("the ring shows");
+    let (at, size) = (over.absolute_position(), over.size());
+    assert!(
+        at.x <= row_x && row_x <= at.x + size.width && at.y <= row_y && row_y <= at.y + size.height,
+        "the ring {at:?} {size:?} lies over the row at {row_x},{row_y}"
+    );
+    click_at(&window, row_x, row_y);
+    assert_eq!(*clicks.borrow(), ["press 0 0"]);
     global.set_shown(false);
     assert!(ring().is_none());
     window.hide().expect("hides");

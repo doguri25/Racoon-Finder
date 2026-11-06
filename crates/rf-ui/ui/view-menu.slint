@@ -42,6 +42,9 @@ export component ViewMenu inherits ContextMenuArea {
     // milliseconds (300, 500, 800 or 1200).
     in-out property <bool> long-press;
     in property <int> long-press-ms: 500;
+    // The rows start with checkboxes (NAV-15), two-way with the window's: the same switch as the
+    // 선택 menu's, which the keys cannot open.
+    in-out property <bool> checkbox-select;
 
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
@@ -852,6 +855,16 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.show-thumbnails;
                 activated => {
                     root.command("toggle-thumbnails");
+                    root.done();
+                }
+            }
+            // The 선택 menu has this item too; here the keys reach it (F10, ↑↓, Enter; KEY-02).
+            MenuItem {
+                title: "체크박스로 선택";
+                checkable: true;
+                checked <=> root.checkbox-select;
+                activated => {
+                    root.command("toggle-checkboxes");
                     root.done();
                 }
             }

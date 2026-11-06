@@ -122,7 +122,10 @@ impl Controller {
     /// A left press at `at` (a finger when `finger` has its id): a long press is armed when it is
     /// on a pane's list and the setting is on.
     pub(super) fn press_began(&self, at: Spot, finger: Option<u64>) {
-        self.press_stop();
+        // A new press forgets the last one, a menu that opened included: its release may never
+        // have come (an OS menu's loop takes it), and waiting for it would withhold this
+        // press's release.
+        self.press_reset();
         self.press.finger.set(finger);
         let Some(window) = self.window.upgrade() else {
             return;
@@ -187,6 +190,19 @@ impl Controller {
     pub(super) fn press_cancel(&self) {
         self.press.machine.borrow_mut().cancel();
         self.press_stop();
+    }
+
+    /// The press under way is forgotten, whatever it was (see [`LongPress::reset`]).
+    pub(super) fn press_reset(&self) {
+        self.press.machine.borrow_mut().reset();
+        self.press_stop();
+    }
+
+    /// The window lost the focus: no press is under way, no finger counts as down (their ends
+    /// go to the window that has the focus now).
+    pub(super) fn press_focus_lost(&self) {
+        self.press_reset();
+        self.press.fingers.set(0);
     }
 
     /// A finger touched the window (`down`) or left it; the number that is down. A second
@@ -272,6 +288,18 @@ impl Controller {
             .as_ref()
             .is_some_and(|state| state.long_press() && state.modal().is_none());
         if !still_allowed {
+            // No menu opens, so no release is to be withheld.
+            self.press.machine.borrow_mut().reset();
+            return;
+        }
+        // The list moved or was listed again during the hold (a scroll of the keys, a relist):
+        // the menu is of what is under the pointer now, or of nothing.
+        let under = window.invoke_press_at(at.x, at.y);
+        let same = under.found
+            && usize::try_from(under.side).ok() == Some(target.side)
+            && usize::try_from(under.index).ok() == target.row;
+        if !same {
+            self.press.machine.borrow_mut().reset();
             return;
         }
         // The press is over for the window before a menu of the system's takes the release

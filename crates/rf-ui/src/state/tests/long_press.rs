@@ -100,6 +100,22 @@ fn the_release_after_the_menu_opened_is_not_a_click() {
 }
 
 #[test]
+fn a_reset_forgets_a_menu_whose_release_never_came() {
+    let (mut press, start) = (machine(), Instant::now());
+    press.press(at(40.0, 60.0), start);
+    assert!(press.tick(after(start, 510)).is_some());
+    // An OS menu's loop took the release: the next press, on the toolbar, never armed the
+    // machine. Reset first, and its release is a click.
+    press.reset();
+    assert!(!press.is_armed());
+    assert_eq!(press.release(after(start, 900)), Outcome::Click);
+    // A reset also ends a press that waits.
+    press.press(at(1.0, 1.0), after(start, 1_000));
+    press.reset();
+    assert_eq!(press.tick(after(start, 2_000)), None);
+}
+
+#[test]
 fn a_second_button_cancels_a_press_that_waits_but_not_one_that_opened() {
     let (mut press, start) = (machine(), Instant::now());
     press.press(at(40.0, 60.0), start);
