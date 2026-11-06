@@ -22,6 +22,7 @@ pub mod pick;
 pub mod places;
 pub mod preview;
 pub mod properties;
+pub mod removal;
 pub mod resolver;
 pub mod selection;
 pub mod settings;

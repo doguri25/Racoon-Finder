@@ -844,6 +844,90 @@ pub fn cleanup_partial() -> &'static str {
     "일부를 정리하지 못했습니다."
 }
 
+/// The line of the list in the window of 완전 삭제…: the app itself goes to the trash last.
+pub fn removal_step_bundle(bundle: &std::path::Path) -> String {
+    format!("앱을 휴지통으로 옮기기: {}", bundle.display())
+}
+
+/// The title of the window of 완전 삭제….
+pub fn removal_title() -> &'static str {
+    "Racoon Finder 완전 삭제"
+}
+
+/// What the window of 완전 삭제… says before the list of what goes.
+pub fn removal_message() -> &'static str {
+    "이 컴퓨터에서 Racoon Finder를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 앱은 휴지통으로 옮겨집니다. 지운 데이터는 되돌릴 수 없습니다."
+}
+
+/// The checkbox of the window of 완전 삭제…: the settings are copied to the documents folder
+/// first, and nothing is deleted if that fails.
+pub fn removal_backup_label() -> String {
+    format!(
+        "문서 폴더에 설정 백업 ({})",
+        crate::removal::BACKUP_FILE_NAME
+    )
+}
+
+/// The button of the window of 완전 삭제… that deletes.
+pub fn removal_button() -> &'static str {
+    "완전 삭제"
+}
+
+/// The title of the question when jobs run as 완전 삭제… is confirmed.
+pub fn removal_jobs_title() -> &'static str {
+    "작업이 진행 중입니다"
+}
+
+/// The question when `count` jobs run as 완전 삭제… is confirmed: they stop for good, or the
+/// removal waits (취소).
+pub fn removal_with_jobs(count: usize) -> String {
+    format!(
+        "진행 중인 작업 {count}개가 있습니다.\n지금 지우면 이 작업은 멈추고 다시 이어 할 수 없습니다. 작업이 끝나기를 기다리려면 취소하세요."
+    )
+}
+
+/// The button that stops the jobs and goes on with 완전 삭제….
+pub fn removal_jobs_button() -> &'static str {
+    "작업을 멈추고 삭제"
+}
+
+/// The list of what 완전 삭제… deletes could not be made; nothing was changed.
+pub fn removal_plan_failed(reason: &str) -> String {
+    format!("지울 목록을 만들지 못했습니다: {reason}")
+}
+
+/// What the window shows while 완전 삭제… works.
+pub fn removing() -> &'static str {
+    "Racoon Finder를 지우는 중…"
+}
+
+/// The title of the window that tells how far 완전 삭제… got when it stopped.
+pub fn removal_stopped_title() -> &'static str {
+    "완전 삭제를 마치지 못했습니다"
+}
+
+/// Said above the report when the app's data is partly or wholly gone and the app stays.
+pub fn removal_stopped_note() -> &'static str {
+    "여기서 멈췄습니다. 앱을 끝낸 뒤 다시 실행하면 남은 것부터 이어서 지울 수 있습니다."
+}
+
+/// The app's data is gone, but the app could not be moved to the trash.
+pub fn removal_not_trashed(reason: &str) -> String {
+    format!(
+        "앱의 데이터는 모두 지웠지만 앱을 휴지통으로 옮기지 못했습니다: {reason}\n앱을 끝낸 뒤 직접 휴지통으로 옮겨 주세요."
+    )
+}
+
+/// The settings were copied to `copy` before 완전 삭제… went on.
+pub fn removal_backup_done(copy: &std::path::Path) -> String {
+    format!("설정을 백업했습니다: {}", copy.display())
+}
+
+/// The uninstaller of an installed app could not be started.
+pub fn uninstaller_failed(reason: &str) -> String {
+    format!("제거 프로그램을 열지 못했습니다: {reason}")
+}
+
 /// What is said of arguments `--cleanup` does not understand (exit code 2).
 pub fn cleanup_usage() -> &'static str {
     "사용법: --cleanup [--backup-settings <파일>] | --cleanup-plan [--backup-settings <파일>]"

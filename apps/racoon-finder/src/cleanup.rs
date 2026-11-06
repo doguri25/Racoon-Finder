@@ -13,21 +13,18 @@
 //! The exit code says how it went ([`Exit`]), the output says what was done, in Korean.
 
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rf_core::{AppPaths, InstallMode};
 use rf_ledger::{CleanupAction, CleanupReport, LedgerError, SystemBackend};
+use rf_ui::removal::{self, back_up};
 use rf_ui::{instance, settings, words};
 
 /// How long `--cleanup` waits for a running app to end: the app takes the request within a
 /// moment, but ends only once its jobs have, or the user has answered its question.
 pub const QUIT_WAIT: Duration = Duration::from_secs(30);
-
-/// How many names a backup file tries before it gives up.
-const BACKUP_TRIES: u32 = 1000;
 
 /// How a run of `--cleanup` or `--cleanup-plan` ended, as the process's exit code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,94 +237,6 @@ fn finish(report: &CleanupReport, out: &mut dyn Write) -> Exit {
     }
 }
 
-/// Copies the settings file `from` to `to`, or to the first free one of `to`, `to-2`, `to-3`, …
-/// (before the extension): a file that is there is never written over. `Ok(None)` when there is
-/// no settings file to copy. The copy is refused when it would go inside a folder the cleanup
-/// deletes (`owned`), and a copy that could not be finished is taken away again.
-pub fn back_up(from: &Path, to: &Path, owned: &[PathBuf]) -> io::Result<Option<PathBuf>> {
-    let mut source = match File::open(from) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let to = resolved_destination(to)?;
-    if owned.iter().any(|folder| to.starts_with(resolved(folder))) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "inside the folders the cleanup deletes",
-        ));
-    }
-    for number in 1..=BACKUP_TRIES {
-        let path = numbered(&to, number);
-        let mut copy = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-        let copied = io::copy(&mut source, &mut copy).and_then(|_| copy.sync_all());
-        drop(copy);
-        return match copied {
-            Ok(()) => Ok(Some(path)),
-            Err(error) => {
-                let _ = std::fs::remove_file(&path);
-                Err(error)
-            }
-        };
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "every name for the backup is taken",
-    ))
-}
-
-/// `to` with its folder resolved (`..`, links, the case of a name on Windows): the folder must
-/// be there, a cleanup does not make folders.
-fn resolved_destination(to: &Path) -> io::Result<PathBuf> {
-    let to = std::path::absolute(to)?;
-    let (Some(folder), Some(name)) = (to.parent(), to.file_name()) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not the name of a file",
-        ));
-    };
-    Ok(std::fs::canonicalize(folder)?.join(name))
-}
-
-/// `path` as the file system names it. For a folder that is not there (nothing to delete in
-/// it) the nearest folder above that is, with the rest of the name after it; where nothing
-/// can be resolved, the path as it is.
-fn resolved(path: &Path) -> PathBuf {
-    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut rest = Vec::new();
-    let mut above = path.as_path();
-    loop {
-        if let Ok(real) = std::fs::canonicalize(above) {
-            return rest.iter().rev().fold(real, |acc, name| acc.join(name));
-        }
-        match (above.parent(), above.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name);
-                above = parent;
-            }
-            _ => return path,
-        }
-    }
-}
-
-/// `path` for 1, `stem-2.ext` for 2, and so on.
-fn numbered(path: &Path, number: u32) -> PathBuf {
-    if number <= 1 {
-        return path.to_path_buf();
-    }
-    let mut name = path.file_stem().map(OsString::from).unwrap_or_default();
-    name.push(format!("-{number}"));
-    if let Some(extension) = path.extension() {
-        name.push(".");
-        name.push(extension);
-    }
-    path.with_file_name(name)
-}
-
 fn step_line(step: &Step) -> String {
     match step {
         Step::BackupSettings { from, to } => words::cleanup_step_backup(from, to),
@@ -336,49 +245,13 @@ fn step_line(step: &Step) -> String {
 }
 
 fn action_line(action: &CleanupAction) -> String {
-    match action {
-        CleanupAction::Revert { change, .. } => words::cleanup_step_revert(change),
-        CleanupAction::ClearDomain(domain) => words::cleanup_step_clear_domain(domain),
-        CleanupAction::Delete(path) => words::cleanup_step_delete(path),
-        CleanupAction::RemoveIfEmpty(path) => words::cleanup_step_remove_if_empty(path),
-        CleanupAction::ListTemp(path) => words::cleanup_step_list_temp(path),
-        _ => words::cleanup_step_other().to_owned(),
-    }
+    removal::action_line(action)
 }
 
 fn write_report(report: &CleanupReport, out: &mut dyn Write) {
-    if !report.reverted.reverted.is_empty() {
-        say(
-            out,
-            &words::cleanup_reverted(report.reverted.reverted.len()),
-        );
+    for line in removal::report_lines(report) {
+        say(out, &line);
     }
-    for failure in &report.reverted.failed {
-        say(
-            out,
-            &words::cleanup_revert_failed(&failure.change, &failure.error),
-        );
-    }
-    if report.deletes_skipped {
-        say(out, words::cleanup_deletes_skipped());
-    }
-    for action in &report.done {
-        say(out, &words::cleanup_done_line(&action_line(action)));
-    }
-    for (action, error) in &report.failed {
-        say(
-            out,
-            &words::cleanup_remaining_line(&action_line(action), error),
-        );
-    }
-    say(
-        out,
-        if report.is_complete() {
-            words::cleanup_complete()
-        } else {
-            words::cleanup_partial()
-        },
-    );
 }
 
 /// Writes a line. A closed output (no console, as in a Windows release build) is no failure.
@@ -388,6 +261,7 @@ fn say(out: &mut dyn Write, line: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::mpsc;
 
     use rf_core::{BaseDirs, Os};

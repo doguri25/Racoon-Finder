@@ -4408,6 +4408,7 @@ dependencies = [
  "regex",
  "rf-core",
  "rf-jobs",
+ "rf-ledger",
  "rf-platform",
  "rf-vfs",
  "serde",
