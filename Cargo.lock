@@ -4136,7 +4136,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "racoon-finder"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rf-core",
  "rf-ledger",
@@ -4329,7 +4329,7 @@ dependencies = [
 
 [[package]]
 name = "rf-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.13.2",
  "proptest",
@@ -4341,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "rf-jobs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proptest",
  "rf-core",
@@ -4354,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "rf-ledger"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "objc2-core-foundation",
  "rf-core",
@@ -4368,7 +4368,7 @@ dependencies = [
 
 [[package]]
 name = "rf-platform"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "block2 0.6.2",
  "dirs",
@@ -4394,7 +4394,7 @@ dependencies = [
 
 [[package]]
 name = "rf-ui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "chardetng",
@@ -4424,7 +4424,7 @@ dependencies = [
 
 [[package]]
 name = "rf-vfs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.13.2",
  "criterion",

@@ -1,7 +1,7 @@
 # Builds the demo app for each OS and uploads one downloadable package per platform
-# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.3.0`), or a
-# manual run with "release" ticked, also publishes the four packages and two Windows installers as the GitHub release
-# v<workspace version>, with docs/releases/<tag>.md as its notes.
+# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.4.0`), or a
+# manual run with "release" ticked, also publishes the four packages, the two Windows installers and the macOS disk
+# image (seven files) as the GitHub release v<workspace version>, with docs/releases/<tag>.md as its notes.
 name: Demo build
 
 on:
@@ -106,6 +106,19 @@ jobs:
           cp installer/demo/macos.txt "dist/$PACKAGE/$GUIDE_NAME"
           ditto -c -k --keepParent "dist/$PACKAGE" "dist/$PACKAGE.zip"
 
+          # Disk image: the app, a link to /Applications to drag it onto, and the guide.
+          # ditto keeps the signature and the executable bits of the bundle.
+          dmg="RacoonFinder-demo-$version-macos-arm64.dmg"
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "$app" "$stage/$app_name.app"
+          ln -s /Applications "$stage/Applications"
+          cp installer/demo/macos.txt "$stage/$GUIDE_NAME"
+          hdiutil create -volname "Racoon Finder" -srcfolder "$stage" -ov -format UDZO "dist/$dmg"
+          test -s "dist/$dmg"
+          echo "DMG_NAME=$dmg" >> "$GITHUB_ENV"
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -122,6 +135,14 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           path: dist/${{ env.PACKAGE }}.${{ matrix.ext }}
+          archive: false
+          retention-days: 30
+          if-no-files-found: error
+      - name: Upload the macOS disk image
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ env.DMG_NAME }}
           archive: false
           retention-days: 30
           if-no-files-found: error
@@ -295,13 +316,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # 4 packages + 2 Windows installers. Task 8 adds the macOS dmg here (and raises the count).
+          # 4 packages (3 archives + the Linux tar.gz), 2 Windows installers and 1 macOS disk image.
           mapfile -t files < <(find dist -type f \( -name 'RacoonFinder-demo-*' -o -name 'RacoonFinder-setup-*.exe' \) | sort)
           printf '%s\n' "${files[@]}"
-          packages=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-demo-' || true)
+          packages=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-demo-.*\.\(zip\|tar\.gz\)$' || true)
           installers=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-setup-.*\.exe$' || true)
-          if [ "$packages" -ne 4 ] || [ "$installers" -ne 2 ] || [ "${#files[@]}" -ne 6 ]; then
-            echo "::error::expected 4 packages (+ 2 installers), found $packages packages and $installers installers"
+          images=$(printf '%s\n' "${files[@]}" | grep -c 'RacoonFinder-demo-.*-macos-arm64\.dmg$' || true)
+          if [ "$packages" -ne 4 ] || [ "$installers" -ne 2 ] || [ "$images" -ne 1 ] || [ "${#files[@]}" -ne 7 ]; then
+            echo "::error::expected 4 packages + 2 installers + 1 disk image (7 files), found $packages packages, $installers installers, $images disk images, ${#files[@]} files"
             exit 1
           fi
           tag="${{ steps.tag.outputs.name }}"

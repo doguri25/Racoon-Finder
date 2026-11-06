@@ -7,7 +7,8 @@ Racoon Finder 데모 (macOS)
 
 실행
 
-1. Racoon Finder.app을 원하는 곳(예: 응용 프로그램 폴더)에 두고 엽니다.
+1. 디스크 이미지(.dmg)로 받았으면 열어서 Racoon Finder.app을 옆의 Applications 폴더로 끌어다 놓습니다.
+   zip으로 받았으면 Racoon Finder.app을 원하는 곳(예: 응용 프로그램 폴더)에 두고 엽니다.
 2. 공증하지 않은 데모라서 처음에는 macOS가 열지 않고 경고 창을 띄웁니다.
    - 경고 창에서 "완료"를 눌러 닫습니다.
    - 시스템 설정 > 개인정보 보호 및 보안으로 가서 아래쪽의 "그래도 열기"를 누르고,
@@ -29,5 +30,6 @@ Racoon Finder 데모 (macOS)
 
 지우기
 
-앱을 끈 뒤 Racoon Finder.app과 위의 세 폴더를 휴지통으로 옮깁니다.
-Finder에서 이동 > 폴더로 이동(Shift-Command-G)에 위 경로를 붙여 넣으면 바로 열립니다.
+앱의 보기 메뉴(Command-J) > 설정 맨 아래 "Racoon Finder 완전 삭제…"를 고르면 위의 세 폴더와 앱을
+지워 줍니다(설정 백업을 고를 수 있습니다). 직접 지우려면 앱을 끈 뒤 Racoon Finder.app과 위의 세 폴더를
+휴지통으로 옮깁니다. Finder에서 이동 > 폴더로 이동(Shift-Command-G)에 위 경로를 붙여 넣으면 바로 열립니다.
