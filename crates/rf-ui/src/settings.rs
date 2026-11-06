@@ -55,8 +55,8 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError, TryLockError, mpsc};
+use std::time::{Duration, Instant};
 
 use rf_core::{Os, VPath};
 use rf_vfs::{SortBy, SortOrder, SortSpec};
@@ -1297,6 +1297,29 @@ impl Saver {
             return Some(Err(error));
         }
         result.recv_timeout(wait).ok()
+    }
+
+    /// Writes nothing from now on, however many saves are asked for: waits up to `wait` for a
+    /// write under way to end (it has, when this returns `true`), and the saves after it are
+    /// skipped. For the removal of the app, which must not find its folder written again. Blocks.
+    pub fn stop_within(&self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.written.try_lock() {
+                Ok(mut written) => {
+                    *written = u64::MAX;
+                    return true;
+                }
+                Err(TryLockError::Poisoned(poisoned)) => {
+                    *poisoned.into_inner() = u64::MAX;
+                    return true;
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryLockError::WouldBlock) => return false,
+            }
+        }
     }
 
     fn write(&self, number: u64, text: &str) -> io::Result<()> {
@@ -2555,6 +2578,55 @@ mod tests {
             assert!(received.recv().expect("each write reports"));
         }
         assert_eq!(load(dir.path()), writable(last));
+    }
+
+    #[test]
+    fn a_stopped_saver_writes_nothing_more() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let saver = Saver::new(dir.path().to_owned(), true);
+        let first = Settings {
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        assert!(matches!(
+            saver.save_within(first.to_text().expect("text"), Duration::from_secs(10)),
+            Some(Ok(()))
+        ));
+
+        assert!(saver.stop_within(Duration::from_secs(10)));
+
+        // A save asked for after that reports success and writes nothing, and a folder that was
+        // deleted is not made again.
+        let later = Settings {
+            theme: ThemeChoice::Light,
+            ..Settings::default()
+        };
+        assert!(matches!(
+            saver.save_within(later.to_text().expect("text"), Duration::from_secs(10)),
+            Some(Ok(()))
+        ));
+        assert_eq!(load(dir.path()), writable(first));
+        std::fs::remove_dir_all(dir.path()).expect("deleted");
+        assert!(matches!(
+            saver.save_within(later.to_text().expect("text"), Duration::from_secs(10)),
+            Some(Ok(()))
+        ));
+        assert!(!dir.path().exists());
+        // The tempdir's own drop finds nothing to delete; that is fine.
+    }
+
+    #[test]
+    fn a_saver_stops_once_a_write_under_way_ends_and_gives_up_on_a_hung_one() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let saver = Saver::new(dir.path().to_owned(), true);
+        let hung = saver.written.lock().expect("not poisoned");
+
+        let started = Instant::now();
+        assert!(!saver.stop_within(Duration::from_millis(100)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        drop(hung);
+        assert!(saver.stop_within(Duration::from_secs(10)));
     }
 
     #[test]

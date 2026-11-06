@@ -442,7 +442,7 @@ mod tests {
         let Outcome::Incomplete { lines } = outcome else {
             panic!("expected an incomplete removal");
         };
-        assert!(!lines.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:?}");
         for owned in paths.owned_paths() {
             assert!(owned.exists(), "{owned:?} stays");
         }

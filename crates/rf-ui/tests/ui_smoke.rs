@@ -1869,6 +1869,80 @@ fn a_confirm_is_answered_from_the_keyboard_on_the_button_it_is_on() {
 }
 
 #[test]
+fn a_confirm_with_a_checkbox_flips_it_by_the_pointer_and_from_the_keyboard() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_confirm_accepted(move || record.note("accepted"));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    let record = calls.clone();
+    window.on_confirm_check_toggled(move || record.note("toggled"));
+    let label = "문서 폴더에 설정 백업";
+    let show = |checked: bool| {
+        window.set_confirm_view(ConfirmView {
+            title: "Racoon Finder 완전 삭제".into(),
+            message: "이 컴퓨터에서 Racoon Finder를 지웁니다.".into(),
+            lines: ModelRc::new(slint::VecModel::from(vec!["삭제: /a".into()])),
+            ok_text: "완전 삭제".into(),
+            danger: true,
+            check_text: label.into(),
+            checked,
+            ..ConfirmView::default()
+        });
+        window.set_dialog(DialogKind::Confirm);
+        slint::platform::update_timers_and_animations();
+    };
+    show(false);
+    // The pointer flips it, and the box shows what Rust says it is.
+    let boxes = labelled(&window, label, AccessibleRole::Checkbox);
+    assert_eq!(boxes.len(), 1);
+    assert_eq!(boxes[0].accessible_checked(), Some(false));
+    boxes[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["toggled"]);
+    show(true);
+    assert_eq!(
+        labelled(&window, label, AccessibleRole::Checkbox)[0].accessible_checked(),
+        Some(true)
+    );
+
+    // From the keyboard: a danger confirm starts on 취소, Tab goes to the delete button and then
+    // to the checkbox, and Space there flips it without answering the question.
+    let key = |key: Key| char::from(key).to_string();
+    let (tab, back, enter) = (key(Key::Tab), key(Key::Backtab), key(Key::Return));
+    let space = " ".to_owned();
+    chord(&window, &[&tab]);
+    chord(&window, &[&tab]);
+    chord(&window, &[&space]);
+    assert_eq!(calls.take(), ["toggled"]);
+    // Rust flips it and the dialog gets the new view: the keys stay on the checkbox.
+    show(false);
+    chord(&window, &[&enter]);
+    assert_eq!(calls.take(), ["toggled"]);
+    // Tab comes round to 취소; Shift+Tab goes back to the checkbox.
+    chord(&window, &[&tab]);
+    chord(&window, &[&enter]);
+    assert_eq!(calls.take(), ["cancelled"]);
+    chord(&window, &[&back]);
+    chord(&window, &[&space]);
+    assert_eq!(calls.take(), ["toggled"]);
+    // A confirm without a checkbox has no such stop: Tab goes 취소, the button, 취소.
+    window.set_confirm_view(ConfirmView {
+        title: "영구 삭제".into(),
+        message: "항목 1개를 영구 삭제할까요?".into(),
+        ok_text: "영구 삭제".into(),
+        danger: true,
+        ..ConfirmView::default()
+    });
+    slint::platform::update_timers_and_animations();
+    assert!(labelled(&window, label, AccessibleRole::Checkbox).is_empty());
+    chord(&window, &[&tab]);
+    chord(&window, &[&tab]);
+    chord(&window, &[&enter]);
+    assert_eq!(calls.take(), ["cancelled"]);
+}
+
+#[test]
 fn the_question_before_the_end_offers_the_tray_as_its_main_answer() {
     let window = window();
     let calls = Calls::default();
@@ -5038,6 +5112,72 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     assert!(end <= 560.0, "설정 ends at {end}px of 560");
     choose_item(&window, windows_menu);
     assert_eq!(calls.take(), ["toggle-system-menu-first"]);
+}
+
+#[test]
+fn the_view_menu_s_settings_end_with_the_way_to_remove_the_app() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open = |subs: &[&str]| {
+        button.invoke_accessible_default_action();
+        for sub in subs {
+            choose_item(&window, sub);
+        }
+    };
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let windows_menu = "오른쪽 클릭에 Windows 메뉴 바로 띄우기";
+
+    // The way to remove the app is the last thing in 설정, where the system offers one (INST-05).
+    let delete = "Racoon Finder 완전 삭제…";
+    let uninstall = "제거 프로그램 열기";
+    let shown = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .is_some()
+    };
+    // Not offered (Linux, a portable app): neither item shows.
+    window.set_removal_offer(0);
+    open(&["설정"]);
+    assert!(!shown(delete) && !shown(uninstall));
+    for _ in 0..2 {
+        press(&window, Key::Escape);
+    }
+    // macOS: 완전 삭제…, below everything else, inside the window.
+    window.set_removal_offer(1);
+    window.set_system_menu_offered(false);
+    open(&["설정"]);
+    assert!(shown(delete) && !shown(uninstall));
+    let thumbnails = ElementHandle::find_by_accessible_label(&window, "썸네일 보이기")
+        .next()
+        .expect("the menu shows the thumbnails item");
+    let last = ElementHandle::find_by_accessible_label(&window, delete)
+        .next()
+        .expect("the menu shows 완전 삭제…");
+    assert!(last.absolute_position().y > thumbnails.absolute_position().y);
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "설정 ends at {end}px of 560");
+    choose_item(&window, delete);
+    assert_eq!(calls.take(), ["remove-app"]);
+    // Windows, installed: 제거 프로그램 열기 under the Windows menu's item, which together
+    // still end inside a 900x560 window.
+    window.set_removal_offer(2);
+    window.set_system_menu_offered(true);
+    open(&["설정"]);
+    assert!(shown(uninstall) && !shown(delete));
+    let last = ElementHandle::find_by_accessible_label(&window, uninstall)
+        .next()
+        .expect("the menu shows 제거 프로그램 열기");
+    let above = ElementHandle::find_by_accessible_label(&window, windows_menu)
+        .next()
+        .expect("the menu shows the Windows item");
+    assert!(last.absolute_position().y > above.absolute_position().y);
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "설정 ends at {end}px of 560");
+    choose_item(&window, uninstall);
+    assert_eq!(calls.take(), ["open-uninstaller"]);
 }
 
 #[test]

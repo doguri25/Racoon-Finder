@@ -133,6 +133,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         controller::post_question,
     )
     .map_err(RunError::Thread)?;
+    let exe = std::env::current_exe().ok();
     let startup = controller::Startup {
         start,
         settings: loaded.settings,
@@ -141,6 +142,9 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         cache_dir: paths.cache_dir().to_owned(),
         settings_backup: loaded.backup,
         notification_app_id: rf_platform::desktop::notification_app_id(paths.mode()),
+        removal_offer: removal::detect(&paths, exe.as_deref()),
+        exe,
+        paths: paths.clone(),
     };
     let controller = controller::begin(&window, startup, jobs.clone());
     // A second start of the app shows this one's window. Without the look (no thread), a second

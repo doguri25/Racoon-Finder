@@ -33,6 +33,7 @@ mod pick;
 mod pointer;
 mod preview;
 mod properties;
+mod removal;
 mod report;
 mod select;
 mod session;

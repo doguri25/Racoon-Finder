@@ -154,6 +154,9 @@ export component MainWindow inherits Window {
     in-out property <bool> show-thumbnails: true;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
+    // What the bottom of 보기 ▸ 설정 offers for removing the app: 0 nothing, 1 "Racoon Finder
+    // 완전 삭제…" (macOS), 2 "제거 프로그램 열기" (an installed app on Windows).
+    in property <int> removal-offer;
     // 보기 ▸ 설정 ▸ 길게 눌러 메뉴 열기 and its time in milliseconds (PICK-02), which Rust sets back
     // to the state's after the toggle and the choice.
     in-out property <bool> long-press: true;
@@ -330,6 +333,8 @@ export component MainWindow inherits Window {
     callback name-accepted(text: string);
     callback dialog-cancelled();
     callback confirm-accepted();
+    // The checkbox of the confirmation (설정 백업 of 완전 삭제…) was flipped.
+    callback confirm-check-toggled();
     callback conflict-answered(choice: int, apply-all: bool);
     callback preflight-answered(choice: int);
     callback recovery-chosen(index: int, run-again: bool);
@@ -1091,6 +1096,7 @@ export component MainWindow inherits Window {
                             show-thumbnails <=> root.show-thumbnails;
                             system-menu-first <=> root.system-menu-first;
                             system-menu-offered: root.system-menu-offered;
+                            removal-offer: root.removal-offer;
                             long-press <=> root.long-press;
                             long-press-ms: root.long-press-ms;
                             checkbox-select <=> root.checkbox-select;
@@ -2003,6 +2009,9 @@ export component MainWindow inherits Window {
             }
             alternative => {
                 root.confirm-alternative();
+            }
+            check-toggled => {
+                root.confirm-check-toggled();
             }
             cancelled => {
                 root.dialog-cancelled();

@@ -56,6 +56,9 @@ export struct ConfirmView {
     // A third answer that keeps things going (트레이에서 계속), the main button, which Enter takes;
     // empty for none. The ok button is then an outline one beside it.
     alt-text: string,
+    // A checkbox under the list (설정 백업); empty for none, and whether it is on.
+    check-text: string,
+    checked: bool,
 }
 
 export struct MessageView {
@@ -613,6 +616,8 @@ export component ConfirmDialog inherits DialogFrame {
     callback cancelled();
     // The third answer (`alt-text`).
     callback alternative();
+    // The checkbox (`check-text`) was clicked or pressed with Space: Rust flips `checked`.
+    callback check-toggled();
 
     width: 500px;
     height: layout.preferred-height;
@@ -630,14 +635,18 @@ export component ConfirmDialog inherits DialogFrame {
     // The keys stay with the dialog's FocusScope (the buttons take no focus), which answers for
     // the button it is on.
     property <int> on-button: -1;
-    property <int> buttons: root.view.alt-text != "" ? 3 : 2;
+    // The checkbox, where there is one, is the last stop of Tab, after the buttons.
+    property <int> check-stop: root.view.alt-text != "" ? 3 : 2;
+    property <int> buttons: root.check-stop + (root.view.check-text != "" ? 1 : 0);
+    // What the dialog asks, so that a change of the checkbox does not start it again.
+    property <string> asks: root.view.title + "\n" + root.view.message;
 
     init => {
         root.on-button = root.view.danger ? 0 : -1;
         keys.focus();
     }
     // Another confirm in the same dialog starts again.
-    changed view => {
+    changed asks => {
         root.on-button = root.view.danger ? 0 : -1;
     }
 
@@ -646,8 +655,10 @@ export component ConfirmDialog inherits DialogFrame {
             root.cancelled();
         } else if (button == 1) {
             root.accepted();
-        } else if (button == 2) {
+        } else if (button == 2 && root.view.alt-text != "") {
             root.alternative();
+        } else if (button == root.check-stop && root.view.check-text != "") {
+            root.check-toggled();
         }
     }
 
@@ -715,6 +726,14 @@ export component ConfirmDialog inherits DialogFrame {
                 color: Theme.text;
                 font-weight: 600;
                 wrap: word-wrap;
+            }
+            if root.view.check-text != "": CheckBox {
+                text: root.view.check-text;
+                checked: root.view.checked;
+                focused: root.on-button == root.check-stop;
+                toggled => {
+                    root.check-toggled();
+                }
             }
             HorizontalLayout {
                 alignment: end;

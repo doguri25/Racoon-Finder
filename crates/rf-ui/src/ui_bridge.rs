@@ -2047,6 +2047,8 @@ pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
         ok_text: confirm.ok.as_str().into(),
         danger: confirm.danger,
         alt_text: confirm.alt.as_str().into(),
+        check_text: confirm.check.as_str().into(),
+        checked: confirm.checked,
     }
 }
 

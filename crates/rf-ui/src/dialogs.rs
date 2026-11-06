@@ -363,6 +363,12 @@ pub enum ConfirmPurpose {
     /// 하위 폴더에 적용: `view` for `folder` and the folders below it, which forget their own
     /// views.
     ApplyViewBelow { folder: VPath, view: FolderView },
+    /// 완전 삭제…: the list of what goes was shown. Its checkbox, [`Confirm::checked`], is 설정
+    /// 백업.
+    RemoveApp,
+    /// 완전 삭제… was confirmed while jobs run: they stop for good if this is, and the removal
+    /// waits if it is not. `backup`: the settings are copied first.
+    RemoveAppWithJobs { backup: bool },
 }
 
 /// A window that asks before something happens that cannot be taken back.
@@ -386,6 +392,11 @@ pub struct Confirm {
     /// takes it); empty for none. The question before the app ends while jobs run has one where
     /// they can go on behind the tray icon: 트레이에서 계속.
     pub alt: String,
+    /// The label of a checkbox under the list, a choice that goes with the answer (설정 백업 of
+    /// 완전 삭제…); empty for none.
+    pub check: String,
+    /// Whether the checkbox is on.
+    pub checked: bool,
 }
 
 impl Confirm {
@@ -406,6 +417,8 @@ impl Confirm {
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
             alt: String::new(),
+            check: String::new(),
+            checked: false,
             purpose: ConfirmPurpose::DeletePermanently(paths),
         }
     }
@@ -427,6 +440,8 @@ impl Confirm {
             ok: words::delete_permanently_button().to_owned(),
             danger: true,
             alt: String::new(),
+            check: String::new(),
+            checked: false,
             purpose: ConfirmPurpose::DeleteCopies {
                 spec,
                 record: Box::new(record),
@@ -451,6 +466,8 @@ impl Confirm {
                 .map(words::continue_in_tray)
                 .unwrap_or_default()
                 .to_owned(),
+            check: String::new(),
+            checked: false,
         }
     }
 
@@ -467,6 +484,44 @@ impl Confirm {
             ok: words::view_apply_button().to_owned(),
             danger: false,
             alt: String::new(),
+            check: String::new(),
+            checked: false,
+        }
+    }
+
+    /// The question before 완전 삭제…: `lines` list what goes, one step a line, and the checkbox
+    /// asks whether the settings are copied to the documents folder first (off at first).
+    pub fn remove_app(lines: Vec<String>) -> Confirm {
+        Confirm {
+            purpose: ConfirmPurpose::RemoveApp,
+            title: words::removal_title().to_owned(),
+            message: words::removal_message().to_owned(),
+            detail: words::removal_backup_note(),
+            lines,
+            question: String::new(),
+            ok: words::removal_button().to_owned(),
+            danger: true,
+            alt: String::new(),
+            check: words::removal_backup_label().to_owned(),
+            checked: false,
+        }
+    }
+
+    /// The question when `running` jobs run as 완전 삭제… is confirmed, with `backup` as the
+    /// checkbox was: 취소 waits, the button stops them and goes on.
+    pub fn remove_with_jobs(running: usize, backup: bool) -> Confirm {
+        Confirm {
+            purpose: ConfirmPurpose::RemoveAppWithJobs { backup },
+            title: words::removal_jobs_title().to_owned(),
+            message: words::removal_with_jobs(running),
+            detail: String::new(),
+            lines: Vec::new(),
+            question: String::new(),
+            ok: words::removal_jobs_button().to_owned(),
+            danger: true,
+            alt: String::new(),
+            check: String::new(),
+            checked: false,
         }
     }
 
@@ -478,7 +533,10 @@ impl Confirm {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
             ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
-            ConfirmPurpose::Quit | ConfirmPurpose::ApplyViewBelow { .. } => None,
+            ConfirmPurpose::Quit
+            | ConfirmPurpose::ApplyViewBelow { .. }
+            | ConfirmPurpose::RemoveApp
+            | ConfirmPurpose::RemoveAppWithJobs { .. } => None,
         }
     }
 }

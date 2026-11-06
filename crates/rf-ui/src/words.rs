@@ -861,9 +861,14 @@ pub fn removal_message() -> &'static str {
 
 /// The checkbox of the window of 완전 삭제…: the settings are copied to the documents folder
 /// first, and nothing is deleted if that fails.
-pub fn removal_backup_label() -> String {
+pub fn removal_backup_label() -> &'static str {
+    "문서 폴더에 설정 백업"
+}
+
+/// Under the list of the window of 완전 삭제…: what the checkbox does.
+pub fn removal_backup_note() -> String {
     format!(
-        "문서 폴더에 설정 백업 ({})",
+        "설정 백업을 켜면 지우기 전에 문서 폴더의 {}로 복사합니다. 같은 이름의 파일이 있으면 덮어쓰지 않고 다른 이름으로 저장하며, 백업하지 못하면 아무것도 지우지 않습니다.",
         crate::removal::BACKUP_FILE_NAME
     )
 }

@@ -36,6 +36,9 @@ export component ViewMenu inherits ContextMenuArea {
     in-out property <bool> move-undo-toast;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
+    // What the bottom of 설정 offers for removing the app: 0 nothing, 1 "Racoon Finder 완전 삭제…"
+    // (macOS), 2 "제거 프로그램 열기" (an installed app on Windows).
+    in property <int> removal-offer;
     // The icon views show the files' thumbnails (VIEW-09), two-way with the window's.
     in-out property <bool> show-thumbnails;
     // A press held on a row opens its menu (PICK-02), two-way with the window's, and for how many
@@ -930,6 +933,22 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.system-menu-first;
                 activated => {
                     root.command("toggle-system-menu-first");
+                    root.done();
+                }
+            }
+            // The way out of the app, at the very bottom, where the system offers one.
+            if root.removal-offer != 0: MenuSeparator { }
+            if root.removal-offer == 1: MenuItem {
+                title: "Racoon Finder 완전 삭제…";
+                activated => {
+                    root.command("remove-app");
+                    root.done();
+                }
+            }
+            if root.removal-offer == 2: MenuItem {
+                title: "제거 프로그램 열기";
+                activated => {
+                    root.command("open-uninstaller");
                     root.done();
                 }
             }

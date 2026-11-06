@@ -325,6 +325,12 @@ impl Controller {
         text
     }
 
+    /// The text of the settings as the window shows them now, without ending the saves: for the
+    /// backup 완전 삭제… makes, which may still be given up. `None` before the panes show.
+    pub(super) fn settings_text(&self) -> Option<String> {
+        self.snapshot().map(|(_, text)| text)
+    }
+
     /// The last write [`Controller::final_settings`] gave could not be handed on: it is to be
     /// taken again.
     pub(super) fn reopen_settings(&self) {

@@ -68,7 +68,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use jiff::tz::TimeZone;
-use rf_core::{Os, VPath};
+use rf_core::{AppPaths, Os, VPath};
 use rf_jobs::{JobEvent, TransferMode};
 use rf_platform::KnownFolder;
 use rf_platform::dnd::{
@@ -120,6 +120,7 @@ mod persist;
 mod pointer;
 mod previewer;
 mod properties;
+mod removal;
 mod sorter;
 mod spring;
 mod system_menu;
@@ -247,6 +248,14 @@ pub struct Startup {
     /// The app id the notifications go out under on Windows
     /// ([`rf_platform::desktop::notification_app_id`]).
     pub notification_app_id: Option<&'static str>,
+    /// The folders of the app, which 완전 삭제… deletes the contents of.
+    pub paths: AppPaths,
+    /// The executable that runs, when the system says where it is: the app bundle on macOS and
+    /// the uninstaller on Windows are found from it.
+    pub exe: Option<PathBuf>,
+    /// What the bottom of 보기 ▸ 설정 offers for removing the app
+    /// ([`removal::detect`](crate::removal::detect)).
+    pub removal_offer: Option<crate::removal::Offer>,
 }
 
 /// Connects the window's callbacks to a new controller with the job engine `jobs`, gives the
@@ -262,6 +271,9 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         cache_dir,
         settings_backup,
         notification_app_id,
+        paths,
+        exe,
+        removal_offer,
     } = startup;
     if let Some((width, height)) = settings.window_size() {
         window.set_start_width(logical(width));
@@ -274,6 +286,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
     window.set_system_menu_offered(rf_platform::shell::SYSTEM_MENU);
+    window.set_removal_offer(crate::removal::Offer::number(removal_offer));
     window
         .global::<ItemMenu<'_>>()
         .set_shares(rf_platform::shell::SHARES);
@@ -281,6 +294,11 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     controller.notifier = OsNotifier::system(notification_app_id);
     let controller = Rc::new(controller);
     *controller.log_dir.borrow_mut() = log_dir;
+    *controller.removal.borrow_mut() = Some(removal::Context {
+        paths,
+        exe,
+        offer: removal_offer,
+    });
     *controller.thumber.cache_dir.borrow_mut() = Some(cache_dir);
     CONTROLLER.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&controller)));
     connect(window);
@@ -288,6 +306,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
 
     let loader = controller.loader.clone();
     spawn_worker("rf-ui-start", move || {
+        // The first read of the rights of a symbolic link is made here, not by the first menu.
+        let _ = rf_platform::symlink_needs_privilege_cached();
         let home = rf_platform::known_folder(KnownFolder::Home);
         let documents = rf_platform::known_folder(KnownFolder::Documents);
         let root = std::path::absolute(std::path::MAIN_SEPARATOR_STR)
@@ -306,8 +326,6 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
             return;
         };
         let mut folders = session.folders();
-        // The first read of the rights of a symbolic link is made here, not by the first menu.
-        let _ = rf_platform::symlink_needs_privilege_cached();
         // `left` is the folder asked for: a gone one adds no tab (`Session::with_start`).
         if started_at && !folders.contains(&left) {
             folders.push(left.clone());
@@ -480,24 +498,6 @@ fn spawn_worker(name: &str, f: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// The pane a callback's `side` names: 1 is the right one, anything else the left one.
-fn side(side: i32) -> usize {
-    if side == 1 { RIGHT } else { LEFT }
-}
-
-/// A row or tab position from Slint; `None` for a negative one.
-fn index(index: i32) -> Option<usize> {
-    usize::try_from(index).ok()
-}
-
-/// `value` as a number for the window, at most `i32::MAX`.
-fn number(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-fn connect(window: &MainWindow) {
-    window.on_key(|text, ctrl, shift, alt, meta, repeat| {
-        let mods = Mods {
 /// Whether Shift counts as held for a choice made in a menu on `os`: where the system tells the
 /// keys held now (`live`, Windows and macOS), that answer alone, since a menu of the system's own
 /// ran a loop in which the window may have missed the release of a Shift it heard pressed (a stale
@@ -528,6 +528,24 @@ fn set_first_drag_payloads(window: &MainWindow) {
     window.set_favorite_drag_data(ui_bridge::favorite_payload(usize::MAX, ""));
 }
 
+/// The pane a callback's `side` names: 1 is the right one, anything else the left one.
+fn side(side: i32) -> usize {
+    if side == 1 { RIGHT } else { LEFT }
+}
+
+/// A row or tab position from Slint; `None` for a negative one.
+fn index(index: i32) -> Option<usize> {
+    usize::try_from(index).ok()
+}
+
+/// `value` as a number for the window, at most `i32::MAX`.
+fn number(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn connect(window: &MainWindow) {
+    window.on_key(|text, ctrl, shift, alt, meta, repeat| {
+        let mods = Mods {
             ctrl,
             shift,
             alt,
@@ -1371,6 +1389,14 @@ fn connect_jobs(window: &MainWindow) {
     window.on_confirm_accepted(|| {
         with(|c| c.update(AppState::confirm_accepted));
     });
+    window.on_confirm_check_toggled(|| {
+        with(|c| {
+            c.update(|state| {
+                state.confirm_check_toggled();
+                Vec::new()
+            });
+        });
+    });
     window.on_conflict_answered(|choice, apply_all| {
         let choice = match choice {
             0 => ConflictChoice::Overwrite,
@@ -1553,6 +1579,9 @@ pub struct Controller {
     request_stop: RefCell<Option<RequestStop>>,
     /// The worker of the app's end, once [`Controller::quit`] started it.
     quitting: RefCell<Option<JoinHandle<()>>>,
+    /// Where the app runs from, for removing it; `None` until [`begin`] knows (and in the tests
+    /// of the controller).
+    removal: RefCell<Option<removal::Context>>,
 }
 
 impl fmt::Debug for Controller {
@@ -1583,15 +1612,7 @@ impl Controller {
         window.set_recent_rows(ModelRc::from(Rc::clone(&recent_rows)));
         let history_rows = Rc::new(VecModel::default());
         window.set_history_rows(ModelRc::from(Rc::clone(&history_rows)));
-        // A payload from the start: a drag only begins on a press whose area has one, and the
-        // press readies the drag's own.
-        window.set_drag_data(ui_bridge::drag_payload(0));
-        // The same for a drag of a tab: the press that shows the tab readies its own (id 0 is
-        // no tab's).
-        window.set_tab_drag_data(ui_bridge::tab_payload(0));
-        // A drag starts only with a payload, and the press on a favorite's row readies its own
-        // after the drag area has looked: this one belongs to no favorite.
-        window.set_favorite_drag_data(ui_bridge::favorite_payload(usize::MAX, ""));
+        set_first_drag_payloads(window);
         Controller {
             window: window.as_weak(),
             loader: Loader::new(rf_vfs::Vfs::with_local()),
@@ -1678,6 +1699,7 @@ impl Controller {
             }))),
             request_stop: RefCell::new(None),
             quitting: RefCell::new(None),
+            removal: RefCell::new(None),
         }
     }
 
@@ -1716,6 +1738,7 @@ impl Controller {
             state.set_checkbox_select(settings.checkbox_select);
         }
         state.offer_system_menu(rf_platform::shell::SYSTEM_MENU);
+        state.set_removal_offer(self.removal.borrow().as_ref().and_then(|c| c.offer));
         state.settle_views(&mut effects);
         if !self.saver.writable() {
             effects.push(Effect::Notice(words::settings_unreadable().to_owned()));
@@ -1758,6 +1781,7 @@ impl Controller {
                 | JobEvent::Queue { .. }
         );
         if quiet {
+            let history = redraws_history(&event);
             let effects = match self.state.borrow_mut().as_mut() {
                 Some(state) => state.job_event(event),
                 None => return,
@@ -1781,7 +1805,6 @@ impl Controller {
     }
 
     /// A question of a job.
-            let history = redraws_history(&event);
     fn question(&self, question: Question) {
         if self.state.borrow().is_none() {
             self.early.borrow_mut().push(Early::Question(question));
@@ -2760,6 +2783,7 @@ impl Controller {
             "share" => return self.update(AppState::share),
             "add-favorite" => return self.update(AppState::favorite_add_selected),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
+            "remove-app" | "open-uninstaller" => return self.update(AppState::removal_asked),
             _ => {}
         }
         if let Some(index) = name
@@ -2888,6 +2912,7 @@ impl Controller {
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::SaveLog { report, folder } => self.save_log(report, folder),
                 Effect::Quit => self.quit(),
+                Effect::Removal(work) => self.removal_work(work),
                 Effect::Notify(_) | Effect::ToTray | Effect::FromTray => self.desktop(effect),
                 Effect::Sort(_)
                 | Effect::MatchNames(_)
@@ -3127,6 +3152,7 @@ impl Controller {
             | Effect::NotBusy(_)
             | Effect::SaveLog { .. }
             | Effect::Quit
+            | Effect::Removal(_)
             | Effect::Notify(_)
             | Effect::ToTray
             | Effect::FromTray => {}
@@ -3245,6 +3271,7 @@ impl Controller {
             | Effect::ReadSpace { .. }
             | Effect::SaveLog { .. }
             | Effect::Quit
+            | Effect::Removal(_)
             | Effect::Notify(_)
             | Effect::ToTray
             | Effect::FromTray => {}
@@ -3712,7 +3739,12 @@ impl Controller {
         let tz = self.tz.borrow();
         match &now.1 {
             _ if kind == DialogKind::Closing => {
-                window.set_closing_text(words::closing().into());
+                let text = if state.removing() {
+                    words::removing()
+                } else {
+                    words::closing()
+                };
+                window.set_closing_text(text.into());
             }
             Some(Modal::Name(dialog)) => window.set_name_view(ui_bridge::name_view(dialog)),
             Some(Modal::Confirm(confirm)) => {
@@ -3810,6 +3842,37 @@ mod tests {
     use crate::settings;
 
     #[test]
+    fn a_menu_choice_trusts_the_system_s_keys_where_it_tells_them() {
+        // A Shift the window heard pressed and never heard released is no Shift on Windows and
+        // macOS, where the system says what is held now; and a Shift held counts there.
+        for os in [Os::Windows, Os::MacOs] {
+            assert!(!menu_choice_shift(os, false, true), "{os:?}");
+            assert!(menu_choice_shift(os, true, false), "{os:?}");
+            assert!(menu_choice_shift(os, true, true), "{os:?}");
+            assert!(!menu_choice_shift(os, false, false), "{os:?}");
+        }
+        // Elsewhere the system says nothing, and the window's own hearing is all there is.
+        assert!(menu_choice_shift(Os::Other, false, true));
+        assert!(!menu_choice_shift(Os::Other, false, false));
+    }
+
+    #[test]
+    fn a_progress_tick_does_not_judge_the_history_again() {
+        use rf_jobs::{JobId, JobState, Progress};
+        let id = JobId(1);
+        assert!(!redraws_history(&JobEvent::Progress {
+            id,
+            progress: Progress::default(),
+        }));
+        // A job that starts or stops can change whether an undo may start.
+        assert!(redraws_history(&JobEvent::State {
+            id,
+            state: JobState::Running,
+        }));
+        assert!(redraws_history(&JobEvent::Queue { order: vec![id] }));
+    }
+
+    #[test]
     fn an_end_writes_the_settings_then_shuts_the_engine_down_and_waits_for_the_notice() {
         // The end of the window's close button and the end when the system ends the event
         // loop under the app (macOS ⌘Q, the Dock's 종료) do the same work.
@@ -3841,37 +3904,6 @@ mod tests {
             notifier: notifier.clone(),
             last: Some("theme = \"dark\"\n".to_owned()),
             cleared: Some(cleared),
-    #[test]
-    fn a_menu_choice_trusts_the_system_s_keys_where_it_tells_them() {
-        // A Shift the window heard pressed and never heard released is no Shift on Windows and
-        // macOS, where the system says what is held now; and a Shift held counts there.
-        for os in [Os::Windows, Os::MacOs] {
-            assert!(!menu_choice_shift(os, false, true), "{os:?}");
-            assert!(menu_choice_shift(os, true, false), "{os:?}");
-            assert!(menu_choice_shift(os, true, true), "{os:?}");
-            assert!(!menu_choice_shift(os, false, false), "{os:?}");
-        }
-        // Elsewhere the system says nothing, and the window's own hearing is all there is.
-        assert!(menu_choice_shift(Os::Other, false, true));
-        assert!(!menu_choice_shift(Os::Other, false, false));
-    }
-
-    #[test]
-    fn a_progress_tick_does_not_judge_the_history_again() {
-        use rf_jobs::{JobId, JobState, Progress};
-        let id = JobId(1);
-        assert!(!redraws_history(&JobEvent::Progress {
-            id,
-            progress: Progress::default(),
-        }));
-        // A job that starts or stops can change whether an undo may start.
-        assert!(redraws_history(&JobEvent::State {
-            id,
-            state: JobState::Running,
-        }));
-        assert!(redraws_history(&JobEvent::Queue { order: vec![id] }));
-    }
-
         });
         answering.join().expect("the answer");
         assert!(jobs.is_closed());

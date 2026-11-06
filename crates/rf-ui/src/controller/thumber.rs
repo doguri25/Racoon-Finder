@@ -69,6 +69,19 @@ impl Thumber {
     }
 }
 
+impl Thumber {
+    /// No thumbnail is made or kept from now on: the pools end, none starts again, and the disk
+    /// cache is not written (the removal of the app deletes its folder).
+    pub(super) fn stop(&self) {
+        *self.cache_dir.borrow_mut() = None;
+        for pool in &self.pools {
+            pool.borrow_mut().take();
+        }
+        self.batch.stop();
+        self.harvest.stop();
+    }
+}
+
 impl std::fmt::Debug for Thumber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Thumber")

@@ -245,6 +245,14 @@ impl AppState {
                 self.close();
                 self.apply_view_below(&folder, view)
             }
+            ConfirmPurpose::RemoveApp => {
+                let backup = confirm.checked;
+                self.removal_confirmed(backup)
+            }
+            ConfirmPurpose::RemoveAppWithJobs { backup } => {
+                let backup = *backup;
+                self.begin_removal(backup)
+            }
         }
     }
 
@@ -401,13 +409,19 @@ impl AppState {
         if self.quitting {
             return Vec::new();
         }
+        self.close_for_end();
+        vec![Effect::Quit]
+    }
+
+    /// Every window closes and nothing opens or asks any more: the app ends, or the removal of
+    /// the app works ([`AppState::begin_removal`]).
+    pub(super) fn close_for_end(&mut self) {
         self.quitting = true;
         self.modal = None;
         self.later.clear();
         self.drop_closed_picker();
         self.drop_closed_pattern();
         self.toast = None;
-        vec![Effect::Quit]
     }
 
     /// Whether the location of `paths` has a trash, as the worker found

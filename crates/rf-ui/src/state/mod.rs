@@ -71,6 +71,7 @@ mod pick;
 mod pointer;
 mod preview;
 mod properties;
+mod removal;
 mod report;
 mod select;
 mod shell;
@@ -101,6 +102,7 @@ pub use preview::{
     PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
     preview_width,
 };
+pub use removal::{RemovalStop, RemovalWork};
 pub use select::{MATCH_STRETCH, MatchRequest, Matched, SelectState};
 pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
 pub use tray::TrayCommand;
@@ -302,6 +304,8 @@ pub enum Effect {
     /// ([`crate::jobs::log_name`]) or a free name beside it, on a worker thread
     /// ([`crate::jobs::save_log`]), then hand what came of it to [`AppState::log_saved`].
     SaveLog { report: SharedReport, folder: VPath },
+    /// A step of removing the app, on a worker thread ([`RemovalWork`]).
+    Removal(RemovalWork),
 }
 
 /// What the button of the toast on screen does.
@@ -373,6 +377,12 @@ pub struct AppState {
     toast_token: u64,
     /// The app is ending: no window opens and no question shows any more.
     quitting: bool,
+    /// What the bottom of 보기 ▸ 설정 offers for removing the app.
+    removal_offer: Option<crate::removal::Offer>,
+    /// A worker is listing what 완전 삭제… would delete.
+    planning_removal: bool,
+    /// 완전 삭제… works (the app is `quitting` meanwhile, so the window is the closing note).
+    removing: bool,
     /// Whether the notice of a journal error has shown (once is enough).
     journal_error_told: bool,
     /// For each job under way, how far the user had changed the selection of each tab when it
@@ -532,6 +542,9 @@ impl AppState {
             toast: None,
             toast_token: 0,
             quitting: false,
+            removal_offer: None,
+            planning_removal: false,
+            removing: false,
             journal_error_told: false,
             selections_at_submit: HashMap::new(),
             copies: copies::Copies::default(),
