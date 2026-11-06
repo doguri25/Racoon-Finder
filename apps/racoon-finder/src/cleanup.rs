@@ -250,8 +250,8 @@ pub fn back_up(from: &Path, to: &Path, owned: &[PathBuf]) -> io::Result<Option<P
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let to = std::path::absolute(to)?;
-    if owned.iter().any(|folder| to.starts_with(folder)) {
+    let to = resolved_destination(to)?;
+    if owned.iter().any(|folder| to.starts_with(resolved(folder))) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "inside the folders the cleanup deletes",
@@ -278,6 +278,40 @@ pub fn back_up(from: &Path, to: &Path, owned: &[PathBuf]) -> io::Result<Option<P
         io::ErrorKind::AlreadyExists,
         "every name for the backup is taken",
     ))
+}
+
+/// `to` with its folder resolved (`..`, links, the case of a name on Windows): the folder must
+/// be there, a cleanup does not make folders.
+fn resolved_destination(to: &Path) -> io::Result<PathBuf> {
+    let to = std::path::absolute(to)?;
+    let (Some(folder), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not the name of a file",
+        ));
+    };
+    Ok(std::fs::canonicalize(folder)?.join(name))
+}
+
+/// `path` as the file system names it. For a folder that is not there (nothing to delete in
+/// it) the nearest folder above that is, with the rest of the name after it; where nothing
+/// can be resolved, the path as it is.
+fn resolved(path: &Path) -> PathBuf {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut rest = Vec::new();
+    let mut above = path.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(above) {
+            return rest.iter().rev().fold(real, |acc, name| acc.join(name));
+        }
+        match (above.parent(), above.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                above = parent;
+            }
+            _ => return path,
+        }
+    }
 }
 
 /// `path` for 1, `stem-2.ext` for 2, and so on.
@@ -384,7 +418,8 @@ mod tests {
         }
     }
 
-    /// A portable layout: the marker is next to the executable.
+    /// A portable layout: the marker is next to the executable (macOS ignores it).
+    #[cfg(not(target_os = "macos"))]
     fn portable_under(root: &Path) -> AppPaths {
         let exe = root.join("portable").join("app");
         std::fs::create_dir_all(exe.parent().expect("a folder")).expect("made");
@@ -441,10 +476,11 @@ mod tests {
     }
 
     #[test]
-    fn the_backup_comes_before_every_delete_and_a_portable_install_has_no_steps() {
+    fn the_backup_comes_before_every_delete() {
         let root = tempfile::tempdir().expect("a temp dir");
         let paths = installed_under(root.path());
         paths.ensure_dirs().expect("folders");
+        make_preferences(&paths);
         let to = root.path().join("backup.toml");
 
         let steps = plan_with_backup(&paths, Some(to.clone())).expect("a plan");
@@ -481,8 +517,13 @@ mod tests {
         // Without a backup the plan is the ledger's own.
         let plain = plan_with_backup(&paths, None).expect("a plan");
         assert_eq!(plain, steps[1..]);
+    }
 
-        // A portable install has no uninstaller: no steps, with or without a backup.
+    /// macOS has no portable mode (the marker is ignored there).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_portable_install_has_no_steps() {
+        let root = tempfile::tempdir().expect("a temp dir");
         let portable = portable_under(root.path());
         assert_eq!(portable.mode(), InstallMode::Portable);
         assert_eq!(plan_with_backup(&portable, None).expect("a plan"), []);
@@ -497,6 +538,7 @@ mod tests {
         let root = tempfile::tempdir().expect("a temp dir");
         let paths = installed_under(root.path());
         paths.ensure_dirs().expect("folders");
+        make_preferences(&paths);
         std::fs::write(
             paths.config_dir().join(settings::FILE_NAME),
             "theme = \"dark\"\n",
@@ -520,18 +562,31 @@ mod tests {
         }
         assert!(!to.exists());
         assert!(paths.config_dir().join(settings::FILE_NAME).is_file());
+    }
 
-        // A portable install says so and lists nothing.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_plan_of_a_portable_install_says_so_and_lists_nothing() {
+        let root = tempfile::tempdir().expect("a temp dir");
         let mut out = Vec::new();
         let portable = portable_under(root.path());
         assert_eq!(print_plan(&portable, None, &mut out), Exit::Done);
         assert_eq!(text(&out), "포터블 설치는 폴더를 지우면 됩니다.\n");
     }
 
+    /// The preferences file some systems keep (macOS): `ensure_dirs` does not make it.
+    fn make_preferences(paths: &AppPaths) {
+        if let Some(file) = paths.preferences_file() {
+            std::fs::create_dir_all(file.parent().expect("a folder")).expect("folder");
+            std::fs::write(file, b"plist").expect("preferences");
+        }
+    }
+
     /// Fills every folder the app owns, and puts a folder of another app beside each, a file
     /// of the user's in the home folder, and a file of someone else in the shared temp folder.
     fn fill(paths: &AppPaths, root: &Path) -> Vec<PathBuf> {
         paths.ensure_dirs().expect("folders");
+        make_preferences(paths);
         std::fs::write(
             paths.config_dir().join(settings::FILE_NAME),
             "theme = \"dark\"\n",
@@ -698,6 +753,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_backup_is_refused_inside_the_folders_the_cleanup_deletes_however_the_path_is_spelled() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let paths = installed_under(root.path());
+        fill(&paths, root.path());
+        let from = paths.config_dir().join(settings::FILE_NAME);
+        let relative = paths
+            .config_dir()
+            .strip_prefix(root.path())
+            .expect("under the root")
+            .to_path_buf();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a folder");
+        // Out and back in by `..`.
+        let dotted = elsewhere.join("..").join(&relative).join("b.toml");
+        #[cfg(unix)]
+        let ways = {
+            let link = root.path().join("link");
+            std::os::unix::fs::symlink(paths.config_dir(), &link).expect("a link");
+            [dotted, link.join("b.toml")]
+        };
+        #[cfg(not(unix))]
+        let ways = [dotted];
+        for to in ways {
+            let error = back_up(&from, &to, paths.owned_paths()).expect_err("refused");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{to:?}");
+            assert!(!paths.config_dir().join("b.toml").exists(), "{to:?}");
+        }
+        // A folder beside them is fine.
+        let to = elsewhere.join("..").join("elsewhere").join("b.toml");
+        let copy = back_up(&from, &to, paths.owned_paths()).expect("copied");
+        assert!(copy.expect("a copy").is_file());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_portable_install_is_left_alone() {
         let root = tempfile::tempdir().expect("a temp dir");

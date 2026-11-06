@@ -1119,9 +1119,7 @@ fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
 /// It reads a small local file and is called once at the start, before the window shows: the
 /// UI thread may call it then.
 pub fn load(config_dir: &Path) -> Loaded {
-    load_with(config_dir, &local_now, &|from, to| {
-        std::fs::rename(from, to)
-    })
+    load_with(config_dir, &local_now, &rename_retrying)
 }
 
 /// The local time, as the name of a backup shows it.
@@ -1163,7 +1161,7 @@ fn load_with(
     };
     let backup = unusable
         .then(|| {
-            let to = backup_path(config_dir, &backup_name(now()));
+            let to = backup_path(config_dir, &backup_name(now()), BACKUP_TRIES)?;
             rename(&path, &to).is_ok().then_some(to)
         })
         .flatten();
@@ -1193,20 +1191,19 @@ pub fn backup_name(at: jiff::civil::DateTime) -> String {
     format!("{BACKUP_PREFIX}{}", at.strftime("%Y%m%d-%H%M%S"))
 }
 
-/// The first of `name`, `name-2`, `name-3`, … in `config_dir` that nothing is at: a backup is
-/// never put over another file.
-fn backup_path(config_dir: &Path, name: &str) -> PathBuf {
-    let mut path = config_dir.join(name);
-    let mut number = 1_u32;
-    while std::fs::symlink_metadata(&path).is_ok() && number < BACKUP_TRIES {
-        number += 1;
-        path = config_dir.join(format!("{name}-{number}"));
-    }
-    path
+/// The first of `name`, `name-2`, `name-3`, … (at most `tries` names) in `config_dir` that
+/// nothing is at: a backup is never put over another file. `None` when every name is taken, so
+/// the file cannot be backed up.
+fn backup_path(config_dir: &Path, name: &str, tries: u32) -> Option<PathBuf> {
+    (1..=tries)
+        .map(|number| match number {
+            1 => config_dir.join(name),
+            _ => config_dir.join(format!("{name}-{number}")),
+        })
+        .find(|path| std::fs::symlink_metadata(path).is_err())
 }
 
-/// How many names [`backup_path`] tries before it goes on with the last one (and the move then
-/// fails if a file is there).
+/// How many names [`backup_path`] tries before it gives up.
 const BACKUP_TRIES: u32 = 1000;
 
 /// The theme of `settings.toml` in `config_dir`, for a window shown while another instance
@@ -1452,7 +1449,7 @@ mod tests {
     const STAMPED: &str = "settings.toml.bak-20261106-143207";
 
     fn load_at(dir: &Path) -> Loaded {
-        load_with(dir, &at, &|from, to| std::fs::rename(from, to))
+        load_with(dir, &at, &rename_retrying)
     }
 
     #[test]
@@ -2310,6 +2307,20 @@ mod tests {
             "theme = [[["
         );
         assert_eq!(backup_name(at()), STAMPED);
+    }
+
+    #[test]
+    fn a_file_with_every_backup_name_taken_stays_and_is_not_written_over() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        for taken in [STAMPED.to_owned(), format!("{STAMPED}-2")] {
+            std::fs::write(dir.path().join(taken), "older").expect("written");
+        }
+        assert_eq!(
+            backup_path(dir.path(), STAMPED, 3),
+            Some(dir.path().join(format!("{STAMPED}-3")))
+        );
+        assert_eq!(backup_path(dir.path(), STAMPED, 2), None);
+        assert_eq!(backup_path(dir.path(), STAMPED, 0), None);
     }
 
     #[test]
