@@ -295,6 +295,76 @@ fn an_overwrite_is_confirmed_by_the_button_alone() {
 }
 
 #[test]
+fn a_conditional_overwrite_is_confirmed_by_the_button_alone_too() {
+    for policy in [
+        ConflictPolicy::OverwriteIfNewer,
+        ConflictPolicy::OverwriteIfSizeDiffers,
+    ] {
+        let mut state = with_items();
+        press(&mut state, &special(Key::F7), NONE);
+        state.pick_policy(policy);
+        // It may replace files: Enter, in the filter or on the target's own path, does not
+        // confirm it.
+        assert_eq!(state.pick_enter(), []);
+        assert_eq!(state.pick_path_entered(&folder("b").to_string()), []);
+        assert!(matches!(state.modal(), Some(Modal::Pick(_))));
+        // The button does, and the job runs under the policy as it was chosen.
+        let (JobSpec::Transfer(transfer), _) = the_submit(&state.pick_confirmed()) else {
+            panic!("a transfer");
+        };
+        assert_eq!(transfer.options.conflict, policy);
+    }
+}
+
+#[test]
+fn a_copy_follows_links_only_when_its_box_is_on() {
+    use rf_jobs::SymlinkMode;
+
+    let symlinks = |effects: &[Effect]| match the_submit(effects).0 {
+        JobSpec::Transfer(transfer) => (transfer.mode, transfer.options.symlinks),
+        other => panic!("a transfer: {other:?}"),
+    };
+    // A copy: the box is off at first, and a link is copied as a link.
+    let mut state = with_items();
+    press(&mut state, &special(Key::F7), NONE);
+    assert!(picker(&state).offers_follow_links() && !picker(&state).follow_links);
+    assert_eq!(
+        symlinks(&state.pick_confirmed()),
+        (TransferMode::Copy, SymlinkMode::CopyLink)
+    );
+    // Flipped on, the copy follows links.
+    press(&mut state, &special(Key::F7), NONE);
+    state.pick_follow_links_toggled();
+    assert!(picker(&state).follow_links);
+    assert_eq!(
+        symlinks(&state.pick_confirmed()),
+        (TransferMode::Copy, SymlinkMode::Follow)
+    );
+    // Each picker starts with it off again.
+    press(&mut state, &special(Key::F7), NONE);
+    assert!(!picker(&state).follow_links);
+    state.pick_follow_links_toggled();
+    state.pick_follow_links_toggled();
+    assert!(!picker(&state).follow_links);
+    state.dialog_cancelled();
+
+    // A move has no box: a press that came anyway flips nothing, and a box that was on while
+    // the picker copied does not make the move follow links.
+    press(&mut state, &special(Key::F8), NONE);
+    assert!(!picker(&state).offers_follow_links());
+    state.pick_follow_links_toggled();
+    assert!(!picker(&state).follow_links);
+    state.pick_mode(TransferMode::Copy);
+    state.pick_follow_links_toggled();
+    assert!(picker(&state).follow_links);
+    state.pick_mode(TransferMode::Move);
+    assert_eq!(
+        symlinks(&state.pick_confirmed()),
+        (TransferMode::Move, SymlinkMode::CopyLink)
+    );
+}
+
+#[test]
 fn arrows_move_among_the_quick_targets() {
     let mut state = with_items();
     state.add_tab(RIGHT);

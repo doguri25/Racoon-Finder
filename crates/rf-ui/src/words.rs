@@ -2120,6 +2120,59 @@ pub fn overwrite_warning(apply_all: bool) -> &'static str {
     }
 }
 
+/// The hint of the conflict window's 더 새 파일만 덮어쓰기: what it does to this file, which it
+/// replaces (`overwrites`) when the file that would come, named by what `work` does with it, is
+/// the newer one. Empty where no overwrite is offered: the overwrite choice says why.
+pub fn newer_hint(can_overwrite: bool, overwrites: bool, work: JobWork) -> String {
+    if !can_overwrite {
+        return String::new();
+    }
+    let coming = coming(work);
+    if overwrites {
+        format!("{coming} 파일이 더 최근이라 이 파일은 덮어씁니다")
+    } else {
+        format!("{coming} 파일이 더 최근이 아니라 이 파일은 건너뜁니다")
+    }
+}
+
+/// The hint of the conflict window's 크기가 다를 때만 덮어쓰기: what it does to this file, which
+/// it replaces (`overwrites`) when the two sizes differ. Empty where no overwrite is offered.
+pub fn size_differs_hint(can_overwrite: bool, overwrites: bool) -> &'static str {
+    match (can_overwrite, overwrites) {
+        (false, _) => "",
+        (true, true) => "크기가 달라 이 파일은 덮어씁니다",
+        (true, false) => "크기가 같아 이 파일은 건너뜁니다",
+    }
+}
+
+/// The warning while a conditional overwrite is chosen for the remaining conflicts too: each
+/// of them is decided by the same condition.
+pub fn conditional_warning_all() -> &'static str {
+    "남은 충돌도 같은 조건으로 덮어씁니다. 덮어쓴 파일의 내용은 되살릴 수 없습니다."
+}
+
+/// The title of the window that asks about an item a job could not process (XFER-09, 파일마다
+/// 묻기), by what the job does: `복사 중 오류가 났습니다`.
+pub fn error_ask_title(work: JobWork) -> String {
+    format!("{} 중 오류가 났습니다", work.noun())
+}
+
+/// The item the error window asks about, by its whole path (the source, or the target when
+/// there is no source), as [`failure_line`] names it; empty for a failure that names no item.
+pub fn error_ask_item(failure: &ItemFailure) -> String {
+    failure
+        .source
+        .as_ref()
+        .or(failure.target.as_ref())
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}
+
+/// What the error window says while 남은 오류에도 같은 선택 is on: why 다시 시도 is off.
+pub fn error_ask_retry_once() -> &'static str {
+    "다시 시도는 한 번에 한 항목만 할 수 있습니다"
+}
+
 /// The items still to come in a job that asks about a conflict.
 pub fn items_left(count: u64) -> String {
     format!("이 작업에 남은 항목 {count}개")
@@ -2270,10 +2323,19 @@ pub fn pick_policy(policy: ConflictPolicy) -> (&'static str, bool) {
             "같은 이름의 파일을 바꿉니다.\n있던 파일의 내용은 되살릴 수 없습니다.",
             true,
         ),
+        ConflictPolicy::OverwriteIfNewer => (
+            "수정한 날짜가 더 최근일 때만 같은 이름의 파일을 바꾸고, 아니면 건너뜁니다.\n\
+             바꾼 파일의 내용은 되살릴 수 없습니다.",
+            true,
+        ),
+        ConflictPolicy::OverwriteIfSizeDiffers => (
+            "크기가 다를 때만 같은 이름의 파일을 바꾸고, 같으면 건너뜁니다.\n\
+             바꾼 파일의 내용은 되살릴 수 없습니다.",
+            true,
+        ),
         ConflictPolicy::Skip => ("같은 이름이 있는 항목은 건너뜁니다", false),
         ConflictPolicy::AutoRename => ("같은 이름이 있으면 번호를 붙여 둘 다 둡니다", false),
-        // `Ask`, and the policies the picker does not offer.
-        _ => ("같은 이름이 있으면 그때 묻습니다", false),
+        ConflictPolicy::Ask => ("같은 이름이 있으면 그때 묻습니다", false),
     }
 }
 

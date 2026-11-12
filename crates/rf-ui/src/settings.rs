@@ -8,8 +8,9 @@
 //! (`drag_default`, DND-02), whether a dragged move offers its undo (`move_undo_toast`, DND-07),
 //! whether a right click shows Windows' menu first (`system_menu_first`, OPS-05) and whether the
 //! icon views show thumbnails (`show_thumbnails`, VIEW-09), whether a long press opens the menu
-//! (`long_press`, with its delay `long_press_ms`, PICK-02) and whether the rows show checkboxes
-//! (`checkbox_select`, NAV-15); and the sidebar's favorites the user
+//! (`long_press`, with its delay `long_press_ms`, PICK-02), whether the rows show checkboxes
+//! (`checkbox_select`, NAV-15) and what a copy or a move does about an item that fails
+//! (`on_error`, XFER-09); and the sidebar's favorites the user
 //! keeps (`[[favorites]]`, NAV-05: none until the user first edits the list, then the whole list),
 //! the last ten folders visited (`recent_folders`) and whether their group is folded
 //! (`recent_folded`).
@@ -41,8 +42,8 @@
 //! round, a file of an older version (the first demo's, without `[layout]` or `pinned`) opens
 //! with the default layout and no tab pinned, one without `[[folder_views]]` with no view
 //! remembered, one without `hide_extensions` with the extensions shown, and one without the
-//! choices of 보기 ▸ 설정 with a drop that moves, the undo offered, the app's menu first and the
-//! thumbnails shown. A
+//! choices of 보기 ▸ 설정 with a drop that moves, the undo offered, the app's menu first, the
+//! thumbnails shown and a transfer that carries on past an item that fails. A
 //! folder view falls back one key at a time too: a mode or a key of the order this
 //! version does not know shows as the default one, and a column it does not know is left out of
 //! the view; all of them are kept as written (`UnknownParts`) and written back, until the user
@@ -119,6 +120,29 @@ pub enum DragDefault {
     System,
     /// Ask with a menu where they are dropped (놓을 때 묻기).
     Ask,
+}
+
+/// What a copy or a move does when one of its items fails (보기 ▸ 설정 ▸ 복사·이동 오류는 파일마다
+/// 묻기, XFER-09): `on_error = "continue"` or `"ask"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnError {
+    /// Carry on with the other items, and list the failed ones at the end, where they can be
+    /// tried again.
+    #[default]
+    Continue,
+    /// Stop at the item and ask: try it again, leave it out, or stop the job.
+    Ask,
+}
+
+impl OnError {
+    /// The error policy a transfer runs under.
+    pub fn policy(self) -> rf_jobs::ErrorPolicy {
+        match self {
+            OnError::Continue => rf_jobs::ErrorPolicy::Continue,
+            OnError::Ask => rf_jobs::ErrorPolicy::Ask,
+        }
+    }
 }
 
 /// The tabs of one pane, as stored.
@@ -274,6 +298,11 @@ pub struct Settings {
     /// The rows of 자세히, 목록 and 아이콘 start with a checkbox that selects them (NAV-15).
     #[serde(deserialize_with = "or_default")]
     pub checkbox_select: bool,
+    /// What a copy or a move does when one of its items fails (XFER-09): it carries on unless
+    /// the file says `"ask"`. A file without the key (0.4.0 and before), or with a value this
+    /// version cannot read, carries on.
+    #[serde(deserialize_with = "or_default")]
+    pub on_error: OnError,
     /// The favorites the user keeps under "즐겨찾기" in the sidebar, in order (NAV-05). None until
     /// the user first edits the list (add, remove, rename, reorder): the sidebar then shows the
     /// system's well-known folders, and the first edit makes that list the user's own and keeps
@@ -331,6 +360,7 @@ impl Default for Settings {
             long_press: true,
             long_press_ms: LONG_PRESS_DEFAULT_MS,
             checkbox_select: false,
+            on_error: OnError::default(),
             favorites: Vec::new(),
             favorites_emptied: false,
             recent_folders: Vec::new(),
@@ -1009,6 +1039,7 @@ impl Settings {
             long_press: self.long_press,
             long_press_ms: self.long_press_ms,
             checkbox_select: self.checkbox_select,
+            on_error: self.on_error,
             favorites: self.favorites.clone(),
             favorites_emptied: self.favorites_emptied,
             recent_folders: self.recent_folders.clone(),
@@ -1358,6 +1389,7 @@ mod tests {
             long_press: false,
             long_press_ms: 800,
             checkbox_select: true,
+            on_error: OnError::Ask,
             ..Settings::default()
         };
         settings.set_session(&Session {
@@ -1621,6 +1653,54 @@ mod tests {
         .expect("written");
         let loaded = load(dir.path()).settings;
         assert_eq!(drag(&loaded), (DragDefault::Move, true, false));
+        assert_eq!(loaded.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn the_error_choice_round_trips_and_an_older_file_carries_on() {
+        // The default is what the demos before did: carry on, and list the failures at the end.
+        let defaults = Settings::default();
+        assert_eq!(defaults.on_error, OnError::Continue);
+        assert_eq!(OnError::Continue.policy(), rf_jobs::ErrorPolicy::Continue);
+        assert_eq!(OnError::Ask.policy(), rf_jobs::ErrorPolicy::Ask);
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        for (choice, name) in [(OnError::Continue, "continue"), (OnError::Ask, "ask")] {
+            let settings = Settings {
+                on_error: choice,
+                ..Settings::default()
+            };
+            settings.save(dir.path()).expect("saved");
+            let text = std::fs::read_to_string(&file).expect("read");
+            assert!(text.contains(&format!("on_error = \"{name}\"")), "{text}");
+            // The key adds no version: the file is still the version it was.
+            assert!(
+                text.contains(&format!("version = {SETTINGS_VERSION}")),
+                "{text}"
+            );
+            assert_eq!(load(dir.path()), writable(settings));
+        }
+        assert_eq!(SETTINGS_VERSION, 1);
+        // A 0.4.0 file, which has its version and no such key, loads as it is and carries on.
+        std::fs::write(
+            &file,
+            "version = 1\ntheme = \"dark\"\ndrag_default = \"copy\"\nmove_undo_toast = false\n\
+             \n[layout]\nhide_tree = true\n",
+        )
+        .expect("written");
+        let loaded = load(dir.path());
+        assert!(loaded.backup.is_none() && loaded.writable);
+        assert_eq!(loaded.settings.on_error, OnError::Continue);
+        assert_eq!(loaded.settings.version, 1);
+        assert_eq!(loaded.settings.theme, ThemeChoice::Dark);
+        assert_eq!(loaded.settings.drag_default, DragDefault::Copy);
+        assert!(!loaded.settings.move_undo_toast);
+        assert!(loaded.settings.layout.hide_tree);
+        // A value this version cannot read carries on too, and costs no other key.
+        std::fs::write(&file, "on_error = \"panic\"\ntheme = \"dark\"\n").expect("written");
+        let loaded = load(dir.path()).settings;
+        assert_eq!(loaded.on_error, OnError::Continue);
         assert_eq!(loaded.theme, ThemeChoice::Dark);
     }
 

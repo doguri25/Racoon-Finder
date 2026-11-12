@@ -1,7 +1,12 @@
 // The name conflict window (760×560, from the mockup): what is there and what would come, side
-// by side, and what to do about it. The safe choice, keeping both under a numbered name, is
-// chosen when it opens; overwriting is offered only between two files, says what it does to
-// the file that is there, and is never confirmed by Enter alone. With the keys: ↑↓ choose, Enter
+// by side, and what to do about it (XFER-06). The safe choice, keeping both under a numbered
+// name, is chosen when it opens; overwriting is offered only between two files, says what it
+// does to the file that is there, and is never confirmed by Enter alone. Below the mockup's
+// three choices come the two conditional ones, 더 새 파일만 덮어쓰기 and 크기가 다를 때만
+// 덮어쓰기: each says what it does to this file, and with "남은 충돌에도 같은 선택 적용" the job
+// decides each later conflict by the same condition. They are overwrites too: only the button
+// confirms them. The window is as tall as the smallest main window (560px), so its five choices
+// and its cards are set closer than the mockup's three were. With the keys: ↑↓ choose, Enter
 // takes the choice (not an overwrite), Tab goes to "남은 충돌에도 같은 선택 적용" (Space flips it),
 // 작업 취소 and the main button, where Space or Enter presses it, and Esc cancels the job.
 
@@ -34,9 +39,17 @@ export struct ConflictView {
     // What skipping leaves out: "이 파일은 복사하지 않습니다".
     skip-hint: string,
     rename-hint: string,
+    // What 더 새 파일만 덮어쓰기 and 크기가 다를 때만 덮어쓰기 do to this file, and whether that is
+    // to overwrite it.
+    newer-hint: string,
+    newer-overwrites: bool,
+    size-hint: string,
+    size-overwrites: bool,
     // What overwriting does to the file that is there, for this conflict and for all of them.
     warning-once: string,
     warning-all: string,
+    // The same for a conditional overwrite that settles the remaining conflicts too.
+    warning-rule-all: string,
     // The items the job has still to do, or empty.
     items-left: string,
 }
@@ -62,9 +75,9 @@ component Card inherits Rectangle {
     VerticalLayout {
         padding-left: 16px;
         padding-right: 16px;
-        padding-top: 14px;
-        padding-bottom: 14px;
-        spacing: 10px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 8px;
 
         HorizontalLayout {
             height: 22px;
@@ -158,7 +171,8 @@ component Card inherits Rectangle {
 
 export component ConflictDialog inherits DialogFrame {
     in property <ConflictView> view;
-    // `choice`: 0 overwrite, 1 skip, 2 keep both under a numbered name.
+    // `choice`: 0 overwrite, 1 skip, 2 keep both under a numbered name, 3 overwrite if the file
+    // that would come is newer, 4 overwrite if the sizes differ. The rows show in this order.
     callback answered(choice: int, apply-all: bool);
     // Stops the whole job.
     callback cancelled();
@@ -174,6 +188,8 @@ export component ConflictDialog inherits DialogFrame {
     // Where the keys are: -1 the choices, 0 the box, 1 작업 취소, 2 the main button. A new
     // question starts again on the choices.
     private property <int> on-button: -1;
+    // Five choices, where the mockup had three of 48px: closer, to fit the window.
+    private property <length> row-height: 36px;
     private property <int> serial: root.view.serial;
     changed serial => {
         root.on-button = -1;
@@ -188,10 +204,19 @@ export component ConflictDialog inherits DialogFrame {
         keys.focus();
     }
 
-    // The choice below `from` moving `step` rows, over a missing overwrite.
+    // The choice chosen overwrites, always or by its condition: only the button confirms it.
+    private property <bool> overwriting: root.choice == 0 || root.choice >= 3;
+    // What the choice does to this file is to overwrite it: the button says so.
+    private property <bool> overwrites-this: root.choice == 0 || (root.choice == 3 && root.view.newer-overwrites) || (root.choice == 4 && root.view.size-overwrites);
+    // What the choice destroys, said under the choices; empty when it destroys nothing.
+    private property <string> warning: root.choice == 0 ? (root.apply-all ? root.view.warning-all : root.view.warning-once) : !root.overwriting ? "" : root.apply-all ? root.view.warning-rule-all : root.overwrites-this ? root.view.warning-once : "";
+
+    // The choice below `from` moving `step` rows. Where no overwrite is offered (a file and a
+    // folder), the two rows between the overwrites take the keys alone.
     pure function step-choice(from: int, step: int) -> int {
         let lowest = root.view.can-overwrite ? 0 : 1;
-        return max(lowest, min(2, from + step));
+        let highest = root.view.can-overwrite ? 4 : 2;
+        return max(lowest, min(highest, from + step));
     }
 
     function pick(choice: int) {
@@ -238,8 +263,9 @@ export component ConflictDialog inherits DialogFrame {
                 root.pick(root.step-choice(root.choice, 1));
                 return accept;
             }
-            // An overwrite destroys the file that is there: only the button confirms it.
-            if (event.text == Key.Return && root.choice != 0) {
+            // An overwrite destroys the file that is there: only the button confirms it, a
+            // conditional one too.
+            if (event.text == Key.Return && !root.overwriting) {
                 root.answered(root.choice, root.apply-all);
                 return accept;
             }
@@ -249,12 +275,12 @@ export component ConflictDialog inherits DialogFrame {
         VerticalLayout {
             padding-left: 28px;
             padding-right: 28px;
-            padding-top: 24px;
-            padding-bottom: 24px;
-            spacing: 18px;
+            padding-top: 20px;
+            padding-bottom: 20px;
+            spacing: 12px;
 
             VerticalLayout {
-                spacing: 6px;
+                spacing: 4px;
 
                 Text {
                     text: root.view.title;
@@ -296,7 +322,7 @@ export component ConflictDialog inherits DialogFrame {
             }
 
             VerticalLayout {
-                spacing: 6px;
+                spacing: 4px;
                 accessible-role: radio-group;
                 accessible-label: "어떻게 할까요?";
 
@@ -306,6 +332,7 @@ export component ConflictDialog inherits DialogFrame {
                     color: Theme.text;
                 }
                 ChoiceRow {
+                    min-height: root.row-height;
                     text: "덮어쓰기";
                     hint: root.view.overwrite-hint;
                     enabled: root.view.can-overwrite;
@@ -316,6 +343,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                 }
                 ChoiceRow {
+                    min-height: root.row-height;
                     text: "건너뛰기";
                     hint: root.view.skip-hint;
                     chosen: root.choice == 1;
@@ -325,6 +353,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                 }
                 ChoiceRow {
+                    min-height: root.row-height;
                     text: "이름 바꿔 둘 다 두기";
                     hint: root.view.rename-hint;
                     chosen: root.choice == 2;
@@ -333,15 +362,38 @@ export component ConflictDialog inherits DialogFrame {
                         keys.focus();
                     }
                 }
+                ChoiceRow {
+                    min-height: root.row-height;
+                    text: "더 새 파일만 덮어쓰기";
+                    hint: root.view.newer-hint;
+                    enabled: root.view.can-overwrite;
+                    chosen: root.choice == 3;
+                    clicked => {
+                        root.pick(3);
+                        keys.focus();
+                    }
+                }
+                ChoiceRow {
+                    min-height: root.row-height;
+                    text: "크기가 다를 때만 덮어쓰기";
+                    hint: root.view.size-hint;
+                    enabled: root.view.can-overwrite;
+                    chosen: root.choice == 4;
+                    clicked => {
+                        root.pick(4);
+                        keys.focus();
+                    }
+                }
             }
 
             Rectangle {
                 vertical-stretch: 1;
+                min-height: 20px;
 
-                if root.choice == 0: Text {
+                if root.warning != "": Text {
                     y: 0;
                     width: parent.width;
-                    text: root.apply-all ? root.view.warning-all : root.view.warning-once;
+                    text: root.warning;
                     color: Theme.text;
                     font-weight: 500;
                     wrap: word-wrap;
@@ -377,7 +429,7 @@ export component ConflictDialog inherits DialogFrame {
                     alignment: center;
 
                     OutlineButton {
-                        button-height: 44px;
+                        button-height: 40px;
                         text: "작업 취소";
                         focused: root.on-button == 1;
                         clicked => {
@@ -389,8 +441,8 @@ export component ConflictDialog inherits DialogFrame {
                     alignment: center;
 
                     PrimaryButton {
-                        button-height: 44px;
-                        text: root.choice == 0 ? "덮어쓰기" : "계속";
+                        button-height: 40px;
+                        text: root.overwrites-this ? "덮어쓰기" : "계속";
                         focused: root.on-button == 2;
                         clicked => {
                             root.answered(root.choice, root.apply-all);

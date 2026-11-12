@@ -570,8 +570,9 @@ impl AppState {
     }
 
     /// The transfer that a drop of `sources`, dragged from pane `side`, into `folder` submits:
-    /// it asks about a name that is taken. A move is noted with how many items it carries, so
-    /// that its end offers its undo ([`AppState::track`], DND-07).
+    /// it asks about a name that is taken, and does about an item that fails what 보기 ▸ 설정
+    /// says (XFER-09). A move is noted with how many items it carries, so that its end offers
+    /// its undo ([`AppState::track`], DND-07).
     pub(super) fn drop_transfer(
         &mut self,
         mode: TransferMode,
@@ -581,6 +582,7 @@ impl AppState {
     ) -> Vec<Effect> {
         let options = TransferOptions {
             conflict: ConflictPolicy::Ask,
+            errors: self.error_policy(),
             ..TransferOptions::default()
         };
         match TransferSpec::into_dir(mode, sources, folder, options) {

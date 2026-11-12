@@ -28,8 +28,8 @@ use slint::{
 
 use crate::controller::{self, Controller};
 use crate::dialogs::{
-    Confirm, ConflictQuestion, Counting, Failures, Modal, NameCheck, NameDialog, PatternDialog,
-    PreflightQuestion, Recovery,
+    Confirm, ConflictChoice, ConflictQuestion, Counting, ErrorChoice, ErrorQuestion, Failures,
+    Modal, NameCheck, NameDialog, PatternDialog, PreflightQuestion, Recovery,
 };
 use crate::format::{
     attribute_letters, file_extension, file_icon, folder_label, format_size, format_time_in,
@@ -39,7 +39,7 @@ use crate::hashing::Algorithm;
 use crate::jobs::{JobRow, RecentRow};
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
-use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, validate};
+use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, overwrites, validate};
 use crate::places::{Place, PlaceKind, recent_slot};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
@@ -54,10 +54,10 @@ use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
-    FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu,
-    JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView, PatternView, PickTarget,
-    PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
-    RowKind, SectionHead, Shortcuts, TabItem, TreeRow,
+    ErrorView, FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView,
+    ItemMenu, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView, PatternView,
+    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView,
+    RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow,
 };
 
 /// What separates the parts of a pane's status line in `PaneView.status`:
@@ -1651,6 +1651,7 @@ pub fn dialog_kind(modal: Option<&Modal>, quitting: bool) -> DialogKind {
         Some(Modal::Failures(_)) => DialogKind::Message,
         Some(Modal::Recovery(_)) => DialogKind::Recovery,
         Some(Modal::Conflict(_)) => DialogKind::Conflict,
+        Some(Modal::Error(_)) => DialogKind::Error,
         Some(Modal::Preflight(_)) => DialogKind::Preflight,
         Some(Modal::Pick(_)) => DialogKind::Pick,
         Some(Modal::Pattern(_)) => DialogKind::Pattern,
@@ -1873,6 +1874,8 @@ impl PickModels {
                 .unwrap_or(0),
             policy_note: policy_note.into(),
             policy_danger,
+            can_follow_links: picker.offers_follow_links(),
+            follow_links: picker.follow_links,
             space: space.into(),
             problem: validity
                 .map(|validity| {
@@ -1918,8 +1921,8 @@ fn pick_words(picker: &Picker) -> (String, String, String) {
 
 /// What the picker says beside its buttons about how it confirms: that the path typed must be
 /// entered first (the button is off meanwhile), or a path or a folder given when the field was
-/// cleared, that it is being looked at, or that an overwrite is confirmed by the button alone;
-/// empty for none of these.
+/// cleared, that it is being looked at, or that an overwrite (a conditional one too) is
+/// confirmed by the button alone; empty for none of these.
 pub fn pick_hint(picker: &Picker) -> &'static str {
     if picker.typed.is_some() {
         words::pick_path_pending()
@@ -1927,7 +1930,7 @@ pub fn pick_hint(picker: &Picker) -> &'static str {
         words::pick_path_blank()
     } else if picker.path_edited {
         words::pick_path_unentered()
-    } else if picker.policy == rf_jobs::ConflictPolicy::Overwrite {
+    } else if overwrites(picker.policy) {
         words::pick_overwrite_by_button()
     } else {
         ""
@@ -2052,13 +2055,32 @@ pub fn confirm_view(confirm: &Confirm) -> ConfirmView {
     }
 }
 
-/// The window of failed items. Its first `MEASURED_LINES` lines go in `head` too: the window
-/// fits its list to their height once wrapped.
+/// The window of failed items, with 다시 시도 when they can be tried again. Its first
+/// `MEASURED_LINES` lines go in `head` too: the window fits its list to their height once
+/// wrapped.
 pub fn message_view(failures: &Failures) -> MessageView {
     MessageView {
         title: failures.title.as_str().into(),
         lines: lines_model(&failures.lines),
         head: lines_model(head(&failures.lines)),
+        retry: failures.retry.is_some(),
+    }
+}
+
+/// The window that asks about the item of `question` that failed (XFER-09): what the job was
+/// doing, the item by its whole path, and why.
+pub fn error_view(question: &ErrorQuestion) -> ErrorView {
+    ErrorView {
+        serial: i32::try_from(question.id % 0x7FFF_FFFF).unwrap_or(0),
+        title: words::error_ask_title(question.work).into(),
+        item: words::error_ask_item(&question.failure).into(),
+        reason: words::item_failure(&question.failure).into(),
+        items_left: if question.items_left > 0 {
+            words::items_left(question.items_left).into()
+        } else {
+            SharedString::new()
+        },
+        retry_note: words::error_ask_retry_once().into(),
     }
 }
 
@@ -2096,6 +2118,29 @@ pub fn preflight_view(question: &PreflightQuestion) -> PreflightView {
     }
 }
 
+/// The choice of the conflict window's row `number`, as its `answered` callback numbers them:
+/// 0 덮어쓰기, 1 건너뛰기, 2 이름 바꿔 둘 다 두기, 3 더 새 파일만 덮어쓰기, 4 크기가 다를 때만
+/// 덮어쓰기. Any other number is the safe one, keeping both.
+pub fn conflict_choice(number: i32) -> ConflictChoice {
+    match number {
+        0 => ConflictChoice::Overwrite,
+        1 => ConflictChoice::Skip,
+        3 => ConflictChoice::OverwriteIfNewer,
+        4 => ConflictChoice::OverwriteIfSizeDiffers,
+        _ => ConflictChoice::Rename,
+    }
+}
+
+/// The choice of the error window's button `number`, as its `answered` callback numbers them:
+/// 0 다시 시도, 2 중단. Any other number is the one that neither repeats nor stops, 건너뛰기 (1).
+pub fn error_choice(number: i32) -> ErrorChoice {
+    match number {
+        0 => ErrorChoice::Retry,
+        2 => ErrorChoice::Abort,
+        _ => ErrorChoice::Skip,
+    }
+}
+
 /// The conflict dialog for `question`, with dates in `tz`.
 pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView {
     let conflict = &question.conflict;
@@ -2128,6 +2173,9 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
     let existing_name = name_of(&conflict.target);
     let existing_folder = folder_of(&conflict.target, CARD_PLACE_CHARS);
     let can_overwrite = question.can_overwrite();
+    // What each conditional choice does to this file, as the engine would decide it.
+    let newer_overwrites = question.would_overwrite(ConflictChoice::OverwriteIfNewer);
+    let size_overwrites = question.would_overwrite(ConflictChoice::OverwriteIfSizeDiffers);
     ConflictView {
         serial: i32::try_from(question.id % 0x7FFF_FFFF).unwrap_or(0),
         title: words::conflict_title(conflict.existing.kind).into(),
@@ -2154,8 +2202,13 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
         overwrite_hint: words::overwrite_hint(can_overwrite, question.work).into(),
         skip_hint: words::skip_hint(conflict.incoming.kind, question.work).into(),
         rename_hint: words::rename_hint(&question.numbered_name()).into(),
+        newer_hint: words::newer_hint(can_overwrite, newer_overwrites, question.work).into(),
+        newer_overwrites,
+        size_hint: words::size_differs_hint(can_overwrite, size_overwrites).into(),
+        size_overwrites,
         warning_once: words::overwrite_warning(false).into(),
         warning_all: words::overwrite_warning(true).into(),
+        warning_rule_all: words::conditional_warning_all().into(),
         items_left: if question.items_left > 0 {
             words::items_left(question.items_left).into()
         } else {
@@ -2736,6 +2789,7 @@ mod tests {
             lines: (0..count)
                 .map(|i| format!("/a/{i}.txt: 권한이 없습니다"))
                 .collect(),
+            retry: None,
         };
         let shown = |model: &ModelRc<SharedString>| -> Vec<String> {
             model.iter().map(|line| line.to_string()).collect()
@@ -2746,6 +2800,164 @@ mod tests {
         assert_eq!(shown(&view.head), many.lines[..MEASURED_LINES]);
         let few = failures(2);
         assert_eq!(shown(&message_view(&few).head), few.lines);
+        // 다시 시도 shows only for a window that has something to try again.
+        assert!(!view.retry);
+        let retry = crate::dialogs::Retry {
+            job: rf_jobs::JobId(1),
+            spec: rf_jobs::JobSpec::Rename {
+                from: system_root(),
+                to: system_root(),
+            },
+        };
+        let again = Failures {
+            retry: Some(retry),
+            ..few
+        };
+        assert!(message_view(&again).retry);
+    }
+
+    /// A conflict question of a copy between two files of 3 bytes, the one that would come a
+    /// minute newer.
+    fn conflict_question() -> ConflictQuestion {
+        let at = UNIX_EPOCH + Duration::from_hours(500_000);
+        let file = |modified| {
+            let mut entry = Entry::new("a.txt", EntryKind::File);
+            entry.size = 3;
+            entry.modified = Some(modified);
+            entry
+        };
+        let path = |folder: &str| {
+            system_root()
+                .join(folder)
+                .and_then(|folder| folder.join("a.txt"))
+                .expect("plain names")
+        };
+        ConflictQuestion {
+            id: 7,
+            job: rf_jobs::JobId(1),
+            conflict: Box::new(rf_jobs::Conflict {
+                source: path("src"),
+                target: path("dst"),
+                incoming: file(at + Duration::from_secs(60)),
+                existing: file(at),
+            }),
+            items_left: 0,
+            work: words::JobWork::Copy,
+        }
+    }
+
+    #[test]
+    fn the_conflict_window_says_what_each_conditional_choice_does_to_this_file() {
+        let mut question = conflict_question();
+        let view = conflict_view(&question, &TimeZone::UTC);
+        // Newer, and as large: 더 새 파일만 replaces it, 크기가 다를 때만 leaves it.
+        assert!(view.can_overwrite && view.incoming_newer);
+        assert_eq!(
+            (view.newer_overwrites, view.newer_hint.as_str()),
+            (true, "복사해 올 파일이 더 최근이라 이 파일은 덮어씁니다")
+        );
+        assert_eq!(
+            (view.size_overwrites, view.size_hint.as_str()),
+            (false, "크기가 같아 이 파일은 건너뜁니다")
+        );
+        assert_eq!(
+            view.warning_rule_all,
+            "남은 충돌도 같은 조건으로 덮어씁니다. 덮어쓴 파일의 내용은 되살릴 수 없습니다."
+        );
+        // Older, and of another size: the other way round.
+        question.conflict.incoming.modified = question
+            .conflict
+            .existing
+            .modified
+            .map(|at| at - Duration::from_secs(60));
+        question.conflict.incoming.size = 4;
+        question.work = words::JobWork::Move;
+        let view = conflict_view(&question, &TimeZone::UTC);
+        assert_eq!(
+            (view.newer_overwrites, view.newer_hint.as_str()),
+            (
+                false,
+                "옮겨 올 파일이 더 최근이 아니라 이 파일은 건너뜁니다"
+            )
+        );
+        assert_eq!(
+            (view.size_overwrites, view.size_hint.as_str()),
+            (true, "크기가 달라 이 파일은 덮어씁니다")
+        );
+        // A file and a folder: no overwrite, by a condition either, and nothing to say of one.
+        question.conflict.existing.kind = EntryKind::Dir;
+        let view = conflict_view(&question, &TimeZone::UTC);
+        assert!(!view.can_overwrite && !view.newer_overwrites && !view.size_overwrites);
+        assert_eq!(
+            (view.newer_hint.as_str(), view.size_hint.as_str()),
+            ("", "")
+        );
+    }
+
+    #[test]
+    fn the_windows_choice_numbers_are_the_choices_of_the_state() {
+        // The rows of the conflict window, in their order.
+        let question = conflict_question();
+        let actions: Vec<rf_jobs::ConflictAction> = (0..5)
+            .map(|number| {
+                let answer = question.answer(conflict_choice(number), true);
+                answer.expect("two files offer every choice").action
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                rf_jobs::ConflictAction::Overwrite,
+                rf_jobs::ConflictAction::Skip,
+                rf_jobs::ConflictAction::Rename,
+                rf_jobs::ConflictAction::OverwriteIfNewer,
+                rf_jobs::ConflictAction::OverwriteIfSizeDiffers,
+            ]
+        );
+        // A number the window does not send destroys nothing.
+        assert_eq!(conflict_choice(-1), ConflictChoice::Rename);
+        assert_eq!(conflict_choice(5), ConflictChoice::Rename);
+        // The buttons of the error window.
+        assert_eq!(
+            [error_choice(0), error_choice(1), error_choice(2)],
+            [ErrorChoice::Retry, ErrorChoice::Skip, ErrorChoice::Abort]
+        );
+        assert_eq!(error_choice(9), ErrorChoice::Skip);
+    }
+
+    #[test]
+    fn the_error_window_names_the_item_and_why_it_failed() {
+        let source = system_root().join("a.txt").expect("a plain name");
+        let question = ErrorQuestion {
+            id: 3,
+            job: rf_jobs::JobId(1),
+            failure: Box::new(rf_jobs::ItemFailure {
+                source: Some(source.clone()),
+                target: None,
+                stage: rf_jobs::Stage::Write,
+                kind: ErrorKind::PermissionDenied,
+                message: String::new(),
+                reason: None,
+            }),
+            items_left: 4,
+            work: words::JobWork::Move,
+        };
+        let view = error_view(&question);
+        assert_eq!(view.serial, 3);
+        assert_eq!(view.title, "이동 중 오류가 났습니다");
+        assert_eq!(view.item.as_str(), source.to_string());
+        assert_eq!(view.reason, "권한이 없습니다");
+        assert_eq!(view.items_left, "이 작업에 남은 항목 4개");
+        assert_eq!(
+            view.retry_note,
+            "다시 시도는 한 번에 한 항목만 할 수 있습니다"
+        );
+        // The last item of a job has none left to tell of.
+        let last = ErrorQuestion {
+            items_left: 0,
+            ..question
+        };
+        assert_eq!(error_view(&last).items_left, "");
     }
 
     #[test]
@@ -2927,6 +3139,41 @@ mod tests {
         let overwrite = view(&picker);
         assert_eq!(overwrite.hint, "덮어쓰기는 버튼으로만 확인합니다");
         assert!(overwrite.policy_danger && overwrite.can_confirm);
+        // So do the two conditional overwrites, each with its own note, at the places of their
+        // buttons (4 and 5).
+        for (policy, at, note) in [
+            (
+                rf_jobs::ConflictPolicy::OverwriteIfNewer,
+                4,
+                "수정한 날짜가 더 최근일 때만 같은 이름의 파일을 바꾸고, 아니면 건너뜁니다.\n\
+                 바꾼 파일의 내용은 되살릴 수 없습니다.",
+            ),
+            (
+                rf_jobs::ConflictPolicy::OverwriteIfSizeDiffers,
+                5,
+                "크기가 다를 때만 같은 이름의 파일을 바꾸고, 같으면 건너뜁니다.\n\
+                 바꾼 파일의 내용은 되살릴 수 없습니다.",
+            ),
+        ] {
+            picker.policy = policy;
+            let conditional = view(&picker);
+            assert_eq!(conditional.policy, at);
+            assert_eq!(conditional.policy_note, note);
+            assert_eq!(conditional.hint, "덮어쓰기는 버튼으로만 확인합니다");
+            assert!(conditional.policy_danger && conditional.can_confirm);
+        }
+        // The box of the links shows for a copy alone, off until it is flipped.
+        picker.policy = rf_jobs::ConflictPolicy::Ask;
+        let moving = view(&picker);
+        assert!(!moving.can_follow_links && !moving.follow_links);
+        picker.set_mode(TransferMode::Copy);
+        let copying = view(&picker);
+        assert!(copying.can_follow_links && !copying.follow_links);
+        picker.follow_links = true;
+        assert!(view(&picker).follow_links);
+        picker.set_mode(TransferMode::Move);
+        assert!(!view(&picker).can_follow_links);
+        picker.follow_links = false;
 
         // A path typed and not entered: the button is off, and the footer says what to do,
         // with nothing about the target the field no longer shows.

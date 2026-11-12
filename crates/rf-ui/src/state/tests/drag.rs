@@ -263,6 +263,31 @@ fn a_drop_submits_the_transfer_of_the_items_the_drag_started_with() {
 }
 
 #[test]
+fn a_drop_takes_a_failure_as_the_setting_says() {
+    for (setting, errors) in [
+        (OnError::Continue, rf_jobs::ErrorPolicy::Continue),
+        (OnError::Ask, rf_jobs::ErrorPolicy::Ask),
+    ] {
+        let mut state = two_panes();
+        state.set_on_error(setting);
+        state.press_row(LEFT, 2, false, false);
+        let id = state.drag_id();
+        let spot = DropSpot::Pane {
+            side: RIGHT,
+            row: Some(0),
+        };
+        state.drop_offer(id, spot).expect("the folder takes it");
+        let (spec, _) = the_submit(&state.drop_items(id, spot));
+        let JobSpec::Transfer(transfer) = spec else {
+            panic!("a transfer: {spec:?}");
+        };
+        assert_eq!(transfer.options.errors, errors);
+        // The rest of what a drop asks for is as it was.
+        assert_eq!(transfer.options.conflict, ConflictPolicy::Ask);
+    }
+}
+
+#[test]
 fn a_press_where_the_state_has_no_row_readies_no_drag() {
     let mut state = two_panes();
     state.press_row(LEFT, 0, false, false);

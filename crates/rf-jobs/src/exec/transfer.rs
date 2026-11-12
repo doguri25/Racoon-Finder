@@ -1298,7 +1298,9 @@ fn existing_at(dst: &dyn Provider, target: &VPath) -> Result<Option<Entry>, Fail
 ///
 /// 1. A folder meets a folder (not a link to one): they merge, without a question.
 /// 2. Otherwise the policy decides. [`Decision::Ask`] goes to the resolver, and its
-///    `Overwrite` answer is refused when either side is a folder, as it would be for the
+///    `Overwrite` answer (or a conditional one, `OverwriteIfNewer` or
+///    `OverwriteIfSizeDiffers`, which is decided for this pair as the policy of the same name
+///    would) is refused when either side is a folder, as it would be for the
 ///    overwrite policies: a file and a folder never replace each other. A refused conflict
 ///    fails the item as `Stage::Conflict` with `AlreadyExists` (`KindMismatch`, see
 ///    [`kind_taken`]) and touches neither side.
@@ -1324,8 +1326,15 @@ fn settle(
                 existing: existing.clone(),
             };
             match ctx.resolve_conflict(&conflict).at(Stage::Conflict)? {
-                // The same rule the overwrite policies follow.
+                // The same rules the overwrite policies follow, for this pair: an answer given
+                // for all the conflicts is decided anew for each of them.
                 ConflictAction::Overwrite => decide(ConflictPolicy::Overwrite, incoming, existing),
+                ConflictAction::OverwriteIfNewer => {
+                    decide(ConflictPolicy::OverwriteIfNewer, incoming, existing)
+                }
+                ConflictAction::OverwriteIfSizeDiffers => {
+                    decide(ConflictPolicy::OverwriteIfSizeDiffers, incoming, existing)
+                }
                 ConflictAction::Skip => Decision::Skip,
                 ConflictAction::Rename => Decision::Rename,
                 // `resolve_conflict` has failed already; this only keeps the match closed.

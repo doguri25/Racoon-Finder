@@ -375,6 +375,160 @@ fn a_remembered_overwrite_is_checked_again_for_each_pair() {
     assert_eq!(read(&f.dst.join("x").join("inner.txt")), "keep");
 }
 
+/// The content and the modification time of `p`: what a file that was left alone still has.
+fn kept(p: &Path) -> (String, std::time::SystemTime) {
+    (read(p), mtime(p))
+}
+
+#[test]
+fn an_answer_of_newer_only_for_all_leaves_the_files_that_are_not_older_untouched() {
+    let f = fx();
+    // `a` and `d` are older at the target, `b` is newer there, `c` is within the clock's noise.
+    for (n, src_secs, dst_secs) in [
+        ("a", 1_000_000_100, 1_000_000_000),
+        ("b", 1_000_000_000, 1_000_000_100),
+        ("c", 1_000_000_001, 1_000_000_000),
+        ("d", 1_000_000_100, 1_000_000_000),
+    ] {
+        both(&f, n, "new", "old");
+        set_mtime(&f.src.join(n), src_secs);
+        set_mtime(&f.dst.join(n), dst_secs);
+    }
+    let before = [kept(&f.dst.join("b")), kept(&f.dst.join("c"))];
+    let r =
+        ScriptedResolver::new().on_conflict(ConflictAnswer::all(ConflictAction::OverwriteIfNewer));
+    let srcs: Vec<PathBuf> = ["a", "b", "c", "d"].iter().map(|n| f.src.join(n)).collect();
+    let rep = run_on(
+        &spec(TransferMode::Copy, &srcs, &f.dst, with(ConflictPolicy::Ask)),
+        &Vfs::with_local(),
+        &r,
+    );
+    // Asked once; the answer is decided anew for each of the conflicts that follow.
+    assert_eq!(
+        (rep.outcome, rep.done.files, rep.skipped, r.calls().len()),
+        (Outcome::Completed, 2, 2, 1)
+    );
+    assert_eq!(
+        (read(&f.dst.join("a")), read(&f.dst.join("d"))),
+        ("new".into(), "new".into())
+    );
+    // The file that is newer at the target, and the one that is as new, are as they were:
+    // neither their content nor their time changed.
+    assert_eq!([kept(&f.dst.join("b")), kept(&f.dst.join("c"))], before);
+    assert_eq!(rep.failures, Vec::new());
+    assert_eq!(temp_files(&f.dst), Vec::<String>::new());
+}
+
+#[test]
+fn an_answer_of_size_differs_for_all_leaves_the_files_of_the_same_size_untouched() {
+    let f = fx();
+    both(&f, "a", "longer", "old");
+    both(&f, "b", "new", "old");
+    both(&f, "c", "x", "old");
+    set_mtime(&f.dst.join("b"), 1_000_000_000);
+    let before = kept(&f.dst.join("b"));
+    let r = ScriptedResolver::new()
+        .on_conflict(ConflictAnswer::all(ConflictAction::OverwriteIfSizeDiffers));
+    let srcs: Vec<PathBuf> = ["a", "b", "c"].iter().map(|n| f.src.join(n)).collect();
+    let rep = run_on(
+        &spec(TransferMode::Copy, &srcs, &f.dst, with(ConflictPolicy::Ask)),
+        &Vfs::with_local(),
+        &r,
+    );
+    assert_eq!(
+        (rep.outcome, rep.done.files, rep.skipped, r.calls().len()),
+        (Outcome::Completed, 2, 1, 1)
+    );
+    assert_eq!(
+        (read(&f.dst.join("a")), read(&f.dst.join("c"))),
+        ("longer".into(), "x".into())
+    );
+    // Three bytes on both sides: the file stays, with its content and its time.
+    assert_eq!(kept(&f.dst.join("b")), before);
+}
+
+#[test]
+fn a_conditional_answer_given_once_settles_that_conflict_alone() {
+    let f = fx();
+    for n in ["a", "b"] {
+        both(&f, n, "new", "old");
+        set_mtime(&f.src.join(n), 1_000_000_000);
+        set_mtime(&f.dst.join(n), 1_000_000_100);
+    }
+    let before = kept(&f.dst.join("a"));
+    // The first answer is for `a` alone, which is newer at the target and stays; `b` is asked
+    // about again, and replaced.
+    let r = ScriptedResolver::new()
+        .on_conflict(ConflictAnswer::once(ConflictAction::OverwriteIfNewer))
+        .on_conflict(ConflictAnswer::once(ConflictAction::Overwrite));
+    let srcs: Vec<PathBuf> = ["a", "b"].iter().map(|n| f.src.join(n)).collect();
+    let rep = run_on(
+        &spec(TransferMode::Copy, &srcs, &f.dst, with(ConflictPolicy::Ask)),
+        &Vfs::with_local(),
+        &r,
+    );
+    assert_eq!(
+        (rep.outcome, rep.done.files, rep.skipped, r.calls().len()),
+        (Outcome::Completed, 1, 1, 2)
+    );
+    assert_eq!(kept(&f.dst.join("a")), before);
+    assert_eq!(read(&f.dst.join("b")), "new");
+}
+
+#[test]
+fn a_conditional_answer_never_replaces_a_folder_either() {
+    for action in [
+        ConflictAction::OverwriteIfNewer,
+        ConflictAction::OverwriteIfSizeDiffers,
+    ] {
+        let f = fx();
+        std::fs::write(f.src.join("x"), "file").unwrap();
+        write_tree(&f.dst, &[("x/inner.txt", "keep")]);
+        let r = ScriptedResolver::new().on_conflict(ConflictAnswer::all(action));
+        let rep = run_on(
+            &spec(
+                TransferMode::Copy,
+                &[f.src.join("x")],
+                &f.dst,
+                with(ConflictPolicy::Ask),
+            ),
+            &Vfs::with_local(),
+            &r,
+        );
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors, "{action:?}");
+        assert_eq!(rep.failures[0].reason, Some(FailureReason::KindMismatch));
+        assert_eq!(read(&f.dst.join("x").join("inner.txt")), "keep");
+        assert_eq!(temp_files(&f.dst), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn a_move_under_a_conditional_answer_keeps_the_sources_it_does_not_move() {
+    let f = fx();
+    both(&f, "a", "new", "old");
+    both(&f, "b", "new", "old");
+    set_mtime(&f.src.join("a"), 1_000_000_100);
+    set_mtime(&f.dst.join("a"), 1_000_000_000);
+    set_mtime(&f.src.join("b"), 1_000_000_000);
+    set_mtime(&f.dst.join("b"), 1_000_000_100);
+    let before = kept(&f.dst.join("b"));
+    let r =
+        ScriptedResolver::new().on_conflict(ConflictAnswer::all(ConflictAction::OverwriteIfNewer));
+    let srcs: Vec<PathBuf> = ["a", "b"].iter().map(|n| f.src.join(n)).collect();
+    let rep = run_on(
+        &spec(TransferMode::Move, &srcs, &f.dst, with(ConflictPolicy::Ask)),
+        &Vfs::with_local(),
+        &r,
+    );
+    assert_eq!((rep.outcome, rep.skipped), (Outcome::Completed, 1));
+    // `a` moved over the older file; `b`, older than the file at the target, stays where it
+    // was on both sides.
+    assert!(!f.src.join("a").exists());
+    assert_eq!(read(&f.dst.join("a")), "new");
+    assert_eq!(read(&f.src.join("b")), "new");
+    assert_eq!(kept(&f.dst.join("b")), before);
+}
+
 #[test]
 fn ask_rename_keeps_both() {
     let f = fx();

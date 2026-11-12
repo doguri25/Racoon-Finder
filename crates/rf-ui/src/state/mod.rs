@@ -51,7 +51,7 @@ use crate::places::Place;
 use crate::preview::PreviewRequest;
 use crate::properties::MeasureRequest;
 use crate::selection::Pick;
-use crate::settings::{DragDefault, Found, Session, SessionPane, Waiting};
+use crate::settings::{DragDefault, Found, OnError, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
@@ -308,6 +308,19 @@ pub enum Effect {
     Removal(RemovalWork),
 }
 
+/// Makes each tab of `waiting` stand in at home for its folder of the last run
+/// ([`Tab::stand_in_for`]); one whose pane or place is not there is passed over.
+fn stand_in(panes: &mut [Pane; 2], waiting: &[Waiting]) {
+    for waiting in waiting {
+        if let Some(tab) = panes
+            .get_mut(waiting.side)
+            .and_then(|pane| pane.tabs_mut().get_mut(waiting.tab))
+        {
+            tab.stand_in_for(waiting.path.clone());
+        }
+    }
+}
+
 /// What the button of the toast on screen does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToastAction {
@@ -404,6 +417,9 @@ pub struct AppState {
     drag_default: DragDefault,
     /// A dragged move offers its undo once it is done (보기 ▸ 설정, DND-07).
     move_undo_toast: bool,
+    /// What a copy or a move does about an item that fails (보기 ▸ 설정, XFER-09): carry on and
+    /// list it at the end, or ask about each one.
+    on_error: OnError,
     /// A right click shows Windows' own menu first (보기 ▸ 설정, OPS-05).
     system_menu_first: bool,
     /// The icon views show the files' thumbnails (보기 ▸ 설정, VIEW-09).
@@ -511,14 +527,7 @@ impl AppState {
             pane.select_tab(active.min(pane.tabs().len() - 1));
             pane
         });
-        for waiting in waiting {
-            if let Some(tab) = panes
-                .get_mut(waiting.side)
-                .and_then(|pane| pane.tabs_mut().get_mut(waiting.tab))
-            {
-                tab.stand_in_for(waiting.path.clone());
-            }
-        }
+        stand_in(&mut panes, waiting);
         let state = AppState {
             panes,
             active: session.active_pane.min(RIGHT),
@@ -557,6 +566,7 @@ impl AppState {
             drag_mods: DragMods::default(),
             drag_default: DragDefault::default(),
             move_undo_toast: true,
+            on_error: OnError::default(),
             system_menu_first: false,
             show_thumbnails: true,
             long_press: true,

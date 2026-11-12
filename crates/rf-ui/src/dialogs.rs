@@ -1,6 +1,8 @@
 //! The windows that open over the main window, as plain data: the name of a new folder or of a
-//! rename, a confirmation, the failed items of a job, the jobs the last run left unfinished,
-//! the questions of the jobs, the destination picker ([`Picker`]) and the properties window.
+//! rename, a confirmation, the failed items of a job (which 다시 시도 tries again, XFER-09), the
+//! jobs the last run left unfinished, the questions of the jobs (a name that is taken, an item
+//! that failed, the pre-flight check), the destination picker ([`Picker`]) and the properties
+//! window.
 //! [`AppState`](crate::state::AppState) keeps the one that shows and the ones waiting behind
 //! it; `dialogs.slint`, `conflict-dialog.slint`, `pick-dialog.slint` and `properties.slint`
 //! draw them.
@@ -12,9 +14,10 @@ use std::ffi::OsString;
 
 use rf_core::{EntryKind, Os, VPath};
 use rf_jobs::{
-    Conflict, ConflictAction, ConflictAnswer, CreateKind, DeleteCopiesSpec, DeleteMethod,
-    DeleteSpec, ErrorPolicy, IncompleteJob, Issue, IssueKind, JobId, JobSpec, MTIME_TOLERANCE,
-    PreflightAnswer, Severity, UndoRecord, numbered_name,
+    Conflict, ConflictAction, ConflictAnswer, ConflictPolicy, CreateKind, Decision,
+    DeleteCopiesSpec, DeleteMethod, DeleteSpec, ErrorAction, ErrorAnswer, ErrorPolicy,
+    IncompleteJob, Issue, IssueKind, ItemFailure, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer,
+    Severity, UndoRecord, decide, numbered_name,
 };
 
 use crate::pattern::{NamePattern, PatternError, PatternSyntax};
@@ -31,6 +34,8 @@ pub enum Modal {
     Failures(Failures),
     Recovery(Recovery),
     Conflict(ConflictQuestion),
+    /// An item of a job failed, and the job asks what to do about it (XFER-09, 파일마다 묻기).
+    Error(ErrorQuestion),
     Preflight(PreflightQuestion),
     /// Where to copy or move the items to (PICK).
     Pick(Box<Picker>),
@@ -47,6 +52,7 @@ impl Modal {
     pub fn question(&self) -> Option<QuestionId> {
         match self {
             Modal::Conflict(question) => Some(question.id),
+            Modal::Error(question) => Some(question.id),
             Modal::Preflight(question) => Some(question.id),
             Modal::Name(_)
             | Modal::Confirm(_)
@@ -555,6 +561,19 @@ pub fn permanent_delete(paths: Vec<VPath>) -> JobSpec {
 pub struct Failures {
     pub title: String,
     pub lines: Vec<String>,
+    /// What the window's 다시 시도 submits; `None` for a window without the button (nothing of
+    /// it can be tried again, or it was tried again already).
+    pub retry: Option<Retry>,
+}
+
+/// What 다시 시도 of the window of failed items submits (XFER-09): the job that tries again the
+/// items job `job` could not process, and nothing else of what that job was asked
+/// (`rf_jobs::retry_spec`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// The job whose failed items these are.
+    pub job: JobId,
+    pub spec: JobSpec,
 }
 
 /// The jobs the last run of the app left unfinished, still to be run again or dropped.
@@ -575,12 +594,42 @@ pub struct ConflictQuestion {
     pub work: JobWork,
 }
 
-/// What the user chose in the conflict window.
+/// What the user chose in the conflict window (XFER-06).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConflictChoice {
     Overwrite,
     Skip,
     Rename,
+    /// 더 새 파일만 덮어쓰기: overwrite when the item that would come is the newer one, skip
+    /// otherwise.
+    OverwriteIfNewer,
+    /// 크기가 다를 때만 덮어쓰기: overwrite when the sizes differ, skip otherwise.
+    OverwriteIfSizeDiffers,
+}
+
+impl ConflictChoice {
+    /// Whether the choice may replace the file that is there, always or when its condition is
+    /// met: it is offered between two files only, and never confirmed by Enter alone.
+    pub fn overwrites(self) -> bool {
+        match self {
+            ConflictChoice::Overwrite
+            | ConflictChoice::OverwriteIfNewer
+            | ConflictChoice::OverwriteIfSizeDiffers => true,
+            ConflictChoice::Skip | ConflictChoice::Rename => false,
+        }
+    }
+
+    /// The answer the engine takes for the choice. A conditional one is decided by the engine
+    /// for each conflict it settles, as the policy of the same name would decide it.
+    fn action(self) -> ConflictAction {
+        match self {
+            ConflictChoice::Overwrite => ConflictAction::Overwrite,
+            ConflictChoice::Skip => ConflictAction::Skip,
+            ConflictChoice::Rename => ConflictAction::Rename,
+            ConflictChoice::OverwriteIfNewer => ConflictAction::OverwriteIfNewer,
+            ConflictChoice::OverwriteIfSizeDiffers => ConflictAction::OverwriteIfSizeDiffers,
+        }
+    }
 }
 
 impl ConflictQuestion {
@@ -621,16 +670,72 @@ impl ConflictQuestion {
             .into_owned()
     }
 
-    /// The answer for `choice`, for this conflict or (`apply_all`) every later one of the job
-    /// too; `None` for an overwrite that is not offered.
-    pub fn answer(&self, choice: ConflictChoice, apply_all: bool) -> Option<ConflictAnswer> {
-        let action = match choice {
-            ConflictChoice::Overwrite if !self.can_overwrite() => return None,
-            ConflictChoice::Overwrite => ConflictAction::Overwrite,
-            ConflictChoice::Skip => ConflictAction::Skip,
-            ConflictChoice::Rename => ConflictAction::Rename,
+    /// Whether `choice` would replace the file that is there in this conflict: an overwrite
+    /// does, a conditional one when this pair meets its condition (as the engine decides it,
+    /// `rf_jobs::decide`), the others never. The window says so beside the choice.
+    pub fn would_overwrite(&self, choice: ConflictChoice) -> bool {
+        let policy = match choice {
+            ConflictChoice::Overwrite => ConflictPolicy::Overwrite,
+            ConflictChoice::OverwriteIfNewer => ConflictPolicy::OverwriteIfNewer,
+            ConflictChoice::OverwriteIfSizeDiffers => ConflictPolicy::OverwriteIfSizeDiffers,
+            ConflictChoice::Skip | ConflictChoice::Rename => return false,
         };
+        let conflict = &self.conflict;
+        decide(policy, &conflict.incoming, &conflict.existing) == Decision::Overwrite
+    }
+
+    /// The answer for `choice`, for this conflict or (`apply_all`) every later one of the job
+    /// too; `None` for an overwrite, conditional or not, that is not offered.
+    pub fn answer(&self, choice: ConflictChoice, apply_all: bool) -> Option<ConflictAnswer> {
+        if choice.overwrites() && !self.can_overwrite() {
+            return None;
+        }
         Some(ConflictAnswer {
+            action: choice.action(),
+            apply_to_all: apply_all,
+        })
+    }
+}
+
+/// An error question of a job (XFER-09, 파일마다 묻기): an item failed, and the job waits to hear
+/// whether to try it again, leave it out or stop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErrorQuestion {
+    pub id: QuestionId,
+    pub job: JobId,
+    /// The item that failed, and why.
+    pub failure: Box<ItemFailure>,
+    /// The items the job has still to do after this one.
+    pub items_left: u64,
+    /// What the job does with the items, as far as the window knows it.
+    pub work: JobWork,
+}
+
+/// What the user chose in the error window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorChoice {
+    /// 다시 시도: try the item again.
+    Retry,
+    /// 건너뛰기: leave the item out and go on; it is listed among the failed items at the end.
+    Skip,
+    /// 중단: stop the job.
+    Abort,
+}
+
+impl ErrorQuestion {
+    /// The answer for `choice`, for this failure or (`apply_all`, 남은 오류에도 같은 선택) every
+    /// later one of the job too. `None` for a retry of every later failure, which the window
+    /// does not offer: the engine tries an item again only when it is asked to for that item,
+    /// so a failure that stays would otherwise be tried without end. A window closed without a
+    /// choice answers [`SKIP_ERROR`](crate::resolver::SKIP_ERROR).
+    pub fn answer(choice: ErrorChoice, apply_all: bool) -> Option<ErrorAnswer> {
+        let action = match choice {
+            ErrorChoice::Retry if apply_all => return None,
+            ErrorChoice::Retry => ErrorAction::Retry,
+            ErrorChoice::Skip => ErrorAction::Skip,
+            ErrorChoice::Abort => ErrorAction::Abort,
+        };
+        Some(ErrorAnswer {
             action,
             apply_to_all: apply_all,
         })
@@ -885,6 +990,114 @@ mod tests {
             Some(ConflictAnswer::once(ConflictAction::Skip))
         );
         assert!(!conflict(EntryKind::Dir, EntryKind::File).can_overwrite());
+    }
+
+    #[test]
+    fn the_conditional_choices_reach_the_engine_as_its_own_answers() {
+        let files = conflict(EntryKind::File, EntryKind::File);
+        // Each choice of the window is the engine's answer of the same name, once or for the
+        // conflicts that follow.
+        for (choice, action) in [
+            (ConflictChoice::Overwrite, ConflictAction::Overwrite),
+            (ConflictChoice::Skip, ConflictAction::Skip),
+            (ConflictChoice::Rename, ConflictAction::Rename),
+            (
+                ConflictChoice::OverwriteIfNewer,
+                ConflictAction::OverwriteIfNewer,
+            ),
+            (
+                ConflictChoice::OverwriteIfSizeDiffers,
+                ConflictAction::OverwriteIfSizeDiffers,
+            ),
+        ] {
+            assert_eq!(
+                files.answer(choice, false),
+                Some(ConflictAnswer::once(action))
+            );
+            assert_eq!(
+                files.answer(choice, true),
+                Some(ConflictAnswer::all(action))
+            );
+        }
+        // A file and a folder never replace each other, by a condition either.
+        let mixed = conflict(EntryKind::Dir, EntryKind::File);
+        for choice in [
+            ConflictChoice::OverwriteIfNewer,
+            ConflictChoice::OverwriteIfSizeDiffers,
+        ] {
+            assert!(choice.overwrites());
+            assert_eq!(mixed.answer(choice, true), None);
+            assert!(!mixed.would_overwrite(choice));
+        }
+        assert!(!ConflictChoice::Skip.overwrites() && !ConflictChoice::Rename.overwrites());
+    }
+
+    #[test]
+    fn a_conditional_choice_says_what_it_does_to_this_file() {
+        let mut question = conflict(EntryKind::File, EntryKind::File);
+        let now = std::time::SystemTime::now();
+        let minute = std::time::Duration::from_secs(60);
+        question.conflict.incoming.size = 3;
+        question.conflict.existing.size = 3;
+        // The file that would come is the newer one: 더 새 파일만 replaces, 크기가 다를 때만 (the
+        // sizes are the same) leaves it.
+        question.conflict.incoming.modified = Some(now);
+        question.conflict.existing.modified = Some(now - minute);
+        assert!(question.would_overwrite(ConflictChoice::Overwrite));
+        assert!(question.would_overwrite(ConflictChoice::OverwriteIfNewer));
+        assert!(!question.would_overwrite(ConflictChoice::OverwriteIfSizeDiffers));
+        // The other way round.
+        question.conflict.existing.modified = Some(now + minute);
+        question.conflict.existing.size = 4;
+        assert!(!question.would_overwrite(ConflictChoice::OverwriteIfNewer));
+        assert!(question.would_overwrite(ConflictChoice::OverwriteIfSizeDiffers));
+        // Within the clock tolerance of the jobs neither is newer; without a time, too.
+        question.conflict.existing.modified = Some(now - std::time::Duration::from_secs(1));
+        assert!(!question.would_overwrite(ConflictChoice::OverwriteIfNewer));
+        question.conflict.existing.modified = None;
+        assert!(!question.would_overwrite(ConflictChoice::OverwriteIfNewer));
+        // Skipping and keeping both replace nothing.
+        assert!(!question.would_overwrite(ConflictChoice::Skip));
+        assert!(!question.would_overwrite(ConflictChoice::Rename));
+    }
+
+    #[test]
+    fn an_error_is_answered_for_its_item_or_for_the_rest() {
+        let once = |action| ErrorAnswer {
+            action,
+            apply_to_all: false,
+        };
+        assert_eq!(
+            ErrorQuestion::answer(ErrorChoice::Retry, false),
+            Some(once(ErrorAction::Retry))
+        );
+        assert_eq!(
+            ErrorQuestion::answer(ErrorChoice::Skip, false),
+            Some(once(ErrorAction::Skip))
+        );
+        assert_eq!(
+            ErrorQuestion::answer(ErrorChoice::Abort, false),
+            Some(once(ErrorAction::Abort))
+        );
+        // 남은 오류에도 같은 선택: the engine remembers a skip, and stops for good on 중단.
+        assert_eq!(
+            ErrorQuestion::answer(ErrorChoice::Skip, true),
+            Some(ErrorAnswer {
+                action: ErrorAction::Skip,
+                apply_to_all: true,
+            })
+        );
+        assert_eq!(
+            ErrorQuestion::answer(ErrorChoice::Abort, true),
+            Some(ErrorAnswer {
+                action: ErrorAction::Abort,
+                apply_to_all: true,
+            })
+        );
+        // A retry is asked for one item at a time: with the box on it is not offered.
+        assert_eq!(ErrorQuestion::answer(ErrorChoice::Retry, true), None);
+        // A window closed without a choice leaves the item out, this once.
+        assert_eq!(crate::resolver::SKIP_ERROR, once(ErrorAction::Skip));
     }
 
     #[test]

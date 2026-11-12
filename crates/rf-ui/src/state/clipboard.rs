@@ -681,6 +681,7 @@ impl AppState {
         }
         let options = TransferOptions {
             conflict: ConflictPolicy::AutoRename,
+            errors: self.error_policy(),
             ..TransferOptions::default()
         };
         match TransferSpec::into_dir(mode, &sources, &to.folder, options) {

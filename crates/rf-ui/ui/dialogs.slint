@@ -1,5 +1,6 @@
-// The dialogs over the main window: a name, a confirmation, a list of failed items, the jobs
-// the last run left unfinished, the pre-flight check of a transfer, and the note that shows
+// The dialogs over the main window: a name, a confirmation, a list of failed items (with 다시
+// 시도 for those of a copy or a move), the question about an item a job could not process, the
+// jobs the last run left unfinished, the pre-flight check of a transfer, and the note that shows
 // while the app ends. Each one takes the keyboard when it opens and can be used with it alone
 // (KEY-02): Esc closes it (Cancel), Tab and Shift+Tab move among its buttons (and its field),
 // going round, Space or Enter presses the button the keys are on, which shows a ring, and
@@ -66,6 +67,23 @@ export struct MessageView {
     lines: [string],
     // The first lines, which the window lays out out of sight to fit its list to them.
     head: [string],
+    // The failed items can be tried again: the window has 다시 시도 (XFER-09).
+    retry: bool,
+}
+
+// The question about an item a job could not process (XFER-09, 파일마다 묻기).
+export struct ErrorView {
+    // A new question gets a new number, which starts the window again.
+    serial: int,
+    // What the job was doing: "복사 중 오류가 났습니다".
+    title: string,
+    // The item, by its whole path, and why it failed.
+    item: string,
+    reason: string,
+    // The items the job has still to do, or empty.
+    items-left: string,
+    // Why 다시 시도 is off while "남은 오류에도 같은 선택" is on.
+    retry-note: string,
 }
 
 export struct RecoveryView {
@@ -775,17 +793,26 @@ export component ConfirmDialog inherits DialogFrame {
     }
 }
 
-// The items a job could not process, and why. Enter or Esc closes it; Tab puts the keys on 확인.
+// The items a job could not process, and why. Esc closes it, and so does Enter while the keys
+// are not on 다시 시도; Tab puts the keys on 확인, then, where the items can be tried again
+// (`view.retry`, XFER-09), on 다시 시도 and back, and Space or Enter presses the button they are
+// on. 다시 시도 hands over to Rust, which submits a job of the failed items alone.
 export component MessageDialog inherits DialogFrame {
     in property <MessageView> view;
     callback closed();
+    // 다시 시도.
+    callback retried();
 
     width: 600px;
     height: layout.preferred-height;
     accessible-label: root.view.title;
 
-    // 0 while the keys are on 확인, its one button; -1 before Tab.
+    // 0 while the keys are on 확인, 1 on 다시 시도 (where there is one); -1 before Tab.
     property <int> on-button: -1;
+    // Another list in the same window starts again.
+    changed view => {
+        root.on-button = -1;
+    }
 
     init => {
         keys.focus();
@@ -793,15 +820,20 @@ export component MessageDialog inherits DialogFrame {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (event.text == Key.Escape || event.text == Key.Return) {
+            if (event.text == Key.Escape) {
                 root.closed();
                 return accept;
             }
-            if (DialogKeys.tab-step(event) != 0) {
-                root.on-button = 0;
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                root.on-button = !root.view.retry ? 0 : root.on-button < 0 ? (step > 0 ? 0 : 1) : 1 - root.on-button;
                 return accept;
             }
-            if (event.text == " " && root.on-button == 0) {
+            if (root.on-button == 1 && root.view.retry && DialogKeys.presses(event)) {
+                root.retried();
+                return accept;
+            }
+            if (event.text == Key.Return || (event.text == " " && root.on-button == 0)) {
                 root.closed();
                 return accept;
             }
@@ -825,13 +857,186 @@ export component MessageDialog inherits DialogFrame {
             }
             HorizontalLayout {
                 alignment: end;
+                spacing: Theme.gap-s;
 
+                if root.view.retry: OutlineButton {
+                    text: "다시 시도";
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.retried();
+                    }
+                }
                 PrimaryButton {
                     button-height: 36px;
                     text: "확인";
                     focused: root.on-button == 0;
                     clicked => {
                         root.closed();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// An item of a job failed, and the job waits (XFER-09, 파일마다 묻기 of 보기 ▸ 설정): 다시 시도
+// tries the item again, 건너뛰기 leaves it out and goes on (it is listed at the job's end), 중단
+// stops the job. "남은 오류에도 같은 선택" makes 건너뛰기 the answer to every later failure of the
+// job, which then asks no more; 다시 시도 is for one item at a time, and is off while the box is
+// on. The keys start on 다시 시도: Space or Enter presses the button they are on (a key held
+// down presses nothing, so that an item that keeps failing is not tried again without end), Tab
+// goes to the box (Space flips it), 중단, 건너뛰기 and back to 다시 시도, and Esc closes the
+// window, which leaves the item out as 건너뛰기 does.
+export component ErrorDialog inherits DialogFrame {
+    in property <ErrorView> view;
+    // `choice`: 0 다시 시도, 1 건너뛰기, 2 중단.
+    callback answered(choice: int, apply-all: bool);
+    // Esc: the item is left out.
+    callback cancelled();
+
+    width: 600px;
+    height: layout.preferred-height;
+    accessible-label: root.view.title;
+    accessible-description: root.view.reason;
+
+    // "남은 오류에도 같은 선택", and for which question it was set: a new one starts with it off.
+    private property <bool> picked-all;
+    private property <int> picked-for: -1;
+    private property <bool> apply-all: root.picked-for == root.view.serial && root.picked-all;
+    // 다시 시도 is offered: not for every later failure.
+    private property <bool> can-retry: !root.apply-all;
+
+    // Where the keys are: 0 the box, 1 중단, 2 건너뛰기, 3 다시 시도. A new question starts on
+    // 다시 시도 again.
+    private property <int> on-button: 3;
+    private property <int> serial: root.view.serial;
+    changed serial => {
+        root.on-button = 3;
+    }
+
+    init => {
+        keys.focus();
+    }
+
+    function toggle-all() {
+        root.picked-all = !root.apply-all;
+        root.picked-for = root.view.serial;
+    }
+
+    function press(button: int) {
+        if (button == 0) {
+            root.toggle-all();
+        } else if (button == 1) {
+            root.answered(2, root.apply-all);
+        } else if (button == 2) {
+            root.answered(1, root.apply-all);
+        } else if (root.can-retry) {
+            root.answered(0, false);
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            let step = DialogKeys.tab-step(event);
+            if (step != 0) {
+                // 다시 시도 is passed over while it is off.
+                let next = DialogKeys.cycle(root.on-button, step, 4);
+                root.on-button = next == 3 && !root.can-retry ? DialogKeys.cycle(next, step, 4) : next;
+                return accept;
+            }
+            if (root.on-button == 0) {
+                // The box: Space flips it, and Enter does nothing there.
+                if (event.text == " ") {
+                    root.toggle-all();
+                }
+                return DialogKeys.presses(event) ? accept : reject;
+            }
+            if (DialogKeys.presses(event)) {
+                // Not a key held down: the window comes back as often as the item fails, and
+                // a held Enter would try it again at the keyboard's repeat rate.
+                if (!event.repeat) {
+                    root.press(root.on-button);
+                }
+                return accept;
+            }
+            reject
+        }
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: Theme.gap-m;
+
+            Heading {
+                text: root.view.title;
+            }
+            // The item's whole path, which breaks inside a word too long for a line, and why.
+            if root.view.item != "": Text {
+                text: root.view.item;
+                color: Theme.muted;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            Text {
+                text: root.view.reason;
+                color: Theme.text;
+                font-weight: 500;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.gap-m;
+
+                CheckBox {
+                    horizontal-stretch: 0;
+                    text: "남은 오류에도 같은 선택";
+                    checked: root.apply-all;
+                    focused: root.on-button == 0;
+                    toggled => {
+                        root.toggle-all();
+                        // The keys do not stay on a button that went off.
+                        if (!root.can-retry && root.on-button == 3) {
+                            root.on-button = 2;
+                        }
+                        keys.focus();
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.apply-all ? root.view.retry-note : root.view.items-left;
+                    font-size: Theme.font-small;
+                    color: root.apply-all ? Theme.muted : Theme.faint;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.gap-s;
+
+                OutlineButton {
+                    text: "중단";
+                    focused: root.on-button == 1;
+                    clicked => {
+                        root.press(1);
+                    }
+                }
+                OutlineButton {
+                    text: "건너뛰기";
+                    focused: root.on-button == 2;
+                    clicked => {
+                        root.press(2);
+                    }
+                }
+                PrimaryButton {
+                    button-height: 36px;
+                    text: "다시 시도";
+                    enabled: root.can-retry;
+                    focused: root.on-button == 3;
+                    clicked => {
+                        root.press(3);
                     }
                 }
             }

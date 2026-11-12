@@ -51,6 +51,9 @@ pub trait Resolver: Send + Sync {
     ///
     /// An answer of `ConflictAction::Overwrite`, once or for all, is still refused when either
     /// side is a folder: that item fails as `Stage::Conflict` and both sides stay as they are.
+    /// So is a conditional one (`OverwriteIfNewer`, `OverwriteIfSizeDiffers`), which otherwise
+    /// replaces the existing file only when this pair meets its condition and skips it when
+    /// not; given for all, the condition is looked at again for each later pair.
     fn conflict(&self, job: JobId, conflict: &Conflict) -> ConflictAnswer;
 
     /// An item failed and the error policy is to ask.

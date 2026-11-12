@@ -30,7 +30,7 @@ import { JobTray } from "tray.slint";
 import {
     NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
     RecoveryView, PreflightDialog, PreflightView, ClosingNote, NoticeWindow, PatternDialog,
-    PatternView
+    PatternView, ErrorDialog, ErrorView
 } from "dialogs.slint";
 import { ConflictDialog, ConflictView } from "conflict-dialog.slint";
 import { PickDialog, PickView, PickTarget } from "pick-dialog.slint";
@@ -42,7 +42,7 @@ import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, HistoryRowView, StatusFit, JobTray, NameView,
-    ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, PickView, PickTarget,
+    ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, ErrorView, PickView, PickTarget,
     NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt
 }
@@ -55,6 +55,8 @@ export enum DialogKind {
     message,
     recovery,
     conflict,
+    // An item of a job failed, and the job asks what to do about it.
+    error,
     preflight,
     // Where to copy or move the items to.
     pick,
@@ -116,6 +118,7 @@ export component MainWindow inherits Window {
     in property <RecoveryView> recovery-view;
     in property <PreflightView> preflight-view;
     in property <ConflictView> conflict-view;
+    in property <ErrorView> error-view;
     in property <PickView> pick-view;
     in property <PatternView> pattern-view;
     in property <PropertiesView> properties-view;
@@ -150,6 +153,9 @@ export component MainWindow inherits Window {
     // the menu offers on Windows alone (`system-menu-offered`).
     in property <int> drag-default;
     in-out property <bool> move-undo-toast: true;
+    // 보기 ▸ 설정 ▸ 복사·이동 오류는 파일마다 묻기 (XFER-09), which Rust sets back to the state's
+    // after the toggle; off, a copy or a move carries on and lists its failed items at its end.
+    in-out property <bool> ask-on-error;
     // 보기 ▸ 설정 ▸ 썸네일 보이기, which Rust sets back to the state's after the toggle.
     in-out property <bool> show-thumbnails: true;
     in-out property <bool> system-menu-first;
@@ -338,6 +344,11 @@ export component MainWindow inherits Window {
     // The checkbox of the confirmation (설정 백업 of 완전 삭제…) was flipped.
     callback confirm-check-toggled();
     callback conflict-answered(choice: int, apply-all: bool);
+    // The question about an item that failed was answered (`choice`: 0 try again, 1 leave it
+    // out, 2 stop the job); Esc there is `dialog-cancelled`, which leaves the item out.
+    callback error-answered(choice: int, apply-all: bool);
+    // 다시 시도 of the window of failed items.
+    callback message-retried();
     callback preflight-answered(choice: int);
     callback recovery-chosen(index: int, run-again: bool);
     // The pattern window (패턴으로 선택): its field changed, 와일드카드 or 정규식 was chosen, 대소문자
@@ -369,6 +380,8 @@ export component MainWindow inherits Window {
     callback pick-confirmed();
     callback pick-mode(is-move: bool);
     callback pick-policy(policy: int);
+    // The picker's 링크는 가리키는 것을 복사 was clicked or pressed.
+    callback pick-follow-links-toggled();
     callback pick-filter-edited(text: string);
     callback pick-path-edited(text: string);
     callback pick-path-entered(text: string);
@@ -1095,6 +1108,7 @@ export component MainWindow inherits Window {
                             sync-navigation <=> root.sync-navigation;
                             drag-default: root.drag-default;
                             move-undo-toast <=> root.move-undo-toast;
+                            ask-on-error <=> root.ask-on-error;
                             show-thumbnails <=> root.show-thumbnails;
                             system-menu-first <=> root.system-menu-first;
                             system-menu-offered: root.system-menu-offered;
@@ -1981,6 +1995,9 @@ export component MainWindow inherits Window {
             policy-chosen(policy) => {
                 root.pick-policy(policy);
             }
+            follow-links-toggled => {
+                root.pick-follow-links-toggled();
+            }
         }
         // Over the picker while a dialog shows on top of it.
         if root.pick-behind: Rectangle {
@@ -2027,6 +2044,9 @@ export component MainWindow inherits Window {
             closed => {
                 root.dialog-cancelled();
             }
+            retried => {
+                root.message-retried();
+            }
         }
         if root.dialog == DialogKind.recovery: RecoveryDialog {
             x: (parent.width - self.width) / 2;
@@ -2053,6 +2073,17 @@ export component MainWindow inherits Window {
             view: root.conflict-view;
             answered(choice, apply-all) => {
                 root.conflict-answered(choice, apply-all);
+            }
+            cancelled => {
+                root.dialog-cancelled();
+            }
+        }
+        if root.dialog == DialogKind.error: ErrorDialog {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            view: root.error-view;
+            answered(choice, apply-all) => {
+                root.error-answered(choice, apply-all);
             }
             cancelled => {
                 root.dialog-cancelled();

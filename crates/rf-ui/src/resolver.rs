@@ -3,14 +3,22 @@
 //! A job asks on its own worker thread and waits for the answer, which stops its lane (and only
 //! its lane) meanwhile. [`UiResolver`] hands the question to the UI thread as a [`Question`],
 //! through the `post` function it was made with, and waits on a channel until the window calls
-//! [`UiResolver::answer_conflict`] or [`UiResolver::answer_preflight`] with the question's id.
-//! No lock is held while it waits.
+//! [`UiResolver::answer_conflict`], [`UiResolver::answer_error`] or
+//! [`UiResolver::answer_preflight`] with the question's id. No lock is held while it waits, and
+//! the window holds nothing of its own for the question but the window that shows it: the
+//! answer comes back as a call of its own, from another turn of the event loop.
+//!
+//! A job asks about an item that failed only when it runs under `ErrorPolicy::Ask`, which is
+//! the choice 파일마다 묻기 of 보기 ▸ 설정 (XFER-09); under the default policy it carries on and
+//! the failed items are listed at its end.
 //!
 //! When the app ends, [`UiResolver::release_all`] answers every question still open with the
 //! cancelling choice, and every later one at once, so that no worker waits for a window that is
 //! gone. It is called after `JobEngine::shutdown` (carry-m1-03 "quit order"): the engine has
 //! then marked the jobs as cut off by the app's end, so the cancel this answer brings is not
-//! taken for the user's, and the next start recovers the jobs.
+//! taken for the user's, and the next start recovers the jobs. For an item that failed, the
+//! cancelling choice is to leave it out ([`SKIP_ERROR`]): a job the engine has stopped ends at
+//! its next step as cut off, where an answer that stops the job would end it for good.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -28,7 +36,8 @@ pub type QuestionId = u64;
 /// A question of a job for the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
-    /// What [`UiResolver::answer_conflict`] or [`UiResolver::answer_preflight`] answers.
+    /// What [`UiResolver::answer_conflict`], [`UiResolver::answer_error`] or
+    /// [`UiResolver::answer_preflight`] answers.
     pub id: QuestionId,
     /// The job that asks.
     pub job: JobId,
@@ -40,6 +49,8 @@ pub struct Question {
 pub enum Asked {
     /// The name of an item is taken at the target.
     Conflict(Box<Conflict>),
+    /// An item failed, and the job's error policy is to ask.
+    Error(Box<ItemFailure>),
     /// The pre-flight check found problems on the target before anything was written.
     Preflight(Vec<Issue>),
 }
@@ -47,6 +58,7 @@ pub enum Asked {
 /// The channel an open question waits on.
 enum Waiting {
     Conflict(Sender<ConflictAnswer>),
+    Error(Sender<ErrorAnswer>),
     Preflight(Sender<PreflightAnswer>),
 }
 
@@ -57,6 +69,9 @@ impl Waiting {
             Waiting::Conflict(answer) => {
                 let _ = answer.send(CANCEL_CONFLICT);
             }
+            Waiting::Error(answer) => {
+                let _ = answer.send(SKIP_ERROR);
+            }
             Waiting::Preflight(answer) => {
                 let _ = answer.send(PreflightAnswer::Cancel);
             }
@@ -65,6 +80,14 @@ impl Waiting {
 }
 
 const CANCEL_CONFLICT: ConflictAnswer = ConflictAnswer::once(ConflictAction::Cancel);
+
+/// The answer to an error question nobody can answer (the window is gone, or it closed without
+/// a choice): the item is left out, this once, and the job goes on, as it does under the
+/// default policy.
+pub const SKIP_ERROR: ErrorAnswer = ErrorAnswer {
+    action: ErrorAction::Skip,
+    apply_to_all: false,
+};
 
 /// The open questions, behind the resolver's lock.
 #[derive(Default)]
@@ -114,6 +137,16 @@ impl UiResolver {
         }
     }
 
+    /// Answers the error question `id`; `false` when it is not open (answered, released, or not
+    /// an error question).
+    pub fn answer_error(&self, id: QuestionId, answer: ErrorAnswer) -> bool {
+        let waiting = self.take(id, |waiting| matches!(waiting, Waiting::Error(_)));
+        match waiting {
+            Some(Waiting::Error(channel)) => channel.send(answer).is_ok(),
+            _ => false,
+        }
+    }
+
     /// Answers the pre-flight question `id`; `false` when it is not open.
     pub fn answer_preflight(&self, id: QuestionId, answer: PreflightAnswer) -> bool {
         let waiting = self.take(id, |waiting| matches!(waiting, Waiting::Preflight(_)));
@@ -124,8 +157,9 @@ impl UiResolver {
     }
 
     /// Answers every open question with its cancelling choice (`ConflictAction::Cancel`,
-    /// `PreflightAnswer::Cancel`), and every later question at once. For the app's end, after
-    /// `JobEngine::shutdown` (see the [module](self) documentation).
+    /// `PreflightAnswer::Cancel`, and [`SKIP_ERROR`] for an item that failed), and every later
+    /// question at once. For the app's end, after `JobEngine::shutdown` (see the
+    /// [module](self) documentation).
     pub fn release_all(&self) {
         let released: Vec<Waiting> = {
             let mut open = self.lock();
@@ -195,13 +229,16 @@ impl Resolver for UiResolver {
         )
     }
 
-    /// The demo submits every job with `ErrorPolicy::Continue`, so a job asks this only for a
-    /// policy it never uses: the item is skipped, as the policy it uses would.
-    fn error(&self, _job: JobId, _failure: &ItemFailure) -> ErrorAnswer {
-        ErrorAnswer {
-            action: ErrorAction::Skip,
-            apply_to_all: false,
-        }
+    /// Asks the window about the item that failed (XFER-09, 파일마다 묻기), and waits for its
+    /// answer. With nobody to answer, the item is left out and the job goes on
+    /// ([`SKIP_ERROR`]).
+    fn error(&self, job: JobId, failure: &ItemFailure) -> ErrorAnswer {
+        self.ask(
+            job,
+            Asked::Error(Box::new(failure.clone())),
+            Waiting::Error,
+            SKIP_ERROR,
+        )
     }
 
     fn preflight(&self, job: JobId, issues: &[Issue]) -> PreflightAnswer {
@@ -211,5 +248,123 @@ impl Resolver for UiResolver {
             Waiting::Preflight,
             PreflightAnswer::Cancel,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+
+    use rf_core::{ErrorKind, VPath};
+    use rf_jobs::Stage;
+
+    use super::*;
+
+    /// The longest a test waits for the other thread.
+    const WAIT: Duration = Duration::from_secs(20);
+
+    fn failure(name: &str) -> ItemFailure {
+        let path = |folder: &str| {
+            VPath::local(std::env::temp_dir().join(folder).join(name)).expect("a local path")
+        };
+        ItemFailure {
+            source: Some(path("src")),
+            target: Some(path("dst")),
+            stage: Stage::Write,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        }
+    }
+
+    /// A resolver whose questions come out of the receiver, as the window gets them.
+    fn resolver() -> (Arc<UiResolver>, Receiver<Question>) {
+        let (asked, questions) = mpsc::channel();
+        let asked = Mutex::new(asked);
+        let post = move |question| {
+            let asked = asked.lock().unwrap_or_else(PoisonError::into_inner);
+            asked.send(question).is_ok()
+        };
+        (Arc::new(UiResolver::new(post)), questions)
+    }
+
+    /// Asks `resolver` about `failure` for `job` on a thread of its own, as a job's worker
+    /// does; the answer comes out of the receiver.
+    fn ask_on_a_worker(
+        resolver: &Arc<UiResolver>,
+        job: JobId,
+        failure: ItemFailure,
+    ) -> Receiver<ErrorAnswer> {
+        let (answered, answer) = mpsc::channel();
+        let resolver = Arc::clone(resolver);
+        std::thread::spawn(move || {
+            let _ = answered.send(resolver.error(job, &failure));
+        });
+        answer
+    }
+
+    #[test]
+    fn an_error_question_reaches_the_window_and_its_answer_the_job() {
+        let (resolver, questions) = resolver();
+        for answer in [
+            ErrorAnswer {
+                action: ErrorAction::Retry,
+                apply_to_all: false,
+            },
+            ErrorAnswer {
+                action: ErrorAction::Skip,
+                apply_to_all: true,
+            },
+            ErrorAnswer {
+                action: ErrorAction::Abort,
+                apply_to_all: false,
+            },
+        ] {
+            let waiting = ask_on_a_worker(&resolver, JobId(7), failure("a.txt"));
+            let question = questions.recv_timeout(WAIT).expect("the job asks");
+            assert_eq!(question.job, JobId(7));
+            assert_eq!(question.asked, Asked::Error(Box::new(failure("a.txt"))));
+            // The worker waits: nothing has answered yet.
+            assert_eq!(resolver.open_questions(), 1);
+            assert!(waiting.try_recv().is_err());
+            // An answer of another kind is not for this question.
+            assert!(!resolver.answer_conflict(question.id, CANCEL_CONFLICT));
+            assert!(!resolver.answer_preflight(question.id, PreflightAnswer::Cancel));
+            assert_eq!(resolver.open_questions(), 1);
+            // The window's answer is the job's, as it is; a second one finds no question.
+            assert!(resolver.answer_error(question.id, answer));
+            assert_eq!(waiting.recv_timeout(WAIT), Ok(answer));
+            assert!(!resolver.answer_error(question.id, answer));
+            assert_eq!(resolver.open_questions(), 0);
+        }
+    }
+
+    #[test]
+    fn an_error_nobody_can_answer_leaves_its_item_out() {
+        // The app ends with the question open: it is released with the skip.
+        let (resolver, questions) = resolver();
+        let waiting = ask_on_a_worker(&resolver, JobId(1), failure("a.txt"));
+        let question = questions.recv_timeout(WAIT).expect("the job asks");
+        resolver.release_all();
+        assert_eq!(waiting.recv_timeout(WAIT), Ok(SKIP_ERROR));
+        assert!(!resolver.answer_error(question.id, SKIP_ERROR));
+        // From then on a question is answered at once, without reaching the window.
+        assert_eq!(resolver.error(JobId(1), &failure("b.txt")), SKIP_ERROR);
+        assert!(questions.try_recv().is_err());
+
+        // A window that cannot be reached (the event loop has ended) answers the same, and
+        // leaves no question open.
+        let unreachable = UiResolver::new(|_| false);
+        assert_eq!(unreachable.error(JobId(2), &failure("a.txt")), SKIP_ERROR);
+        assert_eq!(unreachable.open_questions(), 0);
+        assert_eq!(
+            SKIP_ERROR,
+            ErrorAnswer {
+                action: ErrorAction::Skip,
+                apply_to_all: false
+            }
+        );
     }
 }

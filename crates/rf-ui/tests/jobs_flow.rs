@@ -9,16 +9,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_jobs::{
-    Conflict, ConflictAction, ConflictAnswer, DeleteMethod, DeleteSpec, EngineConfig, ErrorPolicy,
-    JobEngine, JobEvent, JobId, JobSpec, Outcome, Resolver, TransferMode, TransferOptions,
-    TransferSpec,
+    Conflict, ConflictAction, ConflictAnswer, ConflictPolicy, DeleteMethod, DeleteSpec,
+    EngineConfig, ErrorPolicy, JobEngine, JobEvent, JobId, JobSpec, Outcome, Resolver,
+    TransferMode, TransferOptions, TransferSpec, UndoRecord,
 };
 use rf_platform::dnd::{DragMods, DropEffect, DroppedItems, Effects};
-use rf_ui::dialogs::{ConfirmPurpose, ConflictChoice, Modal};
+use rf_ui::dialogs::{ConfirmPurpose, ConflictChoice, ErrorChoice, Modal};
 use rf_ui::jobs::{JobEffect, Jobs};
 use rf_ui::loader::{LoadEvent, LoadTicket, Loader};
 use rf_ui::pane::LoadStatus;
 use rf_ui::resolver::{Asked, Question, UiResolver};
+use rf_ui::settings::OnError;
 use rf_ui::state::{AppState, DropSpot, Effect, LEFT, MOVE_TOAST_TIME, Paging, RIGHT};
 use rf_vfs::Vfs;
 use slint::platform::Key;
@@ -228,6 +229,63 @@ fn quit_with_a_question_open_leaves_the_job_for_recovery() {
     drop(app);
 
     // The next start offers it again: it was cut off, not cancelled by the user.
+    let (next, events, _questions) = jobs(&journal);
+    let deadline = Instant::now() + WAIT;
+    let recovered = loop {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .expect("the journal is read in time");
+        if let Ok(JobEvent::Recovered { jobs, .. }) = events.recv_timeout(left) {
+            break jobs;
+        }
+    };
+    assert_eq!(
+        recovered.iter().map(|job| job.id).collect::<Vec<_>>(),
+        [started.id]
+    );
+    assert!(next.close_down(WAIT));
+}
+
+#[test]
+fn quit_with_an_error_question_open_leaves_the_job_for_recovery() {
+    let dir = TempDir::new().expect("a temporary folder");
+    let journal = dir.path().join("journal");
+    let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::create_dir_all(&dst).expect("dst");
+    write(&src.join("b.txt"), "b");
+
+    // A copy that asks about a failed item (파일마다 묻기): its first source is not there.
+    let spec = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Copy,
+            &[local(&src.join("a.txt")), local(&src.join("b.txt"))],
+            &local(&dst),
+            TransferOptions {
+                errors: ErrorPolicy::Ask,
+                ..TransferOptions::default()
+            },
+        )
+        .expect("a transfer"),
+    );
+    let (app, events, questions) = jobs(&journal);
+    let started = app
+        .carry_out(JobEffect::Submit { spec, origin: None })
+        .expect("a job");
+    let question = questions.recv_timeout(WAIT).expect("the job asks");
+    assert_eq!(question.job, started.id);
+    assert!(matches!(question.asked, Asked::Error(_)), "{question:?}");
+
+    // The window closes with the question open: the engine shuts down first, then the question
+    // is released, with the skip of its item. The job, which the shutdown stopped, ends there
+    // as cut off: it neither goes on to copy the rest nor counts as ended for good.
+    assert!(!app.close_down(rf_ui::jobs::QUIT_TIMEOUT));
+    assert_eq!(app.resolver().open_questions(), 0);
+    assert_eq!(outcome_of(&events, started.id), Outcome::Cancelled);
+    assert!(!dst.join("b.txt").exists());
+    drop(app);
+
+    // The next start offers it again.
     let (next, events, _questions) = jobs(&journal);
     let deadline = Instant::now() + WAIT;
     let recovered = loop {
@@ -895,6 +953,366 @@ fn a_question_during_shutdown_waits_for_the_release_and_the_job_is_recovered() {
         [job]
     );
     assert!(next.close_down(WAIT));
+}
+
+/// Selects every row of pane `side` (Ctrl+A).
+fn select_all(state: &mut AppState, side: usize) {
+    state.activate(side);
+    state
+        .key(
+            rf_ui::keys::Command::SelectAll,
+            rf_ui::keys::Mods::NONE,
+            Paging::rows(10),
+            Instant::now(),
+        )
+        .expect("the window takes it");
+}
+
+/// The token of the toast among `seen` that says `text` and offers 자세히.
+fn details_toast(seen: &[Effect], text: &str) -> u64 {
+    seen.iter()
+        .find_map(|effect| match effect {
+            Effect::Toast {
+                token,
+                text: said,
+                action,
+                ..
+            } if said == text && action == "자세히" => Some(*token),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a toast saying {text}: {seen:?}"))
+}
+
+/// The paths each record of the undo history says its copy made, the oldest job first.
+fn copies_recorded(harness: &Harness) -> Vec<Vec<VPath>> {
+    harness
+        .jobs
+        .history()
+        .undo
+        .iter()
+        .map(|record| match record {
+            UndoRecord::Copied { created, .. } => {
+                created.iter().map(|item| item.path.clone()).collect()
+            }
+            other => panic!("the record of a copy: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn retrying_the_failures_redoes_only_what_failed() {
+    let (_dir, left, right) = folders();
+    write(&left.join("a.txt"), "a1");
+    write(&left.join("b.txt"), "b1");
+    write(&left.join("c.txt"), "c1");
+    // A folder has the name of `b.txt` at the target: no file replaces a folder.
+    std::fs::create_dir(right.join("b.txt")).expect("a folder in the way");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    select_all(&mut state, LEFT);
+    // `c.txt` goes after it was chosen: it is gone when the job comes to it.
+    std::fs::remove_file(left.join("c.txt")).expect("c.txt goes");
+
+    // The policy under which asking for a done item again would do the most harm.
+    let options = TransferOptions {
+        conflict: ConflictPolicy::Overwrite,
+        ..TransferOptions::default()
+    };
+    let effects = state.transfer(LEFT, TransferMode::Copy, &local(&right), options);
+    let seen = harness.run(&mut state, effects);
+    assert_eq!(read(&right.join("a.txt")), "a1");
+    assert!(right.join("b.txt").is_dir() && !right.join("c.txt").exists());
+    let token = details_toast(&seen, "항목 2개를 처리하지 못했습니다");
+    assert_eq!(state.toast_clicked(token), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items: {:?}", state.modal());
+    };
+    assert_eq!(failures.lines.len(), 2, "{failures:?}");
+    assert!(failures.retry.is_some(), "다시 시도 is offered");
+
+    // Before the retry, the copy the first run made is edited, and so is its source: a retry
+    // that copied `a.txt` again would write "a2" over the edit. The folder in the way goes, so
+    // `b.txt` can be copied now; `c.txt` is still gone.
+    write(&right.join("a.txt"), "edited");
+    write(&left.join("a.txt"), "a2");
+    std::fs::remove_dir(right.join("b.txt")).expect("the folder goes");
+    let effects = state.failures_retried();
+    assert_eq!(state.modal(), None);
+    let seen = harness.run(&mut state, effects);
+    // The failed item that can go now went; the done one was not touched.
+    assert_eq!(read(&right.join("b.txt")), "b1");
+    assert_eq!(read(&right.join("a.txt")), "edited");
+    assert!(!right.join("c.txt").exists());
+
+    // The item whose source is gone failed again, and stays listed, with a retry of its own.
+    let token = details_toast(&seen, "항목 1개를 처리하지 못했습니다");
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the item that failed again: {:?}", state.modal());
+    };
+    assert_eq!(
+        failures.lines,
+        [format!("{}: 찾을 수 없습니다", local(&left.join("c.txt")))]
+    );
+    let Some(JobSpec::Transfer(next)) = failures.retry.as_ref().map(|retry| &retry.spec) else {
+        panic!("the retry of the retry: {failures:?}");
+    };
+    assert_eq!((next.mode, next.options), (TransferMode::Copy, options));
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(next.items[0].source, local(&left.join("c.txt")));
+    assert_eq!(next.items[0].target, local(&right.join("c.txt")));
+    state.dialog_cancelled();
+
+    // The undo history keeps the original job and its retry apart: each took back by itself.
+    assert_eq!(
+        copies_recorded(&harness),
+        [
+            vec![local(&right.join("a.txt"))],
+            vec![local(&right.join("b.txt"))]
+        ]
+    );
+    let rows = state.history_view(&jiff::tz::TimeZone::UTC, SystemTime::now());
+    assert_eq!(rows.undo.len(), 2, "{rows:?}");
+}
+
+/// F7 then the picker's button: the copy of the chosen items of the left pane into the right
+/// pane's folder, as the window submits it (with the error policy of its settings).
+fn copy_by_picker(state: &mut AppState) -> Vec<Effect> {
+    key(state, Key::F7, false);
+    assert!(
+        matches!(state.modal(), Some(Modal::Pick(_))),
+        "{:?}",
+        state.modal()
+    );
+    state.pick_confirmed()
+}
+
+/// Waits for the question about the item of `harness`'s job that failed, and gives the path
+/// of that item.
+fn error_asked(harness: &mut Harness, state: &mut AppState) -> VPath {
+    harness.until(state, "the question about a failed item", |state| {
+        matches!(state.modal(), Some(Modal::Error(_)))
+    });
+    let Some(Modal::Error(question)) = state.modal() else {
+        unreachable!("`until` waited for it")
+    };
+    question.failure.source.clone().expect("the item's source")
+}
+
+#[test]
+fn ask_per_file_tries_again_and_remembers_a_skip_for_the_rest() {
+    let (_dir, left, right) = folders();
+    for name in ["ok.txt", "x.txt", "y.txt", "z.txt"] {
+        write(&left.join(name), name);
+    }
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    state.set_on_error(OnError::Ask);
+    select_all(&mut state, LEFT);
+    // Three of the four go after they were chosen.
+    for name in ["x.txt", "y.txt", "z.txt"] {
+        std::fs::remove_file(left.join(name)).expect("the source goes");
+    }
+    let effects = copy_by_picker(&mut state);
+    harness.carry_out(&mut state, effects);
+
+    // The job stops at the first one and asks. The file comes back, and 다시 시도 takes it.
+    assert_eq!(
+        error_asked(&mut harness, &mut state),
+        local(&left.join("x.txt"))
+    );
+    assert_eq!(harness.jobs.resolver().open_questions(), 1);
+    write(&left.join("x.txt"), "back");
+    let effects = state.error_answered(ErrorChoice::Retry, false);
+    assert_eq!(state.modal(), None);
+    harness.carry_out(&mut state, effects);
+
+    // It asks about the next one: 건너뛰기 with 남은 오류에도 같은 선택. The third one fails
+    // too, and nothing asks about it: the job ends by itself.
+    assert_eq!(
+        error_asked(&mut harness, &mut state),
+        local(&left.join("y.txt"))
+    );
+    let effects = state.error_answered(ErrorChoice::Skip, true);
+    let mut seen = harness.carry_out(&mut state, effects);
+    seen.extend(harness.until(&mut state, "the job to end", |state| {
+        state.active_jobs() == 0
+    }));
+    assert_eq!(state.modal(), None);
+    assert_eq!(harness.jobs.resolver().open_questions(), 0);
+    assert_eq!(read(&right.join("ok.txt")), "ok.txt");
+    assert_eq!(read(&right.join("x.txt")), "back");
+    assert!(!right.join("y.txt").exists() && !right.join("z.txt").exists());
+    // The two that were left out are listed at the end, as without the question, and can be
+    // tried again from there.
+    let token = details_toast(&seen, "항목 2개를 처리하지 못했습니다");
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items: {:?}", state.modal());
+    };
+    assert_eq!(
+        failures.lines,
+        ["y.txt", "z.txt"].map(|name| format!("{}: 찾을 수 없습니다", local(&left.join(name))))
+    );
+    // Its retry asks about a failure too: it keeps the policy of the job it comes from.
+    let Some(JobSpec::Transfer(retry)) = failures.retry.as_ref().map(|retry| &retry.spec) else {
+        panic!("a retry: {failures:?}");
+    };
+    assert_eq!(retry.options.errors, ErrorPolicy::Ask);
+}
+
+#[test]
+fn closing_the_error_window_skips_that_item_and_stopping_ends_the_job() {
+    let (_dir, left, right) = folders();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        write(&left.join(name), name);
+    }
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    state.set_on_error(OnError::Ask);
+    select_all(&mut state, LEFT);
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::remove_file(left.join(name)).expect("the source goes");
+    }
+    let effects = copy_by_picker(&mut state);
+    harness.carry_out(&mut state, effects);
+
+    // Esc on the first question leaves that item out, this once: the job goes on, and asks
+    // about the next one again.
+    assert_eq!(
+        error_asked(&mut harness, &mut state),
+        local(&left.join("a.txt"))
+    );
+    let effects = state.dialog_cancelled();
+    assert_eq!(state.modal(), None);
+    harness.carry_out(&mut state, effects);
+    assert_eq!(
+        error_asked(&mut harness, &mut state),
+        local(&left.join("b.txt"))
+    );
+    // 중단 stops the job there: nothing asks about `c.txt`, and `d.txt`, which would have
+    // copied, is not copied.
+    let effects = state.error_answered(ErrorChoice::Abort, false);
+    harness.carry_out(&mut state, effects);
+    harness.until(&mut state, "the job to end", |state| {
+        state.active_jobs() == 0
+    });
+    assert_eq!(state.modal(), None);
+    assert_eq!(harness.jobs.resolver().open_questions(), 0);
+    assert_eq!(std::fs::read_dir(&right).expect("right").count(), 0);
+    assert_eq!(read(&left.join("d.txt")), "d.txt");
+}
+
+#[test]
+fn without_the_setting_a_failed_item_asks_nothing() {
+    let (_dir, left, right) = folders();
+    write(&left.join("a.txt"), "a");
+    write(&left.join("b.txt"), "b");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    assert_eq!(state.on_error(), OnError::Continue);
+    select_all(&mut state, LEFT);
+    std::fs::remove_file(left.join("a.txt")).expect("the source goes");
+    let effects = copy_by_picker(&mut state);
+    // The job runs to its end with no question: the other item is copied, and the failed one
+    // is told of at the end.
+    let seen = harness.run(&mut state, effects);
+    assert_eq!(state.modal(), None);
+    assert_eq!(read(&right.join("b.txt")), "b");
+    details_toast(&seen, "항목 1개를 처리하지 못했습니다");
+}
+
+#[test]
+fn a_conditional_answer_for_the_rest_overwrites_only_what_meets_it() {
+    let (_dir, left, right) = folders();
+    let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    let set_modified = |path: &Path, secs: u64| {
+        rf_platform::set_times(&local(path), Some(at(secs)), None, None).expect("the time is set");
+    };
+    let modified = |path: &Path| {
+        let meta = std::fs::metadata(path).expect("the file is there");
+        meta.modified().expect("its time")
+    };
+    // `a.txt` and `c.txt` are newer in the left pane; `b.txt` is newer at the target.
+    for (name, source_secs, target_secs) in [
+        ("a.txt", 1_700_000_600, 1_700_000_000),
+        ("b.txt", 1_700_000_000, 1_700_000_600),
+        ("c.txt", 1_700_000_600, 1_700_000_000),
+    ] {
+        write(&left.join(name), "new");
+        write(&right.join(name), "old");
+        set_modified(&left.join(name), source_secs);
+        set_modified(&right.join(name), target_secs);
+    }
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    select_all(&mut state, LEFT);
+    // A copy that asks about a name that is taken.
+    let dest = local(&right);
+    let effects = state.transfer(LEFT, TransferMode::Copy, &dest, TransferOptions::default());
+    harness.carry_out(&mut state, effects);
+    harness.until(&mut state, "the first conflict", |state| {
+        matches!(state.modal(), Some(Modal::Conflict(_)))
+    });
+    let Some(Modal::Conflict(question)) = state.modal() else {
+        unreachable!("`until` waited for it")
+    };
+    // The window can say what the choice does to this file: `a.txt` would be replaced.
+    assert_eq!(question.conflict.target, local(&right.join("a.txt")));
+    assert!(question.would_overwrite(ConflictChoice::OverwriteIfNewer));
+    assert!(!question.would_overwrite(ConflictChoice::OverwriteIfSizeDiffers));
+
+    // 더 새 파일만 덮어쓰기 with 남은 충돌에도 같은 선택 적용: asked once, and each of the conflicts
+    // that follow is decided by the same condition.
+    let effects = state.conflict_answered(ConflictChoice::OverwriteIfNewer, true);
+    let mut seen = harness.carry_out(&mut state, effects);
+    seen.extend(harness.until(&mut state, "the job to end", |state| {
+        state.active_jobs() == 0
+    }));
+    assert_eq!(state.modal(), None);
+    assert_eq!(harness.jobs.resolver().open_questions(), 0);
+    assert_eq!(read(&right.join("a.txt")), "new");
+    assert_eq!(read(&right.join("c.txt")), "new");
+    // The file that is newer at the target is as it was: its content and its time.
+    assert_eq!(read(&right.join("b.txt")), "old");
+    assert_eq!(modified(&right.join("b.txt")), at(1_700_000_600));
+    assert!(
+        seen.iter().any(|effect| matches!(
+            effect,
+            Effect::Toast { text, .. } if text == "항목 3개 중 2개를 복사했습니다 · 1개 건너뜀"
+        )),
+        "{seen:?}"
+    );
+}
+
+/// 링크는 가리키는 것을 복사 (XFER-11): with the box on, the copy of a link is what it points
+/// at; without, it is a link. A symbolic link needs no rights on Unix; on Windows it does, so
+/// this runs there by hand only.
+#[cfg(unix)]
+#[test]
+fn a_copy_follows_a_link_only_with_its_box_on() {
+    for follow in [false, true] {
+        let (dir, left, right) = folders();
+        let outside = dir.path().join("outside.txt");
+        write(&outside, "pointed at");
+        std::os::unix::fs::symlink(&outside, left.join("link.txt")).expect("a link");
+        let mut harness = Harness::new();
+        let mut state = harness.open(&left, &right);
+        click(&mut state, LEFT, "link.txt");
+        key(&mut state, Key::F7, false);
+        if follow {
+            state.pick_follow_links_toggled();
+        }
+        let effects = state.pick_confirmed();
+        harness.run(&mut state, effects);
+        let copied = right.join("link.txt");
+        let is_link = std::fs::symlink_metadata(&copied)
+            .expect("the copy is there")
+            .file_type()
+            .is_symlink();
+        assert_eq!(is_link, !follow, "follow links: {follow}");
+        assert_eq!(read(&copied), "pointed at");
+    }
 }
 
 /// Where there is no trash (Linux), the undo of a copy trashes nothing: the copies stay until the

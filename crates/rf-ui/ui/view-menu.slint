@@ -2,7 +2,8 @@
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
 // the names, the sidebar and the preview panel, the layout and the commands between the panes,
 // the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
-// the icon views, the undo of a dragged move, and on Windows the menu of a right click). It is short enough for a 560px window,
+// the icon views, the undo of a dragged move, whether a copy or a move asks about each item that
+// fails, and on Windows the menu of a right click). It is short enough for a 560px window,
 // with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
 // their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
 // 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach every item:
@@ -34,6 +35,9 @@ export component ViewMenu inherits ContextMenuArea {
     // (Windows).
     in property <int> drag-default;
     in-out property <bool> move-undo-toast;
+    // A copy or a move asks about each item that fails (XFER-09), two-way with the window's;
+    // off, it carries on and lists the failed items at its end.
+    in-out property <bool> ask-on-error;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
     // What the bottom of 설정 offers for removing the app: 0 nothing, 1 "Racoon Finder 완전 삭제…"
@@ -811,7 +815,8 @@ export component ViewMenu inherits ContextMenuArea {
             }
         }
         // The settings the app keeps that have no place elsewhere: what a drop does without a
-        // modifier key (DND-02), the toast that offers to undo a dragged move (DND-07), and on
+        // modifier key (DND-02), the toast that offers to undo a dragged move (DND-07), whether
+        // a copy or a move asks about each item that fails (XFER-09), and on
         // Windows whether a right click shows Windows' own menu (OPS-05). The four defaults are
         // its own items, not a sub-menu of it: a third level would open over the 보기 menu in a
         // narrow window and hide this one. After 경로 복사 without a separator, for the room of
@@ -925,6 +930,19 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.move-undo-toast;
                 activated => {
                     root.command("toggle-move-undo-toast");
+                    root.done();
+                }
+            }
+            // XFER-09: off (the default), a copy or a move carries on past an item that fails
+            // and lists the failed ones at its end, where 다시 시도 tries them again; on, it
+            // stops at each one and asks. With the other switch of what a transfer does after
+            // it, and no separator before it, for the room of a 560px window.
+            MenuItem {
+                title: "복사·이동 오류는 파일마다 묻기";
+                checkable: true;
+                checked <=> root.ask-on-error;
+                activated => {
+                    root.command("toggle-ask-on-error");
                     root.done();
                 }
             }

@@ -1,14 +1,16 @@
 //! The file commands, the jobs, the toasts and the dialogs.
 
 use rf_jobs::{
-    DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobSpec, Outcome,
-    TransferMode, TransferOptions, TransferSpec, UndoRecord,
+    ConflictPolicy, DeleteMethod, DeleteSpec, ErrorAction, ErrorAnswer, ErrorPolicy, FailureReason,
+    ItemFailure, JobEvent, JobSpec, Outcome, Stage, SymlinkMode, TransferItem, TransferMode,
+    TransferOptions, TransferSpec, UndoRecord,
 };
 
 use super::*;
-use crate::dialogs::{ConfirmPurpose, ConflictChoice, Modal};
+use crate::dialogs::{ConfirmPurpose, ConflictChoice, ErrorChoice, Modal};
 use crate::jobs::{History, JobEffect, Started};
-use crate::resolver::{Asked, Question};
+use crate::resolver::{Asked, Question, SKIP_ERROR};
+use crate::settings::OnError;
 use crate::words::JobWork;
 
 /// The one job `effects` submit, and the pane that asked for it.
@@ -281,7 +283,7 @@ fn failure(source: VPath, kind: ErrorKind, reason: Option<FailureReason>) -> Ite
     ItemFailure {
         source: Some(source),
         target: None,
-        stage: rf_jobs::Stage::Delete,
+        stage: Stage::Delete,
         kind,
         message: String::new(),
         reason,
@@ -977,7 +979,7 @@ fn gone(path: VPath) -> ItemFailure {
     ItemFailure {
         source: Some(path),
         target: None,
-        stage: rf_jobs::Stage::Delete,
+        stage: Stage::Delete,
         kind: ErrorKind::Unsupported,
         message: String::new(),
         reason: Some(FailureReason::DeletedNotTrashed),
@@ -1374,5 +1376,302 @@ fn a_job_that_ends_reads_the_free_space_of_the_drives_it_touched() {
             .last()
             .map(String::as_str),
         Some("남은 공간 5 GB")
+    );
+}
+
+/// The failure of the copy of `name` from `a` to `b` at `stage`, as a transfer reports it: with
+/// both of its paths.
+fn copy_failure(name: &str, stage: Stage) -> ItemFailure {
+    ItemFailure {
+        source: Some(in_a(name)),
+        target: Some(folder("b").join(name).expect("a plain name")),
+        stage,
+        kind: ErrorKind::PermissionDenied,
+        message: String::new(),
+        reason: None,
+    }
+}
+
+/// The copy of `names` from `a` into `b` under `options`.
+fn copy_of(names: &[&str], options: TransferOptions) -> JobSpec {
+    let sources: Vec<VPath> = names.iter().map(|name| in_a(name)).collect();
+    JobSpec::Transfer(
+        TransferSpec::into_dir(TransferMode::Copy, &sources, &folder("b"), options)
+            .expect("a transfer"),
+    )
+}
+
+#[test]
+fn retrying_the_failures_redoes_only_what_failed() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt"), file("c.txt")], vec![]);
+    // A copy of three files under policies of its own: `a.txt` was copied, the two others
+    // failed.
+    let options = TransferOptions {
+        conflict: ConflictPolicy::Overwrite,
+        errors: ErrorPolicy::Continue,
+        symlinks: SymlinkMode::Follow,
+    };
+    let spec = copy_of(&["a.txt", "b.txt", "c.txt"], options);
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.done.files = 1;
+        report.failures.push(copy_failure("b.txt", Stage::Write));
+        report.failures.push(copy_failure("c.txt", Stage::Read));
+    });
+    let (token, text, _) = the_toast(&effects);
+    assert_eq!(text, "항목 2개를 처리하지 못했습니다");
+    assert_eq!(state.toast_clicked(token), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!(failures.lines.len(), 2);
+    assert!(failures.retry.is_some(), "다시 시도 is offered");
+
+    // 다시 시도 submits one new job: the same kind, to the same targets, under the same
+    // policies, of the two failed items alone. The file that was copied is not in it.
+    let (retry, origin) = the_submit(&state.failures_retried());
+    assert_eq!(origin, None);
+    let JobSpec::Transfer(transfer) = &retry else {
+        panic!("a transfer: {retry:?}");
+    };
+    assert_eq!(
+        (transfer.mode, transfer.options),
+        (TransferMode::Copy, options)
+    );
+    let item = |name: &str| TransferItem {
+        source: in_a(name),
+        target: folder("b").join(name).expect("a plain name"),
+    };
+    assert_eq!(transfer.items, [item("b.txt"), item("c.txt")]);
+    assert_eq!(state.modal(), None);
+    // The window is gone: a second press finds nothing to submit.
+    assert_eq!(state.failures_retried(), []);
+
+    // The same job's 자세히 in 최근 완료 lists its failures still, and offers no second retry.
+    assert_eq!(state.recent_details(0), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items again");
+    };
+    assert_eq!((failures.lines.len(), &failures.retry), (2, &None));
+    assert_eq!(state.failures_retried(), []);
+    state.dialog_cancelled();
+
+    // The retry is a job of its own: `b.txt` goes this time, `c.txt` (its source is gone)
+    // fails again and stays listed, with a retry of its own that holds it alone.
+    let effects = finish(&mut state, 2, &retry, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.done.files = 1;
+        let mut gone = copy_failure("c.txt", Stage::Plan);
+        gone.kind = ErrorKind::NotFound;
+        report.failures.push(gone);
+    });
+    let (token, text, _) = the_toast(&effects);
+    assert_eq!(text, "항목 1개를 처리하지 못했습니다");
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the item that failed again");
+    };
+    assert_eq!(
+        failures.lines,
+        [format!("{}: 찾을 수 없습니다", in_a("c.txt"))]
+    );
+    let (again, _) = the_submit(&state.failures_retried());
+    let JobSpec::Transfer(transfer) = again else {
+        panic!("a transfer");
+    };
+    assert_eq!(transfer.items, [item("c.txt")]);
+    assert_eq!(transfer.options, options);
+}
+
+#[test]
+fn only_the_failures_a_transfer_can_take_up_again_offer_a_retry() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let details = |state: &mut AppState| {
+        assert_eq!(state.recent_details(0), []);
+        let Some(Modal::Failures(failures)) = state.modal().cloned() else {
+            panic!("the failed items");
+        };
+        state.dialog_cancelled();
+        failures
+    };
+
+    // A move whose copy is in place but whose source stayed: asking for it again would meet
+    // the copy as a conflict, so there is nothing to try again.
+    let moving = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Move,
+            &[in_a("a.txt")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    finish(&mut state, 1, &moving, JobWork::Move, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report
+            .failures
+            .push(copy_failure("a.txt", Stage::DeleteSource));
+    });
+    assert_eq!(details(&mut state).retry, None);
+
+    // A warning is no failure: a copy that only warned has no retry.
+    let copy = copy_of(&["a.txt"], TransferOptions::default());
+    finish(&mut state, 2, &copy, JobWork::Copy, |report| {
+        report.warnings.push(copy_failure("a.txt", Stage::Metadata));
+    });
+    assert_eq!(details(&mut state).retry, None);
+
+    // A trash that failed is not tried again from the window: only copies and moves are.
+    let trash = delete(vec![in_a("a.txt")], DeleteMethod::Trash);
+    finish(&mut state, 3, &trash, JobWork::Trash, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report
+            .failures
+            .push(failure(in_a("a.txt"), ErrorKind::PermissionDenied, None));
+    });
+    assert_eq!(details(&mut state).retry, None);
+
+    // A copy that failed before its content was in place has one, from 최근 완료 too; once it
+    // is taken there, neither that line nor the job's toast offers it again.
+    let effects = finish(&mut state, 4, &copy, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(copy_failure("a.txt", Stage::Commit));
+    });
+    let (token, _, _) = the_toast(&effects);
+    assert_eq!(state.recent_details(0), []);
+    assert!(matches!(
+        the_submit(&state.failures_retried()).0,
+        JobSpec::Transfer(_)
+    ));
+    assert_eq!(details(&mut state).retry, None);
+    // Nor does the window of the job's toast, which was made before the retry.
+    assert_eq!(state.toast_clicked(token), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!((failures.lines.len(), &failures.retry), (1, &None));
+    assert_eq!(state.failures_retried(), []);
+}
+
+fn error_question(id: u64) -> Question {
+    Question {
+        id,
+        job: JobId(1),
+        asked: Asked::Error(Box::new(copy_failure("a.txt", Stage::Write))),
+    }
+}
+
+#[test]
+fn an_error_question_is_answered_for_its_item_or_for_the_rest() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    state.track(Started {
+        id: JobId(1),
+        spec: Some(Arc::new(copy_of(&["a.txt"], TransferOptions::default()))),
+        work: JobWork::Copy,
+        origin: Some(LEFT),
+        via_history: false,
+    });
+    let answered = |action, apply_to_all| ErrorAnswer {
+        action,
+        apply_to_all,
+    };
+    // The question shows with the item that failed and what its job does.
+    assert_eq!(state.question(error_question(4)), []);
+    let Some(Modal::Error(question)) = state.modal() else {
+        panic!("the error shows");
+    };
+    assert_eq!((question.id, question.work), (4, JobWork::Copy));
+    assert_eq!(question.failure.source, Some(in_a("a.txt")));
+    // 다시 시도 answers for this item, and the window closes.
+    assert_eq!(
+        state.error_answered(ErrorChoice::Retry, false),
+        [Effect::Job(JobEffect::AnswerError(
+            4,
+            answered(ErrorAction::Retry, false)
+        ))]
+    );
+    assert_eq!(state.modal(), None);
+    // An answer with no question open answers nothing.
+    assert_eq!(state.error_answered(ErrorChoice::Skip, false), []);
+
+    // 남은 오류에도 같은 선택 with 건너뛰기: the answer the engine remembers, so that it asks no
+    // more.
+    state.question(error_question(5));
+    assert_eq!(
+        state.error_answered(ErrorChoice::Skip, true),
+        [Effect::Job(JobEffect::AnswerError(
+            5,
+            answered(ErrorAction::Skip, true)
+        ))]
+    );
+    // With 다시 시도 it is not offered: nothing is answered, and the question stays.
+    state.question(error_question(6));
+    assert_eq!(state.error_answered(ErrorChoice::Retry, true), []);
+    assert!(matches!(state.modal(), Some(Modal::Error(question)) if question.id == 6));
+    assert_eq!(
+        state.error_answered(ErrorChoice::Abort, false),
+        [Effect::Job(JobEffect::AnswerError(
+            6,
+            answered(ErrorAction::Abort, false)
+        ))]
+    );
+
+    // Closing the window (Esc) leaves the item out, this once: the job goes on.
+    state.question(error_question(7));
+    assert_eq!(
+        state.dialog_cancelled(),
+        [Effect::Job(JobEffect::AnswerError(7, SKIP_ERROR))]
+    );
+    assert_eq!(SKIP_ERROR, answered(ErrorAction::Skip, false));
+    assert_eq!(state.modal(), None);
+
+    // It waits behind a window that is open, as a conflict does, and is left unanswered once
+    // the app ends (the release after the engine's shutdown answers it).
+    press(&mut state, "N", CTRL_SHIFT);
+    state.question(error_question(8));
+    assert!(matches!(state.modal(), Some(Modal::Name(_))));
+    state.dialog_cancelled();
+    assert!(matches!(state.modal(), Some(Modal::Error(question)) if question.id == 8));
+    state.request_close();
+    assert_eq!(state.confirm_accepted(), [Effect::Quit]);
+    assert_eq!(state.question(error_question(9)), []);
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
+fn the_error_setting_chooses_how_a_transfer_takes_a_failure() {
+    let mut state = ready(vec![file("a.txt")], vec![dir("백업")]);
+    // By default a transfer carries on, as the demos before did.
+    assert_eq!(state.on_error(), OnError::Continue);
+    let errors_of = |effects: &[Effect]| match the_submit(effects).0 {
+        JobSpec::Transfer(transfer) => transfer.options.errors,
+        other => panic!("a transfer: {other:?}"),
+    };
+    let copy_by_picker = |state: &mut AppState| {
+        state.click_row(LEFT, 0, false, false);
+        press(state, &special(Key::F7), NONE);
+        state.pick_confirmed()
+    };
+    assert_eq!(
+        errors_of(&copy_by_picker(&mut state)),
+        ErrorPolicy::Continue
+    );
+
+    // 파일마다 묻기: the transfers submitted from then on ask.
+    state.set_on_error(OnError::Ask);
+    assert_eq!(state.on_error(), OnError::Ask);
+    assert_eq!(errors_of(&copy_by_picker(&mut state)), ErrorPolicy::Ask);
+    // A delete has no such question: it carries on whatever the setting says.
+    let trashed = state.trash_checked(vec![in_a("a.txt")], true);
+    assert_eq!(
+        the_submit(&trashed).0,
+        delete(vec![in_a("a.txt")], DeleteMethod::Trash)
+    );
+
+    // Back to the default.
+    state.set_on_error(OnError::Continue);
+    assert_eq!(
+        errors_of(&copy_by_picker(&mut state)),
+        ErrorPolicy::Continue
     );
 }

@@ -32,6 +32,14 @@ pub enum ConflictAction {
     /// Replace the existing item. The executor still refuses this when either side is a
     /// folder, so a file and a folder never replace each other.
     Overwrite,
+    /// Replace the existing item only when the incoming one is newer, as
+    /// [`ConflictPolicy::OverwriteIfNewer`] decides for this pair; otherwise leave it, as
+    /// [`Skip`](Self::Skip) does. Refused like `Overwrite` when either side is a folder.
+    OverwriteIfNewer,
+    /// Replace the existing item only when the sizes differ, as
+    /// [`ConflictPolicy::OverwriteIfSizeDiffers`] decides for this pair; otherwise leave it.
+    /// Refused like `Overwrite` when either side is a folder.
+    OverwriteIfSizeDiffers,
     /// Leave the existing item as it is and do not transfer the incoming one; the job counts it
     /// as skipped, and a move keeps its source where it is.
     Skip,
@@ -45,7 +53,9 @@ pub enum ConflictAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConflictAnswer {
     pub action: ConflictAction,
-    /// Use `action` for every later conflict of the job without asking again.
+    /// Use `action` for every later conflict of the job without asking again. A conditional
+    /// action (`OverwriteIfNewer`, `OverwriteIfSizeDiffers`) is then decided anew for each
+    /// later pair: one that does not meet the condition is left as it is.
     pub apply_to_all: bool,
 }
 

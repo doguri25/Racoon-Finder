@@ -502,28 +502,30 @@ export component ChoiceRow inherits Rectangle {
 }
 
 // One choice of a few shown side by side (move or copy, what a name conflict does, how a
-// pattern is written).
+// pattern is written). `label` is its name for screen readers, where the text it shows is a
+// short form of it that the heading of its set completes.
 export component Segment inherits Rectangle {
     in property <string> text;
+    in property <string> label: root.text;
     in property <bool> chosen;
     callback clicked();
 
     height: 30px;
-    min-width: label.preferred-width + 24px;
+    min-width: shown.preferred-width + 24px;
     horizontal-stretch: 0;
     border-radius: 6px;
     background: root.chosen ? Theme.panel : touch.has-hover ? Theme.border : transparent;
     drop-shadow-blur: root.chosen ? 3px : 0px;
     drop-shadow-color: #00000029;
     accessible-role: radio-button;
-    accessible-label: root.text;
+    accessible-label: root.label;
     accessible-checkable: true;
     accessible-checked: root.chosen;
     accessible-action-default => {
         root.clicked();
     }
 
-    label := Text {
+    shown := Text {
         accessible-role: none;
         text: root.text;
         color: root.chosen ? Theme.text : Theme.muted;

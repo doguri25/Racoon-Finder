@@ -82,7 +82,7 @@ use slint::winit_030::winit::event::{
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
 
-use crate::dialogs::{ConflictChoice, Modal};
+use crate::dialogs::Modal;
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
 use crate::instance::RequestStop;
@@ -96,7 +96,7 @@ use crate::places::{self, Place};
 use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
-use crate::settings::{Saver, Session, Settings, ThemeChoice, Waiting};
+use crate::settings::{OnError, Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
@@ -1301,6 +1301,14 @@ fn connect_pick(window: &MainWindow) {
             });
         }
     });
+    window.on_pick_follow_links_toggled(|| {
+        with(|c| {
+            c.update(|state| {
+                state.pick_follow_links_toggled();
+                Vec::new()
+            });
+        });
+    });
     window.on_pick_filter_edited(|text| {
         with(|c| c.update(|state| state.pick_filter(&text)));
     });
@@ -1406,12 +1414,15 @@ fn connect_jobs(window: &MainWindow) {
         });
     });
     window.on_conflict_answered(|choice, apply_all| {
-        let choice = match choice {
-            0 => ConflictChoice::Overwrite,
-            1 => ConflictChoice::Skip,
-            _ => ConflictChoice::Rename,
-        };
+        let choice = ui_bridge::conflict_choice(choice);
         with(|c| c.update(|state| state.conflict_answered(choice, apply_all)));
+    });
+    window.on_error_answered(|choice, apply_all| {
+        let choice = ui_bridge::error_choice(choice);
+        with(|c| c.update(|state| state.error_answered(choice, apply_all)));
+    });
+    window.on_message_retried(|| {
+        with(|c| c.update(AppState::failures_retried));
     });
     window.on_preflight_answered(|choice| {
         with(|c| c.update(|state| state.preflight_answered(choice)));
@@ -1739,6 +1750,7 @@ impl Controller {
             let settings = self.settings.borrow();
             state.set_drag_default(settings.drag_default);
             state.set_move_undo_toast(settings.move_undo_toast);
+            state.set_on_error(settings.on_error);
             state.set_system_menu_first(settings.system_menu_first);
             state.set_show_thumbnails(settings.show_thumbnails);
             state.set_long_press(settings.long_press);
@@ -2747,6 +2759,15 @@ impl Controller {
                     Vec::new()
                 });
             }
+            "toggle-ask-on-error" => {
+                self.update(|state| {
+                    state.set_on_error(match state.on_error() {
+                        OnError::Continue => OnError::Ask,
+                        OnError::Ask => OnError::Continue,
+                    });
+                    Vec::new()
+                });
+            }
             "toggle-system-menu-first" => {
                 self.update(|state| {
                     state.set_system_menu_first(!state.system_menu_first());
@@ -3408,6 +3429,7 @@ impl Controller {
             window.set_show_extensions(state.show_extensions());
             window.set_drag_default(ui_bridge::drag_default_number(state.drag_default()));
             window.set_move_undo_toast(state.move_undo_toast());
+            window.set_ask_on_error(state.on_error() == OnError::Ask);
             window.set_show_thumbnails(state.show_thumbnails());
             window.set_long_press(state.long_press());
             window.set_long_press_ms(i32::from(state.long_press_ms()));
@@ -3766,6 +3788,9 @@ impl Controller {
             }
             Some(Modal::Conflict(question)) => {
                 window.set_conflict_view(ui_bridge::conflict_view(question, &tz));
+            }
+            Some(Modal::Error(question)) => {
+                window.set_error_view(ui_bridge::error_view(question));
             }
             Some(Modal::Preflight(question)) => {
                 window.set_preflight_view(ui_bridge::preflight_view(question));

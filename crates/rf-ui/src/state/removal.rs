@@ -176,6 +176,7 @@ impl AppState {
                 self.open(Modal::Failures(Failures {
                     title: words::removal_stopped_title().to_owned(),
                     lines,
+                    retry: None,
                 }));
                 Vec::new()
             }

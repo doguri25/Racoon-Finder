@@ -2,6 +2,12 @@
 //! commands, the dialogs over the main window, the job panel, the toasts, the trash check and
 //! the app's end. A child of [`state`](super), so these methods see the fields of
 //! [`AppState`].
+//!
+//! XFER-09: a copy or a move runs under the error policy of 보기 ▸ 설정
+//! ([`AppState::on_error`]): by default it carries on past an item that fails and its end
+//! lists the failed items, whose window offers 다시 시도 ([`AppState::failures_retried`]: a new
+//! job of the failed items alone, once for each job); with 파일마다 묻기 the job asks about each
+//! failed item ([`AppState::error_answered`]).
 
 use std::ffi::{OsStr, OsString};
 use std::slice;
@@ -12,17 +18,20 @@ use rf_core::{EntryKind, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
     JobSpec, LanePolicy, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
+    retry_spec,
 };
 
 use super::{AppState, Effect, MOVE_TOAST_TIME, RIGHT, ToastAction};
 use crate::dialogs::{
-    Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, Failures, Modal,
-    NameCheck, NameDialog, NamePurpose, PreflightQuestion, Recovery,
+    Confirm, ConfirmPurpose, ConflictChoice, ConflictQuestion, DeleteWhy, ErrorChoice,
+    ErrorQuestion, Failures, Modal, NameCheck, NameDialog, NamePurpose, PreflightQuestion,
+    Recovery, Retry,
 };
 use crate::jobs::{Ended, JobEffect, JobRow, Started};
 use crate::loader::LoadRequest;
 use crate::pane::{LoadStatus, Pane, Tab};
-use crate::resolver::{Asked, Question};
+use crate::resolver::{Asked, Question, SKIP_ERROR};
+use crate::settings::OnError;
 use crate::words::{self, JobWork};
 
 impl AppState {
@@ -44,6 +53,22 @@ impl AppState {
             Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(side))],
             Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
         }
+    }
+
+    /// What a copy or a move does about an item that fails (보기 ▸ 설정, XFER-09).
+    pub fn on_error(&self) -> OnError {
+        self.on_error
+    }
+
+    /// Sets what a copy or a move does about an item that fails. The jobs submitted from now on
+    /// follow it; one that runs keeps the policy it was submitted with.
+    pub fn set_on_error(&mut self, on_error: OnError) {
+        self.on_error = on_error;
+    }
+
+    /// The error policy the transfers this window submits run under ([`AppState::on_error`]).
+    pub(super) fn error_policy(&self) -> ErrorPolicy {
+        self.on_error.policy()
     }
 
     /// The window over the main window, if one shows.
@@ -147,6 +172,13 @@ impl AppState {
                 items_left: self.jobs.items_left(job),
                 work: self.jobs.work(job).unwrap_or(JobWork::Other),
             }),
+            Asked::Error(failure) => Modal::Error(ErrorQuestion {
+                id,
+                job,
+                failure,
+                items_left: self.jobs.items_left(job),
+                work: self.jobs.work(job).unwrap_or(JobWork::Other),
+            }),
             Asked::Preflight(issues) => Modal::Preflight(PreflightQuestion { id, job, issues }),
         };
         if self.removing {
@@ -210,13 +242,18 @@ impl AppState {
     }
 
     /// The window that shows was closed without its main button (Esc, Cancel, the close
-    /// button): a job question is answered with its cancelling choice, which stops the job.
+    /// button): a job question is answered with its cancelling choice, which stops the job;
+    /// the question about an item that failed with the skip of that item, after which the job
+    /// goes on (XFER-09).
     pub fn dialog_cancelled(&mut self) -> Vec<Effect> {
         let effects = match &self.modal {
             Some(Modal::Conflict(question)) => vec![Effect::Job(JobEffect::AnswerConflict(
                 question.id,
                 rf_jobs::ConflictAnswer::once(rf_jobs::ConflictAction::Cancel),
             ))],
+            Some(Modal::Error(question)) => {
+                vec![Effect::Job(JobEffect::AnswerError(question.id, SKIP_ERROR))]
+            }
             Some(Modal::Preflight(question)) => vec![Effect::Job(JobEffect::AnswerPreflight(
                 question.id,
                 rf_jobs::PreflightAnswer::Cancel,
@@ -274,6 +311,41 @@ impl AppState {
         let id = question.id;
         self.close();
         vec![Effect::Job(JobEffect::AnswerConflict(id, answer))]
+    }
+
+    /// The error window was answered with `choice`, for the later failures of the job too when
+    /// `apply_all` (남은 오류에도 같은 선택). A retry of every later failure is not offered, and
+    /// does nothing.
+    pub fn error_answered(&mut self, choice: ErrorChoice, apply_all: bool) -> Vec<Effect> {
+        let Some(Modal::Error(question)) = &self.modal else {
+            return Vec::new();
+        };
+        let Some(answer) = ErrorQuestion::answer(choice, apply_all) else {
+            return Vec::new();
+        };
+        let id = question.id;
+        self.close();
+        vec![Effect::Job(JobEffect::AnswerError(id, answer))]
+    }
+
+    /// 다시 시도 of the window of failed items (XFER-09): the job of the failed items alone is
+    /// submitted ([`Retry`]), the window closes, and the job they come from offers them no
+    /// second time (its retry tells of its own failures). Nothing for a window without the
+    /// button.
+    pub fn failures_retried(&mut self) -> Vec<Effect> {
+        let Some(Modal::Failures(failures)) = &self.modal else {
+            return Vec::new();
+        };
+        let Some(Retry { job, spec }) = failures.retry.clone() else {
+            return Vec::new();
+        };
+        self.close();
+        // Once for each job, whichever window of it the press came from.
+        if self.recent_jobs.retried(job) {
+            return Vec::new();
+        }
+        self.recent_jobs.mark_retried(job);
+        vec![submit(spec, None)]
     }
 
     /// The pre-flight window was answered with button `choice`
@@ -350,7 +422,13 @@ impl AppState {
                 vec![Effect::Notice(words::undo_order().to_owned())]
             }
             ToastAction::Undo(_) => vec![Effect::Job(JobEffect::Undo)],
-            ToastAction::Details(failures) => {
+            ToastAction::Details(mut failures) => {
+                // Its failed items may have been tried again from 최근 완료 since the toast
+                // showed: they are not offered a second time.
+                let retried = |retry: &Retry| self.recent_jobs.retried(retry.job);
+                if failures.retry.as_ref().is_some_and(retried) {
+                    failures.retry = None;
+                }
                 self.open(Modal::Failures(failures));
                 Vec::new()
             }
@@ -616,6 +694,7 @@ impl AppState {
                 .chain(&gone)
                 .map(|failure| words::failure_line(failure))
                 .collect(),
+            retry: retry_of(report),
         };
         self.toast(
             words::and_gone(words::items_failed(failures.len()), gone.len()),
@@ -900,6 +979,22 @@ impl AppState {
 /// The effect that submits `spec`, asked for in pane `origin`.
 pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
     Effect::Job(JobEffect::Submit { spec, origin })
+}
+
+/// What 다시 시도 of the window of the failed items of `report` submits (XFER-09): for a copy or
+/// a move, the transfer of the failed items alone, with the mode, the targets and the policies
+/// of the job they come from (`rf_jobs::retry_spec`). `None` for another kind of job, and for a
+/// transfer none of whose failures can be tried again (a source that could not be removed
+/// after its copy was in place).
+pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
+    if !matches!(report.spec, JobSpec::Transfer(_)) {
+        return None;
+    }
+    let spec = retry_spec(&report.spec, &report.failures)?;
+    Some(Retry {
+        job: report.id,
+        spec,
+    })
 }
 
 /// The warnings of `report` for the items the location deleted for good when they were to go

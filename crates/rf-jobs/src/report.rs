@@ -368,129 +368,10 @@ impl JobReport {
         self.done.bytes.saturating_mul(1_000) / millis
     }
 
-    /// The job to submit to try again what went wrong (XFER-09: review the errors at the end,
-    /// then retry); `None` when there is nothing to retry. Only failures count, never
-    /// warnings, and the retry keeps the original's mode, method and policies.
-    ///
-    /// - A transfer retries the items that failed before their content was in place, in the
-    ///   step `Plan`, `Preflight`, `Conflict`, `Read`, `Write` or `Commit`, and only when the
-    ///   failure names both a source and a target. A failure of `DeleteSource` is left out:
-    ///   its copy is in place already, and a retry would meet that copy as a conflict. The
-    ///   failure's own paths are used, so an item below a folder is retried by itself, to the
-    ///   path it was being written to (a numbered name included), and a move leaves the
-    ///   source folder it came from where it is.
-    /// - A delete retries the paths that failed, with the same method and error policy. A
-    ///   trash is never turned into a permanent delete here. The UI may offer one, and only
-    ///   for a failure of kind [`ErrorKind::Unsupported`] (the trash refused the item) and
-    ///   only after the user has said yes: it then sets `DeleteSpec::method` itself on the
-    ///   spec this gives. A folder a permanent delete kept because of a failure below it is
-    ///   not in the retry.
-    /// - A delete of copies retries each copy that failed, or that something below it failed
-    ///   in, with what its copy job left: it is looked at again before it goes. The retry is
-    ///   `DeleteCopiesSpec::resumed`, since this run may have deleted part of a copied folder.
-    /// - Links retry each link that failed, as asked.
-    /// - A rename, a create or an undo is retried as it was asked, when it has any failure.
-    ///
-    /// Items that a cancelled or aborted job never reached are not failures and are not in the
-    /// retry.
+    /// The job to submit to try again what went wrong in this job: [`retry_spec`] of its spec
+    /// and its failures. `None` when there is nothing to retry.
     pub fn retry_spec(&self) -> Option<JobSpec> {
-        match &self.spec {
-            JobSpec::Transfer(spec) => self.retry_transfer(spec),
-            JobSpec::Delete(spec) => self.retry_delete(spec),
-            JobSpec::DeleteCopies(spec) => self.retry_delete_copies(spec),
-            JobSpec::MakeLink { links } => self.retry_links(links),
-            JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
-                (!self.failures.is_empty()).then(|| self.spec.clone())
-            }
-        }
-    }
-
-    /// The links that failed: each one a failure names by its target (the source) and its place
-    /// (the target).
-    fn retry_links(&self, links: &[(VPath, VPath, LinkKind)]) -> Option<JobSpec> {
-        let failed = |target: &VPath, at: &VPath| {
-            self.failures.iter().any(|failure| {
-                failure.source.as_ref() == Some(target) && failure.target.as_ref() == Some(at)
-            })
-        };
-        let links: Vec<_> = links
-            .iter()
-            .filter(|(target, at, _)| failed(target, at))
-            .cloned()
-            .collect();
-        (!links.is_empty()).then_some(JobSpec::MakeLink { links })
-    }
-
-    fn retry_transfer(&self, spec: &TransferSpec) -> Option<JobSpec> {
-        let mut seen = HashSet::new();
-        let mut items = Vec::new();
-        for failure in &self.failures {
-            let before_the_copy_was_in_place = matches!(
-                failure.stage,
-                Stage::Plan
-                    | Stage::Preflight
-                    | Stage::Conflict
-                    | Stage::Read
-                    | Stage::Write
-                    | Stage::Commit
-            );
-            if !before_the_copy_was_in_place {
-                continue;
-            }
-            let (Some(source), Some(target)) = (&failure.source, &failure.target) else {
-                continue;
-            };
-            let item = TransferItem {
-                source: source.clone(),
-                target: target.clone(),
-            };
-            if seen.insert(item.clone()) {
-                items.push(item);
-            }
-        }
-        (!items.is_empty()).then_some(JobSpec::Transfer(TransferSpec {
-            mode: spec.mode,
-            items,
-            options: spec.options,
-        }))
-    }
-
-    fn retry_delete(&self, spec: &DeleteSpec) -> Option<JobSpec> {
-        let mut seen = HashSet::new();
-        let paths: Vec<VPath> = self
-            .failures
-            .iter()
-            .filter_map(|failure| failure.source.as_ref())
-            .filter(|path| seen.insert(*path))
-            .cloned()
-            .collect();
-        (!paths.is_empty()).then_some(JobSpec::Delete(DeleteSpec {
-            paths,
-            method: spec.method,
-            errors: spec.errors,
-        }))
-    }
-
-    fn retry_delete_copies(&self, spec: &DeleteCopiesSpec) -> Option<JobSpec> {
-        let copies: Vec<_> = spec
-            .copies
-            .iter()
-            .filter(|copy| {
-                self.failures.iter().any(|failure| {
-                    failure
-                        .source
-                        .as_ref()
-                        .is_some_and(|source| source.starts_with(&copy.made.path))
-                })
-            })
-            .cloned()
-            .collect();
-        // This run deleted what it could of them.
-        (!copies.is_empty()).then_some(JobSpec::DeleteCopies(DeleteCopiesSpec {
-            copies,
-            at: spec.at,
-            resumed: true,
-        }))
+        retry_spec(&self.spec, &self.failures)
     }
 
     /// Writes the log of the job (XFER-14, "save the log") to `out`, one record per line, in
@@ -554,6 +435,136 @@ impl JobReport {
         }
         out.flush()
     }
+}
+
+/// The job to submit to try again what went wrong in a job that was asked `original` and
+/// could not process `failed` (XFER-09: review the errors at the end, then retry); `None` when
+/// there is nothing to retry. Only failures count, never warnings, and the retry keeps the
+/// original's mode, method and policies. It holds the failed items alone: what the job did
+/// is not asked for again, so a retry neither copies a file a second time nor meets its own
+/// copy as a conflict.
+///
+/// `failed` is the job's failures (`JobReport::failures`), or the part of them to retry.
+///
+/// - A transfer retries the items that failed before their content was in place, in the
+///   step `Plan`, `Preflight`, `Conflict`, `Read`, `Write` or `Commit`, and only when the
+///   failure names both a source and a target. A failure of `DeleteSource` is left out:
+///   its copy is in place already, and a retry would meet that copy as a conflict. The
+///   failure's own paths are used, so an item below a folder is retried by itself, to the
+///   path it was being written to (a numbered name included), and a move leaves the
+///   source folder it came from where it is.
+/// - A delete retries the paths that failed, with the same method and error policy. A
+///   trash is never turned into a permanent delete here. The UI may offer one, and only
+///   for a failure of kind [`ErrorKind::Unsupported`] (the trash refused the item) and
+///   only after the user has said yes: it then sets `DeleteSpec::method` itself on the
+///   spec this gives. A folder a permanent delete kept because of a failure below it is
+///   not in the retry.
+/// - A delete of copies retries each copy that failed, or that something below it failed
+///   in, with what its copy job left: it is looked at again before it goes. The retry is
+///   `DeleteCopiesSpec::resumed`, since this run may have deleted part of a copied folder.
+/// - Links retry each link that failed, as asked.
+/// - A rename, a create or an undo is retried as it was asked, when it has any failure.
+///
+/// Items that a cancelled or aborted job never reached are not failures and are not in the
+/// retry. An item that fails again (its source is gone, say) is a failure of the retry, which
+/// can be retried in turn.
+pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
+    match original {
+        JobSpec::Transfer(spec) => retry_transfer(spec, failed),
+        JobSpec::Delete(spec) => retry_delete(spec, failed),
+        JobSpec::DeleteCopies(spec) => retry_delete_copies(spec, failed),
+        JobSpec::MakeLink { links } => retry_links(links, failed),
+        JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
+            (!failed.is_empty()).then(|| original.clone())
+        }
+    }
+}
+
+/// The links that failed: each one a failure names by its target (the source) and its place
+/// (the target).
+fn retry_links(links: &[(VPath, VPath, LinkKind)], failed: &[ItemFailure]) -> Option<JobSpec> {
+    let is_failed = |target: &VPath, at: &VPath| {
+        failed.iter().any(|failure| {
+            failure.source.as_ref() == Some(target) && failure.target.as_ref() == Some(at)
+        })
+    };
+    let links: Vec<_> = links
+        .iter()
+        .filter(|(target, at, _)| is_failed(target, at))
+        .cloned()
+        .collect();
+    (!links.is_empty()).then_some(JobSpec::MakeLink { links })
+}
+
+fn retry_transfer(spec: &TransferSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for failure in failed {
+        let before_the_copy_was_in_place = matches!(
+            failure.stage,
+            Stage::Plan
+                | Stage::Preflight
+                | Stage::Conflict
+                | Stage::Read
+                | Stage::Write
+                | Stage::Commit
+        );
+        if !before_the_copy_was_in_place {
+            continue;
+        }
+        let (Some(source), Some(target)) = (&failure.source, &failure.target) else {
+            continue;
+        };
+        let item = TransferItem {
+            source: source.clone(),
+            target: target.clone(),
+        };
+        if seen.insert(item.clone()) {
+            items.push(item);
+        }
+    }
+    (!items.is_empty()).then_some(JobSpec::Transfer(TransferSpec {
+        mode: spec.mode,
+        items,
+        options: spec.options,
+    }))
+}
+
+fn retry_delete(spec: &DeleteSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
+    let mut seen = HashSet::new();
+    let paths: Vec<VPath> = failed
+        .iter()
+        .filter_map(|failure| failure.source.as_ref())
+        .filter(|path| seen.insert(*path))
+        .cloned()
+        .collect();
+    (!paths.is_empty()).then_some(JobSpec::Delete(DeleteSpec {
+        paths,
+        method: spec.method,
+        errors: spec.errors,
+    }))
+}
+
+fn retry_delete_copies(spec: &DeleteCopiesSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
+    let copies: Vec<_> = spec
+        .copies
+        .iter()
+        .filter(|copy| {
+            failed.iter().any(|failure| {
+                failure
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.starts_with(&copy.made.path))
+            })
+        })
+        .cloned()
+        .collect();
+    // This run deleted what it could of them.
+    (!copies.is_empty()).then_some(JobSpec::DeleteCopies(DeleteCopiesSpec {
+        copies,
+        at: spec.at,
+        resumed: true,
+    }))
 }
 
 impl Issue {

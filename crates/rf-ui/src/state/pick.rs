@@ -18,7 +18,8 @@ use crate::dialogs::{Modal, NameDialog};
 use crate::loader::LoadRequest;
 use crate::pane::{Pane, Tab};
 use crate::pick::{
-    Looked, PickPurpose, PickRequest, Picker, RECENT_TARGETS, TargetFacts, quick_targets, validate,
+    Looked, PickPurpose, PickRequest, Picker, RECENT_TARGETS, TargetFacts, overwrites,
+    quick_targets, validate,
 };
 use crate::places::Place;
 use crate::tree::{NodeId, Tree};
@@ -135,8 +136,8 @@ impl AppState {
     /// Enter in the picker. After the filter changed, the first folder it finds that can take
     /// the items becomes the target, and the next Enter confirms; such a filter that finds
     /// none does nothing. Otherwise (no filter, or a target chosen since it changed) the
-    /// picker is confirmed, unless its policy overwrites: only the button confirms what
-    /// destroys files.
+    /// picker is confirmed, unless its policy overwrites (always, or by a condition): only the
+    /// button confirms what destroys files.
     pub fn pick_enter(&mut self) -> Vec<Effect> {
         let Some(picker) = self.active_picker() else {
             return Vec::new();
@@ -163,9 +164,10 @@ impl AppState {
         self.confirm_by_enter()
     }
 
-    /// The picker's confirm button: its transfer is submitted with the policy chosen, the
-    /// target goes first among the recent ones, and the picker closes (PICK-07). Nothing
-    /// while the target cannot take the items.
+    /// The picker's confirm button: its transfer is submitted with the policy chosen, links
+    /// followed or not (XFER-11) and the error policy of 보기 ▸ 설정 (XFER-09), the target goes
+    /// first among the recent ones, and the picker closes (PICK-07). Nothing while the target
+    /// cannot take the items.
     pub fn pick_confirmed(&mut self) -> Vec<Effect> {
         let Some(picker) = self.active_picker() else {
             return Vec::new();
@@ -195,10 +197,14 @@ impl AppState {
             return Vec::new();
         };
         let origin = picker.origin;
+        let errors = self.error_policy();
         self.close();
         self.remember_target(target);
         match spec {
-            Ok(spec) => vec![submit(JobSpec::Transfer(spec), Some(origin))],
+            Ok(mut spec) => {
+                spec.options.errors = errors;
+                vec![submit(JobSpec::Transfer(spec), Some(origin))]
+            }
             Err(error) => vec![Effect::Notice(words::cannot_transfer(error.kind()))],
         }
     }
@@ -220,6 +226,17 @@ impl AppState {
             .filter(|picker| !picker.without_options())
         {
             picker.policy = policy;
+        }
+    }
+
+    /// The picker's 링크는 가리키는 것을 복사 was clicked (XFER-11): it flips, where it is offered
+    /// (a copy of items).
+    pub fn pick_follow_links_toggled(&mut self) {
+        if let Some(picker) = self
+            .active_picker_mut()
+            .filter(|picker| picker.offers_follow_links())
+        {
+            picker.follow_links = !picker.follow_links;
         }
     }
 
@@ -489,10 +506,11 @@ impl AppState {
         effects
     }
 
-    /// Confirms the picker from the keyboard: not when its policy overwrites.
+    /// Confirms the picker from the keyboard: not when its policy overwrites, always or by a
+    /// condition ([`overwrites`]).
     fn confirm_by_enter(&mut self) -> Vec<Effect> {
         match self.active_picker() {
-            Some(picker) if picker.policy != ConflictPolicy::Overwrite => self.pick_confirmed(),
+            Some(picker) if !overwrites(picker.policy) => self.pick_confirmed(),
             _ => Vec::new(),
         }
     }

@@ -19,9 +19,9 @@ use rf_ui::state::{
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, FactRow, FolderMenuRow,
-    FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray, MainWindow,
-    MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
+    ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow,
+    FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray,
+    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
     PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
     StatusFit, Theme,
 };
@@ -2128,6 +2128,7 @@ fn the_failures_window_shows_whole_paths_wrapped() {
     let failures = rf_ui::dialogs::Failures {
         title: "처리하지 못한 항목".to_owned(),
         lines: vec![long.clone(), short.clone()],
+        retry: None,
     };
     window.set_message_view(ui_bridge::message_view(&failures));
     window.set_dialog(DialogKind::Message);
@@ -2333,6 +2334,13 @@ fn conflict_view() -> ConflictView {
         rename_hint: "‘설계안 (2).pdf’처럼 번호를 붙여 저장합니다".into(),
         warning_once: "있던 파일의 내용은 되살릴 수 없습니다.".into(),
         warning_all: "남은 충돌도 모두 덮어씁니다. 있던 파일의 내용은 되살릴 수 없습니다.".into(),
+        // The file that would come is newer, and larger.
+        newer_hint: "옮겨 올 파일이 더 최근이라 이 파일은 덮어씁니다".into(),
+        newer_overwrites: true,
+        size_hint: "크기가 달라 이 파일은 덮어씁니다".into(),
+        size_overwrites: true,
+        warning_rule_all:
+            "남은 충돌도 같은 조건으로 덮어씁니다. 덮어쓴 파일의 내용은 되살릴 수 없습니다.".into(),
         ..ConflictView::default()
     }
 }
@@ -2389,6 +2397,174 @@ fn the_conflict_dialog_keeps_both_unless_overwrite_is_clicked() {
             .accessible_checked(),
         Some(true)
     );
+}
+
+#[test]
+fn the_conflict_dialog_offers_the_two_conditional_overwrites() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_conflict_answered(move |choice, all| record.note(format!("answer {choice} {all}")));
+    window.set_conflict_view(conflict_view());
+    window.set_dialog(DialogKind::Conflict);
+    slint::platform::update_timers_and_animations();
+    let newer = "더 새 파일만 덮어쓰기";
+    let size = "크기가 다를 때만 덮어쓰기";
+    let row = |label: &str| labelled(&window, label, AccessibleRole::RadioButton).remove(0);
+    let shows = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+    let once = "있던 파일의 내용은 되살릴 수 없습니다.";
+    let rule_all = "남은 충돌도 같은 조건으로 덮어씁니다. 덮어쓴 파일의 내용은 되살릴 수 없습니다.";
+
+    // Both rows are there, below keeping both, which is still the one chosen; each says what
+    // it does to this file.
+    let rename = row("이름 바꿔 둘 다 두기");
+    assert_eq!(rename.accessible_checked(), Some(true));
+    for label in [newer, size] {
+        let conditional = row(label);
+        assert_eq!(conditional.accessible_enabled(), Some(true));
+        assert_eq!(conditional.accessible_checked(), Some(false));
+        assert!(conditional.absolute_position().y > rename.absolute_position().y);
+    }
+    assert_eq!(
+        row(newer).accessible_description().as_deref(),
+        Some("옮겨 올 파일이 더 최근이라 이 파일은 덮어씁니다")
+    );
+    assert!(!shows(once) && !shows(rule_all));
+
+    // ↓ goes to 더 새 파일만: it would replace this file, which it says, and Enter alone does
+    // not confirm it. The button, which says what it does to this file, does.
+    press(&window, Key::DownArrow);
+    assert_eq!(row(newer).accessible_checked(), Some(true));
+    assert!(shows(once));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    labelled(&window, "덮어쓰기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["answer 3 false"]);
+
+    // ↓ again, to 크기가 다를 때만, the last row (one more ↓ stays there). With "남은 충돌에도"
+    // it says that the rest is decided by the same condition, and answers for all.
+    press(&window, Key::DownArrow);
+    press(&window, Key::DownArrow);
+    assert_eq!(row(size).accessible_checked(), Some(true));
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert!(shows(rule_all) && !shows(once));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 4 true"]);
+
+    // A file that the condition leaves alone: the row says so, nothing is warned of, and the
+    // button goes on rather than overwrites. It is still the button's alone to confirm.
+    window.set_conflict_view(ConflictView {
+        serial: 2,
+        newer_hint: "옮겨 올 파일이 더 최근이 아니라 이 파일은 건너뜁니다".into(),
+        newer_overwrites: false,
+        ..conflict_view()
+    });
+    slint::platform::update_timers_and_animations();
+    row(newer).invoke_accessible_default_action();
+    assert!(!shows(once) && !shows(rule_all));
+    assert!(labelled(&window, "덮어쓰기", AccessibleRole::Button).is_empty());
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    labelled(&window, "계속", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["answer 3 false"]);
+
+    // A file and a folder: no overwrite of any kind is offered, and the keys stay between
+    // skipping and keeping both.
+    window.set_conflict_view(ConflictView {
+        serial: 3,
+        can_overwrite: false,
+        existing_dir: true,
+        newer_hint: "".into(),
+        size_hint: "".into(),
+        newer_overwrites: false,
+        size_overwrites: false,
+        ..conflict_view()
+    });
+    slint::platform::update_timers_and_animations();
+    for label in ["덮어쓰기", newer, size] {
+        assert_eq!(row(label).accessible_enabled(), Some(false), "{label}");
+    }
+    press(&window, Key::DownArrow);
+    assert_eq!(row("이름 바꿔 둘 다 두기").accessible_checked(), Some(true));
+    press(&window, Key::UpArrow);
+    press(&window, Key::UpArrow);
+    assert_eq!(row("건너뛰기").accessible_checked(), Some(true));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 1 false"]);
+}
+
+#[test]
+fn the_conflict_dialog_fits_its_five_choices_in_the_smallest_window() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    window.set_conflict_view(ConflictView {
+        items_left: "이 작업에 남은 항목 12개".into(),
+        ..conflict_view()
+    });
+    window.set_dialog(DialogKind::Conflict);
+    slint::platform::update_timers_and_animations();
+    // Overwriting for all the conflicts shows the longest warning.
+    labelled(&window, "덮어쓰기", AccessibleRole::RadioButton)[0]
+        .invoke_accessible_default_action();
+    labelled(
+        &window,
+        "남은 충돌에도 같은 선택 적용",
+        AccessibleRole::Checkbox,
+    )[0]
+    .invoke_accessible_default_action();
+    let bottom = |element: &ElementHandle| element.absolute_position().y + element.size().height;
+    let mut rows: Vec<ElementHandle> = [
+        "덮어쓰기",
+        "건너뛰기",
+        "이름 바꿔 둘 다 두기",
+        "더 새 파일만 덮어쓰기",
+        "크기가 다를 때만 덮어쓰기",
+    ]
+    .iter()
+    .map(|label| labelled(&window, label, AccessibleRole::RadioButton).remove(0))
+    .collect();
+    // The rows follow each other without lying over one another, in this order.
+    for pair in rows.windows(2) {
+        assert!(
+            bottom(&pair[0]) <= pair[1].absolute_position().y,
+            "{:?} over {:?}",
+            pair[0].accessible_label(),
+            pair[1].accessible_label()
+        );
+    }
+    // The warning lies below the last row, and the buttons below it, inside the window.
+    let last = rows.pop().expect("five rows");
+    let warning = labelled(
+        &window,
+        "남은 충돌도 모두 덮어씁니다. 있던 파일의 내용은 되살릴 수 없습니다.",
+        AccessibleRole::Text,
+    )
+    .remove(0);
+    assert!(bottom(&last) <= warning.absolute_position().y);
+    for label in ["작업 취소", "덮어쓰기"] {
+        let button = labelled(&window, label, AccessibleRole::Button).remove(0);
+        assert!(
+            bottom(&warning) <= button.absolute_position().y,
+            "the warning runs into {label}"
+        );
+        assert!(
+            bottom(&button) <= 560.0,
+            "{label} ends at {}",
+            bottom(&button)
+        );
+    }
+    let title = labelled(
+        &window,
+        "같은 이름의 파일이 이미 있습니다",
+        AccessibleRole::Text,
+    )
+    .remove(0);
+    assert!(title.absolute_position().y >= 0.0);
 }
 
 /// A picker of a move whose target, the other pane's folder, is chosen; the items' own folder
@@ -2529,6 +2705,97 @@ fn the_picker_takes_the_keys_until_it_closes() {
     window.set_dialog(DialogKind::None);
     chord(&window, &[&down]);
     assert_eq!(keys.borrow().as_slice(), [down]);
+}
+
+#[test]
+fn the_picker_offers_six_policies_and_a_copy_s_box_for_links() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_pick_policy(move |policy| record.note(format!("policy {policy}")));
+    let record = calls.clone();
+    window.on_pick_follow_links_toggled(move || record.note("links"));
+    let record = calls.clone();
+    window.on_pick_enter(move || record.note("enter"));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("cancelled"));
+    let links = "링크는 가리키는 것을 복사";
+    let boxes = |window: &MainWindow| labelled(window, links, AccessibleRole::Checkbox);
+
+    // A move: the six policies in their order, and no box for links.
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    slint::platform::update_timers_and_animations();
+    for (number, label) in [
+        "물어보기",
+        "덮어쓰기",
+        "건너뛰기",
+        "이름 바꾸기",
+        "더 새 파일만 덮어쓰기",
+        "크기가 다를 때만 덮어쓰기",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let segment = labelled(&window, label, AccessibleRole::RadioButton);
+        assert_eq!(segment.len(), 1, "{label}");
+        segment[0].invoke_accessible_default_action();
+        assert_eq!(calls.take(), [format!("policy {number}")], "{label}");
+    }
+    assert!(boxes(&window).is_empty());
+    // With the keys: Tab to 이름이 겹치면 (the filter, the path, 새 폴더, 이동/복사, then it), where →
+    // goes on to the policy after the one chosen, up to the last one, and ← back.
+    for _ in 0..4 {
+        press(&window, Key::Tab);
+    }
+    for (chosen, key, asked) in [
+        (3, Key::RightArrow, 4),
+        (4, Key::RightArrow, 5),
+        (5, Key::RightArrow, 5),
+        (5, Key::LeftArrow, 4),
+    ] {
+        window.set_pick_view(PickView {
+            policy: chosen,
+            ..pick_view()
+        });
+        press(&window, key);
+        assert_eq!(calls.take(), [format!("policy {asked}")]);
+    }
+    // A move has no box: Tab goes from the policies to 취소.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+
+    // A copy has the box, off; a click flips it (Rust does), and it shows as Rust says.
+    let copying = |follow_links: bool| PickView {
+        is_move: false,
+        can_follow_links: true,
+        follow_links,
+        ..pick_view()
+    };
+    window.set_pick_view(copying(false));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(boxes(&window).len(), 1);
+    assert_eq!(boxes(&window)[0].accessible_checked(), Some(false));
+    boxes(&window)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["links"]);
+    window.set_pick_view(copying(true));
+    assert_eq!(boxes(&window)[0].accessible_checked(), Some(true));
+    // With the keys: the click left them in the filter; Tab five times is the box, where Space
+    // flips it and Enter is the picker's Enter. Tab once more is 취소.
+    for _ in 0..5 {
+        press(&window, Key::Tab);
+    }
+    press(&window, Key::Space);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["links", "enter"]);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+    // And back with Shift+Tab.
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["links"]);
 }
 
 #[test]
@@ -4378,8 +4645,11 @@ fn the_failures_window_is_closed_and_scrolled_from_the_keys() {
         title: "처리하지 못한 항목".into(),
         lines: ModelRc::new(slint::VecModel::from(lines)),
         head: ModelRc::new(slint::VecModel::from(head)),
+        retry: false,
     });
     window.set_dialog(DialogKind::Message);
+    // Without something to try again, the window has its one button.
+    assert!(labelled(&window, "다시 시도", AccessibleRole::Button).is_empty());
     // Where the second line is: the list makes only the lines it shows, and drops the first one
     // once it is mostly out of view.
     let line_y = || {
@@ -4408,6 +4678,182 @@ fn the_failures_window_is_closed_and_scrolled_from_the_keys() {
     press(&window, Key::Return);
     press(&window, Key::Escape);
     assert_eq!(calls.take(), ["closed", "closed", "closed"]);
+}
+
+#[test]
+fn the_failures_window_tries_again_from_its_button_and_the_keys() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("closed"));
+    let record = calls.clone();
+    window.on_message_retried(move || record.note("retried"));
+    let lines: Vec<SharedString> = vec!["a.txt: 권한이 없습니다".into()];
+    let show = |retry: bool| {
+        window.set_message_view(MessageView {
+            title: "처리하지 못한 항목".into(),
+            lines: ModelRc::new(slint::VecModel::from(lines.clone())),
+            head: ModelRc::new(slint::VecModel::from(lines.clone())),
+            retry,
+        });
+        window.set_dialog(DialogKind::Message);
+        slint::platform::update_timers_and_animations();
+    };
+    show(true);
+    // 다시 시도 is beside 확인, and a click hands over to Rust.
+    let retry = labelled(&window, "다시 시도", AccessibleRole::Button);
+    assert_eq!(retry.len(), 1);
+    let ok = labelled(&window, "확인", AccessibleRole::Button).remove(0);
+    assert!(retry[0].absolute_position().x < ok.absolute_position().x);
+    retry[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["retried"]);
+    // Before Tab, Enter closes (as Esc does): it never tries again by itself.
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["closed"]);
+    // Tab: 확인, which Space presses. Tab again: 다시 시도, which Space and Enter press. Tab
+    // goes round to 확인, Shift+Tab back.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Return);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    press_shifted(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Escape);
+    assert_eq!(
+        calls.take(),
+        [
+            "closed", "retried", "retried", "closed", "retried", "closed"
+        ]
+    );
+    // A list with nothing to try again, in the same window: the button is gone, and the keys
+    // are on no button again.
+    show(false);
+    assert!(labelled(&window, "다시 시도", AccessibleRole::Button).is_empty());
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["closed"]);
+}
+
+fn error_view(serial: i32) -> ErrorView {
+    ErrorView {
+        serial,
+        title: "복사 중 오류가 났습니다".into(),
+        item: "/home/me/프로젝트/설계안.pdf".into(),
+        reason: "권한이 없습니다".into(),
+        items_left: "이 작업에 남은 항목 3개".into(),
+        retry_note: "다시 시도는 한 번에 한 항목만 할 수 있습니다".into(),
+    }
+}
+
+#[test]
+fn the_error_window_is_answered_from_its_buttons_and_the_keys() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_error_answered(move |choice, all| record.note(format!("answer {choice} {all}")));
+    let record = calls.clone();
+    window.on_dialog_cancelled(move || record.note("closed"));
+    let show = |serial: i32| {
+        window.set_error_view(error_view(serial));
+        window.set_dialog(DialogKind::Error);
+        slint::platform::update_timers_and_animations();
+    };
+    let button = |label: &str| labelled(&window, label, AccessibleRole::Button).remove(0);
+    let all = || labelled(&window, "남은 오류에도 같은 선택", AccessibleRole::Checkbox).remove(0);
+    let shows = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+
+    show(1);
+    // What failed and why, and the three answers with the box.
+    for text in [
+        "복사 중 오류가 났습니다",
+        "/home/me/프로젝트/설계안.pdf",
+        "권한이 없습니다",
+        "이 작업에 남은 항목 3개",
+    ] {
+        assert!(shows(text), "{text}");
+    }
+    assert_eq!(all().accessible_checked(), Some(false));
+    // The buttons answer: 0 다시 시도, 1 건너뛰기, 2 중단.
+    button("다시 시도").invoke_accessible_default_action();
+    button("건너뛰기").invoke_accessible_default_action();
+    button("중단").invoke_accessible_default_action();
+    assert_eq!(
+        calls.take(),
+        ["answer 0 false", "answer 1 false", "answer 2 false"]
+    );
+    // The keys start on 다시 시도: Enter and Space press it. Esc closes the window, which Rust
+    // takes as leaving the item out.
+    press(&window, Key::Return);
+    press(&window, Key::Space);
+    press(&window, Key::Escape);
+    assert_eq!(calls.take(), ["answer 0 false", "answer 0 false", "closed"]);
+    // Tab: the box (Enter does nothing there), 중단, 건너뛰기, and round to 다시 시도.
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(
+        calls.take(),
+        ["answer 2 false", "answer 1 false", "answer 0 false"]
+    );
+
+    // The box, flipped with Space: 다시 시도 goes off and says why, Tab passes over it, and
+    // the other two answer for the rest too.
+    press(&window, Key::Tab);
+    press(&window, Key::Space);
+    assert_eq!(all().accessible_checked(), Some(true));
+    assert_eq!(button("다시 시도").accessible_enabled(), Some(false));
+    assert!(shows("다시 시도는 한 번에 한 항목만 할 수 있습니다"));
+    button("다시 시도").invoke_accessible_default_action();
+    assert_eq!(calls.take(), Vec::<String>::new());
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 1 true"]);
+    press(&window, Key::Tab);
+    press(&window, Key::Tab);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 2 true"]);
+
+    // A click on the box while the keys are on 다시 시도 moves them to 건너뛰기.
+    show(2);
+    assert_eq!(all().accessible_checked(), Some(false));
+    all().invoke_accessible_default_action();
+    assert_eq!(all().accessible_checked(), Some(true));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 1 true"]);
+
+    // A new question starts with the box off and the keys on 다시 시도.
+    show(3);
+    assert_eq!(all().accessible_checked(), Some(false));
+    assert_eq!(button("다시 시도").accessible_enabled(), Some(true));
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["answer 0 false"]);
+    // A key held down answers once: the window comes back for an item that fails again, and
+    // the repeats of the key must not try it again and again.
+    let enter = SharedString::from(char::from(Key::Return));
+    let send = |event| window.window().dispatch_event(event);
+    send(WindowEvent::KeyPressed {
+        text: enter.clone(),
+    });
+    for _ in 0..3 {
+        send(WindowEvent::KeyPressRepeated {
+            text: enter.clone(),
+        });
+    }
+    send(WindowEvent::KeyReleased { text: enter });
+    assert_eq!(calls.take(), ["answer 0 false"]);
 }
 
 #[test]
@@ -5112,6 +5558,72 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     assert!(end <= 560.0, "설정 ends at {end}px of 560");
     choose_item(&window, windows_menu);
     assert_eq!(calls.take(), ["toggle-system-menu-first"]);
+}
+
+#[test]
+fn the_view_menu_s_settings_choose_whether_a_transfer_asks_about_each_failure() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open = || {
+        button.invoke_accessible_default_action();
+        choose_item(&window, "설정");
+    };
+    let close = || {
+        for _ in 0..2 {
+            press(&window, Key::Escape);
+        }
+    };
+    let ask = "복사·이동 오류는 파일마다 묻기";
+    let middle_y =
+        |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
+    let marked = || {
+        let item = ElementHandle::find_by_accessible_label(&window, ask)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {ask}"));
+        ElementHandle::find_by_accessible_label(&window, "✓")
+            .any(|mark| (middle_y(&mark) - middle_y(&item)).abs() < 4.0)
+    };
+    // Off at first (XFER-09: a transfer carries on and lists its failures at the end): the item
+    // has no mark, below the switch of the undo toast, and says its command.
+    open();
+    assert!(!marked());
+    let item = ElementHandle::find_by_accessible_label(&window, ask)
+        .next()
+        .expect("the item");
+    let above = ElementHandle::find_by_accessible_label(&window, "끌어서 옮긴 뒤 되돌리기 알림")
+        .next()
+        .expect("the switch of the undo toast");
+    assert!(item.absolute_position().y > above.absolute_position().y);
+    choose_item(&window, ask);
+    assert_eq!(calls.take(), ["toggle-ask-on-error"]);
+    // The mark is Rust's to set: on while a transfer asks, off again when it does not.
+    window.set_ask_on_error(true);
+    open();
+    assert!(marked());
+    close();
+    window.set_ask_on_error(false);
+    open();
+    assert!(!marked());
+    close();
+    // The keys reach it (KEY-02): F10 opens the menu, as its test shows; here the item is in
+    // the sub-menu the keys walk, inside the smallest window with every other item there is.
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    window.set_system_menu_offered(true);
+    window.set_removal_offer(2);
+    open();
+    let item = ElementHandle::find_by_accessible_label(&window, ask)
+        .next()
+        .expect("the item");
+    let end = item.absolute_position().y + item.size().height;
+    assert!(end <= 560.0, "the item ends at {end}px of 560");
+    let last = ElementHandle::find_by_accessible_label(&window, "제거 프로그램 열기")
+        .next()
+        .expect("the last item");
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "설정 ends at {end}px of 560");
 }
 
 #[test]

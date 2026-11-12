@@ -17,9 +17,10 @@ use rf_jobs::testkit::{
     Fault, FaultyProvider, ScriptedResolver, temp_files, tree, wait_finished, wait_for,
 };
 use rf_jobs::{
-    CreateKind, DefaultLanes, DeleteMethod, DeleteSpec, EngineConfig, ErrorAction, ErrorAnswer,
-    ErrorPolicy, IncompleteJob, JobEngine, JobEvent, JobId, JobSnapshot, JobSpec, JobState, LaneId,
-    LanePolicy, NonInteractive, Outcome, Stage, TransferMode, TransferOptions,
+    ConflictPolicy, CreateKind, DefaultLanes, DeleteMethod, DeleteSpec, EngineConfig, ErrorAction,
+    ErrorAnswer, ErrorPolicy, IncompleteJob, JobEngine, JobEvent, JobId, JobSnapshot, JobSpec,
+    JobState, LaneId, LanePolicy, NonInteractive, Outcome, Stage, TransferItem, TransferMode,
+    TransferOptions, UndoRecord, retry_spec,
 };
 use rf_vfs::Vfs;
 
@@ -524,4 +525,149 @@ fn wait_for_looks_at_every_event_that_is_ready_past_its_deadline() {
         matches!(ev, JobEvent::Queue { .. })
     });
     assert!(matches!(found, JobEvent::Queue { .. }));
+}
+
+/// The items of `spec`, a transfer, as `(source, target)`.
+fn items_of(spec: &JobSpec) -> Vec<TransferItem> {
+    match spec {
+        JobSpec::Transfer(transfer) => transfer.items.clone(),
+        other => panic!("a transfer: {other:?}"),
+    }
+}
+
+/// The paths each record of the engine's undo list says its copy made, the oldest job first.
+fn copies_recorded(e: &JobEngine) -> Vec<Vec<rf_core::VPath>> {
+    e.undo_history()
+        .iter()
+        .map(|record| match record {
+            UndoRecord::Copied { created, .. } => {
+                created.iter().map(|item| item.path.clone()).collect()
+            }
+            other => panic!("the record of a copy: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn retrying_the_failures_redoes_only_what_failed() {
+    let f = fx();
+    let item = |name: &str| TransferItem {
+        source: v(f.src.join(name)),
+        target: v(f.dst.join(name)),
+    };
+    // `a` and `c` are there; `b` and `d` are not.
+    std::fs::write(f.src.join("a"), "a1").unwrap();
+    std::fs::write(f.src.join("c"), "c1").unwrap();
+    // The policy that would do the most harm if a retry asked for a done item again.
+    let options = TransferOptions {
+        conflict: ConflictPolicy::Overwrite,
+        ..TransferOptions::default()
+    };
+    let sources: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| f.src.join(n)).collect();
+    let original = spec(TransferMode::Copy, &sources, &f.dst, options);
+    let (e, rx) = engine(Vfs::with_local());
+    let first = wait_finished(&rx, e.submit(original.clone()), WAIT);
+    assert_eq!(
+        (first.outcome, first.done.files, first.failures.len()),
+        (Outcome::CompletedWithErrors, 2, 2)
+    );
+
+    // The retry asks for the failed items alone, as the original asked for them: the same kind
+    // of job, the same targets, the same policies.
+    let retry = retry_spec(&original, &first.failures).expect("something to retry");
+    assert_eq!(items_of(&retry), [item("b"), item("d")]);
+    let JobSpec::Transfer(asked) = &retry else {
+        unreachable!("`items_of` took a transfer")
+    };
+    assert_eq!((asked.mode, asked.options), (TransferMode::Copy, options));
+    assert_eq!(first.retry_spec(), Some(retry.clone()));
+
+    // What the first run copied changes meanwhile, at the source and at the target. A retry
+    // that asked for those items again would write over both under this policy.
+    std::fs::write(f.src.join("a"), "a2").unwrap();
+    set_mtime(&f.dst.join("a"), 1_000_000_000);
+    std::fs::write(f.dst.join("c"), "edited").unwrap();
+    // `b` has come since; `d` is still not there.
+    std::fs::write(f.src.join("b"), "b1").unwrap();
+    let second = wait_finished(&rx, e.submit(retry), WAIT);
+    assert_eq!(
+        (second.outcome, second.done.files, second.planned.files),
+        (Outcome::CompletedWithErrors, 1, 1)
+    );
+    assert_eq!(std::fs::read_to_string(f.dst.join("b")).unwrap(), "b1");
+    // The done items were not copied a second time: content and time are as they were left.
+    assert_eq!(std::fs::read_to_string(f.dst.join("a")).unwrap(), "a1");
+    assert_eq!(mtime(&f.dst.join("a")), at(1_000_000_000));
+    assert_eq!(std::fs::read_to_string(f.dst.join("c")).unwrap(), "edited");
+    // The item whose source is gone fails again, and is what the next retry holds.
+    assert_eq!(
+        second
+            .failures
+            .iter()
+            .map(|failure| failure.source.clone())
+            .collect::<Vec<_>>(),
+        [Some(v(f.src.join("d")))]
+    );
+    let again = retry_spec(&second.spec, &second.failures).expect("`d` is still to do");
+    assert_eq!(items_of(&again), [item("d")]);
+    assert!(!f.dst.join("d").exists());
+
+    // The undo history keeps the two jobs apart: what the original made, then what the retry
+    // made. Undoing the retry would take `b` alone.
+    assert_eq!(
+        copies_recorded(&e),
+        [
+            vec![v(f.dst.join("a")), v(f.dst.join("c"))],
+            vec![v(f.dst.join("b"))]
+        ]
+    );
+    assert!(e.shutdown(WAIT));
+}
+
+#[test]
+fn a_retried_move_moves_only_what_stayed_behind() {
+    let f = fx();
+    // `a` moves; `b` cannot: a folder has its name at the target, which no file replaces.
+    std::fs::write(f.src.join("a"), "a").unwrap();
+    std::fs::write(f.src.join("b"), "b").unwrap();
+    std::fs::create_dir(f.dst.join("b")).unwrap();
+    let options = TransferOptions {
+        conflict: ConflictPolicy::Overwrite,
+        ..TransferOptions::default()
+    };
+    let original = spec(
+        TransferMode::Move,
+        &[f.src.join("a"), f.src.join("b")],
+        &f.dst,
+        options,
+    );
+    let (e, rx) = engine(Vfs::with_local());
+    let first = wait_finished(&rx, e.submit(original.clone()), WAIT);
+    assert_eq!(first.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(first.failures[0].stage, Stage::Conflict);
+    assert!(!f.src.join("a").exists() && f.src.join("b").exists());
+
+    // The folder in the way goes; the retry holds `b` alone, so `a`, which is no longer at its
+    // source, is not asked for (and does not fail) a second time.
+    std::fs::remove_dir(f.dst.join("b")).unwrap();
+    let retry = retry_spec(&original, &first.failures).expect("something to retry");
+    assert_eq!(
+        items_of(&retry),
+        [TransferItem {
+            source: v(f.src.join("b")),
+            target: v(f.dst.join("b")),
+        }]
+    );
+    let second = wait_finished(&rx, e.submit(retry), WAIT);
+    assert_eq!(
+        (second.outcome, second.failures.len()),
+        (Outcome::Completed, 0)
+    );
+    assert_eq!(std::fs::read_to_string(f.dst.join("a")).unwrap(), "a");
+    assert_eq!(std::fs::read_to_string(f.dst.join("b")).unwrap(), "b");
+    assert!(!f.src.join("b").exists());
+    assert_eq!(retry_spec(&second.spec, &second.failures), None);
+    // Each job left its own record: undoing the retry moves `b` back, and `a` stays moved.
+    assert_eq!(e.undo_history().len(), 2);
+    assert!(e.shutdown(WAIT));
 }

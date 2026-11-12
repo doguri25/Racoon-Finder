@@ -12,7 +12,8 @@
 //!
 //! [`Picker`] is the picker's state while it shows: the request, the offered folders, the
 //! chosen one and what a worker found about it ([`TargetFacts`]), the path typed, the filter
-//! of its folder tree and the conflict policy. [`AppState`](crate::state::AppState) keeps it
+//! of its folder tree, the conflict policy (one of [`POLICIES`], XFER-06) and whether a copy
+//! follows links (XFER-11). [`AppState`](crate::state::AppState) keeps it
 //! in its queue of windows and does the rest: the picker's folder tree, the workers and the
 //! job.
 
@@ -20,7 +21,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 
 use rf_core::{ErrorKind, VPath};
-use rf_jobs::{ConflictPolicy, LinkKind, TransferMode, TransferOptions, TransferSpec};
+use rf_jobs::{ConflictPolicy, LinkKind, SymlinkMode, TransferMode, TransferOptions, TransferSpec};
 
 use crate::format::{folder_label, short_path};
 use crate::jobs::SharedReport;
@@ -35,14 +36,28 @@ pub const RECENT_TARGETS: usize = 10;
 /// left out, so that its end stays in view.
 const NOTE_CHARS: usize = 56;
 
-/// The conflict policies the picker offers, in the order of its buttons: 물어보기, 덮어쓰기,
-/// 건너뛰기, 이름 바꾸기.
-pub const POLICIES: [ConflictPolicy; 4] = [
+/// The conflict policies the picker offers (XFER-06), in the order of its buttons: 물어보기,
+/// 덮어쓰기, 건너뛰기, 이름 바꾸기, 더 새 파일만 덮어쓰기, 크기가 다를 때만 덮어쓰기. The two
+/// conditional ones come last, as in the conflict window, whose choices they also are.
+pub const POLICIES: [ConflictPolicy; 6] = [
     ConflictPolicy::Ask,
     ConflictPolicy::Overwrite,
     ConflictPolicy::Skip,
     ConflictPolicy::AutoRename,
+    ConflictPolicy::OverwriteIfNewer,
+    ConflictPolicy::OverwriteIfSizeDiffers,
 ];
+
+/// Whether `policy` may replace a file that is there, always or when its condition is met: the
+/// picker then says so, and only its button confirms it, never Enter alone.
+pub fn overwrites(policy: ConflictPolicy) -> bool {
+    matches!(
+        policy,
+        ConflictPolicy::Overwrite
+            | ConflictPolicy::OverwriteIfNewer
+            | ConflictPolicy::OverwriteIfSizeDiffers
+    )
+}
 
 /// What the picker is asked to find a folder for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -305,6 +320,10 @@ pub enum PickPurpose {
 
 /// The picker while it shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact of the picker, not states of one machine"
+)]
 pub struct Picker {
     pub purpose: PickPurpose,
     pub request: PickRequest,
@@ -338,6 +357,10 @@ pub struct Picker {
     /// finds that can be chosen, rather than confirming.
     pub filter_fresh: bool,
     pub policy: ConflictPolicy,
+    /// 링크는 가리키는 것을 복사 (XFER-11): a copy copies what a link points at rather than the
+    /// link itself. Off at first. A move never follows links, whatever this says: its box does
+    /// not show then ([`Picker::offers_follow_links`]).
+    pub follow_links: bool,
     /// The folder 새 폴더 asked for, by its folder and its name: it becomes the target once
     /// its job has made it.
     pub making: Option<(VPath, OsString)>,
@@ -382,6 +405,7 @@ impl Picker {
             filter: String::new(),
             filter_fresh: false,
             policy: ConflictPolicy::Ask,
+            follow_links: false,
             making: None,
         }
     }
@@ -426,6 +450,21 @@ impl Picker {
     /// and a link is numbered when its name is taken.
     pub fn without_options(&self) -> bool {
         self.for_a_log() || self.for_links()
+    }
+
+    /// Whether 링크는 가리키는 것을 복사 shows: for a copy of items alone. A move takes the
+    /// links as they are, and a log or a link has no such choice.
+    pub fn offers_follow_links(&self) -> bool {
+        !self.without_options() && self.request.mode == TransferMode::Copy
+    }
+
+    /// How the transfer treats links: it follows them only as a copy whose box is on.
+    pub fn symlinks(&self) -> SymlinkMode {
+        if self.offers_follow_links() && self.follow_links {
+            SymlinkMode::Follow
+        } else {
+            SymlinkMode::CopyLink
+        }
     }
 
     /// The quick targets in the order they show, every head's in turn.
@@ -549,7 +588,9 @@ impl Picker {
         Looked::Facts
     }
 
-    /// The transfer the confirm button submits; `None` without a target.
+    /// The transfer the confirm button submits, with the conflict policy chosen and links
+    /// followed or not ([`Picker::symlinks`]); `None` without a target. Its error policy is the
+    /// default one: the state sets the one of 보기 ▸ 설정 as it submits the job.
     pub fn spec(&self) -> Option<rf_core::Result<TransferSpec>> {
         let target = self.target.as_ref()?;
         Some(TransferSpec::into_dir(
@@ -558,6 +599,7 @@ impl Picker {
             target,
             TransferOptions {
                 conflict: self.policy,
+                symlinks: self.symlinks(),
                 ..TransferOptions::default()
             },
         ))
@@ -1054,5 +1096,77 @@ mod tests {
         assert_eq!(spec.options.conflict, ConflictPolicy::AutoRename);
         assert_eq!(spec.items.len(), 2);
         assert_eq!(spec.items[0].target, under(&b, &["docs"]));
+    }
+
+    #[test]
+    fn the_picker_offers_every_conflict_policy_of_the_engine() {
+        // The four of the first demos keep their places; the two conditional ones follow.
+        assert_eq!(
+            POLICIES,
+            [
+                ConflictPolicy::Ask,
+                ConflictPolicy::Overwrite,
+                ConflictPolicy::Skip,
+                ConflictPolicy::AutoRename,
+                ConflictPolicy::OverwriteIfNewer,
+                ConflictPolicy::OverwriteIfSizeDiffers,
+            ]
+        );
+        // Each one reaches the engine as it is.
+        let req = request(TransferMode::Copy);
+        let b = folder("b");
+        let groups = quick_targets(&req, &b, &[], &[], &[]);
+        let mut picker = Picker::new(req, 0, groups);
+        for policy in POLICIES {
+            picker.policy = policy;
+            let spec = picker.spec().expect("a target").expect("a transfer");
+            assert_eq!(spec.options.conflict, policy);
+        }
+        // The ones that may replace a file, always or by their condition, and the others.
+        let replacing: Vec<ConflictPolicy> =
+            POLICIES.into_iter().filter(|p| overwrites(*p)).collect();
+        assert_eq!(
+            replacing,
+            [
+                ConflictPolicy::Overwrite,
+                ConflictPolicy::OverwriteIfNewer,
+                ConflictPolicy::OverwriteIfSizeDiffers,
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_copy_follows_links_and_only_when_asked() {
+        let b = folder("b");
+        let req = request(TransferMode::Copy);
+        let groups = quick_targets(&req, &b, &[], &[], &[]);
+        let mut picker = Picker::new(req, 0, groups);
+        let symlinks = |picker: &Picker| {
+            let spec = picker.spec().expect("a target").expect("a transfer");
+            spec.options.symlinks
+        };
+        // Off at first: a link is copied as a link.
+        assert!(picker.offers_follow_links() && !picker.follow_links);
+        assert_eq!(symlinks(&picker), SymlinkMode::CopyLink);
+        picker.follow_links = true;
+        assert_eq!(symlinks(&picker), SymlinkMode::Follow);
+        // A move has no such box, and takes the links as they are whatever the box said.
+        picker.set_mode(TransferMode::Move);
+        assert!(!picker.offers_follow_links());
+        assert_eq!(symlinks(&picker), SymlinkMode::CopyLink);
+        // Back to a copy, the box is as it was left.
+        picker.set_mode(TransferMode::Copy);
+        assert_eq!(symlinks(&picker), SymlinkMode::Follow);
+
+        // The picker of a log or of links offers none.
+        let links = Picker::for_purpose(
+            PickPurpose::Link {
+                kind: LinkKind::Symlink,
+            },
+            request(TransferMode::Copy),
+            0,
+            Vec::new(),
+        );
+        assert!(!links.offers_follow_links());
     }
 }

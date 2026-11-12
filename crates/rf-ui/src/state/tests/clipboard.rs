@@ -325,6 +325,31 @@ fn a_move_that_copied_instead_keeps_the_clipboard() {
 }
 
 #[test]
+fn a_paste_takes_a_failure_as_the_setting_says() {
+    let mut state = two_panes();
+    let copy = || Ok(Some(files(&[in_a("y.txt")], Some(DropEffect::Copy), 10)));
+    let errors_of = |effects: &[Effect]| match the_submit(effects).0 {
+        JobSpec::Transfer(transfer) => transfer.options,
+        other => panic!("a transfer: {other:?}"),
+    };
+    // By default it carries on; with 파일마다 묻기 it asks. It numbers a taken name either way.
+    let token = paste(&mut state, RIGHT);
+    assert_eq!(
+        errors_of(&state.clipboard_read(token, copy())),
+        auto_rename()
+    );
+    state.set_on_error(OnError::Ask);
+    let token = paste(&mut state, RIGHT);
+    assert_eq!(
+        errors_of(&state.clipboard_read(token, copy())),
+        TransferOptions {
+            errors: rf_jobs::ErrorPolicy::Ask,
+            ..auto_rename()
+        }
+    );
+}
+
+#[test]
 fn the_same_cut_pasted_twice_moves_once() {
     let mut state = two_panes();
     let first = paste(&mut state, RIGHT);

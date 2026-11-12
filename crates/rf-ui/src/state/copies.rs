@@ -212,6 +212,8 @@ impl AppState {
             let shown = Failures {
                 title: words::failures_title().to_owned(),
                 lines: check.other_lines.clone(),
+                // An undo is not tried again from here: the history offers it.
+                retry: None,
             };
             let text = words::and_gone(words::items_failed(check.other_failed), check.gone);
             effects.push(self.toast(text, Some(ToastAction::Details(shown))));
@@ -288,6 +290,7 @@ impl AppState {
         let shown = Failures {
             title: words::failures_title().to_owned(),
             lines,
+            retry: None,
         };
         let failed = check.other_failed + check.copies.len();
         let text = words::and_gone(words::items_failed(failed), check.gone);

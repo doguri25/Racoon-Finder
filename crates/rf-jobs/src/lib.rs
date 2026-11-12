@@ -33,7 +33,9 @@ pub use preflight::{
     CaseIndex, FsKind, Issue, IssueKind, Severity, check_name, check_path_len, check_size,
 };
 pub use progress::{PROGRESS_INTERVAL, Progress, SPEED_WINDOW, SpeedMeter};
-pub use report::{FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals, one_line};
+pub use report::{
+    FailureReason, ItemFailure, JobReport, Outcome, Stage, Totals, one_line, retry_spec,
+};
 pub use resolver::{ErrorAction, ErrorAnswer, NonInteractive, PreflightAnswer, Resolver};
 pub use rf_platform::LinkKind;
 pub use spec::{
