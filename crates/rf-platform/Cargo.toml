@@ -1,0 +1,48 @@
+[package]
+name = "rf-platform"
+description = "OS integration: natural sort, trash, file ids, attributes, known folders, volumes, rename, directory watching, notifications, thumbnails."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dirs = "7.0.0"
+# The window's handle as winit gives it, borrowed from the live window (`shell::Owner::of`): the
+# same 0.6 that winit 0.30 and Slint use, already in the lock file.
+raw-window-handle = "0.6.2"
+rf-core = { version = "0.4.0", path = "../rf-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_NetworkManagement_WNet", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows-core = "0.62.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+libc = "0.2.191"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSRunningApplication", "block2", "NSView", "NSResponder", "NSDragging", "NSEvent", "NSApplication", "NSDraggingItem", "NSDraggingSession", "NSImage", "NSWindow", "NSGraphicsContext", "NSSharingService"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSObjCRuntime", "NSFileManager", "NSURL", "NSError", "NSPathUtilities", "NSArray", "NSBundle", "NSGeometry", "NSProcessInfo", "NSData"] }
+objc2-quick-look-thumbnailing = { version = "0.3.2", default-features = false, features = ["std", "QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "QLThumbnailErrors", "block2", "bitflags", "objc2-core-graphics", "objc2-core-foundation"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2", "UNNotification"] }
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+
+[target."cfg(not(windows))".dependencies]
+notify = "8.2.0"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4.18.2"
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3.27.0"

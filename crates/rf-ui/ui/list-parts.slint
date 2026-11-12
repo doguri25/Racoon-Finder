@@ -1,0 +1,581 @@
+// Parts that every view of a pane's items shares (자세히 in `file-list.slint`, 목록 and the icons in
+// `file-grid.slint`): the menu of an item and of the part without items, what a drag over the
+// list shows, the names of the places a drag is over (`DropPlace`, `DropAt`), where in the window
+// the pointer of a drag is (and whether it is still where a list saw it) and the menu of a drop
+// that asks, and how a list keeps the place it scrolled to after a long jump.
+
+import { Theme } from "theme.slint";
+import { Shortcuts, PathForms } from "shortcuts.slint";
+
+// What a drag is over: a pane's list, a pane's tab, a row of the tree, or the list of favorites
+// between its items (or its empty part).
+export enum DropPlace {
+    list,
+    tab,
+    tree,
+    favorites,
+}
+
+// The place under a point of the window, as a drag there names it (`MainWindow.spot-at`): row
+// `index` of pane `side`'s list (-1 below the rows), tab `index` of pane `side`, row `index` of the
+// tree (`side` 0), or the gap `index` of the list of favorites (`side` 0; -1 for its empty part,
+// where the heads, the margins and the room under the rows are). `found` is
+// false where nothing takes drops: `DropPlace` gets no value for nothing, so its default stays
+// what it was.
+export struct DropAt {
+    found: bool,
+    place: DropPlace,
+    side: int,
+    index: int,
+}
+
+// Where the pointer of a drag is, in the window: every place that takes drops (a list, a tab, a
+// row of the tree, the window under them) tells it at each move and at the drop, for what shows
+// beside the pointer (DND-03), the menu of 놓을 때 묻기, which shows where the drop was, and the
+// lists that scroll under a drag held at their ends (DND-08), which scroll while the pointer is
+// still where they last saw it.
+export global DragPointer {
+    in-out property <length> x;
+    in-out property <length> y;
+    // A drag is over the window: from its first move there until it ends or leaves (`gone`).
+    in-out property <bool> over;
+    // A drag of rows (a row's `DragArea` is `dragging`) is under way, over the window or past its
+    // edges: from the move that starts it until it ends. Rust reads it as the pointer leaves the
+    // window, where the system's drag carries the drag on (DND-05), and clears it as it ends
+    // Slint's drag for that, and as the left button is let go (a drag whose row is gone tells no
+    // end).
+    in-out property <bool> rows;
+
+    // A list scrolled under the still pointer of a drag: what is under it changed, so Rust has
+    // the window ask the place there again, as a move of the pointer would.
+    callback moved-under();
+
+    // The pointer is at `offset` of a place that lies at `origin` of the window (a drop area's
+    // `absolute-position` and its event's `position`): the one rule of the window's coordinates.
+    public function at(origin: Point, offset: Point) {
+        DragPointer.x = origin.x + offset.x;
+        DragPointer.y = origin.y + offset.y;
+        DragPointer.over = true;
+    }
+
+    // The drag ended, or left the window.
+    public function gone() {
+        DragPointer.over = false;
+    }
+}
+
+// The ring beside the pointer that fills while a press is held on a row for its menu (PICK-02,
+// the long press). Rust drives it from the press's progress, 0 to 1, and shows it only after the
+// first moments of a press, so that a click shows nothing. The main window draws it.
+export global LongPressRing {
+    in-out property <bool> shown;
+    in-out property <float> progress;
+    // Where the press is, in the window.
+    in-out property <length> x;
+    in-out property <length> y;
+}
+
+// Whether the pointer of a drag is still where a list last saw it (`saw`, from the list's own
+// drop areas), and over the window (DND-08): a list scrolls under a drag held near its ends only
+// then, whether its rows take the drop or not, and stops once the pointer has moved on to
+// another place or the drag has ended. The places that see one pointer reach the window's
+// coordinates by different sums (an area's `absolute-position` plus its event's `position`, or
+// the window's own, under everything), which differ in the last bit at fractions of a pixel (a
+// scaled screen, a pane that starts mid-pixel): positions within half a pixel are one.
+export component DragSeen {
+    width: 0px;
+    height: 0px;
+
+    out property <bool> here: root.seen && DragPointer.over && abs(DragPointer.x - root.seen-x) < 0.5px && abs(DragPointer.y - root.seen-y) < 0.5px;
+
+    private property <length> seen-x;
+    private property <length> seen-y;
+    private property <bool> seen;
+    // A drag that ended leaves nothing seen for the next one.
+    private property <bool> dragging: DragPointer.over;
+    changed dragging => {
+        if (!root.dragging) {
+            root.seen = false;
+        }
+    }
+
+    // The list sees the pointer where `DragPointer` has just been told it is.
+    public function saw() {
+        root.seen-x = DragPointer.x;
+        root.seen-y = DragPointer.y;
+        root.seen = true;
+    }
+}
+
+// The menu of a drop that asks what to do (놓을 때 묻기, DND-04), where the drop was: move or copy
+// the items there, make links to them, or nothing (취소; Esc and a click beside the menu choose
+// nothing too). It offers only what the drag allows (`moves`, `copies`, `links`), as File
+// Explorer's menu of a drag with the right button leaves out what the source forbids. It takes
+// no click itself (`enabled: false`): it shows only when it is asked to.
+export component DropMenu inherits ContextMenuArea {
+    // Whether the drag allows a move (여기로 이동), a copy (여기로 복사) and a link (여기에
+    // 링크 만들기).
+    in property <bool> moves: true;
+    in property <bool> copies: true;
+    in property <bool> links: true;
+
+    // An item was chosen: `move`, `copy`, `link` or `cancel`.
+    callback chosen(name: string);
+
+    enabled: false;
+
+    Menu {
+        if root.moves: MenuItem {
+            title: "여기로 이동";
+            activated => {
+                root.chosen("move");
+            }
+        }
+        if root.copies: MenuItem {
+            title: "여기로 복사";
+            activated => {
+                root.chosen("copy");
+            }
+        }
+        if root.links: MenuItem {
+            title: "여기에 링크 만들기";
+            activated => {
+                root.chosen("link");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "취소";
+            activated => {
+                root.chosen("cancel");
+            }
+        }
+    }
+}
+
+// One entry of the item menu's 링크 만들기 ▸: a kind of link, with its name, off where it cannot be
+// made now (the title then says why: a menu item has no tooltip).
+export struct LinkEntry {
+    title: string,
+    enabled: bool,
+}
+
+// What the item menu offers for the items it opens for, besides what it always has: Rust sets it
+// (`AppState::item_menu`) before the menu shows. And where a menu of a list showed last, in the
+// window, for the menus and the picker that show there after it.
+export global ItemMenu {
+    // One file: 연결 프로그램으로 열기….
+    in property <bool> one-file;
+    // One program the system runs as administrator (Windows): 관리자 권한으로 실행.
+    in property <bool> runnable;
+    // One folder: 터미널에서 열기.
+    in property <bool> one-folder;
+    // One item that is a folder itself, not a link: 즐겨찾기에 추가.
+    in property <bool> one-dir;
+    // One item: OS 속성 창 열기.
+    in property <bool> one-item;
+    // The system shares items through a picker of its own (macOS): 공유….
+    in property <bool> shares;
+    // The kinds of link 링크 만들기 ▸ offers, in order: a shortcut (an alias on macOS), a symbolic
+    // link, on Windows a junction for folders. Empty for no item or an item off the local disk.
+    in property <[LinkEntry]> links;
+    // Whether Undo and Redo can start: something to undo (to do again), and no undo or redo
+    // under way. The toolbar's 되돌리기 and the folder's menu follow them.
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    // Where a menu of a list showed last, in the window: the item menu, the folder's, or a
+    // right press on a list (Rust notes it where the system has a menu of its own). The menu of
+    // the apps (macOS), the system's own menu of 더 많은 옵션 표시 (Windows) and the picker of
+    // 공유… (macOS) show there.
+    in-out property <length> at-x;
+    in-out property <length> at-y;
+
+    // Whether the clipboard holds no files (text, an image, nothing): 붙여넣기 and 여기로 이동
+    // are off then, as in File Explorer. Each menu asks as it shows (a menu's items are made
+    // anew for every show), since another app may have changed the clipboard since; Rust answers
+    // with a look that reads nothing (`rf_platform::clipboard::has_files`). Unanswered, it is
+    // false and they stay on.
+    pure callback no-files-to-paste() -> bool;
+
+    // A menu of a list shows at (`x`, `y`) of the window.
+    public function showing(x: length, y: length) {
+        ItemMenu.at-x = x;
+        ItemMenu.at-y = y;
+    }
+}
+
+// The menu of an item: move and copy first (OPS-05), then the clipboard, and 속성 last, as in
+// File Explorer, each command with its key (KEY-03). It wraps what is right-clicked; the press
+// selects the item first, then calls `show`. The clipboard's items are the system's: 잘라내기
+// where File Explorer has it (not on macOS), 여기로 이동 where Finder has it (macOS only);
+// 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
+// else into the pane's folder; they are off while the clipboard holds no files. The system's
+// ways to open an item (OPS-04, OPS-06, OPS-11) show for the items they act on (`ItemMenu`):
+// 관리자 권한으로 실행 and 연결 프로그램으로 열기… by 열기 for one file, 터미널에서 열기 and
+// 즐겨찾기에 추가 (NAV-05) for one folder, OS 속성 창 열기 after 속성 for one item. 공유… shows where the system shares items
+// (macOS, after Finder's, by 복사), and 더 많은 옵션 표시, the system's own menu of the items, at
+// the end where the system has one (Windows 11 File Explorer's item and key, Shift+F10).
+export component RowMenu inherits ContextMenuArea {
+    // An item of the menu: the name of the window's command it runs (move, copy, cut,
+    // copy-files, paste-into, paste-move-into, copy-path-<form>, share, open, run-as-admin,
+    // open-with, quick-look, open-terminal, add-favorite, link-<i>, rename, delete, delete-permanently,
+    // properties, system-properties, more-options).
+    callback command(name: string);
+
+    // What the menu is of. (Before the menu: the compiler takes the menu out of the children, so
+    // children placed after it would have no place to go.)
+    @children
+
+    Menu {
+        MenuItem {
+            title: Shortcuts.titled("이동…", Shortcuts.move-to);
+            activated => {
+                root.command("move");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("복사…", Shortcuts.copy-to);
+            activated => {
+                root.command("copy");
+            }
+        }
+        MenuSeparator { }
+        if Shortcuts.cut != "": MenuItem {
+            title: Shortcuts.titled("잘라내기", Shortcuts.cut);
+            activated => {
+                root.command("cut");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("복사", Shortcuts.copy);
+            activated => {
+                root.command("copy-files");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            enabled: !ItemMenu.no-files-to-paste();
+            activated => {
+                root.command("paste-into");
+            }
+        }
+        if Shortcuts.paste-move != "": MenuItem {
+            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            enabled: !ItemMenu.no-files-to-paste();
+            activated => {
+                root.command("paste-move-into");
+            }
+        }
+        Menu {
+            title: "경로 복사";
+
+            for form[i] in PathForms.titles: MenuItem {
+                title: PathForms.title(i);
+                activated => {
+                    root.command("copy-path-\{i}");
+                }
+            }
+        }
+        if ItemMenu.links.length > 0: Menu {
+            title: "링크 만들기";
+
+            for link[i] in ItemMenu.links: MenuItem {
+                title: link.title;
+                enabled: link.enabled;
+                activated => {
+                    root.command("link-\{i}");
+                }
+            }
+        }
+        if ItemMenu.shares: MenuItem {
+            title: "공유…";
+            activated => {
+                root.command("share");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("열기", Shortcuts.open);
+            activated => {
+                root.command("open");
+            }
+        }
+        if ItemMenu.runnable: MenuItem {
+            title: "관리자 권한으로 실행";
+            activated => {
+                root.command("run-as-admin");
+            }
+        }
+        if ItemMenu.one-file: MenuItem {
+            title: "연결 프로그램으로 열기…";
+            activated => {
+                root.command("open-with");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("빠른 보기", Shortcuts.quick-look);
+            activated => {
+                root.command("quick-look");
+            }
+        }
+        if ItemMenu.one-folder: MenuItem {
+            title: Shortcuts.titled("터미널에서 열기", Shortcuts.open-terminal);
+            activated => {
+                root.command("open-terminal");
+            }
+        }
+        if ItemMenu.one-dir: MenuItem {
+            title: "즐겨찾기에 추가";
+            activated => {
+                root.command("add-favorite");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
+            activated => {
+                root.command("rename");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("휴지통으로 보내기", Shortcuts.trash);
+            activated => {
+                root.command("delete");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
+            activated => {
+                root.command("delete-permanently");
+            }
+        }
+        MenuSeparator { }
+        // The app's own window (OPS-06), then the system's.
+        MenuItem {
+            title: Shortcuts.titled("속성", Shortcuts.properties);
+            activated => {
+                root.command("properties");
+            }
+        }
+        if ItemMenu.one-item: MenuItem {
+            title: "OS 속성 창 열기";
+            activated => {
+                root.command("system-properties");
+            }
+        }
+        if Shortcuts.system-menu != "": MenuSeparator { }
+        if Shortcuts.system-menu != "": MenuItem {
+            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            activated => {
+                root.command("more-options");
+            }
+        }
+    }
+}
+
+// The menu of the part of a list without items: a new folder there, a paste into the folder
+// (off while the clipboard holds no files), 되돌리기 and 다시 실행 (off while there is nothing
+// to undo or to do again), the folder listed again (NAV-13), each with its key (KEY-03), a
+// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer; at the end the
+// system's own menu of the folder (더 많은 옵션 표시), where the system has one. It wraps that
+// part of the list.
+export component BlankMenu inherits ContextMenuArea {
+    // An item of the menu: the name of the window's command it runs (new-folder, paste,
+    // paste-move, undo, redo, refresh, folder-terminal, folder-properties, folder-more-options).
+    callback command(name: string);
+
+    // What the menu is of (before the menu: see `RowMenu`).
+    @children
+
+    Menu {
+        MenuItem {
+            title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
+            activated => {
+                root.command("new-folder");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            enabled: !ItemMenu.no-files-to-paste();
+            activated => {
+                root.command("paste");
+            }
+        }
+        if Shortcuts.paste-move != "": MenuItem {
+            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            enabled: !ItemMenu.no-files-to-paste();
+            activated => {
+                root.command("paste-move");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("되돌리기", Shortcuts.undo);
+            enabled: ItemMenu.can-undo;
+            activated => {
+                root.command("undo");
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled("다시 실행", Shortcuts.redo);
+            enabled: ItemMenu.can-redo;
+            activated => {
+                root.command("redo");
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled("새로 고침", Shortcuts.refresh);
+            activated => {
+                root.command("refresh");
+            }
+        }
+        // The folder's, whatever is chosen: no key beside it, since the key (Shift+F4) opens a
+        // folder that is chosen when there is one.
+        MenuItem {
+            title: "터미널에서 열기";
+            activated => {
+                root.command("folder-terminal");
+            }
+        }
+        MenuSeparator { }
+        // The folder's, whatever is chosen: no key beside it, since the key (Alt+Enter, ⌘I)
+        // shows the chosen items' when there are some.
+        MenuItem {
+            title: "속성";
+            activated => {
+                root.command("folder-properties");
+            }
+        }
+        if Shortcuts.system-menu != "": MenuSeparator { }
+        if Shortcuts.system-menu != "": MenuItem {
+            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            activated => {
+                root.command("folder-more-options");
+            }
+        }
+    }
+}
+
+// The item menu and the folder's menu of a list, shown from the keyboard (the menu key, Linux's
+// Shift+F10, macOS ⌃↩) where the list says: they have no room, so they take no click, and a
+// right click still reaches the menus of the rows and of the part without them.
+export component KeyMenus {
+    // An item of either menu: the name of the window's command it runs.
+    callback command(name: string);
+
+    width: 0px;
+    height: 0px;
+
+    // The item menu at (`x`, `y`) of the list (where this lies at its top left corner).
+    public function item(x: length, y: length) {
+        row-menu.show({ x: x, y: y });
+    }
+
+    // The folder's menu at (`x`, `y`) of the list.
+    public function blank(x: length, y: length) {
+        blank-menu.show({ x: x, y: y });
+    }
+
+    row-menu := RowMenu {
+        command(name) => {
+            root.command(name);
+        }
+    }
+
+    blank-menu := BlankMenu {
+        command(name) => {
+            root.command(name);
+        }
+    }
+}
+
+// The menu of the apps that can open a file (연결 프로그램, macOS): Rust lists them (the default
+// one first, "(기본)" after its name) and shows the menu where the item menu showed. It takes no
+// click itself (`enabled: false`): it shows only when it is asked to.
+export component OpenWithMenu inherits ContextMenuArea {
+    in property <[string]> apps;
+    // App `index` was chosen.
+    callback chosen(index: int);
+
+    enabled: false;
+
+    Menu {
+        for app[index] in root.apps: MenuItem {
+            title: app;
+            activated => {
+                root.chosen(index);
+            }
+        }
+    }
+}
+
+// What a list shows of a drag of items over it: an accent frame around it while its own folder
+// takes them. What a drop would do shows beside the pointer (the main window's badge).
+export component DropFrame {
+    in property <bool> frame;
+
+    if root.frame: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Theme.accent;
+        border-radius: Theme.radius;
+    }
+}
+
+// Where a list scrolls to show a stretch of its content whole, scrolling as little as it can.
+export global ListScroll {
+    // The `content-y` that shows the stretch from `top` to `top + size` of a list at `content-y`
+    // whose visible height is `room`; a positive length when it shows already.
+    public pure function into-view(top: length, size: length, content-y: length, room: length) -> length {
+        if (top + content-y < 0) {
+            return -top;
+        }
+        if (top + size + content-y > room) {
+            return room - top - size;
+        }
+        return 1px;
+    }
+}
+
+// After a jump of more than a screen and a half (End in a long folder), a ListView makes the
+// rows of the new place afresh and lines the first of them up with its top, which rounds the
+// place by part of a row: the last row would stay cut. So while the list settles, a place it
+// moves to by itself is set back to the one asked for, once; a scroll of the user's ends that.
+export component ListSettle {
+    in-out property <bool> settling;
+    in-out property <length> target;
+
+    // The list was sent to `target`.
+    public function start(target: length) {
+        root.target = target;
+        root.settling = true;
+        timer.restart();
+    }
+
+    // The list moved to `y`: where it is to be (the place asked for, once, while it settles).
+    public function corrected(y: length) -> length {
+        if (root.settling && y != root.target) {
+            root.settling = false;
+            return root.target;
+        }
+        return y;
+    }
+
+    // The user scrolled.
+    public function stop() {
+        root.settling = false;
+    }
+
+    timer := Timer {
+        interval: 500ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.settling = false;
+        }
+    }
+}
