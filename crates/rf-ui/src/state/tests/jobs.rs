@@ -1675,3 +1675,166 @@ fn the_error_setting_chooses_how_a_transfer_takes_a_failure() {
         ErrorPolicy::Continue
     );
 }
+
+#[test]
+fn a_failure_no_retry_can_help_is_listed_and_not_tried_again() {
+    let mut state = ready(vec![dir("dir"), file("b.txt")], vec![]);
+    let following = TransferOptions {
+        symlinks: SymlinkMode::Follow,
+        ..TransferOptions::default()
+    };
+    let spec = copy_of(&["dir", "b.txt"], following);
+    // A link in `dir` that leads back to `dir`, as a copy that follows links reports it.
+    let looped = || ItemFailure {
+        source: Some(in_a("dir").join("loop").expect("a plain name")),
+        target: Some(
+            folder("b")
+                .join("dir")
+                .and_then(|dir| dir.join("loop"))
+                .expect("plain names"),
+        ),
+        stage: Stage::Plan,
+        kind: ErrorKind::Unsupported,
+        message: String::new(),
+        reason: Some(FailureReason::LinkLoop),
+    };
+    let details = |state: &mut AppState| {
+        assert_eq!(state.recent_details(0), []);
+        let Some(Modal::Failures(failures)) = state.modal().cloned() else {
+            panic!("the failed items");
+        };
+        state.dialog_cancelled();
+        failures
+    };
+
+    // The loop alone: the window lists it with its reason, and has no 다시 시도 (asked for by
+    // itself, the link would be followed and the folder copied again below it).
+    finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(looped());
+    });
+    let failures = details(&mut state);
+    assert_eq!(
+        failures.lines,
+        [format!(
+            "{}: 바로 가기가 자기를 담은 폴더를 다시 가리켜 따라갈 수 없습니다",
+            in_a("dir").join("loop").expect("a plain name")
+        )]
+    );
+    assert_eq!(failures.retry, None);
+
+    // With a failure that can be tried again beside it, both are listed and the retry holds
+    // that one alone.
+    finish(&mut state, 2, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(looped());
+        report.failures.push(copy_failure("b.txt", Stage::Write));
+    });
+    let failures = details(&mut state);
+    assert_eq!(failures.lines.len(), 2);
+    let Some(JobSpec::Transfer(retry)) = failures.retry.map(|retry| retry.spec) else {
+        panic!("a retry of the other item");
+    };
+    let sources: Vec<VPath> = retry.items.into_iter().map(|item| item.source).collect();
+    assert_eq!(sources, [in_a("b.txt")]);
+    assert_eq!(retry.options, following);
+}
+
+#[test]
+fn a_stopped_job_says_so_and_offers_no_retry() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = copy_of(
+        &["a.txt", "b.txt", "c.txt", "d.txt"],
+        TransferOptions::default(),
+    );
+    // Four files planned: one copied, the second failed, and the user pressed 중단 there.
+    let stopped = |report: &mut JobReport| {
+        report.outcome = Outcome::Aborted;
+        report.planned.files = 4;
+        report.done.files = 1;
+        report.failures.push(copy_failure("b.txt", Stage::Write));
+    };
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, stopped);
+    // The notice says that the job was stopped and how many items it never came to, not only
+    // that one item failed.
+    let (token, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        (
+            "복사를 중단했습니다 · 실패 1개 · 남은 항목 2개는 처리하지 않았습니다",
+            "자세히"
+        )
+    );
+    let note = "복사를 중단했습니다. 아래 항목에서 멈췄고 그 뒤의 항목 2개는 처리하지 않았습니다. \
+                마저 하려면 복사를 다시 시작하세요.";
+    let line = format!("{}: 권한이 없습니다", in_a("b.txt"));
+    // So does the first line of the window, before the item it stopped at. It has no 다시
+    // 시도: that would try `b.txt` alone, and `c.txt` and `d.txt` would still be missing.
+    assert_eq!(state.toast_clicked(token), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!(failures.lines, [note.to_owned(), line.clone()]);
+    assert_eq!(failures.retry, None);
+    assert_eq!(state.failures_retried(), []);
+    state.dialog_cancelled();
+    // The same from 최근 완료.
+    assert_eq!(state.recent_details(0), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items again");
+    };
+    assert_eq!(failures.lines, [note.to_owned(), line]);
+    assert_eq!(failures.retry, None);
+    state.dialog_cancelled();
+
+    // Stopped while it was still counting: how many are left is not known, and not made up.
+    let effects = finish(&mut state, 2, &spec, JobWork::Move, |report| {
+        report.outcome = Outcome::Aborted;
+        report.failures.push(copy_failure("a.txt", Stage::Plan));
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "이동을 중단했습니다 · 실패 1개 · 남은 항목은 처리하지 않았습니다"
+    );
+    // A job that ran to its end with the same failure is told as before, with its retry.
+    let effects = finish(&mut state, 3, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.planned.files = 4;
+        report.done.files = 3;
+        report.failures.push(copy_failure("b.txt", Stage::Write));
+    });
+    let (token, text, _) = the_toast(&effects);
+    assert_eq!(text, "항목 1개를 처리하지 못했습니다");
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!(failures.lines.len(), 1);
+    assert!(failures.retry.is_some());
+}
+
+#[test]
+fn a_retry_is_offered_once_even_after_the_recent_list_is_cleared() {
+    let mut state = ready(vec![file("a.txt")], vec![]);
+    let spec = copy_of(&["a.txt"], TransferOptions::default());
+    let effects = finish(&mut state, 1, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(copy_failure("a.txt", Stage::Write));
+    });
+    let (token, _, _) = the_toast(&effects);
+    // Tried again from 최근 완료, whose list is then cleared, while the toast still shows.
+    assert_eq!(state.recent_details(0), []);
+    assert!(matches!(
+        the_submit(&state.failures_retried()).0,
+        JobSpec::Transfer(_)
+    ));
+    state.recent_cleared();
+    assert_eq!(state.recent_rows(), []);
+    // The toast's window lists the item still, and offers no second retry.
+    assert_eq!(state.toast_clicked(token), []);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!((failures.lines.len(), &failures.retry), (1, &None));
+    assert_eq!(state.failures_retried(), []);
+}

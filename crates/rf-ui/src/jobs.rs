@@ -379,9 +379,6 @@ impl Eq for SharedReport {}
 pub struct Finished {
     pub work: JobWork,
     pub report: SharedReport,
-    /// Its failed items were tried again (다시 시도 of the window of failed items): they are not
-    /// offered a second time from this job, whose retry has a report of its own.
-    pub retried: bool,
 }
 
 impl Finished {
@@ -404,25 +401,8 @@ impl RecentJobs {
         self.jobs.push_front(Finished {
             work,
             report: SharedReport(report),
-            retried: false,
         });
         self.jobs.truncate(RECENT_JOBS);
-    }
-
-    /// Notes that the failed items of job `id` were tried again ([`Finished::retried`]).
-    /// Nothing for a job the list no longer keeps.
-    pub fn mark_retried(&mut self, id: JobId) {
-        for job in self.jobs.iter_mut().filter(|job| job.report.0.id == id) {
-            job.retried = true;
-        }
-    }
-
-    /// Whether the failed items of job `id` were tried again; `false` for a job the list does
-    /// not keep.
-    pub fn retried(&self, id: JobId) -> bool {
-        self.jobs
-            .iter()
-            .any(|job| job.report.0.id == id && job.retried)
     }
 
     /// The job at `index`, the newest being 0.

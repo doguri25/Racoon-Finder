@@ -420,6 +420,10 @@ pub struct AppState {
     /// What a copy or a move does about an item that fails (보기 ▸ 설정, XFER-09): carry on and
     /// list it at the end, or ask about each one.
     on_error: OnError,
+    /// The jobs whose failed items were tried again (다시 시도 of the window of failed items):
+    /// none of their windows offers it a second time. Kept apart from 최근 완료, whose 지우기
+    /// must not bring the offer back while the job's toast still shows.
+    retried_jobs: HashSet<JobId>,
     /// A right click shows Windows' own menu first (보기 ▸ 설정, OPS-05).
     system_menu_first: bool,
     /// The icon views show the files' thumbnails (보기 ▸ 설정, VIEW-09).
@@ -567,6 +571,7 @@ impl AppState {
             drag_default: DragDefault::default(),
             move_undo_toast: true,
             on_error: OnError::default(),
+            retried_jobs: HashSet::new(),
             system_menu_first: false,
             show_thumbnails: true,
             long_press: true,

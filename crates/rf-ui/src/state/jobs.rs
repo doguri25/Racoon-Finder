@@ -7,7 +7,9 @@
 //! ([`AppState::on_error`]): by default it carries on past an item that fails and its end
 //! lists the failed items, whose window offers 다시 시도 ([`AppState::failures_retried`]: a new
 //! job of the failed items alone, once for each job); with 파일마다 묻기 the job asks about each
-//! failed item ([`AppState::error_answered`]).
+//! failed item ([`AppState::error_answered`]). A job that was stopped (중단) says so in its
+//! notice and at the head of its failed items, with how many items it never came to, and
+//! offers no retry: the failed items are not all it left undone ([`retry_of`]).
 
 use std::ffi::{OsStr, OsString};
 use std::slice;
@@ -341,10 +343,9 @@ impl AppState {
         };
         self.close();
         // Once for each job, whichever window of it the press came from.
-        if self.recent_jobs.retried(job) {
+        if !self.retried_jobs.insert(job) {
             return Vec::new();
         }
-        self.recent_jobs.mark_retried(job);
         vec![submit(spec, None)]
     }
 
@@ -425,7 +426,7 @@ impl AppState {
             ToastAction::Details(mut failures) => {
                 // Its failed items may have been tried again from 최근 완료 since the toast
                 // showed: they are not offered a second time.
-                let retried = |retry: &Retry| self.recent_jobs.retried(retry.job);
+                let retried = |retry: &Retry| self.retried_jobs.contains(&retry.job);
                 if failures.retry.as_ref().is_some_and(retried) {
                     failures.retry = None;
                 }
@@ -672,7 +673,9 @@ impl AppState {
 
     /// The notice of a job some items of which failed: why, for a rename or a create (one
     /// item); for the others a toast whose button lists the items and why, and after them the
-    /// items of `report` the location deleted for good instead of trashing them.
+    /// items of `report` the location deleted for good instead of trashing them. A job that was
+    /// stopped says that instead, in the toast and as the first line of the list
+    /// ([`stopped_note`]).
     fn failure_notice(
         &mut self,
         work: JobWork,
@@ -687,17 +690,22 @@ impl AppState {
             return Effect::Notice(words::link_refused(failures[0]));
         }
         let gone: Vec<&ItemFailure> = deleted_for_good(report).collect();
+        let listed = failures.iter().chain(&gone);
         let shown = Failures {
             title: words::failures_title().to_owned(),
-            lines: failures
-                .iter()
-                .chain(&gone)
-                .map(|failure| words::failure_line(failure))
+            lines: stopped_note(work, report)
+                .into_iter()
+                .chain(listed.map(|failure| words::failure_line(failure)))
                 .collect(),
             retry: retry_of(report),
         };
+        let text = if report.outcome == Outcome::Aborted {
+            words::job_stopped(work, failures.len(), not_reached(report))
+        } else {
+            words::items_failed(failures.len())
+        };
         self.toast(
-            words::and_gone(words::items_failed(failures.len()), gone.len()),
+            words::and_gone(text, gone.len()),
             Some(ToastAction::Details(shown)),
         )
     }
@@ -985,9 +993,14 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 /// a move, the transfer of the failed items alone, with the mode, the targets and the policies
 /// of the job they come from (`rf_jobs::retry_spec`). `None` for another kind of job, and for a
 /// transfer none of whose failures can be tried again (a source that could not be removed
-/// after its copy was in place).
+/// after its copy was in place, a link that leads back to its own folder).
+///
+/// `None` too for a job that was stopped (`Outcome::Aborted`): the items it never came to are
+/// no failures, and the report does not name them (it counts them at most), so a retry would
+/// redo the failed item alone and look as if it had finished the job. The window says that
+/// the job was stopped instead ([`stopped_note`]).
 pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
-    if !matches!(report.spec, JobSpec::Transfer(_)) {
+    if !matches!(report.spec, JobSpec::Transfer(_)) || report.outcome == Outcome::Aborted {
         return None;
     }
     let spec = retry_spec(&report.spec, &report.failures)?;
@@ -995,6 +1008,32 @@ pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
         job: report.id,
         spec,
     })
+}
+
+/// How many items a job that was stopped never came to, as far as `report` tells: what it
+/// planned, less what it did, skipped and failed at. `None` when it cannot be told (the job
+/// stopped while it was still counting), `Some(0)` when the item it stopped at was its last.
+pub(super) fn not_reached(report: &JobReport) -> Option<u64> {
+    let items = |totals: rf_jobs::Totals| totals.files.saturating_add(totals.dirs);
+    let planned = items(report.planned);
+    if planned == 0 {
+        return None;
+    }
+    let failed = u64::try_from(report.failures.len()).unwrap_or(u64::MAX);
+    Some(
+        planned
+            .saturating_sub(items(report.done))
+            .saturating_sub(report.skipped)
+            .saturating_sub(failed),
+    )
+}
+
+/// The line that heads the failed items of a job that was stopped (`Outcome::Aborted`: 중단 in
+/// the window that asks about a failed item, or an error that stopped the job): that it was
+/// stopped, and that what came after the listed items was not processed. `None` for a job
+/// that ran to its end.
+pub(super) fn stopped_note(work: JobWork, report: &JobReport) -> Option<String> {
+    (report.outcome == Outcome::Aborted).then(|| words::job_stopped_note(work, not_reached(report)))
 }
 
 /// The warnings of `report` for the items the location deleted for good when they were to go

@@ -2074,7 +2074,7 @@ pub fn error_view(question: &ErrorQuestion) -> ErrorView {
         serial: i32::try_from(question.id % 0x7FFF_FFFF).unwrap_or(0),
         title: words::error_ask_title(question.work).into(),
         item: words::error_ask_item(&question.failure).into(),
-        reason: words::item_failure(&question.failure).into(),
+        reason: words::error_ask_reason(&question.failure).into(),
         items_left: if question.items_left > 0 {
             words::items_left(question.items_left).into()
         } else {

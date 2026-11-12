@@ -1492,6 +1492,36 @@ pub fn items_failed(count: usize) -> String {
     format!("항목 {count}개를 처리하지 못했습니다")
 }
 
+/// The notice of a job that was stopped at a failed item (중단 in the window that asks about
+/// it, XFER-09) or by an error: that it was stopped, how many items failed, and that the
+/// `left` items after them were not processed (`None`: how many cannot be told; `Some(0)`: it
+/// stopped at its last item). `복사를 중단했습니다 · 실패 1개 · 남은 항목 2개는 처리하지 않았습니다`.
+pub fn job_stopped(work: JobWork, failed: usize, left: Option<u64>) -> String {
+    let object = work.phrases().object;
+    let rest = match left {
+        Some(0) => String::new(),
+        Some(left) => format!(" · 남은 항목 {left}개는 처리하지 않았습니다"),
+        None => " · 남은 항목은 처리하지 않았습니다".to_owned(),
+    };
+    format!("{object} 중단했습니다 · 실패 {failed}개{rest}")
+}
+
+/// The first line of the window of failed items of such a job: the items below are where it
+/// stopped, what came after them was not processed, and the window has no 다시 시도, which
+/// would try the listed items alone.
+pub fn job_stopped_note(work: JobWork, left: Option<u64>) -> String {
+    let object = work.phrases().object;
+    let rest = match left {
+        Some(0) => return format!("{object} 중단했습니다. 아래 항목에서 멈췄습니다."),
+        Some(left) => format!("그 뒤의 항목 {left}개는"),
+        None => "그 뒤의 항목은".to_owned(),
+    };
+    format!(
+        "{object} 중단했습니다. 아래 항목에서 멈췄고 {rest} 처리하지 않았습니다. \
+         마저 하려면 {object} 다시 시작하세요."
+    )
+}
+
 /// `text`, the notice of a job that ended, and how many of its items (`gone`) the location
 /// deleted for good when they were to go to the trash, which nothing brings back: `복사를
 /// 되돌렸습니다 · 1개는 휴지통 대신 영구 삭제되었습니다`. `text` as it is for none.
@@ -2166,6 +2196,25 @@ pub fn error_ask_item(failure: &ItemFailure) -> String {
         .or(failure.target.as_ref())
         .map(ToString::to_string)
         .unwrap_or_default()
+}
+
+/// Why the item the error window asks about failed, said while the job still waits for the
+/// answer: the reasons the list at a job's end words as done ("…건너뛰었습니다", "…그대로
+/// 두었습니다", [`failure_reason`]) say here only what is wrong, since whether the item is left
+/// out is what the window asks. Any other failure reads as in that list ([`item_failure`]).
+pub fn error_ask_reason(failure: &ItemFailure) -> String {
+    let words = match &failure.reason {
+        Some(FailureReason::TooDeep) => "폴더 안 너무 깊은 곳에 있어 처리할 수 없습니다",
+        Some(FailureReason::NotARegularFile) => {
+            "장치나 파이프 같은 특수 파일이라 처리할 수 없습니다"
+        }
+        Some(FailureReason::SourceCutShort) => "복사하는 동안 원본 파일이 줄어들었습니다",
+        Some(FailureReason::OntoItself) => "대상 폴더가 원본이 있는 바로 그 폴더입니다",
+        Some(FailureReason::ChangedWhileMoved) => "옮기는 동안 항목이 바뀌었습니다",
+        Some(FailureReason::OtherVolume) => "다른 드라이브의 항목이라 함께 옮길 수 없습니다",
+        _ => return item_failure(failure),
+    };
+    words.to_owned()
 }
 
 /// What the error window says while 남은 오류에도 같은 선택 is on: why 다시 시도 is off.
@@ -3834,6 +3883,73 @@ mod tests {
         assert_eq!(
             name_refused(JobWork::Create, &refused),
             "새 폴더를 만들지 못했습니다: Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등). 이 이름은 쓸 수 없습니다"
+        );
+    }
+
+    #[test]
+    fn the_window_that_asks_about_a_failure_does_not_say_it_was_already_left_out() {
+        let failure = |reason: Option<FailureReason>| ItemFailure {
+            source: None,
+            target: None,
+            stage: rf_jobs::Stage::Read,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason,
+        };
+        // The reasons the list at a job's end words as done have lines of their own here.
+        for reason in [
+            FailureReason::TooDeep,
+            FailureReason::NotARegularFile,
+            FailureReason::SourceCutShort,
+            FailureReason::OntoItself,
+            FailureReason::ChangedWhileMoved,
+            FailureReason::OtherVolume,
+        ] {
+            let listed = failure_reason(&reason);
+            let asked = error_ask_reason(&failure(Some(reason.clone())));
+            assert_ne!(asked, listed, "{reason:?}");
+            for done in ["건너뛰었습니다", "두었습니다", "않았습니다"] {
+                assert!(!asked.contains(done), "{reason:?}: {asked}");
+            }
+        }
+        assert_eq!(
+            error_ask_reason(&failure(Some(FailureReason::NotARegularFile))),
+            "장치나 파이프 같은 특수 파일이라 처리할 수 없습니다"
+        );
+        // Any other failure reads as in the list: an error of the system, a rule that says
+        // what is wrong.
+        assert_eq!(error_ask_reason(&failure(None)), "권한이 없습니다");
+        let mismatch = failure(Some(FailureReason::KindMismatch));
+        assert_eq!(error_ask_reason(&mismatch), item_failure(&mismatch));
+    }
+
+    #[test]
+    fn a_stopped_job_says_that_it_stopped_and_what_it_left() {
+        assert_eq!(
+            job_stopped(JobWork::Copy, 1, Some(2)),
+            "복사를 중단했습니다 · 실패 1개 · 남은 항목 2개는 처리하지 않았습니다"
+        );
+        assert_eq!(
+            job_stopped(JobWork::Move, 3, None),
+            "이동을 중단했습니다 · 실패 3개 · 남은 항목은 처리하지 않았습니다"
+        );
+        assert_eq!(
+            job_stopped(JobWork::Copy, 1, Some(0)),
+            "복사를 중단했습니다 · 실패 1개"
+        );
+        assert_eq!(
+            job_stopped_note(JobWork::Copy, Some(2)),
+            "복사를 중단했습니다. 아래 항목에서 멈췄고 그 뒤의 항목 2개는 처리하지 않았습니다. \
+             마저 하려면 복사를 다시 시작하세요."
+        );
+        assert_eq!(
+            job_stopped_note(JobWork::Move, None),
+            "이동을 중단했습니다. 아래 항목에서 멈췄고 그 뒤의 항목은 처리하지 않았습니다. \
+             마저 하려면 이동을 다시 시작하세요."
+        );
+        assert_eq!(
+            job_stopped_note(JobWork::Copy, Some(0)),
+            "복사를 중단했습니다. 아래 항목에서 멈췄습니다."
         );
     }
 

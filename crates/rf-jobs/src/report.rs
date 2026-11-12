@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::copies::CopyFound;
 use crate::id::JobId;
 use crate::preflight::{Issue, IssueKind};
-use crate::spec::{DeleteCopiesSpec, DeleteSpec, JobKind, JobSpec, TransferItem, TransferSpec};
+use crate::spec::{
+    DeleteCopiesSpec, DeleteSpec, JobKind, JobSpec, SymlinkMode, TransferItem, TransferSpec,
+};
 use crate::undo::UndoRecord;
 
 /// The step of a job an item failed in, for the UI to pick the wording.
@@ -452,7 +454,9 @@ impl JobReport {
 ///   its copy is in place already, and a retry would meet that copy as a conflict. The
 ///   failure's own paths are used, so an item below a folder is retried by itself, to the
 ///   path it was being written to (a numbered name included), and a move leaves the
-///   source folder it came from where it is.
+///   source folder it came from where it is. A failure no retry can help is left out too
+///   ([`retry_helps`]): asked for by itself, such an item would not fail the same way again
+///   but copy what the job has done once more.
 /// - A delete retries the paths that failed, with the same method and error policy. A
 ///   trash is never turned into a permanent delete here. The UI may offer one, and only
 ///   for a failure of kind [`ErrorKind::Unsupported`] (the trash refused the item) and
@@ -496,6 +500,26 @@ fn retry_links(links: &[(VPath, VPath, LinkKind)], failed: &[ItemFailure]) -> Op
     (!links.is_empty()).then_some(JobSpec::MakeLink { links })
 }
 
+/// Whether trying the item of `failure` again, by itself, can come to anything in a transfer
+/// that treats links as `symlinks` says. It cannot for an item the job refused because of
+/// where it lies among the others, which a retry no longer sees:
+///
+/// - `LinkLoop`: a link that leads back to a folder above it. Asked for as an item of its own
+///   it has no folder above it, so it would be followed, and everything the job copied from
+///   that folder would be copied again below the link's name, down to the next turn of the
+///   loop.
+/// - `TooDeep` while links are followed: without file identities a loop of links ends as an
+///   item too deep, and the same holds. (Not followed, an item too deep is a real folder,
+///   which a retry reaches from its own depth.)
+/// - `IntoItself`: a folder that goes into itself fails the same way whenever it is asked.
+fn retry_helps(failure: &ItemFailure, symlinks: SymlinkMode) -> bool {
+    match failure.reason {
+        Some(FailureReason::LinkLoop | FailureReason::IntoItself) => false,
+        Some(FailureReason::TooDeep) => symlinks != SymlinkMode::Follow,
+        _ => true,
+    }
+}
+
 fn retry_transfer(spec: &TransferSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
     let mut seen = HashSet::new();
     let mut items = Vec::new();
@@ -509,7 +533,7 @@ fn retry_transfer(spec: &TransferSpec, failed: &[ItemFailure]) -> Option<JobSpec
                 | Stage::Write
                 | Stage::Commit
         );
-        if !before_the_copy_was_in_place {
+        if !before_the_copy_was_in_place || !retry_helps(failure, spec.options.symlinks) {
             continue;
         }
         let (Some(source), Some(target)) = (&failure.source, &failure.target) else {

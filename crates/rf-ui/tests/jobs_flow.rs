@@ -1204,6 +1204,76 @@ fn closing_the_error_window_skips_that_item_and_stopping_ends_the_job() {
 }
 
 #[test]
+fn stopping_in_mid_run_keeps_what_was_done_and_says_what_was_not() {
+    let (_dir, left, right) = folders();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        write(&left.join(name), name);
+    }
+    // A folder has the name of `b.txt` at the target: under 덮어쓰기 that item fails when the
+    // job comes to it, after `a.txt` was written (on every system: no rights are needed).
+    std::fs::create_dir(right.join("b.txt")).expect("a folder in the way");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    state.set_on_error(OnError::Ask);
+    select_all(&mut state, LEFT);
+    key(&mut state, Key::F7, false);
+    state.pick_policy(ConflictPolicy::Overwrite);
+    let effects = state.pick_confirmed();
+    harness.carry_out(&mut state, effects);
+
+    // The job asks about `b.txt`, with `a.txt` already in place. 중단.
+    assert_eq!(
+        error_asked(&mut harness, &mut state),
+        local(&left.join("b.txt"))
+    );
+    assert_eq!(read(&right.join("a.txt")), "a.txt");
+    let effects = state.error_answered(ErrorChoice::Abort, false);
+    let mut seen = harness.carry_out(&mut state, effects);
+    seen.extend(harness.until(&mut state, "the job to end", |state| {
+        state.active_jobs() == 0
+    }));
+    assert_eq!(state.modal(), None);
+
+    // On disk: what was done stays done, nothing after the stop was started, the folder in
+    // the way is as it was, and every source is still there (a copy).
+    assert_eq!(read(&right.join("a.txt")), "a.txt");
+    assert!(right.join("b.txt").is_dir());
+    assert!(!right.join("c.txt").exists() && !right.join("d.txt").exists());
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        assert_eq!(read(&left.join(name)), name);
+    }
+    // The copy that was made has its undo record: stopping took nothing back by itself.
+    assert_eq!(
+        copies_recorded(&harness),
+        [vec![local(&right.join("a.txt"))]]
+    );
+
+    // The notice says that the job was stopped and that two items were never processed.
+    let token = details_toast(
+        &seen,
+        "복사를 중단했습니다 · 실패 1개 · 남은 항목 2개는 처리하지 않았습니다",
+    );
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items: {:?}", state.modal());
+    };
+    // The window says it first, then lists the item the job stopped at. No 다시 시도: it
+    // would copy `b.txt` alone and leave `c.txt` and `d.txt` out without a word.
+    assert_eq!(failures.lines.len(), 2, "{failures:?}");
+    assert_eq!(
+        failures.lines[0],
+        "복사를 중단했습니다. 아래 항목에서 멈췄고 그 뒤의 항목 2개는 처리하지 않았습니다. \
+         마저 하려면 복사를 다시 시작하세요."
+    );
+    assert!(
+        failures.lines[1].starts_with(&local(&left.join("b.txt")).to_string()),
+        "{failures:?}"
+    );
+    assert_eq!(failures.retry, None);
+    assert_eq!(state.failures_retried(), []);
+}
+
+#[test]
 fn without_the_setting_a_failed_item_asks_nothing() {
     let (_dir, left, right) = folders();
     write(&left.join("a.txt"), "a");

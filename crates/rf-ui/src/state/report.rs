@@ -16,7 +16,7 @@ use std::sync::Arc;
 use rf_core::{ErrorKind, VPath};
 use rf_jobs::JobReport;
 
-use super::jobs::{retry_of, top_level_count};
+use super::jobs::{retry_of, stopped_note, top_level_count};
 use super::{AppState, Effect};
 use crate::dialogs::{Failures, Modal};
 use crate::jobs::{Ended, RecentRow, report_lines};
@@ -58,19 +58,25 @@ impl AppState {
 
     /// 자세히 of line `index` of 최근 완료: the items the job could not process, and why, and those
     /// it warned about, with 다시 시도 for the failed items of a copy or a move that were not
-    /// tried again yet (XFER-09). Nothing for a job without them.
+    /// tried again yet (XFER-09); a job that was stopped says so first, and has no retry.
+    /// Nothing for a job without them.
     pub fn recent_details(&mut self, index: usize) -> Vec<Effect> {
         let Some(finished) = self.recent_jobs.get(index) else {
             return Vec::new();
         };
-        let lines = report_lines(&finished.report.0);
+        let report = &finished.report.0;
+        let mut lines = report_lines(report);
         if lines.is_empty() || self.quitting {
             return Vec::new();
         }
-        let retry = if finished.retried {
+        // A job that was stopped says so before its items.
+        if let Some(note) = stopped_note(finished.work, report) {
+            lines.insert(0, note);
+        }
+        let retry = if self.retried_jobs.contains(&report.id) {
             None
         } else {
-            retry_of(&finished.report.0)
+            retry_of(report)
         };
         self.open(Modal::Failures(Failures {
             title: words::failures_title().to_owned(),
