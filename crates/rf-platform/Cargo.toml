@@ -35,7 +35,7 @@ objc2-quick-look-thumbnailing = { version = "0.3.2", default-features = false, f
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "block2", "UNNotification"] }
 
 [target."cfg(unix)".dependencies]
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs"] }
 
 [target."cfg(not(windows))".dependencies]
 notify = "8.2.0"

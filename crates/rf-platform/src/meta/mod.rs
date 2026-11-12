@@ -283,7 +283,9 @@ mod imp {
     /// The NUL-separated names of the extended attributes of `local`, without following a
     /// final link.
     fn xattr_names(local: &Path) -> rustix::io::Result<Vec<u8>> {
-        let size = rustix::fs::llistxattr(local, &mut [0u8; 0])?;
+        // The size comes from the query call: since rustix 1.1.6 a zero-length buffer no
+        // longer asks for it (RUSTSEC-2026-0486).
+        let size = rustix::fs::llistxattr_query(local)?;
         let mut names = vec![0; size];
         if size > 0 {
             let len = rustix::fs::llistxattr(local, &mut names[..])?;
@@ -294,7 +296,7 @@ mod imp {
 
     /// The value of the extended attribute `name` of `local`, without following a final link.
     fn read_xattr(local: &Path, name: &[u8]) -> rustix::io::Result<Vec<u8>> {
-        let size = rustix::fs::lgetxattr(local, name, &mut [0u8; 0])?;
+        let size = rustix::fs::lgetxattr_query(local, name)?;
         let mut value = vec![0; size];
         if size > 0 {
             let len = rustix::fs::lgetxattr(local, name, &mut value[..])?;
