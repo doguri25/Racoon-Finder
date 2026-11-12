@@ -1814,6 +1814,79 @@ fn a_stopped_job_says_so_and_offers_no_retry() {
 }
 
 #[test]
+fn a_stopped_job_counts_only_what_it_never_came_to() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    let spec = copy_of(
+        &["a.txt", "b.txt", "c.txt", "d.txt"],
+        TransferOptions::default(),
+    );
+    // A move of three files to another drive: `a` moved, `b` was copied but its source could
+    // not be removed (which counts it as done), and the user stopped there. `c` is the one
+    // item it never came to.
+    let moving = JobSpec::Transfer(
+        TransferSpec::into_dir(
+            TransferMode::Move,
+            &[in_a("a.txt"), in_a("b.txt"), in_a("c.txt")],
+            &folder("b"),
+            TransferOptions::default(),
+        )
+        .expect("a transfer"),
+    );
+    let effects = finish(&mut state, 10, &moving, JobWork::Move, |report| {
+        report.outcome = Outcome::Aborted;
+        report.planned.files = 3;
+        report.done.files = 2;
+        report
+            .failures
+            .push(copy_failure("b.txt", Stage::DeleteSource));
+    });
+    let (token, text, _) = the_toast(&effects);
+    assert_eq!(
+        text,
+        "이동을 중단했습니다 · 실패 1개 · 남은 항목 1개는 처리하지 않았습니다"
+    );
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items");
+    };
+    assert_eq!(
+        failures.lines[0],
+        "이동을 중단했습니다. 아래 항목에서 멈췄고 그 뒤의 항목 1개는 처리하지 않았습니다. \
+         마저 하려면 이동을 다시 시작하세요."
+    );
+    state.dialog_cancelled();
+
+    // A copy of four: `a` had vanished (it was never in the plan of three) and was left out
+    // in the window that asks, `b` was copied, `c` failed and the user stopped there. `d` is
+    // the one item it never came to.
+    let effects = finish(&mut state, 11, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::Aborted;
+        report.planned.files = 3;
+        report.done.files = 1;
+        let mut gone = copy_failure("a.txt", Stage::Plan);
+        gone.kind = ErrorKind::NotFound;
+        report.failures.push(gone);
+        report.failures.push(copy_failure("c.txt", Stage::Write));
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "복사를 중단했습니다 · 실패 2개 · 남은 항목 1개는 처리하지 않았습니다"
+    );
+    // A failure whose place in the plan is not known (a fault of the engine itself): that
+    // items were left is said, and no number is made up.
+    let effects = finish(&mut state, 12, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::Aborted;
+        report.planned.files = 4;
+        report.done.files = 1;
+        report.failures.push(copy_failure("b.txt", Stage::Internal));
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "복사를 중단했습니다 · 실패 1개 · 남은 항목은 처리하지 않았습니다"
+    );
+}
+
+#[test]
 fn a_retry_is_offered_once_even_after_the_recent_list_is_cleared() {
     let mut state = ready(vec![file("a.txt")], vec![]);
     let spec = copy_of(&["a.txt"], TransferOptions::default());

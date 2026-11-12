@@ -1198,6 +1198,60 @@ fn a_move_never_enters_a_folder_on_another_volume() {
     assert_eq!(failure.reason, Some(FailureReason::OtherVolume));
 }
 
+/// The folder a move would not enter is not what a retry is for: asked for by itself it has no
+/// folder above it to be on another volume than, so the move would copy what is on that volume
+/// to the target and delete it there.
+#[test]
+fn a_folder_on_another_volume_is_never_retried() {
+    let f = fx();
+    write_tree(&f.src, &[("dir/a.txt", "A"), ("dir/mnt/x.txt", "X")]);
+    let mnt = f.src.join("dir").join("mnt");
+    let faults = || {
+        FaultyProvider::local(vec![
+            Fault::CrossDevice,
+            Fault::OtherVolume { under: v(&mnt) },
+        ])
+    };
+    // It is the job's one failure: nothing to retry, and what is on that volume stays.
+    let rep = run_on(
+        &mv(&[f.src.join("dir")], &f.dst),
+        &faults().vfs(),
+        &NonInteractive,
+    );
+    assert_eq!(rep.failures.len(), 1, "{:?}", rep.failures);
+    assert_eq!(rep.failures[0].reason, Some(FailureReason::OtherVolume));
+    assert_eq!(rep.retry_spec(), None);
+    assert_eq!(read(&mnt.join("x.txt")), "X");
+    assert!(!f.dst.join("dir").join("mnt").exists());
+
+    // Beside a failure that can be tried again (a source that is not there), the retry holds
+    // that one alone; run under the same faults, it leaves the volume as it is.
+    let g = fx();
+    write_tree(&g.src, &[("dir/mnt/x.txt", "X")]);
+    let mnt = g.src.join("dir").join("mnt");
+    let faults = || {
+        FaultyProvider::local(vec![
+            Fault::CrossDevice,
+            Fault::OtherVolume { under: v(&mnt) },
+        ])
+    };
+    let rep = run_on(
+        &mv(&[g.src.join("dir"), g.src.join("gone")], &g.dst),
+        &faults().vfs(),
+        &NonInteractive,
+    );
+    assert_eq!(rep.failures.len(), 2, "{:?}", rep.failures);
+    let Some(JobSpec::Transfer(retry)) = rep.retry_spec() else {
+        panic!("a retry of the source that is gone: {:?}", rep.retry_spec())
+    };
+    let sources: Vec<_> = retry.items.iter().map(|item| item.source.clone()).collect();
+    assert_eq!(sources, [v(g.src.join("gone"))]);
+    let again = run_on(&JobSpec::Transfer(retry), &faults().vfs(), &NonInteractive);
+    assert_eq!((again.done.files, again.done.dirs), (0, 0));
+    assert_eq!(read(&mnt.join("x.txt")), "X");
+    assert!(!g.dst.join("dir").join("mnt").exists());
+}
+
 /// The undo of a folder moved across volumes makes the source folders again with the times
 /// they had: the folders made at the target kept them, and give them back before they go.
 #[test]

@@ -88,8 +88,14 @@ fn a_retry_leaves_out_the_failures_no_retry_can_help() {
         sources(retry_spec(&job(SymlinkMode::Follow), &failed)),
         [v(f.src.join("gone"))]
     );
-    // With nothing else to try again, there is no retry at all.
-    for reason in [FailureReason::LinkLoop, FailureReason::IntoItself] {
+    // With nothing else to try again, there is no retry at all. So for a folder on another
+    // volume, which a move never enters, and for a pipe or a device, which is never read.
+    for reason in [
+        FailureReason::LinkLoop,
+        FailureReason::IntoItself,
+        FailureReason::OtherVolume,
+        FailureReason::NotARegularFile,
+    ] {
         let only = [failure("x", Some(reason))];
         assert_eq!(retry_spec(&job(SymlinkMode::CopyLink), &only), None);
         assert_eq!(retry_spec(&job(SymlinkMode::Follow), &only), None);

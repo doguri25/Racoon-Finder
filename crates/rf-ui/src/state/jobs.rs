@@ -19,7 +19,7 @@ use std::time::Duration;
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
-    JobSpec, LanePolicy, Outcome, TransferMode, TransferOptions, TransferSpec, UndoRecord,
+    JobSpec, LanePolicy, Outcome, Stage, TransferMode, TransferOptions, TransferSpec, UndoRecord,
     retry_spec,
 };
 
@@ -1011,15 +1011,34 @@ pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
 }
 
 /// How many items a job that was stopped never came to, as far as `report` tells: what it
-/// planned, less what it did, skipped and failed at. `None` when it cannot be told (the job
-/// stopped while it was still counting), `Some(0)` when the item it stopped at was its last.
+/// planned, less what it did, what it skipped, and the planned items it failed at. `None`
+/// when it cannot be told, so that no wrong number is ever said: the job stopped while it was
+/// still counting, or it has a failure whose place in the plan is not known here. `Some(0)`
+/// when the item it stopped at was its last.
+///
+/// Not every failure is a planned item that was not done:
+/// - one of `Stage::Plan` was never in the plan (a source that is gone is not counted);
+/// - one of `Stage::DeleteSource` is a file whose copy is in place and counted as done, its
+///   source alone stayed.
+///
+/// A folder that failed counts what is in it as not reached, which it was not.
 pub(super) fn not_reached(report: &JobReport) -> Option<u64> {
     let items = |totals: rf_jobs::Totals| totals.files.saturating_add(totals.dirs);
     let planned = items(report.planned);
     if planned == 0 {
         return None;
     }
-    let failed = u64::try_from(report.failures.len()).unwrap_or(u64::MAX);
+    let mut failed: u64 = 0;
+    for failure in &report.failures {
+        match failure.stage {
+            Stage::Plan | Stage::DeleteSource => {}
+            Stage::Conflict | Stage::Read | Stage::Write | Stage::Commit => {
+                failed = failed.saturating_add(1);
+            }
+            // A step of another kind of job, or of the engine itself.
+            _ => return None,
+        }
+    }
     Some(
         planned
             .saturating_sub(items(report.done))
