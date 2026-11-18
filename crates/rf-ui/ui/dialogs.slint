@@ -3,7 +3,8 @@
 // jobs the last run left unfinished, the pre-flight check of a transfer, and the note that shows
 // while the app ends. Each one takes the keyboard when it opens and can be used with it alone
 // (KEY-02): Esc closes it (Cancel), Tab and Shift+Tab move among its buttons (and its field),
-// going round, Space or Enter presses the button the keys are on, which shows a ring, and
+// going round (the name window's Tab is the next rename, and its arrows reach its buttons: see
+// `NameDialog`), Space or Enter presses the button the keys are on, which shows a ring, and
 // ↑↓ PageUp PageDown Home End scroll its list. With no button chosen yet, Enter does its main
 // action unless that action destroys something; a dialog whose main action destroys something
 // starts on 취소. `NoticeWindow` is a window of its own, for a message before or instead of the
@@ -16,6 +17,9 @@ import { Icon } from "icons.slint";
 import { DialogKeys } from "shortcuts.slint";
 
 export struct NameView {
+    // A new number for each item the window names: it starts again (the Tab of a rename moves
+    // on to the next item in the same window).
+    serial: int,
     title: string,
     // The text the field starts with, and where its first selection ends (a byte offset).
     initial: string,
@@ -112,16 +116,24 @@ component Body inherits Text {
     wrap: word-wrap;
 }
 
-// Asks for the name of a new folder or a rename. The field starts with `view.initial`, the
-// part before the extension selected; Rust checks each edit and sends the warning back. While
-// an input method composes a syllable, the field's text and Rust do not have it until it is
-// committed, so neither 확인 nor Enter takes the name meanwhile: either would leave the
-// syllable out, and Tab leaves the field only once it is committed. Tab goes from the field to
-// 취소, then to 확인, then back to the field.
+// Asks for the name of a new folder or file, or of a rename. The field starts with
+// `view.initial`, the part before the extension selected; Rust checks each edit and sends the
+// warning back. While an input method composes a syllable, the field's text and Rust do not have
+// it until it is committed, so neither 확인, Enter nor Tab takes the name meanwhile: each would
+// leave the syllable out.
+//
+// Tab applies the name, as Enter does; in a rename it then opens the rename of the next item of
+// the list (Shift+Tab the item before), in this same window, which starts again with that
+// item's name (`view.serial`), as File Explorer's Tab does (OPS-02). Rust decides: a name that
+// cannot be used keeps the window on the item, with its warning. The buttons are reached by the
+// arrows instead: ↓ goes from the field to 확인 (or 취소 while 확인 is off), ← and → go between
+// them, and ↑ goes back to the field.
 export component NameDialog inherits DialogFrame {
     in property <NameView> view;
     callback edited(text: string);
     callback accepted(text: string);
+    // Tab (`backward`: Shift+Tab) with the field holding `text`.
+    callback tabbed(text: string, backward: bool);
     callback cancelled();
 
     property <bool> composing: input.preedit-text != "";
@@ -132,16 +144,28 @@ export component NameDialog inherits DialogFrame {
     height: layout.preferred-height;
     accessible-label: root.view.title;
 
-    init => {
+    // The field takes the name the window starts with, its first part selected, and the keys.
+    function start() {
+        root.on-button = -1;
         input.text = root.view.initial;
         input.focus();
         input.set-selection-offsets(0, root.view.select-end);
     }
 
-    // The keys go `step` stops on from where they are (the field is the stop before 취소).
-    function go(step: int) {
-        root.on-button = DialogKeys.cycle(root.on-button + 1, step, 3) - 1;
-        if (root.on-button < 0) {
+    init => {
+        root.start();
+    }
+
+    // The next item's name: the window starts again.
+    private property <int> serial: root.view.serial;
+    changed serial => {
+        root.start();
+    }
+
+    // The keys go to button `button` (0 취소, 1 확인), or back to the field (-1).
+    function go-to(button: int) {
+        root.on-button = button;
+        if (button < 0) {
             // Back in the field, the name is all selected, as in the system's dialogs: what is
             // typed replaces it.
             input.focus();
@@ -159,6 +183,13 @@ export component NameDialog inherits DialogFrame {
         }
     }
 
+    // Tab or Shift+Tab: the name is applied, and Rust moves on.
+    function tab(step: int) {
+        if (!root.composing) {
+            root.tabbed(input.text, step < 0);
+        }
+    }
+
     keys := FocusScope {
         focus-on-click: false;
         key-pressed(event) => {
@@ -168,8 +199,18 @@ export component NameDialog inherits DialogFrame {
             }
             let step = DialogKeys.tab-step(event);
             if (step != 0) {
-                root.go(step);
+                root.tab(step);
                 return accept;
+            }
+            if (root.on-button >= 0 && DialogKeys.plain(event)) {
+                if (event.text == Key.UpArrow) {
+                    root.go-to(-1);
+                    return accept;
+                }
+                if (event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                    root.go-to(1 - root.on-button);
+                    return accept;
+                }
             }
             if (root.on-button >= 0 && DialogKeys.presses(event)) {
                 root.press(root.on-button);
@@ -219,9 +260,11 @@ export component NameDialog inherits DialogFrame {
                         }
                         let step = DialogKeys.tab-step(event);
                         if (step != 0) {
-                            if (!root.composing) {
-                                root.go(step);
-                            }
+                            root.tab(step);
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow && DialogKeys.plain(event) && !root.composing) {
+                            root.go-to(root.view.ok-enabled ? 1 : 0);
                             return accept;
                         }
                         reject

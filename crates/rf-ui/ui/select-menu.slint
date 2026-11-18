@@ -2,8 +2,8 @@
 // the rows whose names match a pattern, or those with the extension of the cursor's row. Each
 // tool chooses among the rows on screen, whatever the view mode, and each item says its key
 // (KEY-03): the keys do the same from the panes, so the menu needs no key of its own (KEY-02).
-// 선택 해제 says none: Esc does more (with nothing selected it cancels a cut, as File
-// Explorer's does), and File Explorer's 선택 안 함 shows no key either. 체크박스로 선택 is a
+// 선택 해제 says Esc, which also cancels a cut when nothing is selected, as File Explorer's does
+// (the item itself only clears the selection). 체크박스로 선택 is a
 // switch, saved with the settings: the rows of 자세히, 목록 and the icons then start with a
 // checkbox. It has no key: it is turned on and off rarely, and a key would have to be free in
 // the tables of every system (KEY-02 asks for a key only where one is free), so the menu is
@@ -31,7 +31,7 @@ export component SelectMenu inherits ContextMenuArea {
             }
         }
         MenuItem {
-            title: "선택 해제";
+            title: Shortcuts.titled("선택 해제", Shortcuts.clear-selection);
             activated => {
                 root.command("clear-selection");
             }

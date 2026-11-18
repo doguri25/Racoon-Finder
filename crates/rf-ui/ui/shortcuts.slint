@@ -6,6 +6,8 @@
 export global Shortcuts {
     in property <string> back;
     in property <string> forward;
+    // The visit history's menu under 뒤로 and 앞으로 (NAV-04).
+    in property <string> visits-menu;
     in property <string> up;
     in property <string> new-folder;
     in property <string> copy-to;
@@ -43,6 +45,7 @@ export global Shortcuts {
     in property <string> fit-columns;
     // The 선택 menu, and listing the folder again.
     in property <string> select-all;
+    in property <string> clear-selection;
     in property <string> invert-selection;
     in property <string> select-pattern;
     in property <string> select-same-extension;
@@ -111,5 +114,10 @@ export global DialogKeys {
     // The key presses the button the keys are on: Space or Enter.
     public pure function presses(event: KeyEvent) -> bool {
         return event.text == " " || event.text == Key.Return;
+    }
+
+    // No modifier key is held with the key.
+    public pure function plain(event: KeyEvent) -> bool {
+        return !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
     }
 }

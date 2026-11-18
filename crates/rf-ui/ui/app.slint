@@ -40,13 +40,14 @@ import { ViewMenu } from "view-menu.slint";
 import { SelectMenu } from "select-menu.slint";
 import { PreviewPanel, QuickLook, PreviewView, PreviewKind } from "preview.slint";
 import { PropertiesDialog, PropertiesView, FactRow, HashRowView } from "properties.slint";
-import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing, DropPlace, DropAt } from "list-parts.slint";
+import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing, DropPlace, DropAt, VisitsMenu, VisitEntry } from "list-parts.slint";
 
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, HistoryRowView, StatusFit, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, ErrorView, PickView, PickTarget,
     NoticeWindow, JobWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
-    PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt
+    PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt,
+    VisitEntry
 }
 
 // Which dialog is open over the main window.
@@ -92,6 +93,9 @@ export component MainWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <bool> can-up;
+    // The lines of the visit history's menu (NAV-04), which Rust fills as it opens
+    // (`visits-asked`).
+    in property <[VisitEntry]> visit-entries;
     // The rows of the job panel, of the jobs a worker has taken up; the panel shows while
     // there is one.
     in property <[JobRowView]> job-rows;
@@ -164,6 +168,9 @@ export component MainWindow inherits Window {
     // 보기 ▸ 설정 ▸ 복사·이동 오류는 파일마다 묻기 (XFER-09), which Rust sets back to the state's
     // after the toggle; off, a copy or a move carries on and lists its failed items at its end.
     in-out property <bool> ask-on-error;
+    // 보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴 곳부터 (PICK-05), which Rust sets back to the state's
+    // after the toggle; off, the destination picker starts at the other pane's folder.
+    in-out property <bool> pick-from-last;
     // 보기 ▸ 설정 ▸ 썸네일 보이기, which Rust sets back to the state's after the toggle.
     in-out property <bool> show-thumbnails: true;
     in-out property <bool> system-menu-first;
@@ -329,7 +336,8 @@ export component MainWindow inherits Window {
     // apply-below (하위 폴더에 적용), reset-view (기본값으로 되돌리기).
     callback view-command(side: int, name: string);
     // A left press on row `index` of pane `side`, and its release when no drag came of it.
-    callback row-clicked(side: int, index: int, ctrl: bool, shift: bool);
+    // A left press on row `index` of pane `side` (`on-name`: on its name's text, OPS-02).
+    callback row-clicked(side: int, index: int, ctrl: bool, shift: bool, on-name: bool);
     callback row-released(side: int, index: int);
     // A click on the checkbox of row `index` of pane `side`, and on the head's (NAV-15).
     callback row-checkbox(side: int, index: int);
@@ -347,6 +355,8 @@ export component MainWindow inherits Window {
     // out the blocked items, 2 cancel), recovered job `index` was run again or dropped.
     callback name-edited(text: string);
     callback name-accepted(text: string);
+    // Tab (`backward`: Shift+Tab) in the name window, which holds `text` (OPS-02).
+    callback name-tabbed(text: string, backward: bool);
     callback dialog-cancelled();
     callback confirm-accepted();
     // The checkbox of the confirmation (설정 백업 of 완전 삭제…) was flipped.
@@ -393,6 +403,13 @@ export component MainWindow inherits Window {
     callback pick-filter-edited(text: string);
     callback pick-path-edited(text: string);
     callback pick-path-entered(text: string);
+    // Tab in the picker's path field, which holds `text` (PICK-03): the completed text; `text`
+    // itself while Rust waits for the names that complete it (the field gets them by
+    // `fill-pick-path`); empty when there is nothing to complete, and Tab moves on.
+    callback pick-path-completed(text: string) -> string;
+    // A key the picker does not take itself (PICK-04: the window's key for a new folder):
+    // whether Rust did something with it.
+    callback pick-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     callback pick-tree-clicked(index: int);
     callback pick-tree-toggled(index: int);
     callback pick-new-folder();
@@ -412,6 +429,10 @@ export component MainWindow inherits Window {
     callback recent-save(index: int);
     callback history-toggled();
     callback history-run(redo: bool, index: int);
+    // The visit history's menu (NAV-04) is about to show `way` (0 behind, 1 ahead, -1 both, from
+    // its key): Rust fills `visit-entries`. Then line `index` of way `way` was chosen.
+    callback visits-asked(way: int);
+    callback visit-chosen(way: int, index: int);
     // The confirmation's third answer (트레이에서 계속).
     callback confirm-alternative();
     // The button of the toast `token`, and its end (closed, or its time ran out).
@@ -636,6 +657,46 @@ export component MainWindow inherits Window {
         root.give-quick-look-keys();
         pane-menu-keys-later.running = true;
     }
+
+    // The visit history's menu under 뒤로 (`way` 0, and -1 for both ways from its key) or 앞으로
+    // (1), once Rust has filled it; nothing when it has no line.
+    public function show-visits-menu(way: int) {
+        root.visits-asked(way);
+        if (root.visit-entries.length == 0) {
+            return;
+        }
+        let x = way == 1 ? forward-button.absolute-position.x : back-button.absolute-position.x;
+        visits-menu.show({ x: x, y: back-button.absolute-position.y + back-button.height + 4px });
+    }
+
+    // Which of 뒤로 (0) and 앞으로 (1) a long press at the point (`x`, `y`) of the window starts
+    // on, while it has a folder to list (NAV-04); -1 elsewhere, and while a dialog, quick look or
+    // a list of the window shows over the panes.
+    public pure function visits-button-at(x: length, y: length) -> int {
+        if (root.drops-blocked()) {
+            return -1;
+        }
+        let bx = x - back-button.absolute-position.x;
+        let by = y - back-button.absolute-position.y;
+        if (root.can-back && bx >= 0 && by >= 0 && bx < back-button.width && by < back-button.height) {
+            return 0;
+        }
+        let fx = x - forward-button.absolute-position.x;
+        let fy = y - forward-button.absolute-position.y;
+        if (root.can-forward && fx >= 0 && fy >= 0 && fx < forward-button.width && fy < forward-button.height) {
+            return 1;
+        }
+        return -1;
+    }
+
+    // The text of the destination picker's path field becomes `text`: a Tab that waited for the
+    // names completed it (PICK-03).
+    public function fill-pick-path(text: string) {
+        root.pick-fill-text = text;
+        root.pick-fill-serial += 1;
+    }
+    private property <string> pick-fill-text;
+    private property <int> pick-fill-serial;
 
     // The menu of the apps that can open a file (`open-with-apps`), where the item menu showed.
     public function show-open-with() {
@@ -985,22 +1046,32 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         spacing: Theme.gap-xs;
 
-                        ToolButton {
+                        // A right click (or a long press, which Rust tells) lists the visit
+                        // history that way (NAV-04).
+                        back-button := ToolButton {
                             icon: "back";
                             keys: Shortcuts.back;
                             label: "뒤로";
+                            note: Shortcuts.tip("방문 기록", Shortcuts.visits-menu);
                             enabled: root.can-back;
                             clicked => {
                                 root.command("back");
                             }
+                            right-pressed => {
+                                root.show-visits-menu(0);
+                            }
                         }
-                        ToolButton {
+                        forward-button := ToolButton {
                             icon: "forward";
                             keys: Shortcuts.forward;
                             label: "앞으로";
+                            note: Shortcuts.tip("방문 기록", Shortcuts.visits-menu);
                             enabled: root.can-forward;
                             clicked => {
                                 root.command("forward");
+                            }
+                            right-pressed => {
+                                root.show-visits-menu(1);
                             }
                         }
                         ToolButton {
@@ -1122,6 +1193,7 @@ export component MainWindow inherits Window {
                             drag-default: root.drag-default;
                             move-undo-toast <=> root.move-undo-toast;
                             ask-on-error <=> root.ask-on-error;
+                            pick-from-last <=> root.pick-from-last;
                             show-thumbnails <=> root.show-thumbnails;
                             system-menu-first <=> root.system-menu-first;
                             system-menu-offered: root.system-menu-offered;
@@ -1423,8 +1495,8 @@ export component MainWindow inherits Window {
                         column-texts(column, first, count) => {
                             return root.column-texts(0, column, first, count);
                         }
-                        row-clicked(index, ctrl, shift) => {
-                            root.row-clicked(0, index, ctrl, shift);
+                        row-clicked(index, ctrl, shift, on-name) => {
+                            root.row-clicked(0, index, ctrl, shift, on-name);
                             keys.focus();
                         }
                         row-released(index) => {
@@ -1579,8 +1651,8 @@ export component MainWindow inherits Window {
                         column-texts(column, first, count) => {
                             return root.column-texts(1, column, first, count);
                         }
-                        row-clicked(index, ctrl, shift) => {
-                            root.row-clicked(1, index, ctrl, shift);
+                        row-clicked(index, ctrl, shift, on-name) => {
+                            root.row-clicked(1, index, ctrl, shift, on-name);
                             keys.focus();
                         }
                         row-released(index) => {
@@ -1982,6 +2054,8 @@ export component MainWindow inherits Window {
             active: root.dialog == DialogKind.pick;
             scroll-row: root.pick-scroll-row;
             scroll-serial: root.pick-scroll-serial;
+            fill-text: root.pick-fill-text;
+            fill-serial: root.pick-fill-serial;
             cancelled => {
                 root.dialog-cancelled();
             }
@@ -2012,6 +2086,12 @@ export component MainWindow inherits Window {
             path-entered(text) => {
                 root.pick-path-entered(text);
             }
+            path-completed(text) => {
+                return root.pick-path-completed(text);
+            }
+            other-key(text, ctrl, shift, alt, meta) => {
+                return root.pick-key(text, ctrl, shift, alt, meta);
+            }
             new-folder => {
                 root.pick-new-folder();
             }
@@ -2041,6 +2121,9 @@ export component MainWindow inherits Window {
             }
             accepted(text) => {
                 root.name-accepted(text);
+            }
+            tabbed(text, backward) => {
+                root.name-tabbed(text, backward);
             }
             cancelled => {
                 root.dialog-cancelled();
@@ -2186,6 +2269,13 @@ export component MainWindow inherits Window {
             apps: root.open-with-apps;
             chosen(index) => {
                 root.open-with-chosen(index);
+            }
+        }
+
+        visits-menu := VisitsMenu {
+            lines: root.visit-entries;
+            chosen(way, index) => {
+                root.visit-chosen(way, index);
             }
         }
 

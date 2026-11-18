@@ -30,7 +30,7 @@ use rf_vfs::{
     sort_entries,
 };
 
-use crate::history::History;
+use crate::history::{History, Way};
 use crate::loader::{LoadEvent, LoadRequest};
 use crate::selection::Selection;
 use crate::state::FolderView;
@@ -536,6 +536,13 @@ impl Tab {
     pub fn go_forward(&mut self) -> Option<LoadRequest> {
         let next = self.history.go_forward(self.location.clone())?;
         Some(self.load(next))
+    }
+
+    /// Goes to the folder `index` places along the history `way` (0 is the next one), in one
+    /// move ([`History::go_to`]); `None` when the history is not that long.
+    pub fn go_to(&mut self, way: Way, index: usize) -> Option<LoadRequest> {
+        let folder = self.history.go_to(way, index, self.location.clone())?;
+        Some(self.load(folder))
     }
 
     /// Goes to the parent folder, like [`Tab::navigate`]; `None` at a root. The folder it

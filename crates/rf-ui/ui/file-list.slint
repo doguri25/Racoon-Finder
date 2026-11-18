@@ -121,8 +121,9 @@ export component FileList inherits Rectangle {
     // The texts of the column numbered `column` in `count` rows from row `first` on, one a
     // line, for a fit to measure.
     callback column-texts(column: int, first: int, count: int) -> string;
-    // A left press on row `index`, and its release when no drag came of it (a click).
-    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    // A left press on row `index` (`on-name`: on the text of its name, for the slow second
+    // click that renames, OPS-02), and its release when no drag came of it (a click).
+    callback row-clicked(index: int, ctrl: bool, shift: bool, on-name: bool);
     callback row-released(index: int);
     callback row-activated(index: int);
     // A right click on row `index`, just before its menu opens.
@@ -397,7 +398,9 @@ export component FileList inherits Rectangle {
                                     touch := TouchArea {
                                         pointer-event(event) => {
                                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                                                root.row-clicked(i, event.modifiers.control, event.modifiers.shift);
+                                                let name-x = head.pad + root.check-room + root.icon-room;
+                                                let on-name = self.mouse-x >= name-x && self.mouse-x < name-x + min(name-text.preferred-width, name-text.width);
+                                                root.row-clicked(i, event.modifiers.control, event.modifiers.shift, on-name);
                                             }
                                             if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                                                 root.row-menu(i);
@@ -444,7 +447,7 @@ export component FileList inherits Rectangle {
                                     name: row.icon;
                                     color: row.is-dir ? Theme.folder : Theme.muted;
                                 }
-                                Text {
+                                name-text := Text {
                                     x: head.pad + root.check-room + root.icon-room;
                                     width: head.name-end - self.x;
                                     height: parent.height;

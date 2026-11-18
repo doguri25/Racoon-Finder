@@ -205,7 +205,9 @@ export global ItemMenu {
 }
 
 // The menu of an item: move and copy first (OPS-05), then the clipboard, and 속성 last, as in
-// File Explorer, each command with its key (KEY-03). It wraps what is right-clicked; the press
+// File Explorer, each command with its key (KEY-03), and 새 파일 ▸ after the ways to make
+// something of the item (OPS-01: a new file in the pane's folder). It wraps what is
+// right-clicked; the press
 // selects the item first, then calls `show`. The clipboard's items are the system's: 잘라내기
 // where File Explorer has it (not on macOS), 여기로 이동 where Finder has it (macOS only);
 // 붙여넣기 and 여기로 이동 paste into the item when it is a folder, as File Explorer does, and
@@ -293,6 +295,18 @@ export component RowMenu inherits ContextMenuArea {
                 root.command("share");
             }
         }
+        // A new file beside the item, in the pane's folder, as the folder's menu makes one. Its
+        // kinds of file, each made through its name window.
+        Menu {
+            title: "새 파일";
+
+            MenuItem {
+                title: "빈 텍스트 파일";
+                activated => {
+                    root.command("new-file");
+                }
+            }
+        }
         MenuSeparator { }
         MenuItem {
             title: Shortcuts.titled("열기", Shortcuts.open);
@@ -373,15 +387,17 @@ export component RowMenu inherits ContextMenuArea {
     }
 }
 
-// The menu of the part of a list without items: a new folder there, a paste into the folder
+// The menu of the part of a list without items: a new folder there, a new file (새 파일 ▸ 빈
+// 텍스트 파일, OPS-01; no key, as neither File Explorer nor Finder has one), a paste into the folder
 // (off while the clipboard holds no files), 되돌리기 and 다시 실행 (off while there is nothing
 // to undo or to do again), the folder listed again (NAV-13), each with its key (KEY-03), a
 // terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer; at the end the
 // system's own menu of the folder (더 많은 옵션 표시), where the system has one. It wraps that
 // part of the list.
 export component BlankMenu inherits ContextMenuArea {
-    // An item of the menu: the name of the window's command it runs (new-folder, paste,
-    // paste-move, undo, redo, refresh, folder-terminal, folder-properties, folder-more-options).
+    // An item of the menu: the name of the window's command it runs (new-folder, new-file,
+    // paste, paste-move, undo, redo, refresh, folder-terminal, folder-properties,
+    // folder-more-options).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -392,6 +408,17 @@ export component BlankMenu inherits ContextMenuArea {
             title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
             activated => {
                 root.command("new-folder");
+            }
+        }
+        // The kinds of new file, each made through its name window.
+        Menu {
+            title: "새 파일";
+
+            MenuItem {
+                title: "빈 텍스트 파일";
+                activated => {
+                    root.command("new-file");
+                }
             }
         }
         MenuSeparator { }
@@ -505,6 +532,42 @@ export component OpenWithMenu inherits ContextMenuArea {
             title: app;
             activated => {
                 root.chosen(index);
+            }
+        }
+    }
+}
+
+// One line of the visit history's menu (NAV-04), as Rust makes it.
+export struct VisitEntry {
+    // The folder's name and the folder it is in.
+    title: string,
+    // 0 a folder behind (뒤로), 1 one ahead (앞으로), -1 the current one (in the menu of the key,
+    // checked and off).
+    way: int,
+    // Its place in that way's list, the nearest 0.
+    index: int,
+}
+
+// The visit history's menu under 뒤로 and 앞으로 (NAV-04): the folders behind (a right click or a
+// long press on 뒤로), those ahead (on 앞으로), or, from its key, those ahead over the current one
+// and those behind under it, as File Explorer's list of recent locations has them. Rust fills
+// `lines` as it opens. It takes no click itself (`enabled: false`): it shows only when it is
+// asked to.
+export component VisitsMenu inherits ContextMenuArea {
+    in property <[VisitEntry]> lines;
+    // Line `index` of way `way` was chosen.
+    callback chosen(way: int, index: int);
+
+    enabled: false;
+
+    Menu {
+        for entry in root.lines: MenuItem {
+            title: entry.title;
+            enabled: entry.way >= 0;
+            checkable: entry.way < 0;
+            checked: entry.way < 0;
+            activated => {
+                root.chosen(entry.way, entry.index);
             }
         }
     }

@@ -1,5 +1,5 @@
-//! The mouse's fourth and fifth buttons (NAV-04), a trackpad's swipe (COMP-04) and the long press
-//! (PICK-02), from the window's own events.
+//! The mouse's fourth and fifth buttons (NAV-04), a trackpad's swipe (COMP-04), the long press
+//! (PICK-02) and the slow second click (OPS-02), from the window's own events.
 //!
 //! The window's winit hook ([`watch_winit_events`](super)) sees these before Slint does, and
 //! calls the methods here:
@@ -17,7 +17,15 @@
 //!   does ([`Controller::press_open`]). The pointer's moves and the release are the window's own
 //!   events too, so that they reach it whatever Slint makes of the press: a move past the
 //!   threshold ends it ([`Controller::press_moved`]), a second button, a key, another finger or
-//!   the pointer leaving the window cancel it ([`Controller::press_cancel`]).
+//!   the pointer leaving the window cancel it ([`Controller::press_cancel`]). A long press on
+//!   뒤로 or 앞으로 opens the visit history's menu that way instead (NAV-04), as a right click on
+//!   them does.
+//! - **A slow second click** on the name of the item that is already the only selection renames
+//!   it (OPS-02, [`SlowClick`]): a row's press tells what it is on ([`Controller::slow_press`]),
+//!   the pointer's moves and the cancels of the long press reach it too, its click
+//!   ([`Controller::slow_release`]) renames at once when the double-click time has passed since
+//!   the press, else a timer waits for that time, unless another press comes first (a double
+//!   click opens).
 //!
 //! The menu opens while the button is still down. The menus the system shows (Windows, macOS) run
 //! a loop of their own that takes the button's release, which neither winit nor Slint would then
@@ -32,14 +40,26 @@ use rf_platform::shell::WindowPoint;
 use slint::ComponentHandle;
 
 use super::{Controller, side_number, with};
+use crate::history::Way;
 use crate::state::long_press::{LongPress, Outcome, Spot, THRESHOLD_PX, TICK};
+use crate::state::{DOUBLE_CLICK, SlowClick, SlowTarget};
 use crate::{DragPointer, DropPlace, LongPressRing};
 
-/// Where a long press began: a row of a pane's list, or the part of it without rows.
+/// Where a long press began.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PressTarget {
-    side: usize,
-    row: Option<usize>,
+pub(super) enum PressTarget {
+    /// A row of a pane's list, or the part of it without rows.
+    List { side: usize, row: Option<usize> },
+    /// 뒤로 or 앞으로, whose visit history that way it lists (NAV-04).
+    Visits(Way),
+}
+
+/// The number the window gives the button of `way` (`MainWindow.visits-button-at`).
+fn way_number(way: Way) -> i32 {
+    match way {
+        Way::Back => 0,
+        Way::Forward => 1,
+    }
 }
 
 /// How many fingers count as down once the menu of a long press returned: when a finger armed
@@ -61,6 +81,10 @@ pub(super) struct PressWork {
     pub(super) timer: slint::Timer,
     /// The release Slint is being told of is the long press's own: it clicks nothing.
     pub(super) swallow: Cell<bool>,
+    /// The slow second click (OPS-02), and the timer that waits out the double-click time
+    /// after its click.
+    slow: RefCell<SlowClick>,
+    slow_timer: slint::Timer,
 }
 
 impl PressWork {
@@ -75,6 +99,8 @@ impl PressWork {
             fingers: Cell::new(0),
             timer: slint::Timer::default(),
             swallow: Cell::new(false),
+            slow: RefCell::new(SlowClick::new(DOUBLE_CLICK, THRESHOLD_PX)),
+            slow_timer: slint::Timer::default(),
         }
     }
 }
@@ -150,13 +176,19 @@ impl Controller {
         if !allowed {
             return;
         }
-        let found = window.invoke_press_at(at.x, at.y);
-        if !found.found || found.place != DropPlace::List {
-            return;
-        }
-        let target = PressTarget {
-            side: usize::try_from(found.side).unwrap_or(0),
-            row: usize::try_from(found.index).ok(),
+        let target = match window.invoke_visits_button_at(at.x, at.y) {
+            0 => PressTarget::Visits(Way::Back),
+            1 => PressTarget::Visits(Way::Forward),
+            _ => {
+                let found = window.invoke_press_at(at.x, at.y);
+                if !found.found || found.place != DropPlace::List {
+                    return;
+                }
+                PressTarget::List {
+                    side: usize::try_from(found.side).unwrap_or(0),
+                    row: usize::try_from(found.index).ok(),
+                }
+            }
         };
         self.press.target.set(Some(target));
         {
@@ -171,8 +203,10 @@ impl Controller {
             });
     }
 
-    /// The pointer is at `at`: a press that waits and was moved too far is no long press.
+    /// The pointer is at `at`: a press that waits and was moved too far is no long press, nor a
+    /// slow second click (it is a drag).
     pub(super) fn press_moved(&self, at: Spot) {
+        self.press.slow.borrow_mut().moved(at);
         let cancelled = self
             .press
             .machine
@@ -197,12 +231,80 @@ impl Controller {
     pub(super) fn press_cancel(&self) {
         self.press.machine.borrow_mut().cancel();
         self.press_stop();
+        self.slow_cancel();
     }
 
-    /// The press under way is forgotten, whatever it was (see [`LongPress::reset`]).
+    /// The press under way is forgotten, whatever it was (see [`LongPress::reset`]); a rename a
+    /// slow second click left waiting does not come (this may be a double click's second press,
+    /// whose row then says what it is, [`Controller::slow_press`]).
     pub(super) fn press_reset(&self) {
         self.press.machine.borrow_mut().reset();
         self.press_stop();
+        self.slow_cancel();
+    }
+
+    /// A left press on row `row` of pane `side`, with Ctrl or Shift held (`modified`) and on the
+    /// text of its name or not, before the state takes it: whether it may be a slow second click
+    /// ([`AppState::row_press`](crate::state::AppState::row_press)).
+    pub(super) fn slow_press(&self, side: usize, row: usize, modified: bool, on_name: bool) {
+        self.press.slow_timer.stop();
+        let press = self
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.row_press(side, row, on_name, modified));
+        let at = self
+            .pointer
+            .get()
+            .map_or(Spot::new(0.0, 0.0), |at| Spot::new(at.x, at.y));
+        let mut slow = self.press.slow.borrow_mut();
+        match press {
+            Some(press) => slow.press(press, at, Instant::now()),
+            None => slow.cancel(),
+        }
+    }
+
+    /// A press on a row was let go as a click (Slint's, after no drag): the rename of a slow
+    /// second click, now or once the double-click time has passed.
+    pub(super) fn slow_release(&self) {
+        let due = self.press.slow.borrow_mut().release(Instant::now());
+        match due {
+            Some(target) => self.slow_due(&target),
+            None => self.slow_wait(),
+        }
+    }
+
+    /// Waits for the rename a slow second click left waiting, while one does.
+    fn slow_wait(&self) {
+        let Some(until) = self.press.slow.borrow().waiting_until() else {
+            return;
+        };
+        let wait = until.saturating_duration_since(Instant::now());
+        self.press
+            .slow_timer
+            .start(slint::TimerMode::SingleShot, wait, || {
+                with(Controller::slow_tick);
+            });
+    }
+
+    /// The timer of the slow second click: its rename, once the double-click time has passed.
+    fn slow_tick(&self) {
+        let due = self.press.slow.borrow_mut().tick(Instant::now());
+        match due {
+            Some(target) => self.slow_due(&target),
+            None => self.slow_wait(),
+        }
+    }
+
+    /// The slow second click came due on `target`: its name window opens.
+    fn slow_due(&self, target: &SlowTarget) {
+        self.update(|state| state.slow_rename(target));
+    }
+
+    /// No rename comes of the slow second click under way.
+    fn slow_cancel(&self) {
+        self.press.slow.borrow_mut().cancel();
+        self.press.slow_timer.stop();
     }
 
     /// The window lost the focus: no press is under way, no finger counts as down (their ends
@@ -300,11 +402,19 @@ impl Controller {
             return;
         }
         // The list moved or was listed again during the hold (a scroll of the keys, a relist):
-        // the menu is of what is under the pointer now, or of nothing.
-        let under = window.invoke_press_at(at.x, at.y);
-        let same = under.found
-            && usize::try_from(under.side).ok() == Some(target.side)
-            && usize::try_from(under.index).ok() == target.row;
+        // the menu is of what is under the pointer now, or of nothing; a button that went off
+        // meanwhile lists nothing.
+        let same = match target {
+            PressTarget::List { side, row } => {
+                let under = window.invoke_press_at(at.x, at.y);
+                under.found
+                    && usize::try_from(under.side).ok() == Some(side)
+                    && usize::try_from(under.index).ok() == row
+            }
+            PressTarget::Visits(way) => {
+                window.invoke_visits_button_at(at.x, at.y) == way_number(way)
+            }
+        };
         if !same {
             self.press.machine.borrow_mut().reset();
             return;
@@ -320,18 +430,24 @@ impl Controller {
                 button: slint::platform::PointerEventButton::Left,
             });
         self.press.swallow.set(false);
-        // Where Windows' own menu shows first, it shows where a right click would show it.
+        // Where Windows' own menu shows first, it shows where a right click would show it (on a
+        // list: the buttons have the app's menu alone).
         self.pointer.set(Some(WindowPoint { x: at.x, y: at.y }));
-        if self.right_pressed() {
+        if matches!(target, PressTarget::List { .. }) && self.right_pressed() {
             return;
         }
-        let side = side_number(target.side);
-        match target.row {
-            Some(row) => {
-                self.update(|state| state.row_menu(target.side, row));
-                window.invoke_show_item_menu_at(side, at.x, at.y);
+        match target {
+            PressTarget::List {
+                side,
+                row: Some(row),
+            } => {
+                self.update(|state| state.row_menu(side, row));
+                window.invoke_show_item_menu_at(side_number(side), at.x, at.y);
             }
-            None => window.invoke_show_blank_menu_at(side, at.x, at.y),
+            PressTarget::List { side, row: None } => {
+                window.invoke_show_blank_menu_at(side_number(side), at.x, at.y);
+            }
+            PressTarget::Visits(way) => window.invoke_show_visits_menu(way_number(way)),
         }
         // A menu of the system's may have taken the finger's end: the count is forgotten.
         self.press.fingers.set(fingers_after_menu(

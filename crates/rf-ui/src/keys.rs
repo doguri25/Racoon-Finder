@@ -74,6 +74,10 @@ pub enum Command {
     Up,
     Back,
     Forward,
+    /// Open the visit history's menu (NAV-04) under 뒤로 and 앞으로: the folders ahead, the
+    /// current one, and the folders behind, as File Explorer's list of recent locations has
+    /// them. A right click or a long press on either button lists that way's alone.
+    HistoryMenu,
     /// Edit the path as text.
     EditPath,
     /// The toolbar's filter box (이 폴더에서 거르기) takes the keys.
@@ -200,7 +204,7 @@ impl Command {
     pub fn opens_menu(&self) -> bool {
         matches!(
             self,
-            Command::ViewMenu | Command::ContextMenu | Command::SystemMenu
+            Command::ViewMenu | Command::ContextMenu | Command::SystemMenu | Command::HistoryMenu
         )
     }
 
@@ -791,6 +795,9 @@ static WINDOWS: &[(Chord, Command)] = &[
     // File Explorer's Back since Windows 7.
     (k(Key::Backspace, NONE), C::Back),
     (k(Key::RightArrow, ALT), C::Forward),
+    // File Explorer has no key for its list of recent locations; Alt+↓ opens a drop-down list
+    // in Windows, and goes with Alt+← and Alt+→ beside it.
+    (k(Key::DownArrow, ALT), C::HistoryMenu),
     (c('l', CTRL), C::EditPath),
     (c('d', ALT), C::EditPath),
     (k(Key::F4, NONE), C::EditPath),
@@ -936,6 +943,9 @@ static MACOS: &[(Chord, Command)] = &[
     // are. A text field that has the keys keeps them for its own line start and end.
     (k(Key::LeftArrow, CMD), C::Back),
     (k(Key::RightArrow, CMD), C::Forward),
+    // Finder lists its history only from a long press on its buttons, with no key; ⌘↓ is its
+    // 열기, so ⌥⌘↓, which neither Finder nor macOS takes.
+    (k(Key::DownArrow, CMD_OPT), C::HistoryMenu),
     (c('g', CMD_SHIFT), C::EditPath),
     (c('f', CMD), C::FocusFilter),
     (c('r', CMD), C::Refresh),
@@ -1119,6 +1129,8 @@ mod tests {
             (key(Key::Backspace), NONE, C::Back),
             (key(Key::LeftArrow), ALT, C::Back),
             (key(Key::RightArrow), ALT, C::Forward),
+            // The visit history's menu: the key of a drop-down list, by Alt+← and Alt+→.
+            (key(Key::DownArrow), ALT, C::HistoryMenu),
             (text("l"), CTRL, C::EditPath),
             (text("d"), ALT, C::EditPath),
             (key(Key::F4), NONE, C::EditPath),
@@ -1212,6 +1224,8 @@ mod tests {
             // The browsers' arrows, which no keyboard layout moves.
             (key(Key::LeftArrow), CMD, C::Back),
             (key(Key::RightArrow), CMD, C::Forward),
+            // The visit history's menu, by ⌘↓ (열기).
+            (key(Key::DownArrow), CMD_OPT, C::HistoryMenu),
             (text("G"), CMD_SHIFT, C::EditPath),
             (text("f"), CMD, C::FocusFilter),
             (text("r"), CMD, C::Refresh),
@@ -1544,9 +1558,15 @@ mod tests {
             (Os::Other, explorer_keys()),
             (Os::MacOs, finder_keys()),
         ] {
-            for command in [C::OpenTerminal, C::ContextMenu, C::SystemMenu] {
+            for command in [
+                C::OpenTerminal,
+                C::ContextMenu,
+                C::SystemMenu,
+                C::HistoryMenu,
+            ] {
                 for (chord, _) in bindings(os).filter(|(_, bound)| *bound == &command) {
-                    let ours = command == C::OpenTerminal || os == Os::MacOs;
+                    let ours =
+                        matches!(command, C::OpenTerminal | C::HistoryMenu) || os == Os::MacOs;
                     assert!(
                         !ours || !taken.contains(&chord),
                         "{os:?} {command:?}: {} is the system's",
@@ -1567,7 +1587,10 @@ mod tests {
             );
             // Every key of the 보기 menu, the item menu and Windows' own.
             for (chord, command) in bindings(os) {
-                if matches!(command, C::ViewMenu | C::ContextMenu | C::SystemMenu) {
+                if matches!(
+                    command,
+                    C::ViewMenu | C::ContextMenu | C::SystemMenu | C::HistoryMenu
+                ) {
                     let (text, mods) = chord_input(chord);
                     assert_eq!(
                         held_key(&text, mods, os),
@@ -1750,6 +1773,7 @@ mod tests {
             (C::FocusTree, Some("F6"), Some("F6")),
             // ⌘[ and ⌘] come first; ⌘← and ⌘→ are the other keys.
             (C::Forward, Some("Alt+→"), Some("⌘]")),
+            (C::HistoryMenu, Some("Alt+↓"), Some("⌥⌘↓")),
             (C::ReopenTab, Some("Ctrl+Shift+T"), Some("⇧⌘T")),
             (C::MoveTabLeft, Some("Ctrl+Shift+PageUp"), Some("⇧⌘←")),
             (C::MoveTabRight, Some("Ctrl+Shift+PageDown"), Some("⇧⌘→")),
@@ -2070,6 +2094,7 @@ mod tests {
             C::MoveTabRight,
             C::Back,
             C::Up,
+            C::HistoryMenu,
             C::Undo,
             C::ToggleHidden,
             C::ToggleExtensions,
@@ -2177,7 +2202,6 @@ mod tests {
             (key(Key::F11), NONE),
             (key(Key::Return), CTRL),
             (key(Key::Backspace), CTRL),
-            (key(Key::DownArrow), ALT),
             (key(Key::LeftArrow), CTRL_SHIFT),
             (key(Key::UpArrow), CTRL_ALT),
             (key(Key::PageDown), CTRL),

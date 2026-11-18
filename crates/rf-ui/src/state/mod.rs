@@ -52,7 +52,7 @@ use crate::places::Place;
 use crate::preview::PreviewRequest;
 use crate::properties::MeasureRequest;
 use crate::selection::Pick;
-use crate::settings::{DragDefault, Found, OnError, Session, SessionPane, Waiting};
+use crate::settings::{DragDefault, Found, OnError, PickStart, Session, SessionPane, Waiting};
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
@@ -98,7 +98,7 @@ use layout::Step;
 pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
 pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
 pub use panel::PanelButton;
-pub use pointer::SWIPE_DISTANCE;
+pub use pointer::{DOUBLE_CLICK, RowPress, SWIPE_DISTANCE, SlowClick, SlowTarget};
 pub use preview::{
     PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
     preview_width,
@@ -193,6 +193,9 @@ pub enum Effect {
     /// Put `text` into the path field of pane `side`, while it is edited: a Tab that waited for
     /// the completion list's first names has completed it.
     FillPath { side: usize, text: String },
+    /// Put `text` into the destination picker's path field: a Tab that waited for the names
+    /// that complete it has completed it (PICK-03).
+    FillPickPath(String),
     /// Give the toolbar's filter box (이 폴더에서 거르기) the keys.
     FocusFilter,
     /// Open the 보기 menu.
@@ -412,6 +415,8 @@ pub struct AppState {
     drag: Option<Drag>,
     /// The click a press on a selected row left for its release.
     pending_click: Option<drag::PendingClick>,
+    /// The rename a Tab of the name window applied, whose end opens the next item's (OPS-02).
+    rename_walk: Option<jobs::RenameWalk>,
     /// The modifier keys held now, as the window last told ([`AppState::modifiers_changed`]).
     drag_mods: DragMods,
     /// What a drop does without a modifier key (보기 ▸ 설정).
@@ -421,6 +426,8 @@ pub struct AppState {
     /// What a copy or a move does about an item that fails (보기 ▸ 설정, XFER-09): carry on and
     /// list it at the end, or ask about each one.
     on_error: OnError,
+    /// Where the destination picker starts (보기 ▸ 설정, PICK-05).
+    pick_start: PickStart,
     /// The jobs whose failed items were tried again (다시 시도 of the window of failed items):
     /// none of their windows offers it a second time. Kept apart from 최근 완료, whose 지우기
     /// must not bring the offer back while the job's toast still shows.
@@ -571,10 +578,12 @@ impl AppState {
             copies: copies::Copies::default(),
             drag: None,
             pending_click: None,
+            rename_walk: None,
             drag_mods: DragMods::default(),
             drag_default: DragDefault::default(),
             move_undo_toast: true,
             on_error: OnError::default(),
+            pick_start: PickStart::default(),
             retried_jobs: HashSet::new(),
             system_menu_first: false,
             show_thumbnails: true,
@@ -705,8 +714,8 @@ impl AppState {
         now: Instant,
     ) -> Option<Vec<Effect>> {
         // A command of the window closes the list of subfolders under a `›` (the keys of the
-        // list itself, `keys::list_key`, go to `AppState::subfolders_key` instead).
-        self.subfolders = None;
+        // list itself go to `AppState::subfolders_key` instead), and ends the Tab of a rename.
+        self.interrupted();
         // A window over the main window takes the keys itself; one that comes here anyway (or
         // one pressed while the app ends) does nothing.
         if self.modal.is_some() || self.quitting {
@@ -717,14 +726,7 @@ impl AppState {
         if !matches!(command, Command::TypeToSelect(_)) {
             self.tab_mut(side).end_typing();
         }
-        // Shift selects a range, Ctrl moves the cursor alone (Windows and Linux).
-        let pick = if mods.shift {
-            Pick::Extend
-        } else if mods.ctrl {
-            Pick::Focus
-        } else {
-            Pick::Select
-        };
+        let pick = pick_of(mods);
         let effects = match command {
             // With one pane, Tab stays on it: the other is hidden.
             Command::SwitchPane => {
@@ -744,6 +746,7 @@ impl AppState {
             Command::Up => self.go(side, Step::Up),
             Command::Back => self.go(side, Step::Back),
             Command::Forward => self.go(side, Step::Forward),
+            Command::HistoryMenu => self.history_menu(),
             Command::CursorUp => self.step_cursor(side, KeyMove::Up, pick, paging),
             Command::CursorDown => self.step_cursor(side, KeyMove::Down, pick, paging),
             Command::CursorLeft => self.step_cursor(side, KeyMove::Left, pick, paging),
@@ -811,6 +814,13 @@ impl AppState {
             Command::SystemProperties => self.system_properties(side),
         };
         Some(effects)
+    }
+
+    /// A command of the window came: the list of subfolders under a `›` closes, and the rename
+    /// a Tab of the name window applied opens no next one over what the command does.
+    fn interrupted(&mut self) {
+        self.subfolders = None;
+        self.rename_walk = None;
     }
 
     /// Shows the tab `delta` places after (a negative `delta`: before) the one pane `side`
@@ -1414,6 +1424,18 @@ impl AppState {
         let mut effects = self.with_tree(|tree| tree.set_show_hidden(show));
         effects.extend(self.with_pick_tree(|tree| tree.set_show_hidden(show)));
         effects
+    }
+}
+
+/// What a cursor key held with `mods` does to the selection: Shift selects a range, Ctrl moves
+/// the cursor alone (Windows and Linux), and a plain key selects the row it goes to.
+fn pick_of(mods: Mods) -> Pick {
+    if mods.shift {
+        Pick::Extend
+    } else if mods.ctrl {
+        Pick::Focus
+    } else {
+        Pick::Select
     }
 }
 

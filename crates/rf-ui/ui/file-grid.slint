@@ -25,7 +25,8 @@ import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSee
 
 // What the pointer did to an item.
 enum TileEvent {
-    // A left press (with Ctrl and Shift as held).
+    // A left press (with Ctrl and Shift as held); its command is "name" when it is on the item's
+    // name, for the slow second click that renames (OPS-02).
     press,
     // Its release, when no drag came of the press.
     release,
@@ -64,6 +65,14 @@ component Tile inherits Rectangle {
     // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up.
     private property <length> icon-size: root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 ? 48px : 18px;
     private property <bool> pictured: root.big && root.item.thumb.width > 0;
+    // Where the name begins: under the icon of a large item, after the icon of the others.
+    private property <length> name-x: 8px + root.check-room + root.icon-size + 8px;
+    private property <length> name-y: 8px + root.icon-size + 6px;
+
+    // Whether the point (`x`, `y`) of the item is on its name rather than its icon.
+    pure function on-name(x: length, y: length) -> bool {
+        return root.big ? y >= root.name-y : x >= root.name-x;
+    }
 
     background: root.item.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
     border-radius: 6px;
@@ -100,7 +109,7 @@ component Tile inherits Rectangle {
             touch := TouchArea {
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
-                        root.event(TileEvent.press, event.modifiers.control, event.modifiers.shift, "");
+                        root.event(TileEvent.press, event.modifiers.control, event.modifiers.shift, root.on-name(self.mouse-x, self.mouse-y) ? "name" : "");
                     }
                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                         root.event(TileEvent.menu, false, false, "");
@@ -143,7 +152,7 @@ component Tile inherits Rectangle {
         }
         if root.big: Text {
             x: 4px;
-            y: 8px + root.icon-size + 6px;
+            y: root.name-y;
             width: parent.width - 8px;
             height: parent.height - self.y - 4px;
             text: root.item.name;
@@ -154,7 +163,7 @@ component Tile inherits Rectangle {
             overflow: elide;
         }
         if !root.big: Text {
-            x: 8px + root.check-room + root.icon-size + 8px;
+            x: root.name-x;
             width: parent.width - self.x - 6px;
             height: parent.height;
             text: root.item.name;
@@ -209,7 +218,7 @@ export component FileGrid inherits Rectangle {
     // The items start with a checkbox (NAV-15).
     in property <bool> checkboxes;
 
-    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-clicked(index: int, ctrl: bool, shift: bool, on-name: bool);
     callback row-released(index: int);
     callback row-activated(index: int);
     callback row-menu(index: int);
@@ -252,7 +261,7 @@ export component FileGrid inherits Rectangle {
     // What the pointer did to item `index`: told to the pane as a row of 자세히 tells it.
     function tile-event(index: int, what: TileEvent, ctrl: bool, shift: bool, command: string) {
         if (what == TileEvent.press) {
-            root.row-clicked(index, ctrl, shift);
+            root.row-clicked(index, ctrl, shift, command == "name");
         } else if (what == TileEvent.release) {
             root.row-released(index);
         } else if (what == TileEvent.activate) {

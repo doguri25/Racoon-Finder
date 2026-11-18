@@ -1885,6 +1885,28 @@ pub fn new_folder_title() -> &'static str {
     "새 폴더"
 }
 
+/// The default name of a new empty text file (새 파일 ▸ 빈 텍스트 파일, OPS-01): File Explorer's
+/// "새 텍스트 문서.txt" in the words of this app's menu.
+pub fn new_file_name() -> &'static str {
+    "새 텍스트 파일.txt"
+}
+
+/// The title of the window that asks for a new file's name.
+pub fn new_file_title() -> &'static str {
+    "새 파일"
+}
+
+/// The line of a folder in the visit history's menu (NAV-04): its name, and the folder it is in
+/// (`parent`, its middle left out when it is long), so that two folders of one name tell apart;
+/// a root, which is in no folder, by its name alone. A menu item has no description of its own
+/// for a screen reader, so the folder it is in is in the line itself.
+pub fn history_entry(name: &str, parent: Option<&str>) -> String {
+    match parent {
+        Some(parent) => format!("{name} — {parent}"),
+        None => name.to_owned(),
+    }
+}
+
 /// The title of the window that asks for an item's new name.
 pub fn rename_title() -> &'static str {
     "이름 바꾸기"

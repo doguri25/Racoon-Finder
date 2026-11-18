@@ -45,7 +45,8 @@ impl Spot {
         Spot { x, y }
     }
 
-    fn distance(self, other: Spot) -> f32 {
+    /// How far `other` is from this point, in logical pixels.
+    pub fn distance(self, other: Spot) -> f32 {
         (self.x - other.x).hypot(self.y - other.y)
     }
 }

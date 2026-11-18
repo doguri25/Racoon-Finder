@@ -1,5 +1,5 @@
-//! The windows that open over the main window, as plain data: the name of a new folder or of a
-//! rename, a confirmation, the failed items of a job (which 다시 시도 tries again, XFER-09), the
+//! The windows that open over the main window, as plain data: the name of a new folder, of a
+//! new file or of a rename, a confirmation, the failed items of a job (which 다시 시도 tries again, XFER-09), the
 //! jobs the last run left unfinished, the questions of the jobs (a name that is taken, an item
 //! that failed, the pre-flight check), the destination picker ([`Picker`]) and the properties
 //! window.
@@ -70,6 +70,9 @@ impl Modal {
 pub enum NamePurpose {
     /// A new folder in `parent`, asked for in pane `origin`.
     NewFolder { parent: VPath, origin: usize },
+    /// A new empty file in `parent` (새 파일 ▸ 빈 텍스트 파일, OPS-01), asked for in pane
+    /// `origin`.
+    NewFile { parent: VPath, origin: usize },
     /// A new name for `from`, asked for in pane `origin`.
     Rename { from: VPath, origin: usize },
     /// A new folder in `parent`, asked for by the destination picker's 새 폴더, which takes it
@@ -118,6 +121,18 @@ impl NameDialog {
         }
     }
 
+    /// The window for a new empty text file in `parent`, with the default name
+    /// (`새 텍스트 파일.txt`), its part before the extension selected.
+    pub fn new_file(parent: VPath, origin: usize) -> NameDialog {
+        let name = words::new_file_name().to_owned();
+        NameDialog {
+            purpose: NamePurpose::NewFile { parent, origin },
+            select_end: stem_end(&name, false),
+            text: name.clone(),
+            initial: name,
+        }
+    }
+
     /// The window for a new folder in `parent` that the destination picker asks for, with the
     /// default name.
     pub fn pick_folder(parent: VPath) -> NameDialog {
@@ -158,8 +173,17 @@ impl NameDialog {
             NamePurpose::NewFolder { .. } | NamePurpose::PickFolder { .. } => {
                 words::new_folder_title()
             }
+            NamePurpose::NewFile { .. } => words::new_file_title(),
             NamePurpose::Rename { .. } => words::rename_title(),
             NamePurpose::Favorite { .. } => words::favorite_rename_title(),
+        }
+    }
+
+    /// The item the window renames, with the pane that asked; `None` for another name.
+    pub fn renames(&self) -> Option<(&VPath, usize)> {
+        match &self.purpose {
+            NamePurpose::Rename { from, origin } => Some((from, *origin)),
+            _ => None,
         }
     }
 
@@ -199,6 +223,14 @@ impl NameDialog {
                     parent: parent.clone(),
                     name,
                     kind: CreateKind::Dir,
+                },
+                Some(*origin),
+            ))),
+            NamePurpose::NewFile { parent, origin } => Ok(Some((
+                JobSpec::Create {
+                    parent: parent.clone(),
+                    name,
+                    kind: CreateKind::File,
                 },
                 Some(*origin),
             ))),
@@ -862,6 +894,33 @@ mod tests {
                 None
             )))
         );
+    }
+
+    #[test]
+    fn a_new_file_starts_as_a_text_file_with_its_name_selected() {
+        let mut dialog = NameDialog::new_file(path("parent"), 1);
+        assert_eq!(dialog.title(), "새 파일");
+        assert_eq!(dialog.initial, "새 텍스트 파일.txt");
+        // Typing replaces the name and keeps the extension, as in a rename.
+        assert_eq!(&dialog.initial[..dialog.select_end], "새 텍스트 파일");
+        assert_eq!(dialog.renames(), None);
+        // The name as it is makes the file: a new item has no name to keep.
+        assert_eq!(dialog.check(), NameCheck::Ready);
+        assert_eq!(
+            dialog.job(),
+            Ok(Some((
+                JobSpec::Create {
+                    parent: path("parent"),
+                    name: OsString::from("새 텍스트 파일.txt"),
+                    kind: CreateKind::File,
+                },
+                Some(1)
+            )))
+        );
+        dialog.text = "a/b.txt".to_owned();
+        assert!(dialog.job().is_err());
+        let rename = NameDialog::rename(path("a.txt"), false, 0).expect("a name");
+        assert_eq!(rename.renames(), Some((&path("a.txt"), 0)));
     }
 
     #[test]

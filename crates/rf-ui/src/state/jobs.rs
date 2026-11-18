@@ -257,6 +257,104 @@ impl AppState {
         }
     }
 
+    /// Tab (`backward`: Shift+Tab) in the name window, which holds `text` (OPS-02). In the
+    /// window of a rename, the name is applied as Enter applies it, and the rename of the item
+    /// after it in the list as it is ordered now (before it, with Shift+Tab) opens once that
+    /// rename has landed ([`RenameWalk`]); after the last item (before the first) none opens. A
+    /// name kept as it is moves on at once. A name that cannot be used keeps the window open
+    /// with its warning, and a rename that fails (the name is taken) says why as any rename does
+    /// and moves on to nothing. Each rename is a job of its own, with its own undo. In any other
+    /// name window Tab applies the name, as Enter does.
+    pub fn name_tabbed(&mut self, text: &str, backward: bool) -> Vec<Effect> {
+        let Some(Modal::Name(dialog)) = &mut self.modal else {
+            return Vec::new();
+        };
+        text.clone_into(&mut dialog.text);
+        let Some((from, side)) = dialog.renames().map(|(from, side)| (from.clone(), side)) else {
+            return self.name_confirmed(text);
+        };
+        let check = dialog.check();
+        let job = dialog.job();
+        let next = self.beside(side, &from, backward);
+        match (check, job) {
+            (NameCheck::Unchanged, _) => {
+                self.close();
+                next.map(|next| self.rename_named(side, &next))
+                    .unwrap_or_default()
+            }
+            (NameCheck::Ready, Ok(Some((spec, origin)))) => {
+                self.close();
+                let tab = self.tab(side);
+                self.rename_walk = next.map(|next| RenameWalk {
+                    spec: spec.clone(),
+                    side,
+                    tab: tab.id(),
+                    folder: tab.location().clone(),
+                    next,
+                });
+                vec![submit(spec, origin)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The name of the item beside `item` in pane `side`, after it in the order of its rows (or
+    /// before it, `backward`); `None` at that end, or when the pane no longer shows it.
+    fn beside(&self, side: usize, item: &VPath, backward: bool) -> Option<OsString> {
+        let tab = self.tab(side);
+        let name = item.file_name()?;
+        if item.parent().as_ref() != Some(tab.location()) {
+            return None;
+        }
+        let rows = tab.visible();
+        let at = rows.iter().position(|entry| entry.name == name)?;
+        let other = if backward {
+            at.checked_sub(1)?
+        } else {
+            at.checked_add(1)?
+        };
+        rows.get(other).map(|entry| entry.name.clone())
+    }
+
+    /// The name window of the rename of the item called `name` in pane `side`, which becomes
+    /// the selection, as F2 on it would open it; nothing when the pane no longer shows it.
+    fn rename_named(&mut self, side: usize, name: &OsStr) -> Vec<Effect> {
+        let tab = self.tab_mut(side);
+        let Some(entry) = tab.visible().iter().find(|entry| entry.name == name) else {
+            return Vec::new();
+        };
+        let is_dir = entry.kind == EntryKind::Dir;
+        let Ok(path) = tab.location().join(name) else {
+            return Vec::new();
+        };
+        let effects = tab
+            .select_names(&[name.to_os_string()])
+            .map(|row| Effect::ScrollTo { side, row })
+            .into_iter()
+            .collect();
+        if let Some(dialog) = NameDialog::rename(path, is_dir, side) {
+            self.open(Modal::Name(dialog));
+        }
+        effects
+    }
+
+    /// The rename of `walk`, which the name window's Tab applied, ended as `report` tells: when
+    /// it renamed the item and its pane still shows the same tab at the same folder, with
+    /// nothing over the main window, the rename of the item it noted beside it opens, found by
+    /// its name (the rows may have changed meanwhile: the watch, a sort).
+    fn walk_on(&mut self, walk: &RenameWalk, report: &JobReport) -> Vec<Effect> {
+        let tab = self.tab(walk.side);
+        let still = report.outcome == Outcome::Completed
+            && self.modal.is_none()
+            && !self.quitting
+            && tab.id() == walk.tab
+            && *tab.location() == walk.folder;
+        if !still {
+            return Vec::new();
+        }
+        self.rename_named(walk.side, &walk.next)
+    }
+
     /// The window that shows was closed without its main button (Esc, Cancel, the close
     /// button): a job question is answered with its cancelling choice, which stops the job;
     /// the question about an item that failed with the skip of that item, after which the job
@@ -608,6 +706,9 @@ impl AppState {
         let marks = self.selections_at_submit.remove(&report.id);
         // Before the end of a cancelled copy, which may have made some of its items.
         self.note_copies(&report);
+        // The rename a Tab applied moves on to the item beside it once it has landed (OPS-02),
+        // after what selects the renamed item.
+        let walk = self.rename_walk.take_if(|walk| walk.spec == report.spec);
         if let Some(done) = self.copies_deleted(&report) {
             effects.extend(done);
             return effects;
@@ -622,6 +723,9 @@ impl AppState {
             effects.extend(self.select_outputs(side, slice::from_ref(output), marks.as_deref()));
         }
         effects.extend(self.select_made_links(work, origin, &report, marks.as_deref()));
+        if let Some(walk) = walk {
+            effects.extend(self.walk_on(&walk, &report));
+        }
         // What a paste made is selected in the pane it was asked in, as File Explorer does;
         // what it could not make (a failure) is not among its outputs.
         if matches!(
@@ -948,6 +1052,20 @@ impl AppState {
         Vec::new()
     }
 
+    /// 새 파일 ▸ 빈 텍스트 파일 of the folder's menu and the item menu (OPS-01): the name window for
+    /// a new empty text file in the active tab's folder, which the job makes under the next free
+    /// numbered name when the name is taken, as it makes a new folder. No key: neither File
+    /// Explorer nor Finder has one.
+    pub fn new_file(&mut self) -> Vec<Effect> {
+        if self.quitting {
+            return Vec::new();
+        }
+        let side = self.active;
+        let parent = self.tab(side).location().clone();
+        self.open(Modal::Name(NameDialog::new_file(parent, side)));
+        Vec::new()
+    }
+
     /// F2: the name window for the cursor's row, once the user put the cursor there and while
     /// it is not unselected (or else the first selected row).
     pub(super) fn rename(&mut self, side: usize) -> Vec<Effect> {
@@ -1013,6 +1131,19 @@ impl AppState {
             Vec::new()
         }
     }
+}
+
+/// The rename the name window's Tab applied (OPS-02): once its job `spec` has renamed the item,
+/// the rename of the item called `next` opens, which was beside it in pane `side` when Tab was
+/// pressed, while that pane still shows the same tab (its id) at `folder`. A key or a press on
+/// a row in the meantime drops it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RenameWalk {
+    spec: JobSpec,
+    side: usize,
+    tab: u64,
+    folder: VPath,
+    next: OsString,
 }
 
 /// The effect that submits `spec`, asked for in pane `origin`.

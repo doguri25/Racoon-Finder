@@ -1926,3 +1926,215 @@ fn a_retry_is_offered_once_even_after_the_recent_list_is_cleared() {
     assert_eq!((failures.lines.len(), &failures.retry), (1, &None));
     assert_eq!(state.failures_retried(), []);
 }
+
+#[test]
+fn a_new_file_asks_for_a_name_then_creates_an_empty_one() {
+    let mut state = ready(vec![file("x")], vec![]);
+    assert_eq!(state.new_file(), []);
+    let Some(Modal::Name(dialog)) = state.modal() else {
+        panic!("a name dialog: {:?}", state.modal());
+    };
+    assert_eq!(dialog.title(), "새 파일");
+    assert_eq!(dialog.initial, "새 텍스트 파일.txt");
+    assert_eq!(&dialog.initial[..dialog.select_end], "새 텍스트 파일");
+    // A name that cannot be one keeps the window open, as for a folder.
+    assert_eq!(state.name_confirmed("a/b.txt"), []);
+    assert!(matches!(state.modal(), Some(Modal::Name(_))));
+    let effects = state.name_confirmed("메모.txt");
+    assert_eq!(
+        the_submit(&effects),
+        (
+            JobSpec::Create {
+                parent: folder("a"),
+                name: "메모.txt".into(),
+                kind: rf_jobs::CreateKind::File,
+            },
+            Some(LEFT)
+        )
+    );
+    assert_eq!(state.modal(), None);
+    // In the folder of the pane with the keyboard; the name as it is makes the file, and Tab
+    // takes the name as Enter does (it renames no item of a list).
+    state.activate(RIGHT);
+    state.new_file();
+    let effects = state.name_tabbed("새 텍스트 파일.txt", false);
+    let spec = JobSpec::Create {
+        parent: folder("b"),
+        name: "새 텍스트 파일.txt".into(),
+        kind: rf_jobs::CreateKind::File,
+    };
+    assert_eq!(the_submit(&effects), (spec, Some(RIGHT)));
+    assert_eq!(state.modal(), None);
+}
+
+/// The item the name window that shows renames, by its first name.
+fn renaming(state: &AppState) -> String {
+    match state.modal() {
+        Some(Modal::Name(dialog)) if dialog.renames().is_some() => dialog.initial.clone(),
+        other => panic!("a rename window: {other:?}"),
+    }
+}
+
+/// The rename of `from` to `to` in the left pane's folder.
+fn rename_of(from: &str, to: &str) -> JobSpec {
+    JobSpec::Rename {
+        from: in_a(from),
+        to: in_a(to),
+    }
+}
+
+#[test]
+fn tab_renames_and_moves_on_to_the_next_item_once_the_rename_lands() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt"), file("c.txt")], vec![]);
+    state.click_row(LEFT, 0, false, false);
+    press(&mut state, &special(Key::F2), NONE);
+    assert_eq!(renaming(&state), "a.txt");
+    // Tab applies the name, a job of its own, and the window closes until it has landed.
+    let effects = state.name_tabbed("z.txt", false);
+    assert_eq!(
+        the_submit(&effects),
+        (rename_of("a.txt", "z.txt"), Some(LEFT))
+    );
+    assert_eq!(state.modal(), None);
+    // The watch tells of it before the job ends: the rows change, z.txt goes last. The next
+    // item is the one after a.txt when Tab was pressed, found by its name, not by its row.
+    let generation = state.panes()[LEFT].active_tab().generation();
+    state.loaded(LoadEvent::Changes {
+        generation,
+        changes: vec![rf_vfs::Change::Renamed {
+            from: "a.txt".into(),
+            to: file("z.txt"),
+        }],
+    });
+    assert_eq!(rows(&state, LEFT), ["b.txt", "c.txt", "z.txt"]);
+    let effects = finish(
+        &mut state,
+        1,
+        &rename_of("a.txt", "z.txt"),
+        JobWork::Rename,
+        |r| {
+            r.outputs.push(in_a("z.txt"));
+        },
+    );
+    assert_eq!(renaming(&state), "b.txt");
+    // It is the selection, in view, as F2 would rename it.
+    assert_eq!(selected(&state, LEFT), [0]);
+    assert!(
+        effects.contains(&Effect::ScrollTo { side: LEFT, row: 0 }),
+        "{effects:?}"
+    );
+
+    // A name kept as it is moves on at once, with no job; Shift+Tab goes back.
+    assert_eq!(
+        state.name_tabbed("b.txt", false),
+        [Effect::ScrollTo { side: LEFT, row: 1 }]
+    );
+    assert_eq!(renaming(&state), "c.txt");
+    assert_eq!(
+        state.name_tabbed("c.txt", true),
+        [Effect::ScrollTo { side: LEFT, row: 0 }]
+    );
+    assert_eq!(renaming(&state), "b.txt");
+    // Before the first item (after the last), Tab closes the window.
+    assert_eq!(state.name_tabbed("b.txt", true), []);
+    assert_eq!(state.modal(), None);
+    state.click_row(LEFT, 2, false, false);
+    press(&mut state, &special(Key::F2), NONE);
+    assert_eq!(renaming(&state), "z.txt");
+    assert_eq!(state.name_tabbed("z.txt", false), []);
+    assert_eq!(state.modal(), None);
+    // The last item renamed with Tab: its job, and nothing opens after it.
+    press(&mut state, &special(Key::F2), NONE);
+    let effects = state.name_tabbed("y.txt", false);
+    assert_eq!(
+        the_submit(&effects),
+        (rename_of("z.txt", "y.txt"), Some(LEFT))
+    );
+    finish(
+        &mut state,
+        2,
+        &rename_of("z.txt", "y.txt"),
+        JobWork::Rename,
+        |r| {
+            r.outputs.push(in_a("y.txt"));
+        },
+    );
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
+fn a_rename_that_fails_does_not_move_on() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt"), file("c.txt")], vec![]);
+    state.click_row(LEFT, 0, false, false);
+    press(&mut state, &special(Key::F2), NONE);
+    // A name that cannot be one keeps the window on the item, with its warning.
+    assert_eq!(state.name_tabbed("x/y", false), []);
+    assert_eq!(renaming(&state), "a.txt");
+    let Some(Modal::Name(dialog)) = state.modal() else {
+        panic!("the window stays");
+    };
+    assert!(matches!(
+        dialog.check(),
+        crate::dialogs::NameCheck::Invalid(_)
+    ));
+    // Nothing, either: the window waits for a name.
+    assert_eq!(state.name_tabbed("  ", false), []);
+    assert_eq!(renaming(&state), "a.txt");
+    // A name that is taken: the job fails, which says why as any rename does, and the next
+    // rename does not open.
+    let effects = state.name_tabbed("c.txt", false);
+    assert_eq!(
+        the_submit(&effects),
+        (rename_of("a.txt", "c.txt"), Some(LEFT))
+    );
+    let effects = finish(
+        &mut state,
+        1,
+        &rename_of("a.txt", "c.txt"),
+        JobWork::Rename,
+        |r| {
+            r.outcome = Outcome::CompletedWithErrors;
+            r.failures
+                .push(failure(in_a("a.txt"), ErrorKind::AlreadyExists, None));
+        },
+    );
+    assert_eq!(
+        effects,
+        [Effect::Notice(
+            "이름을 바꾸지 못했습니다: 같은 이름의 항목이 이미 있습니다".to_owned()
+        )]
+    );
+    assert_eq!(state.modal(), None);
+}
+
+#[test]
+fn what_the_user_does_before_the_rename_lands_keeps_the_next_one_from_opening() {
+    let spec = rename_of("a.txt", "z.txt");
+    // A key, a press on a row, another folder in the pane, or a window over the main one.
+    for case in 0..4 {
+        let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![dir("d")]);
+        state.click_row(LEFT, 0, false, false);
+        press(&mut state, &special(Key::F2), NONE);
+        state.name_tabbed("z.txt", false);
+        match case {
+            0 => {
+                press(&mut state, &special(Key::DownArrow), NONE);
+            }
+            1 => {
+                state.press_row(LEFT, 1, false, false);
+            }
+            2 => {
+                assert_eq!(the_load(&state.go_to(folder("c"))).path, folder("c"));
+            }
+            _ => {
+                state.new_file();
+            }
+        }
+        finish(&mut state, 1, &spec, JobWork::Rename, |r| {
+            r.outputs.push(in_a("z.txt"));
+        });
+        let renames =
+            matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.renames().is_some());
+        assert!(!renames, "case {case}: {:?}", state.modal());
+    }
+}

@@ -75,8 +75,8 @@ export struct TreeRow {
 }
 
 // The menu of a favorite (NAV-05): its folder opens here or in the other pane, it gets another
-// name, leaves the list, or moves in it. Its items come back as `command` (open, open-other,
-// rename, remove, up, down).
+// name, leaves the list, or moves in it, each with the key the tree has for it (KEY-03). Its
+// items come back as `command` (open, open-other, rename, remove, up, down).
 component FavoriteMenu inherits ContextMenuArea {
     in property <bool> can-up: true;
     in property <bool> can-down: true;
@@ -87,7 +87,7 @@ component FavoriteMenu inherits ContextMenuArea {
 
     Menu {
         MenuItem {
-            title: "열기";
+            title: Shortcuts.titled("열기", Shortcuts.open);
             activated => {
                 root.command("open");
             }

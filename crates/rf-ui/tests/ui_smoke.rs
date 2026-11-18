@@ -23,7 +23,7 @@ use rf_ui::{
     FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray,
     JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget,
     PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
-    StatusFit, Theme,
+    StatusFit, Theme, VisitEntry,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -2236,6 +2236,7 @@ fn the_name_dialog_replaces_the_stem() {
     let record = Rc::clone(&edits);
     window.on_name_accepted(move |text| record.borrow_mut().push(("accepted", text.to_string())));
     window.set_name_view(NameView {
+        serial: 0,
         title: "이름 바꾸기".into(),
         initial: "설계안.pdf".into(),
         select_end: i32::try_from("설계안".len()).expect("short"),
@@ -2267,6 +2268,7 @@ fn a_name_being_composed_holds_the_name_dialog() {
     let record = Rc::clone(&calls);
     window.on_name_accepted(move |text| record.borrow_mut().push(format!("accepted {text}")));
     window.set_name_view(NameView {
+        serial: 0,
         title: "새 폴더".into(),
         initial: "보고서".into(),
         select_end: 0,
@@ -2812,6 +2814,7 @@ fn the_picker_stays_under_its_name_window() {
     // A name window over it (its 새 폴더) has the keys; the picker stays in view under it.
     window.set_pick_behind(true);
     window.set_name_view(NameView {
+        serial: 0,
         title: "새 폴더".into(),
         initial: "새 폴더".into(),
         select_end: i32::try_from("새 폴더".len()).expect("short"),
@@ -3226,7 +3229,8 @@ fn drag_window() -> (MainWindow, Rc<DragCalls>, [PaneModels; 2], Rc<TreeRows>) {
 
     let calls = Rc::new(DragCalls::default());
     let record = Rc::clone(&calls);
-    window.on_row_clicked(move |side, i, _, _| record.rows.borrow_mut().push(("press", side, i)));
+    window
+        .on_row_clicked(move |side, i, _, _, _| record.rows.borrow_mut().push(("press", side, i)));
     let record = Rc::clone(&calls);
     window.on_row_released(move |side, i| record.rows.borrow_mut().push(("release", side, i)));
     let record = Rc::clone(&calls);
@@ -3515,7 +3519,7 @@ fn a_long_folder_makes_only_the_items_on_screen_and_scrolls_to_the_cursor() {
     let window = window();
     let pressed = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&pressed);
-    window.on_row_clicked(move |_, i, _, _| record.borrow_mut().push(i));
+    window.on_row_clicked(move |_, i, _, _, _| record.borrow_mut().push(i));
     let mut pane = listed_pane(
         (0..100_000)
             .map(|i| entry(&format!("f{i:05}"), EntryKind::File, 1))
@@ -4049,7 +4053,7 @@ fn a_drag_carries_the_payload_its_press_made() {
     // window has its id before the drag starts.
     let weak = window.as_weak();
     let record = Rc::clone(&calls);
-    window.on_row_clicked(move |side, i, _, _| {
+    window.on_row_clicked(move |side, i, _, _, _| {
         record.rows.borrow_mut().push(("press", side, i));
         if let Some(window) = weak.upgrade() {
             let id = 100 + u64::try_from(i).expect("a row");
@@ -4897,7 +4901,7 @@ fn recovered_jobs_are_answered_from_the_keys_starting_on_close() {
 }
 
 #[test]
-fn the_name_window_tabs_between_its_field_and_its_buttons() {
+fn the_name_window_s_tab_moves_on_and_its_arrows_reach_its_buttons() {
     let window = window();
     let calls = Calls::default();
     let record = calls.clone();
@@ -4905,9 +4909,12 @@ fn the_name_window_tabs_between_its_field_and_its_buttons() {
     let record = calls.clone();
     window.on_name_accepted(move |text| record.note(format!("accepted {text}")));
     let record = calls.clone();
+    window.on_name_tabbed(move |text, backward| record.note(format!("tabbed {text} {backward}")));
+    let record = calls.clone();
     window.on_dialog_cancelled(move || record.note("cancelled"));
     window.set_name_view(NameView {
-        title: "새 폴더".into(),
+        serial: 0,
+        title: "이름 바꾸기".into(),
         initial: "보고서".into(),
         select_end: 0,
         warning: "".into(),
@@ -4916,33 +4923,53 @@ fn the_name_window_tabs_between_its_field_and_its_buttons() {
     window.set_dialog(DialogKind::Name);
     slint::platform::update_timers_and_animations();
 
-    // Tab: 취소, which Space presses.
+    // Tab and Shift+Tab hand the name over, for the next item or the one before (OPS-02): Rust
+    // decides what comes of it.
     press(&window, Key::Tab);
-    press(&window, Key::Space);
-    assert_eq!(calls.take(), ["cancelled"]);
-    // Once more: 확인, which Enter presses with the name; once more: the field, with the name
-    // all selected, so that what is typed replaces it.
-    press(&window, Key::Tab);
+    press_shifted(&window, Key::Tab);
+    assert_eq!(calls.take(), ["tabbed 보고서 false", "tabbed 보고서 true"]);
+    // ↓ goes from the field to 확인, which Enter presses with the name; ← goes to 취소, which
+    // Space presses.
+    press(&window, Key::DownArrow);
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["accepted 보고서"]);
-    press(&window, Key::Tab);
+    press(&window, Key::LeftArrow);
+    press(&window, Key::Space);
+    assert_eq!(calls.take(), ["cancelled"]);
+    // ↑ goes back to the field, the name all selected: what is typed replaces it.
+    press(&window, Key::UpArrow);
     chord(&window, &["x"]);
     assert_eq!(calls.take(), ["edited x"]);
-    // Shift+Tab from the field goes to 확인; letters there type nothing.
-    press_shifted(&window, Key::Tab);
+    // Letters type nothing on a button; Tab there hands the name over as in the field.
+    press(&window, Key::DownArrow);
     chord(&window, &["y"]);
     press(&window, Key::Space);
-    assert_eq!(calls.take(), ["accepted x"]);
-
-    // While a syllable is composed in the field, Tab leaves it alone: the syllable is not in
-    // the name yet.
     press(&window, Key::Tab);
+    assert_eq!(calls.take(), ["accepted x", "tabbed x false"]);
+
+    // While a syllable is composed in the field, Tab and ↓ leave it alone: the syllable is not
+    // in the name yet.
+    press(&window, Key::UpArrow);
     press(&window, Key::RightArrow);
     compose(&window, "ㅅ");
     press(&window, Key::Tab);
+    press(&window, Key::DownArrow);
     commit_composition(&window, "서");
     press(&window, Key::Return);
     assert_eq!(calls.take(), ["edited x서", "accepted x서"]);
+
+    // The next item's name: the window starts again with it, its stem selected.
+    window.set_name_view(NameView {
+        serial: 1,
+        title: "이름 바꾸기".into(),
+        initial: "다음.txt".into(),
+        select_end: i32::try_from("다음".len()).expect("short"),
+        warning: "".into(),
+        ok_enabled: false,
+    });
+    slint::platform::update_timers_and_animations();
+    chord(&window, &["z"]);
+    assert_eq!(calls.take(), ["edited z.txt"]);
 }
 
 #[test]
@@ -7152,7 +7179,7 @@ fn the_select_menu_says_its_keys_and_runs_the_commands() {
             Os::Windows,
             [
                 "모두 선택  (Ctrl+A)",
-                "선택 해제",
+                "선택 해제  (Esc)",
                 "선택 반전  (Ctrl+Shift+I)",
                 "패턴으로 선택…  (Ctrl+S)",
                 "같은 확장자 선택  (Ctrl+Shift+S)",
@@ -7162,7 +7189,7 @@ fn the_select_menu_says_its_keys_and_runs_the_commands() {
             Os::MacOs,
             [
                 "모두 선택  (⌘A)",
-                "선택 해제",
+                "선택 해제  (⎋)",
                 "선택 반전  (⌥⇧⌘A)",
                 "패턴으로 선택…  (⌘S)",
                 "같은 확장자 선택  (⇧⌘S)",
@@ -8043,7 +8070,7 @@ fn a_folder_dropped_between_favorites_shows_the_line_and_is_added() {
     // The window's drag callbacks answer from the app state, as the controller does.
     let weak = window.as_weak();
     let shared = Rc::clone(&state);
-    window.on_row_clicked(move |side, i, ctrl, shift| {
+    window.on_row_clicked(move |side, i, ctrl, shift, _| {
         let mut state = shared.borrow_mut();
         state.press_row(
             usize::from(side == 1),
@@ -8560,7 +8587,7 @@ fn the_rows_start_with_checkboxes_that_select_at_900_by_560() {
         let record = Rc::clone(&calls);
         window.on_all_checkbox(move |side| record.borrow_mut().push(format!("all {side}")));
         let record = Rc::clone(&calls);
-        window.on_row_clicked(move |side, index, _, _| {
+        window.on_row_clicked(move |side, index, _, _, _| {
             record.borrow_mut().push(format!("press {side} {index}"));
         });
     }
@@ -8697,7 +8724,7 @@ fn the_ring_of_a_long_press_shows_beside_the_pointer_and_fills() {
     let (row_x, row_y) = middle(&rows[0]);
     let clicks = Rc::new(RefCell::new(Vec::<String>::new()));
     let record = Rc::clone(&clicks);
-    window.on_row_clicked(move |side, index, _, _| {
+    window.on_row_clicked(move |side, index, _, _, _| {
         record.borrow_mut().push(format!("press {side} {index}"));
     });
     global.set_x(row_x - 20.0);
@@ -8922,4 +8949,247 @@ fn the_history_group_shows_by_itself_and_opens_to_its_rows() {
     window.set_panel_button(0);
     window.invoke_focus_panel();
     assert_eq!(window.get_panel_line(), 0);
+}
+
+#[test]
+fn a_press_on_a_row_tells_whether_it_is_on_the_name() {
+    let window = window();
+    let pressed = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&pressed);
+    window.on_row_clicked(move |_, i, _, _, on_name| record.borrow_mut().push((i, on_name)));
+    let mut pane = listed_pane(vec![
+        entry("설계안.pdf", EntryKind::File, 1),
+        entry("짧음", EntryKind::File, 1),
+    ]);
+    let models = PaneModels::default();
+    for mode in [ViewMode::Details, ViewMode::List, ViewMode::LargeIcons] {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        let row = labelled(&window, "설계안.pdf", AccessibleRole::ListItem).remove(0);
+        let at = row.absolute_position();
+        let size = row.size();
+        // On the icon (the left of a row, the top of a large icon): not the name.
+        let icon = if mode == ViewMode::LargeIcons {
+            LogicalPosition::new(at.x + size.width / 2.0, at.y + 20.0)
+        } else {
+            LogicalPosition::new(at.x + 14.0, at.y + size.height / 2.0)
+        };
+        pointer(&window, "press", icon);
+        pointer(&window, "release", icon);
+        // On the name.
+        let name = if mode == ViewMode::LargeIcons {
+            LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height - 12.0)
+        } else {
+            LogicalPosition::new(at.x + 60.0, at.y + size.height / 2.0)
+        };
+        pointer(&window, "press", name);
+        pointer(&window, "release", name);
+        assert_eq!(pressed.take(), [(0, false), (0, true)], "{mode:?}");
+    }
+    // In 자세히, past the end of a short name's text, the press is no longer on the name.
+    pane.active_tab_mut().set_view(FolderView::default());
+    window.set_left_pane(models.view(&pane, true));
+    let row = labelled(&window, "짧음", AccessibleRole::ListItem).remove(0);
+    let at = row.absolute_position();
+    let beside = LogicalPosition::new(at.x + 200.0, at.y + row.size().height / 2.0);
+    pointer(&window, "press", beside);
+    pointer(&window, "release", beside);
+    assert_eq!(pressed.take(), [(1, false)]);
+}
+
+#[test]
+fn the_visit_history_s_menu_opens_from_back_and_forward_and_its_key() {
+    let window = window();
+    let calls = Calls::default();
+    let rows = Rc::new(slint::VecModel::<VisitEntry>::default());
+    window.set_visit_entries(ModelRc::from(Rc::clone(&rows)));
+    let model = Rc::clone(&rows);
+    let record = calls.clone();
+    window.on_visits_asked(move |way| {
+        record.note(format!("asked {way}"));
+        let line = |title: &str, way: i32, index: i32| VisitEntry {
+            title: title.into(),
+            way,
+            index,
+        };
+        let lines = match way {
+            0 => vec![line("문서 — /home/me", 0, 0), line("me — /home", 0, 1)],
+            1 => vec![line("사진 — /home/me", 1, 0)],
+            _ => vec![
+                line("사진 — /home/me", 1, 0),
+                line("작업 — /home/me", -1, 0),
+                line("문서 — /home/me", 0, 0),
+            ],
+        };
+        model.set_vec(lines);
+    });
+    let record = calls.clone();
+    window.on_visit_chosen(move |way, index| record.note(format!("chosen {way} {index}")));
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    window.set_can_back(true);
+    window.set_can_forward(true);
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+
+    // A right click on 뒤로 lists the folders behind; choosing one jumps there.
+    let back = labelled(&window, "뒤로", AccessibleRole::Button).remove(0);
+    back.mock_single_click(slint::platform::PointerEventButton::Right);
+    choose_item(&window, "me — /home");
+    assert_eq!(calls.take(), ["asked 0", "chosen 0 1"]);
+    // On 앞으로, the folders ahead.
+    let forward = labelled(&window, "앞으로", AccessibleRole::Button).remove(0);
+    forward.mock_single_click(slint::platform::PointerEventButton::Right);
+    choose_item(&window, "사진 — /home/me");
+    assert_eq!(calls.take(), ["asked 1", "chosen 1 0"]);
+    // From its key, both ways around the current folder, which chooses nothing.
+    window.invoke_show_visits_menu(-1);
+    choose_item(&window, "작업 — /home/me");
+    choose_item(&window, "문서 — /home/me");
+    assert_eq!(calls.take(), ["asked -1", "chosen 0 0"]);
+    // A long press finds the buttons while they have somewhere to go.
+    let at = |button: &ElementHandle| {
+        let place = button.absolute_position();
+        let size = button.size();
+        (place.x + size.width / 2.0, place.y + size.height / 2.0)
+    };
+    let (x, y) = at(&back);
+    assert_eq!(window.invoke_visits_button_at(x, y), 0);
+    let (fx, fy) = at(&forward);
+    assert_eq!(window.invoke_visits_button_at(fx, fy), 1);
+    assert_eq!(window.invoke_visits_button_at(x, y + 200.0), -1);
+    window.set_can_back(false);
+    assert_eq!(window.invoke_visits_button_at(x, y), -1);
+    // The tooltip's key: the buttons say Alt+↓ is the menu's.
+    let shown = window.global::<rf_ui::Shortcuts<'_>>();
+    assert_eq!(shown.get_visits_menu(), "Alt+↓");
+    ui_bridge::show_shortcuts(&window, Os::MacOs);
+    assert_eq!(shown.get_visits_menu(), "⌥⌘↓");
+}
+
+#[test]
+fn the_folder_s_menu_and_the_item_menu_make_a_new_file() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    // From the keys: the folder's menu, then the item menu.
+    window.invoke_show_blank_menu(0);
+    choose_item(&window, "새 파일");
+    choose_item(&window, "빈 텍스트 파일");
+    window.invoke_show_item_menu(0, 0);
+    choose_item(&window, "새 파일");
+    choose_item(&window, "빈 텍스트 파일");
+    assert_eq!(calls.take(), ["new-file", "new-file"]);
+}
+
+#[test]
+fn the_favorites_menu_and_the_view_menu_say_their_keys_and_settings() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_favorite_command(move |i, name| record.note(format!("{i} {name}")));
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    // KEY-03: 열기 of a favorite says the key the tree opens it with.
+    for (os, title) in [(Os::Windows, "열기  (Enter)"), (Os::MacOs, "열기  (⌘↓)")] {
+        ui_bridge::show_shortcuts(&window, os);
+        window.invoke_show_favorite_menu(0, 0);
+        choose_item(&window, title);
+    }
+    assert_eq!(calls.take(), ["0 open", "0 open"]);
+    // 보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴 곳부터 (PICK-05), inside the smallest window.
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    button.invoke_accessible_default_action();
+    choose_item(&window, "설정");
+    let title = "위치 고르기는 마지막으로 쓴 곳부터";
+    let item = ElementHandle::find_by_accessible_label(&window, title)
+        .next()
+        .expect("the item");
+    let end = item.absolute_position().y + item.size().height;
+    assert!(end <= 560.0, "the item ends at {end}px of 560");
+    choose_item(&window, title);
+    assert_eq!(calls.take(), ["toggle-pick-start"]);
+}
+
+#[test]
+fn the_picker_s_path_field_completes_with_tab_and_the_window_s_key_makes_a_folder() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_pick_path_completed(move |text| {
+        record.note(format!("complete {text}"));
+        // Rust completes a start of a name, waits for one, or has nothing to complete.
+        match text.as_str() {
+            "/home/me/d" => "/home/me/docs/".into(),
+            "/home/me/w" => text,
+            _ => SharedString::new(),
+        }
+    });
+    let record = calls.clone();
+    window.on_pick_path_edited(move |text| record.note(format!("edited {text}")));
+    let record = calls.clone();
+    window.on_pick_key(move |text, ctrl, shift, _, _| {
+        let taken = ctrl && shift && text.to_lowercase() == "n";
+        if taken {
+            record.note("new folder key");
+        }
+        taken
+    });
+    let record = calls.clone();
+    window.on_pick_filter_edited(move |text| record.note(format!("filter {text}")));
+    window.set_pick_view(pick_view());
+    window.set_dialog(DialogKind::Pick);
+    let path = || labelled(&window, "대상 경로", AccessibleRole::TextInput).remove(0);
+    path().set_accessible_value("/home/me/d");
+    // Tab completes the name in the field; once more, there is nothing to complete after the
+    // separator, and Tab goes on to the next stop (새 폴더, which Space presses: no field).
+    path().invoke_accessible_default_action();
+    path().mock_single_click(slint::platform::PointerEventButton::Left);
+    calls.take();
+    press(&window, Key::Tab);
+    assert_eq!(path().accessible_value().as_deref(), Some("/home/me/docs/"));
+    press(&window, Key::Tab);
+    chord(&window, &["x"]);
+    assert_eq!(
+        calls.take(),
+        ["complete /home/me/d", "complete /home/me/docs/"]
+    );
+    assert_eq!(path().accessible_value().as_deref(), Some("/home/me/docs/"));
+    // While Rust waits for the names, Tab stays in the field, which gets them later.
+    path().set_accessible_value("/home/me/w");
+    path().mock_single_click(slint::platform::PointerEventButton::Left);
+    calls.take();
+    press(&window, Key::Tab);
+    window.invoke_fill_pick_path("/home/me/work/".into());
+    slint::platform::update_timers_and_animations();
+    assert_eq!(path().accessible_value().as_deref(), Some("/home/me/work/"));
+    chord(&window, &["y"]);
+    assert_eq!(
+        calls.take(),
+        ["complete /home/me/w", "edited /home/me/work/y"]
+    );
+    // Ctrl+Shift+N, the window's key for a new folder, reaches Rust from the picker (PICK-04),
+    // and 새 폴더 says it (KEY-03).
+    chord(
+        &window,
+        &[&special(Key::Control), &special(Key::Shift), "N"],
+    );
+    assert_eq!(calls.take(), ["new folder key"]);
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    // The toolbar's, under the picker, and the picker's own.
+    let buttons = labelled(&window, "새 폴더", AccessibleRole::Button);
+    assert_eq!(buttons.len(), 2);
+    for button in buttons {
+        assert_eq!(
+            button.accessible_description().as_deref(),
+            Some("Ctrl+Shift+N")
+        );
+    }
 }

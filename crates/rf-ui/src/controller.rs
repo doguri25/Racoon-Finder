@@ -95,6 +95,7 @@ use slint::{
 use crate::dialogs::Modal;
 use crate::format::folder_label;
 use crate::hashing::{self, HASH_CHUNK, HashNews, PROGRESS_GAP};
+use crate::history::Way;
 use crate::instance::RequestStop;
 use crate::jobs::{self, Jobs, QUIT_TIMEOUT};
 use crate::keys::{self, Command, Mods};
@@ -106,7 +107,7 @@ use crate::places::{self, Place};
 use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
-use crate::settings::{OnError, Saver, Session, Settings, ThemeChoice, Waiting};
+use crate::settings::{OnError, PickStart, Saver, Session, Settings, ThemeChoice, Waiting};
 use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
@@ -119,7 +120,7 @@ use crate::ui_bridge::{
 };
 use crate::{
     DialogKind, DragPointer, DropPlace, FolderMenuRow, HistoryRowView, ItemMenu, JobRowView,
-    JobWindow, MainWindow, RecentRowView, StatusFit, TabDrop, open, words,
+    JobWindow, MainWindow, RecentRowView, StatusFit, TabDrop, VisitEntry, open, words,
 };
 
 pub mod clipboard;
@@ -565,6 +566,11 @@ fn connect(window: &MainWindow) {
         with(|c| c.key(&text, mods, repeat)).unwrap_or(false)
     });
     window.on_command(|name| {
+        // The release of a long press on 뒤로 or 앞으로 that opened the visit history's menu
+        // clicks nothing.
+        if with(Controller::release_swallowed).unwrap_or(false) {
+            return;
+        }
         with(|c| c.command(&name));
     });
     window.on_tree_key(|text, ctrl, shift, alt, meta| {
@@ -613,8 +619,14 @@ fn connect(window: &MainWindow) {
         with(|c| c.update(|state| state.filter_edited(&text)));
     });
     connect_view(window);
-    window.on_row_clicked(|s, i, ctrl, shift| {
-        with(|c| c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift)));
+    window.on_row_clicked(|s, i, ctrl, shift, on_name| {
+        with(|c| {
+            // Before the press changes the selection: whether it may be a slow second click.
+            if let Some(row) = index(i) {
+                c.slow_press(side(s), row, ctrl || shift, on_name);
+            }
+            c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift));
+        });
     });
     window.on_visible_range(|s, first, last| {
         with(|c| c.visible_range(side(s), first, last));
@@ -624,7 +636,10 @@ fn connect(window: &MainWindow) {
         if with(Controller::release_swallowed).unwrap_or(false) {
             return;
         }
-        with(|c| c.update_at(i, |state, i| state.release_row(side(s), i)));
+        with(|c| {
+            c.update_at(i, |state, i| state.release_row(side(s), i));
+            c.slow_release();
+        });
     });
     connect_checkboxes(window);
     window.on_row_activated(|s, i| {
@@ -634,6 +649,7 @@ fn connect(window: &MainWindow) {
         with(|c| c.update(|state| state.retry(side(s))));
     });
     connect_sidebar(window);
+    connect_visits(window);
     connect_drops(window);
     connect_tabs(window);
     connect_jobs(window);
@@ -687,6 +703,19 @@ fn connect_sidebar(window: &MainWindow) {
     });
     window.on_favorites_blank_command(|name| {
         with(|c| c.update(|state| state.favorites_blank_command(&name)));
+    });
+}
+
+/// The callbacks of the visit history's menu under 뒤로 and 앞으로 (NAV-04): it is about to
+/// show, and a line of it was chosen.
+fn connect_visits(window: &MainWindow) {
+    window.on_visits_asked(|way| {
+        with(|c| c.show_visits(ui_bridge::way_of(way)));
+    });
+    window.on_visit_chosen(|way, i| {
+        if let Some(way) = ui_bridge::way_of(way) {
+            with(|c| c.update_at(i, |state, i| state.history_chosen(way, i)));
+        }
     });
 }
 
@@ -1315,12 +1344,21 @@ fn connect_pick(window: &MainWindow) {
         with(|c| c.update(|state| state.pick_filter(&text)));
     });
     window.on_pick_path_edited(|text| {
-        with(|c| {
-            c.update(|state| {
-                state.pick_path_edited(&text);
-                Vec::new()
-            });
-        });
+        with(|c| c.update(|state| state.pick_path_edited(&text)));
+    });
+    window.on_pick_path_completed(|text| {
+        with(|c| c.pick_complete_path(&text))
+            .unwrap_or_default()
+            .into()
+    });
+    window.on_pick_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        with(|c| c.pick_key(&text, mods)).unwrap_or(false)
     });
     window.on_pick_path_entered(|text| {
         with(|c| c.update(|state| state.pick_path_entered(&text)));
@@ -1506,6 +1544,9 @@ fn connect_jobs(window: &MainWindow) {
     window.on_name_accepted(|text| {
         with(|c| c.update(|state| state.name_confirmed(&text)));
     });
+    window.on_name_tabbed(|text, backward| {
+        with(|c| c.update(|state| state.name_tabbed(&text, backward)));
+    });
     window.on_dialog_cancelled(|| {
         with(|c| c.update(AppState::dialog_cancelled));
     });
@@ -1603,6 +1644,11 @@ pub struct Controller {
     /// The dialog the screen shows, as it was last handed over: a view is set again only when
     /// it changed, so a list in it keeps its scroll position while the jobs report progress.
     shown_modal: RefCell<Option<(DialogKind, Option<Modal>)>>,
+    /// The number of the item the name window names, a new one for each item, which starts the
+    /// window again (`NameView.serial`: a Tab of a rename names the next item in it).
+    name_serial: Cell<i32>,
+    /// The lines of the visit history's menu (NAV-04), filled as it opens.
+    visit_rows: Rc<VecModel<VisitEntry>>,
     /// The models of the destination picker's view.
     pick: PickModels,
     /// The running loads of the tabs and the tree, by the generation of their request.
@@ -1722,6 +1768,8 @@ impl Controller {
         window.take_models(&panel);
         let open_with_apps = Rc::new(VecModel::default());
         window.set_open_with_apps(ModelRc::from(Rc::clone(&open_with_apps)));
+        let visit_rows = Rc::new(VecModel::default());
+        window.set_visit_entries(ModelRc::from(Rc::clone(&visit_rows)));
         set_first_drag_payloads(window);
         Controller {
             window: window.as_weak(),
@@ -1732,6 +1780,8 @@ impl Controller {
             tz: RefCell::new(TimeZone::UTC),
             panel,
             shown_modal: RefCell::new(None),
+            name_serial: Cell::new(0),
+            visit_rows,
             pick: PickModels::default(),
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
@@ -1840,6 +1890,7 @@ impl Controller {
             state.set_drag_default(settings.drag_default);
             state.set_move_undo_toast(settings.move_undo_toast);
             state.set_on_error(settings.on_error);
+            state.set_pick_start(settings.pick_start);
             state.set_system_menu_first(settings.system_menu_first);
             state.set_show_thumbnails(settings.show_thumbnails);
             state.set_long_press(settings.long_press);
@@ -2827,6 +2878,52 @@ impl Controller {
         completed
     }
 
+    /// Tab in the destination picker's path field, which holds `text` (PICK-03): the completed
+    /// text; `text` itself while the names it waits for are on their way (the field gets the
+    /// completion then, [`Effect::FillPickPath`]); empty when there is nothing to complete, and
+    /// Tab moves on to the picker's next stop.
+    fn pick_complete_path(&self, text: &str) -> String {
+        let mut completed = String::new();
+        let mut waits = false;
+        self.update(|state| {
+            if let Some((text, effects)) = state.pick_complete_path(text) {
+                completed = text;
+                return effects;
+            }
+            waits = state.pick_completion_waits(text);
+            Vec::new()
+        });
+        if waits { text.to_owned() } else { completed }
+    }
+
+    /// A key the destination picker does not take itself, held with `mods` (PICK-04): the
+    /// window's key for a new folder makes one there. `true` when it did something.
+    fn pick_key(&self, text: &str, mods: Mods) -> bool {
+        let Some(command) = keys::command_for(text, mods, Os::CURRENT) else {
+            return false;
+        };
+        let mut taken = false;
+        self.update(|state| match state.pick_key(&command) {
+            Some(effects) => {
+                taken = true;
+                effects
+            }
+            None => Vec::new(),
+        });
+        taken
+    }
+
+    /// The visit history's menu is about to show `way` (`None`: both ways around the current
+    /// folder, from its key): its lines, from the active pane's tab (NAV-04).
+    fn show_visits(&self, way: Option<Way>) {
+        let rows = self
+            .state
+            .borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |state| ui_bridge::visit_rows(state, way));
+        ui_bridge::set_rows(&self.visit_rows, rows);
+    }
+
     /// Entry `index` of the item menu's 링크 만들기 ▸ was chosen: links in the folder of the pane,
     /// or, with Shift held as it was chosen, in a folder the picker finds (OPS-08). The keys are
     /// read as the system has them now (`rf_platform::dnd::held_mods`): the menu of the system's
@@ -2853,6 +2950,15 @@ impl Controller {
                     state.set_on_error(match state.on_error() {
                         OnError::Continue => OnError::Ask,
                         OnError::Ask => OnError::Continue,
+                    });
+                    Vec::new()
+                });
+            }
+            "toggle-pick-start" => {
+                self.update(|state| {
+                    state.set_pick_start(match state.pick_start() {
+                        PickStart::Opposite => PickStart::Last,
+                        PickStart::Last => PickStart::Opposite,
                     });
                     Vec::new()
                 });
@@ -2908,6 +3014,7 @@ impl Controller {
             "add-favorite" => return self.update(AppState::favorite_add_selected),
             "paste-move-into" => return self.update(|state| state.paste_from_menu(true)),
             "remove-app" | "open-uninstaller" => return self.update(AppState::removal_asked),
+            "new-file" => return self.update(AppState::new_file),
             _ => {}
         }
         if let Some(index) = name
@@ -3071,6 +3178,7 @@ impl Controller {
                 Effect::Notice(_)
                 | Effect::EditPath(_)
                 | Effect::FillPath { .. }
+                | Effect::FillPickPath(_)
                 | Effect::FocusFilter
                 | Effect::ShowViewMenu
                 | Effect::FocusTree
@@ -3259,6 +3367,7 @@ impl Controller {
             | Effect::Notice(_)
             | Effect::EditPath(_)
             | Effect::FillPath { .. }
+            | Effect::FillPickPath(_)
             | Effect::FocusFilter
             | Effect::ShowViewMenu
             | Effect::FocusTree
@@ -3314,6 +3423,18 @@ impl Controller {
         }
     }
 
+    /// Puts `text` into the path field of pane `side` while it is edited, or (`None`) into the
+    /// destination picker's: a Tab that waited for the names that complete it has completed it.
+    fn fill_path(&self, side: Option<usize>, text: String) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        match side {
+            Some(side) => window.invoke_fill_path(side_number(side), text.into()),
+            None => window.invoke_fill_pick_path(text.into()),
+        }
+    }
+
     /// Does an effect that shows on the screen.
     fn show(&self, effect: Effect) {
         match effect {
@@ -3323,11 +3444,8 @@ impl Controller {
                     window.invoke_edit_path(side_number(side));
                 }
             }
-            Effect::FillPath { side, text } => {
-                if let Some(window) = self.window.upgrade() {
-                    window.invoke_fill_path(side_number(side), text.into());
-                }
-            }
+            Effect::FillPath { side, text } => self.fill_path(Some(side), text),
+            Effect::FillPickPath(text) => self.fill_path(None, text),
             Effect::FocusFilter | Effect::FocusTree | Effect::FocusPanes | Effect::FocusPanel => {
                 self.give_keys(&effect);
             }
@@ -3451,6 +3569,8 @@ impl Controller {
                 window.invoke_show_favorite_menu(number(index), number(row));
             }
             MenuShown::FavoritesBlank => window.invoke_show_favorites_blank_menu(),
+            // Both ways around the current folder; the window asks for the lines.
+            MenuShown::History => window.invoke_show_visits_menu(-1),
         }
     }
 
@@ -3542,6 +3662,7 @@ impl Controller {
             window.set_drag_default(ui_bridge::drag_default_number(state.drag_default()));
             window.set_move_undo_toast(state.move_undo_toast());
             window.set_ask_on_error(state.on_error() == OnError::Ask);
+            window.set_pick_from_last(state.pick_start() == PickStart::Last);
             window.set_show_thumbnails(state.show_thumbnails());
             window.set_long_press(state.long_press());
             window.set_long_press_ms(i32::from(state.long_press_ms()));
@@ -4053,7 +4174,17 @@ impl Controller {
                 };
                 window.set_closing_text(text.into());
             }
-            Some(Modal::Name(dialog)) => window.set_name_view(ui_bridge::name_view(dialog)),
+            Some(Modal::Name(dialog)) => {
+                // Another item than the one shown: the window starts again with its name.
+                let same = matches!(
+                    self.shown_modal.borrow().as_ref(),
+                    Some((_, Some(Modal::Name(shown)))) if shown.purpose == dialog.purpose
+                );
+                if !same {
+                    self.name_serial.set(self.name_serial.get().wrapping_add(1));
+                }
+                window.set_name_view(ui_bridge::name_view(dialog, self.name_serial.get()));
+            }
             Some(Modal::Confirm(confirm)) => {
                 window.set_confirm_view(ui_bridge::confirm_view(confirm));
             }

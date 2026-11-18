@@ -16,14 +16,18 @@
 // 이동/복사, 이름이 겹치면, 링크는 가리키는 것을 복사 (a copy's alone), 취소 and the confirm button
 // (a button that is off or not there is passed over, and so is Tab while a syllable is being
 // composed). On 이동/복사 and 이름이 겹치면 ← and → choose; Space flips the box; on a button Space
-// or Enter presses it, which confirms an overwrite too.
+// or Enter presses it, which confirms an overwrite too. In the path field Tab first completes the
+// start of a folder's name typed after the last separator, as the path field of a pane does
+// (PICK-03; Rust decides, and it moves on when there is nothing to complete). The window's key for
+// a new folder (Ctrl+Shift+N, ⇧⌘N) is 새 폴더 here too (PICK-04): Rust is asked about the keys the
+// picker does not take itself.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, PrimaryButton, OutlineButton, DialogFrame, Field, Segment, SegmentTrack, CheckBox } from "widgets.slint";
 import { Sidebar, TreeRow } from "sidebar.slint";
-import { DialogKeys } from "shortcuts.slint";
+import { DialogKeys, Shortcuts } from "shortcuts.slint";
 
 // One quick target, as Rust makes it.
 export struct PickTarget {
@@ -203,6 +207,10 @@ export component PickDialog inherits DialogFrame {
     // The tree scrolls to row `scroll-row` each time `scroll-serial` changes.
     in property <int> scroll-row;
     in property <int> scroll-serial;
+    // The path field takes `fill-text` each time `fill-serial` changes: a Tab that waited for the
+    // names that complete it has completed it.
+    in property <string> fill-text;
+    in property <int> fill-serial;
     callback cancelled();
     callback confirmed();
     // Enter anywhere but in the path field.
@@ -216,6 +224,11 @@ export component PickDialog inherits DialogFrame {
     // The path field's text changed by typing (not entered yet).
     callback path-edited(text: string);
     callback path-entered(text: string);
+    // Tab in the path field, which holds `text`: the completed text, `text` itself while Rust
+    // waits for the names, or empty when there is nothing to complete.
+    callback path-completed(text: string) -> string;
+    // A key the picker does not take itself: whether Rust did something with it.
+    callback other-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     callback new-folder();
     callback mode-chosen(is-move: bool);
     callback policy-chosen(policy: int);
@@ -362,6 +375,11 @@ export component PickDialog inherits DialogFrame {
         tree.scroll-to(root.scroll-row);
     }
 
+    changed fill-serial => {
+        path.text = root.fill-text;
+        path.to-end();
+    }
+
     // The keys the dialog takes wherever its focus is: the fields pass up those they do not
     // use, and the filter passes the arrows. The dialog takes the focus itself only on a stop
     // other than the fields (a click between its parts leaves it where it was), so letters
@@ -392,6 +410,9 @@ export component PickDialog inherits DialogFrame {
         }
         if (event.text == Key.Return) {
             root.enter();
+            return EventResult.accept;
+        }
+        if (root.other-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
             return EventResult.accept;
         }
         return EventResult.reject;
@@ -518,7 +539,20 @@ export component PickDialog inherits DialogFrame {
                         label: "대상 경로";
                         hint: "폴더 경로를 입력하세요";
                         key(event) => {
-                            if (DialogKeys.tab-step(event) != 0) {
+                            let step = DialogKeys.tab-step(event);
+                            // Tab completes the folder's name first (not while a syllable is
+                            // being composed: it is not in the text yet).
+                            if (step > 0 && !self.composing) {
+                                let completed = root.path-completed(self.text);
+                                if (completed != "") {
+                                    if (completed != self.text) {
+                                        self.text = completed;
+                                        self.to-end();
+                                    }
+                                    return EventResult.accept;
+                                }
+                            }
+                            if (step != 0) {
                                 return root.key(event);
                             }
                             return EventResult.reject;
@@ -542,6 +576,7 @@ export component PickDialog inherits DialogFrame {
 
                     OutlineButton {
                         text: "새 폴더";
+                        keys: Shortcuts.new-folder;
                         enabled: root.view.can-make-folder && !path.composing;
                         focused: root.stop == 2;
                         clicked => {

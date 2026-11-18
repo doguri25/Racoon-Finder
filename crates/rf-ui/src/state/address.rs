@@ -43,6 +43,7 @@ use rf_core::{ErrorKind, Os, VPath};
 use rf_vfs::VisibilityFilter;
 
 use super::{AppState, Effect, Layout, load};
+use crate::dialogs::Modal;
 use crate::keys::ListKey;
 use crate::loader::{FolderName, LoadEvent, NameStart, NamesRequest, name_starts_with};
 use crate::pane::{ancestors, next_generation};
@@ -161,10 +162,18 @@ impl Subfolders {
     }
 }
 
-/// The completion list of the path field of a pane.
+/// The path field a completion list is for: a pane's, or the destination picker's (PICK-03),
+/// which completes with Tab alone and shows no list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Field {
+    Pane(usize),
+    Picker,
+}
+
+/// The completion list of the path field of a pane, or of the destination picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
-    side: usize,
+    field: Field,
     /// The field's text it completes, as typed.
     text: String,
     /// That text as far as its last separator (included), and the folder it names.
@@ -189,9 +198,17 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// The pane whose path field it completes.
-    pub fn side(&self) -> usize {
-        self.side
+    /// The pane whose path field it completes; `None` for the picker's.
+    pub fn side(&self) -> Option<usize> {
+        match self.field {
+            Field::Pane(side) => Some(side),
+            Field::Picker => None,
+        }
+    }
+
+    /// A Tab came before the names it waits for: the text is completed once they come.
+    pub fn tab_waits(&self) -> bool {
+        self.tab_waiting
     }
 
     /// The text it completes.
@@ -635,9 +652,14 @@ impl AppState {
 
     /// The completion list of the path field of pane `side`, when it has one.
     pub fn completion(&self, side: usize) -> Option<&Completion> {
+        self.completion_for(Field::Pane(side))
+    }
+
+    /// The completion list of the path field `field`, when it has one.
+    pub(super) fn completion_for(&self, field: Field) -> Option<&Completion> {
         self.completion
             .as_ref()
-            .filter(|completion| completion.side == side)
+            .filter(|completion| completion.field == field)
     }
 
     /// The text of the path field of pane `side` changed to `text`: a worker lists the folders
@@ -649,7 +671,15 @@ impl AppState {
     /// has no completion.
     pub fn path_edited(&mut self, side: usize, text: &str) -> Vec<Effect> {
         self.activate(side);
-        let before = self.completion.take().filter(|before| before.side == side);
+        self.edit_completion(Field::Pane(side), text)
+    }
+
+    /// The text of the path field `field` changed to `text`: see [`AppState::path_edited`].
+    pub(super) fn edit_completion(&mut self, field: Field, text: &str) -> Vec<Effect> {
+        let before = self
+            .completion
+            .take()
+            .filter(|before| before.field == field);
         let environment = &self.environment;
         let Some((head, prefix, folder)) =
             completion_base(text, Os::CURRENT, &|name| environment.var(name))
@@ -673,8 +703,12 @@ impl AppState {
             let request = self.names_request(generation, folder.clone(), &prefix);
             (generation, vec![Effect::ListNames(request)])
         };
+        let tab = match field {
+            Field::Pane(side) => self.tab(side).id(),
+            Field::Picker => 0,
+        };
         self.completion = Some(Completion {
-            side,
+            field,
             text: text.to_owned(),
             head: head.to_owned(),
             folder,
@@ -685,7 +719,7 @@ impl AppState {
             tab_waiting: false,
             cursor: None,
             generation,
-            tab: self.tab(side).id(),
+            tab,
             layout: self.layout,
         });
         effects
@@ -694,7 +728,11 @@ impl AppState {
     /// ↑ (`delta` below 0) or ↓ in the path field of pane `side` while its completion list
     /// shows: the cursor moves a row, from no row ↓ to the first one and ↑ to the last.
     pub fn completion_step(&mut self, side: usize, delta: isize) -> Vec<Effect> {
-        if let Some(completion) = self.completion.as_mut().filter(|each| each.side == side) {
+        if let Some(completion) = self
+            .completion
+            .as_mut()
+            .filter(|each| each.field == Field::Pane(side))
+        {
             let count = completion.names.rows().len();
             completion.cursor = step(completion.cursor, delta, count);
         }
@@ -709,10 +747,19 @@ impl AppState {
     /// ([`Effect::FillPath`]). In a `file:` URL the name is percent-encoded (`%`, `#`, `?`,
     /// space and controls), so that the URL reads back as that folder.
     pub fn complete_path(&mut self, side: usize, text: &str) -> Option<(String, Vec<Effect>)> {
+        self.complete_in(Field::Pane(side), text)
+    }
+
+    /// Tab in the path field `field`, which holds `text`: see [`AppState::complete_path`].
+    pub(super) fn complete_in(
+        &mut self,
+        field: Field,
+        text: &str,
+    ) -> Option<(String, Vec<Effect>)> {
         let completion = self
             .completion
             .as_mut()
-            .filter(|each| each.side == side && each.text == text)?;
+            .filter(|each| each.field == field && each.text == text)?;
         if completion.names.rows().is_empty() && completion.waiting {
             completion.tab_waiting = true;
             return None;
@@ -729,14 +776,20 @@ impl AppState {
             name
         };
         let completed = format!("{}{name}{separator}", completion.head);
-        let effects = self.path_edited(side, &completed);
+        let effects = match field {
+            Field::Pane(side) => self.path_edited(side, &completed),
+            Field::Picker => self.edit_completion(field, &completed),
+        };
         Some((completed, effects))
     }
 
     /// Row `row` of the completion list of pane `side` was clicked: the list closes, and the
     /// pane goes to that folder.
     pub fn choose_completion(&mut self, side: usize, row: usize) -> Vec<Effect> {
-        let Some(completion) = self.completion.take_if(|each| each.side == side) else {
+        let Some(completion) = self
+            .completion
+            .take_if(|each| each.field == Field::Pane(side))
+        else {
             return Vec::new();
         };
         let Some(folder) = completion
@@ -754,7 +807,7 @@ impl AppState {
     /// The completion list of pane `side` closes.
     pub fn dismiss_completion(&mut self, side: usize) {
         self.completion
-            .take_if(|completion| completion.side == side);
+            .take_if(|completion| completion.field == Field::Pane(side));
     }
 
     /// Enter in the path field of pane `side`, which holds `text`: the pane goes to the folder
@@ -764,7 +817,9 @@ impl AppState {
     /// address, and text that is no path, give a notice and change nothing.
     pub fn enter_path(&mut self, side: usize, text: &str) -> Vec<Effect> {
         self.activate(side);
-        let completion = self.completion.take_if(|each| each.side == side);
+        let completion = self
+            .completion
+            .take_if(|each| each.field == Field::Pane(side));
         let chosen = completion
             .filter(|each| each.text == text)
             .and_then(|each| each.chosen());
@@ -801,10 +856,18 @@ impl AppState {
                 self.subfolders = None;
             }
         }
-        if let Some(completion) = &self.completion
-            && !(shows(self, completion.side, completion.tab) && self.layout == completion.layout)
-        {
-            self.completion = None;
+        // The picker's lasts while the picker is the window that shows.
+        let picking = matches!(self.modal, Some(Modal::Pick(_))) && !self.quitting;
+        if let Some(completion) = &self.completion {
+            let kept = match completion.field {
+                Field::Pane(side) => {
+                    shows(self, side, completion.tab) && self.layout == completion.layout
+                }
+                Field::Picker => picking,
+            };
+            if !kept {
+                self.completion = None;
+            }
         }
     }
 
@@ -851,12 +914,20 @@ impl AppState {
         if !std::mem::take(&mut completion.tab_waiting) {
             return Ok(Vec::new());
         }
-        let (side, text) = (completion.side, completion.text.clone());
-        Ok(match self.complete_path(side, &text) {
+        let (field, text) = (completion.field, completion.text.clone());
+        Ok(match self.complete_in(field, &text) {
             Some((completed, mut effects)) => {
-                effects.push(Effect::FillPath {
-                    side,
-                    text: completed,
+                effects.push(match field {
+                    Field::Pane(side) => Effect::FillPath {
+                        side,
+                        text: completed,
+                    },
+                    Field::Picker => {
+                        if let Some(Modal::Pick(picker)) = &mut self.modal {
+                            picker.edit_path(&completed);
+                        }
+                        Effect::FillPickPath(completed)
+                    }
                 });
                 effects
             }

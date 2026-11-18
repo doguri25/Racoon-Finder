@@ -656,7 +656,7 @@ export component Pane inherits Rectangle {
     callback column-resized(column: int, width: length);
     callback column-texts(column: int, first: int, count: int) -> string;
     // A left press on row `index`, and its release when no drag came of it.
-    callback row-clicked(index: int, ctrl: bool, shift: bool);
+    callback row-clicked(index: int, ctrl: bool, shift: bool, on-name: bool);
     callback row-released(index: int);
     // The first and the last item the icon views show changed (`FileGrid.visible-changed`).
     callback visible-changed(first: int, last: int);
@@ -1278,8 +1278,8 @@ export component Pane inherits Rectangle {
                 column-texts(column, first, count) => {
                     return root.column-texts(column, first, count);
                 }
-                row-clicked(index, ctrl, shift) => {
-                    root.row-clicked(index, ctrl, shift);
+                row-clicked(index, ctrl, shift, on-name) => {
+                    root.row-clicked(index, ctrl, shift, on-name);
                 }
                 row-released(index) => {
                     root.row-released(index);
@@ -1320,8 +1320,8 @@ export component Pane inherits Rectangle {
                 visible-changed(first, last) => {
                     root.visible-changed(first, last);
                 }
-                row-clicked(index, ctrl, shift) => {
-                    root.row-clicked(index, ctrl, shift);
+                row-clicked(index, ctrl, shift, on-name) => {
+                    root.row-clicked(index, ctrl, shift, on-name);
                 }
                 row-released(index) => {
                     root.row-released(index);

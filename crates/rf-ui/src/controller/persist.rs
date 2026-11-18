@@ -353,6 +353,7 @@ impl Controller {
             settings.drag_default = state.drag_default();
             settings.move_undo_toast = state.move_undo_toast();
             settings.on_error = state.on_error();
+            settings.pick_start = state.pick_start();
             settings.system_menu_first = state.system_menu_first();
             settings.show_thumbnails = state.show_thumbnails();
             settings.long_press = state.long_press();

@@ -11,10 +11,12 @@ use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{ConflictPolicy, JobReport, JobSpec, Outcome, TransferMode};
 use rf_vfs::VisibilityFilter;
 
+use super::address::Field;
 use super::jobs::submit;
 use super::links::link_job;
-use super::{AppState, Effect, RIGHT};
+use super::{AppState, Effect, RIGHT, split_last};
 use crate::dialogs::{Modal, NameDialog};
+use crate::keys::Command;
 use crate::loader::LoadRequest;
 use crate::pane::{Pane, Tab};
 use crate::pick::{
@@ -22,6 +24,7 @@ use crate::pick::{
     quick_targets, validate,
 };
 use crate::places::Place;
+use crate::settings::PickStart;
 use crate::tree::{NodeId, Tree};
 use crate::words;
 
@@ -41,6 +44,15 @@ impl AppState {
                 self.recent.push(target);
             }
         }
+    }
+
+    /// Where the picker starts when it opens (보기 ▸ 설정, PICK-05).
+    pub fn pick_start(&self) -> PickStart {
+        self.pick_start
+    }
+
+    pub fn set_pick_start(&mut self, start: PickStart) {
+        self.pick_start = start;
     }
 
     /// The picker on screen: the window that shows, or the one under it while its 새 폴더
@@ -67,8 +79,9 @@ impl AppState {
 
     /// F5, F6, the toolbar's 복사… and 이동…, the row menu: the picker for the items of pane
     /// `side` (the selected rows, or the cursor's row; nothing without either), with the
-    /// folder of the other pane chosen when it can take them (PICK-05). A worker looks at the
-    /// target, and the picker's tree opens on the way to it.
+    /// folder of the other pane chosen when it can take them, or the last target where 보기 ▸
+    /// 설정 says so (PICK-05, [`AppState::show_picker`]). A worker looks at the target, and the
+    /// picker's tree opens on the way to it.
     pub(super) fn open_picker(&mut self, side: usize, mode: TransferMode) -> Vec<Effect> {
         if self.quitting {
             return Vec::new();
@@ -92,8 +105,19 @@ impl AppState {
     }
 
     /// Shows `picker` with a folder tree of its own, opening on the way to its target, at which
-    /// a worker looks.
-    pub(super) fn show_picker(&mut self, picker: Picker) -> Vec<Effect> {
+    /// a worker looks. Where 보기 ▸ 설정 says the picker starts at the last target (PICK-05), a
+    /// copy, a move or links start there, when it can take the items (the first of the recent
+    /// targets); a log starts at the app's folder for logs all the same.
+    pub(super) fn show_picker(&mut self, mut picker: Picker) -> Vec<Effect> {
+        if self.pick_start == PickStart::Last
+            && !picker.for_a_log()
+            && let Some(last) = self
+                .recent
+                .first()
+                .filter(|last| validate(&picker.request, last, None).can_choose())
+        {
+            picker.target = Some(last.clone());
+        }
         let target = picker.target.clone();
         self.pick_tree = Tree::new(VisibilityFilter {
             show_hidden: self.show_hidden,
@@ -259,10 +283,54 @@ impl AppState {
 
     /// The path field now holds `text`, typed and not entered yet: unless it is the target's
     /// path, the picker confirms nothing until it is entered and found to be a folder, or
-    /// another target is chosen (the field then shows that one).
-    pub fn pick_path_edited(&mut self, text: &str) {
+    /// another target is chosen (the field then shows that one). A worker lists the folders
+    /// that would complete the text, as the path field of a pane has them (PICK-03,
+    /// [`AppState::pick_complete_path`]).
+    pub fn pick_path_edited(&mut self, text: &str) -> Vec<Effect> {
+        let Some(picker) = self.active_picker_mut() else {
+            return Vec::new();
+        };
+        picker.edit_path(text);
+        self.edit_completion(Field::Picker, text)
+    }
+
+    /// Tab in the picker's path field, which holds `text` (PICK-03): the text completed with
+    /// the first folder whose name starts with what follows its last separator, and that
+    /// folder's separator, as Tab completes the path field of a pane
+    /// ([`AppState::complete_path`]); a Tab before the names come waits for them, and the field
+    /// gets the text then ([`Effect::FillPickPath`]). `None` when there is nothing to complete:
+    /// the text ends with a separator, no folder starts so, or the text names no folder; Tab then
+    /// moves on to the picker's next stop (KEY-02), so that the field never holds the keys.
+    pub fn pick_complete_path(&mut self, text: &str) -> Option<(String, Vec<Effect>)> {
+        self.active_picker()?;
+        let (_, prefix) = split_last(text, Os::CURRENT)?;
+        if prefix.is_empty() {
+            return None;
+        }
+        let (completed, effects) = self.complete_in(Field::Picker, text)?;
         if let Some(picker) = self.active_picker_mut() {
-            picker.edit_path(text);
+            picker.edit_path(&completed);
+        }
+        Some((completed, effects))
+    }
+
+    /// Whether a Tab in the picker's path field, which holds `text`, waits for the names that
+    /// would complete it ([`AppState::pick_complete_path`] said `None` and noted the Tab), rather
+    /// than moving on to the next stop.
+    pub fn pick_completion_waits(&self, text: &str) -> bool {
+        self.completion_for(Field::Picker)
+            .is_some_and(|completion| completion.text() == text && completion.tab_waits())
+    }
+
+    /// The key of `command`, a key of the window's table, pressed in the picker (PICK-04): the
+    /// window's key for a new folder makes one there as its 새 폴더 does
+    /// ([`AppState::pick_new_folder`]). `None` for another command, which the picker does not
+    /// take.
+    pub fn pick_key(&mut self, command: &Command) -> Option<Vec<Effect>> {
+        self.active_picker()?;
+        match command {
+            Command::NewFolder => Some(self.pick_new_folder()),
+            _ => None,
         }
     }
 

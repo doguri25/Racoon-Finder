@@ -38,6 +38,7 @@ use rf_core::{Entry, EntryKind, Os};
 use rf_vfs::{NameFolding, fold_name};
 
 use super::{AppState, Effect, LEFT, RIGHT, load};
+use crate::history::Way;
 use crate::loader::LoadRequest;
 use crate::pane::{LoadStatus, Tab};
 use crate::words;
@@ -384,7 +385,9 @@ impl AppState {
                 }
                 // Up from where the wait began: the other pane is in step there.
                 Step::Up => {}
-                Step::Back | Step::Forward => {
+                // A jump of the visit history's menu past folders the other pane still waits
+                // to open: its history is not in step there.
+                Step::Back | Step::Forward | Step::Jump(..) => {
                     return self.stop_sync(words::sync_cannot_follow().to_owned());
                 }
             }
@@ -402,6 +405,9 @@ pub(super) enum Step {
     Up,
     Back,
     Forward,
+    /// To the folder that many places along the history that way, from the visit history's
+    /// menu (NAV-04): 1 or more (0 is [`Step::Back`] or [`Step::Forward`]).
+    Jump(Way, usize),
 }
 
 impl Step {
@@ -411,6 +417,17 @@ impl Step {
             Step::Up => tab.go_up(),
             Step::Back => tab.go_back(),
             Step::Forward => tab.go_forward(),
+            Step::Jump(way, index) => tab.go_to(way, index),
+        }
+    }
+
+    /// The move to the folder `index` places along the history `way`: a step for the nearest
+    /// one, so that navigation sync follows it as it follows the keys.
+    pub(super) fn to(way: Way, index: usize) -> Step {
+        match (way, index) {
+            (Way::Back, 0) => Step::Back,
+            (Way::Forward, 0) => Step::Forward,
+            _ => Step::Jump(way, index),
         }
     }
 }

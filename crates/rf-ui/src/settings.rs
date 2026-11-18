@@ -10,8 +10,9 @@
 //! whether a right click shows Windows' menu first (`system_menu_first`, OPS-05) and whether the
 //! icon views show thumbnails (`show_thumbnails`, VIEW-09), whether a long press opens the menu
 //! (`long_press`, with its delay `long_press_ms`, PICK-02), whether the rows show checkboxes
-//! (`checkbox_select`, NAV-15) and what a copy or a move does about an item that fails
-//! (`on_error`, XFER-09); and the sidebar's favorites the user
+//! (`checkbox_select`, NAV-15), what a copy or a move does about an item that fails
+//! (`on_error`, XFER-09) and where the destination picker starts (`pick_start`, PICK-05); and
+//! the sidebar's favorites the user
 //! keeps (`[[favorites]]`, NAV-05: none until the user first edits the list, then the whole list),
 //! the last ten folders visited (`recent_folders`) and whether their group is folded
 //! (`recent_folded`).
@@ -144,6 +145,19 @@ impl OnError {
             OnError::Ask => rf_jobs::ErrorPolicy::Ask,
         }
     }
+}
+
+/// Where the destination picker starts when it opens (보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴
+/// 곳부터, PICK-05): `pick_start = "opposite"` or `"last"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PickStart {
+    /// The folder of the other pane, the first of the quick targets.
+    #[default]
+    Opposite,
+    /// The folder a copy or a move was sent to last, when it can take the items; else the
+    /// other pane's.
+    Last,
 }
 
 /// The tabs of one pane, as stored.
@@ -312,6 +326,11 @@ pub struct Settings {
     /// version cannot read, carries on.
     #[serde(deserialize_with = "or_default")]
     pub on_error: OnError,
+    /// Where the destination picker starts (PICK-05): the other pane's folder unless the file
+    /// says `"last"`. A file without the key (0.4.0 and before), or with a value this version
+    /// cannot read, starts there.
+    #[serde(deserialize_with = "or_default")]
+    pub pick_start: PickStart,
     /// The favorites the user keeps under "즐겨찾기" in the sidebar, in order (NAV-05). None until
     /// the user first edits the list (add, remove, rename, reorder): the sidebar then shows the
     /// system's well-known folders, and the first edit makes that list the user's own and keeps
@@ -370,6 +389,7 @@ impl Default for Settings {
             long_press_ms: LONG_PRESS_DEFAULT_MS,
             checkbox_select: false,
             on_error: OnError::default(),
+            pick_start: PickStart::default(),
             favorites: Vec::new(),
             favorites_emptied: false,
             recent_folders: Vec::new(),
@@ -1049,6 +1069,7 @@ impl Settings {
             long_press_ms: self.long_press_ms,
             checkbox_select: self.checkbox_select,
             on_error: self.on_error,
+            pick_start: self.pick_start,
             favorites: self.favorites.clone(),
             favorites_emptied: self.favorites_emptied,
             recent_folders: self.recent_folders.clone(),
@@ -1399,6 +1420,7 @@ mod tests {
             long_press_ms: 800,
             checkbox_select: true,
             on_error: OnError::Ask,
+            pick_start: PickStart::Last,
             ..Settings::default()
         };
         settings.set_session(&Session {
@@ -1711,6 +1733,45 @@ mod tests {
         std::fs::write(&file, "on_error = \"panic\"\ntheme = \"dark\"\n").expect("written");
         let loaded = load(dir.path()).settings;
         assert_eq!(loaded.on_error, OnError::Continue);
+        assert_eq!(loaded.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn where_the_picker_starts_round_trips_and_an_older_file_starts_at_the_other_pane() {
+        // The other pane's folder, as the demos before had it (PICK-05's default).
+        assert_eq!(Settings::default().pick_start, PickStart::Opposite);
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        for (choice, name) in [(PickStart::Opposite, "opposite"), (PickStart::Last, "last")] {
+            let settings = Settings {
+                pick_start: choice,
+                ..Settings::default()
+            };
+            settings.save(dir.path()).expect("saved");
+            let text = std::fs::read_to_string(&file).expect("read");
+            assert!(text.contains(&format!("pick_start = \"{name}\"")), "{text}");
+            // The key adds no version.
+            assert!(
+                text.contains(&format!("version = {SETTINGS_VERSION}")),
+                "{text}"
+            );
+            assert_eq!(load(dir.path()), writable(settings));
+        }
+        // A 0.4.0 file has no such key: it starts at the other pane, and loads as it is.
+        std::fs::write(
+            &file,
+            "version = 1\ntheme = \"dark\"\non_error = \"ask\"\n\n[layout]\nhide_tree = true\n",
+        )
+        .expect("written");
+        let loaded = load(dir.path());
+        assert!(loaded.backup.is_none() && loaded.writable);
+        assert_eq!(loaded.settings.pick_start, PickStart::Opposite);
+        assert_eq!(loaded.settings.on_error, OnError::Ask);
+        assert!(loaded.settings.layout.hide_tree);
+        // A value this version cannot read starts there too, and costs no other key.
+        std::fs::write(&file, "pick_start = 3\ntheme = \"dark\"\n").expect("written");
+        let loaded = load(dir.path()).settings;
+        assert_eq!(loaded.pick_start, PickStart::Opposite);
         assert_eq!(loaded.theme, ThemeChoice::Dark);
     }
 

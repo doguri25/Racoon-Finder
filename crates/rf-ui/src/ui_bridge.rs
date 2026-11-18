@@ -36,6 +36,7 @@ use crate::format::{
     kind_label, short_path, shown_name,
 };
 use crate::hashing::Algorithm;
+use crate::history::Way;
 use crate::jobs::{JobRow, RecentRow, speed_points};
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
@@ -47,8 +48,8 @@ use crate::selection::Selection;
 use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
-    Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names, PathForm,
-    PreviewShown, RIGHT, RecentAt, SelectState,
+    AppState, Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names,
+    PathForm, PreviewShown, RIGHT, RecentAt, SelectState,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
@@ -57,7 +58,7 @@ use crate::{
     ErrorView, FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView,
     ItemMenu, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView, PatternView,
     PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView,
-    RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow,
+    RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow, VisitEntry,
 };
 
 /// What separates the parts of a pane's status line in `PaneView.status`:
@@ -1377,6 +1378,60 @@ pub fn drag_default_of(number: i32) -> Option<DragDefault> {
     }
 }
 
+/// The way of the visit history's menu the window names `number` (0 behind, 1 ahead); `None`
+/// for both, the menu of its key (-1).
+pub fn way_of(number: i32) -> Option<Way> {
+    match number {
+        0 => Some(Way::Back),
+        1 => Some(Way::Forward),
+        _ => None,
+    }
+}
+
+/// The lines of the visit history's menu of the active pane's tab (NAV-04): the folders `way`
+/// goes, nearest first; with no way (its key), those ahead, the farthest first, then the
+/// current folder (checked, off), then those behind, the nearest first, as File Explorer's list
+/// of recent locations has them. Each line is the folder's name and the folder it is in.
+pub fn visit_rows(state: &AppState, way: Option<Way>) -> Vec<VisitEntry> {
+    let line = |path: &VPath, number: i32, index: usize| VisitEntry {
+        title: visit_title(path).into(),
+        way: number,
+        index: i32::try_from(index).unwrap_or(i32::MAX),
+    };
+    let lines = |way: Way, number: i32| {
+        state
+            .history_entries(way)
+            .iter()
+            .enumerate()
+            .map(|(index, path)| line(path, number, index))
+            .collect::<Vec<_>>()
+    };
+    match way {
+        Some(Way::Back) => lines(Way::Back, 0),
+        Some(Way::Forward) => lines(Way::Forward, 1),
+        None => {
+            let mut rows: Vec<VisitEntry> = lines(Way::Forward, 1).into_iter().rev().collect();
+            let current = state.panes()[state.active()].active_tab().location();
+            rows.push(line(current, -1, 0));
+            rows.extend(lines(Way::Back, 0));
+            rows
+        }
+    }
+}
+
+/// How many characters of the folder a line of the visit history's menu is in show; the middle
+/// of a longer path is left out.
+const VISIT_PLACE_CHARS: usize = 48;
+
+/// The line of `path` in the visit history's menu ([`words::history_entry`]).
+fn visit_title(path: &VPath) -> String {
+    let place = path
+        .file_name()
+        .and(path.parent())
+        .map(|parent| short_path(&parent.to_string(), VISIT_PLACE_CHARS));
+    words::history_entry(&folder_label(path), place.as_deref())
+}
+
 /// Gives the window's toolbar, tooltips and menus the keys of their commands on `os`, from the
 /// shortcut table (KEY-03).
 pub fn show_shortcuts(window: &MainWindow, os: Os) {
@@ -1385,6 +1440,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
         |command: Command| SharedString::from(keys::shortcut(&command, os).unwrap_or_default());
     shown.set_back(key(Command::Back));
     shown.set_forward(key(Command::Forward));
+    shown.set_visits_menu(key(Command::HistoryMenu));
     shown.set_up(key(Command::Up));
     shown.set_new_folder(key(Command::NewFolder));
     shown.set_copy_to(key(Command::CopyTo));
@@ -1418,6 +1474,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_view_large_icons(key(Command::ViewLargeIcons));
     shown.set_fit_columns(key(Command::FitColumns));
     shown.set_select_all(key(Command::SelectAll));
+    shown.set_clear_selection(key(Command::ClearSelection));
     shown.set_invert_selection(key(Command::InvertSelection));
     shown.set_select_pattern(key(Command::SelectPattern));
     shown.set_select_same_extension(key(Command::SelectSameExtension));
@@ -2029,10 +2086,12 @@ pub fn pick_targets(picker: &Picker) -> Vec<PickTarget> {
         .collect()
 }
 
-/// What the name dialog shows: the warning of the name typed so far, and whether OK takes it.
-pub fn name_view(dialog: &NameDialog) -> NameView {
+/// What the name dialog shows: the warning of the name typed so far, and whether OK takes it,
+/// with `serial`, the number of the item it names (a new one starts the window again).
+pub fn name_view(dialog: &NameDialog, serial: i32) -> NameView {
     let check = dialog.check();
     NameView {
+        serial,
         title: dialog.title().into(),
         initial: dialog.initial.as_str().into(),
         select_end: i32::try_from(dialog.select_end).unwrap_or(i32::MAX),
@@ -3470,6 +3529,50 @@ mod tests {
         // None fits: the list hides, and a Tab still waits.
         let _ = request(&state.path_edited(LEFT, &format!("{typed}z")));
         assert_eq!(shown(&state), (false, true));
+    }
+
+    #[test]
+    fn the_visit_history_s_menu_lists_each_way_and_both_around_the_current_folder() {
+        use crate::history::Way;
+        use crate::state::AppState;
+
+        let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+        let (mut state, _) = AppState::new(at("a"), at("b"), None);
+        // a → c → d → e, then two places back to c: a is behind, d and e ahead.
+        for folder in ["c", "d", "e"] {
+            state.go_to(at(folder));
+        }
+        state.history_chosen(Way::Back, 1);
+        let parent = at("a").parent().expect("a folder it is in");
+        let place = short_path(&parent.to_string(), VISIT_PLACE_CHARS);
+        let title = |name: &str| format!("{name} — {place}");
+        let lines = |state: &AppState, way| -> Vec<(String, i32, i32)> {
+            visit_rows(state, way)
+                .into_iter()
+                .map(|line| (line.title.to_string(), line.way, line.index))
+                .collect()
+        };
+        assert_eq!(lines(&state, Some(Way::Back)), [(title("a"), 0, 0)]);
+        assert_eq!(
+            lines(&state, Some(Way::Forward)),
+            [(title("d"), 1, 0), (title("e"), 1, 1)]
+        );
+        // From the key: ahead (the farthest first), the current folder, behind (the nearest
+        // first).
+        assert_eq!(
+            lines(&state, None),
+            [
+                (title("e"), 1, 1),
+                (title("d"), 1, 0),
+                (title("c"), -1, 0),
+                (title("a"), 0, 0),
+            ]
+        );
+        assert_eq!(way_of(0), Some(Way::Back));
+        assert_eq!(way_of(1), Some(Way::Forward));
+        assert_eq!(way_of(-1), None);
+        // A root is in no folder: its name alone.
+        assert_eq!(words::history_entry("C:", None), "C:");
     }
 
     #[test]

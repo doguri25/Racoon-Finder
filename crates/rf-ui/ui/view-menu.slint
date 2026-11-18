@@ -3,7 +3,8 @@
 // the names, the sidebar and the preview panel, the layout and the commands between the panes,
 // the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
 // the icon views, the undo of a dragged move, whether a copy or a move asks about each item that
-// fails, and on Windows the menu of a right click), and where the job panel shows (작업 패널 ▸
+// fails, where the destination picker starts, and on Windows the menu of a right click), and where
+// the job panel shows (작업 패널 ▸
 // 별도 창, LAY-09). It is short enough for a 560px window,
 // with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
 // their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
@@ -39,6 +40,9 @@ export component ViewMenu inherits ContextMenuArea {
     // A copy or a move asks about each item that fails (XFER-09), two-way with the window's;
     // off, it carries on and lists the failed items at its end.
     in-out property <bool> ask-on-error;
+    // The destination picker starts at the last place a copy or a move went (PICK-05), two-way
+    // with the window's; off, at the other pane's folder.
+    in-out property <bool> pick-from-last;
     in-out property <bool> system-menu-first;
     in property <bool> system-menu-offered;
     // What the bottom of 설정 offers for removing the app: 0 nothing, 1 "Racoon Finder 완전 삭제…"
@@ -961,6 +965,17 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.ask-on-error;
                 activated => {
                     root.command("toggle-ask-on-error");
+                    root.done();
+                }
+            }
+            // PICK-05: off (the default), the picker of a copy or a move starts at the other
+            // pane's folder; on, at the folder one went to last.
+            MenuItem {
+                title: "위치 고르기는 마지막으로 쓴 곳부터";
+                checkable: true;
+                checked <=> root.pick-from-last;
+                activated => {
+                    root.command("toggle-pick-start");
                     root.done();
                 }
             }

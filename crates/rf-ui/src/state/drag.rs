@@ -243,6 +243,8 @@ impl AppState {
     pub fn press_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
         self.activate(side);
         self.pending_click = None;
+        // A press after a Tab of the name window: the next rename does not open over it.
+        self.rename_walk = None;
         // A drop that waited for the menu of 놓을 때 묻기 is not made after another drag starts,
         // and no drag of another app is over the window while the button is down in it.
         self.asked_drop = None;

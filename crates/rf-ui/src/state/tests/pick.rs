@@ -3,10 +3,13 @@
 
 use rf_jobs::{ConflictPolicy, CreateKind, JobSpec, Outcome, TransferMode};
 
+use std::path::MAIN_SEPARATOR;
+
 use super::*;
 use crate::dialogs::{Modal, NamePurpose};
 use crate::jobs::{JobEffect, Started};
 use crate::pick::{Picker, TargetFacts, Validity};
+use crate::settings::PickStart;
 use crate::words::JobWork;
 
 const MB: u64 = 1024 * 1024;
@@ -645,4 +648,148 @@ fn the_tree_shows_but_does_not_take_a_folder_that_cannot_take_the_items() {
     assert_eq!(the_look(&state.pick_tree_clicked(2)).1, in_a("docs 보관"));
     // Its chevron still opens it.
     assert_eq!(tree_loads(&state.pick_tree_toggled(1)).len(), 1);
+}
+
+#[test]
+fn the_picker_starts_at_the_other_pane_or_where_the_setting_says() {
+    // The default (PICK-05): the other pane's folder, whatever was chosen last.
+    let mut state = with_items();
+    state.set_recent_targets(vec![folder("c")]);
+    assert_eq!(state.pick_start(), PickStart::Opposite);
+    press(&mut state, &special(Key::F8), NONE);
+    assert_eq!(picker(&state).target, Some(folder("b")));
+    state.dialog_cancelled();
+    // 마지막으로 쓴 곳: the last target, among the quick targets still.
+    state.set_pick_start(PickStart::Last);
+    let effects = press(&mut state, &special(Key::F8), NONE).expect("used");
+    assert_eq!(picker(&state).target, Some(folder("c")));
+    assert_eq!(the_look(&effects).1, folder("c"));
+    assert!(
+        picker(&state)
+            .targets()
+            .any(|item| item.path == folder("c"))
+    );
+    assert!(
+        picker(&state)
+            .targets()
+            .any(|item| item.path == folder("b"))
+    );
+    state.dialog_cancelled();
+    // A last target that cannot take the items (a move into their own folder) leaves the
+    // other pane's chosen; so does having none.
+    state.set_recent_targets(vec![folder("a")]);
+    press(&mut state, &special(Key::F8), NONE);
+    assert_eq!(picker(&state).target, Some(folder("b")));
+    state.dialog_cancelled();
+    state.set_recent_targets(Vec::new());
+    press(&mut state, &special(Key::F7), NONE);
+    assert_eq!(picker(&state).target, Some(folder("b")));
+}
+
+#[test]
+fn the_window_s_new_folder_key_makes_a_folder_in_the_picker() {
+    let mut state = with_items();
+    press(&mut state, &special(Key::F8), NONE);
+    let command = keys::command_for("N", CTRL_SHIFT, Os::Windows).expect("a key");
+    assert_eq!(command, Command::NewFolder);
+    assert_eq!(state.pick_key(&command), Some(vec![]));
+    let Some(Modal::Name(dialog)) = state.modal() else {
+        panic!("a name window: {:?}", state.modal());
+    };
+    assert_eq!(
+        dialog.purpose,
+        NamePurpose::PickFolder {
+            parent: folder("b")
+        }
+    );
+    // Over the picker, the picker takes no key; another key is none of the picker's.
+    assert_eq!(state.pick_key(&command), None);
+    state.dialog_cancelled();
+    assert_eq!(state.pick_key(&Command::Trash), None);
+    state.dialog_cancelled();
+    assert_eq!(state.pick_key(&command), None);
+}
+
+#[test]
+fn tab_completes_the_picker_s_path_as_the_path_field_does() {
+    let mut state = with_items();
+    press(&mut state, &special(Key::F8), NONE);
+    let a = folder("a").to_string();
+    let typed = format!("{a}{MAIN_SEPARATOR}d");
+    let effects = state.pick_path_edited(&typed);
+    let request = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ListNames(request) => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the names are listed");
+    assert_eq!(
+        (request.folder.clone(), request.prefix.as_str()),
+        (folder("a"), "d")
+    );
+    // A Tab before the names come waits for them, and the field is filled once they do.
+    assert_eq!(state.pick_complete_path(&typed), None);
+    assert!(state.pick_completion_waits(&typed));
+    let effects = state.loaded(LoadEvent::Names {
+        generation: request.generation,
+        names: vec![
+            crate::loader::FolderName::folder("docs"),
+            crate::loader::FolderName::folder("dump"),
+        ],
+        more: 0,
+        links_left: false,
+    });
+    let completed = format!("{a}{MAIN_SEPARATOR}docs{MAIN_SEPARATOR}");
+    assert!(
+        effects.contains(&Effect::FillPickPath(completed.clone())),
+        "{effects:?}"
+    );
+    // The field holds a path typed and not entered: nothing is confirmed until Enter.
+    assert!(picker(&state).path_edited);
+    assert_eq!(state.pick_confirmed(), []);
+    // After a separator there is nothing to complete: Tab moves on.
+    assert_eq!(state.pick_complete_path(&completed), None);
+    assert!(!state.pick_completion_waits(&completed));
+    // Typed again, the names are there: Tab completes at once with the first of them.
+    let typed = format!("{a}{MAIN_SEPARATOR}du");
+    let request = the_names(&mut state, &typed);
+    state.loaded(LoadEvent::Names {
+        generation: request,
+        names: vec![crate::loader::FolderName::folder("dump")],
+        more: 0,
+        links_left: false,
+    });
+    let (text, _) = state.pick_complete_path(&typed).expect("completed");
+    assert_eq!(text, format!("{a}{MAIN_SEPARATOR}dump{MAIN_SEPARATOR}"));
+    // A start no folder has: nothing, and Tab moves on.
+    let typed = format!("{a}{MAIN_SEPARATOR}zz");
+    let request = the_names(&mut state, &typed);
+    state.loaded(LoadEvent::Names {
+        generation: request,
+        names: Vec::new(),
+        more: 0,
+        links_left: false,
+    });
+    assert_eq!(state.pick_complete_path(&typed), None);
+    assert!(!state.pick_completion_waits(&typed));
+    // The pane's path field has no part of it.
+    assert_eq!(state.completion(LEFT), None);
+    // Once the picker closes, its completion goes with it.
+    state.dialog_cancelled();
+    state.drop_stale_address();
+    assert_eq!(state.pick_complete_path(&typed), None);
+}
+
+/// The generation of the listing of names the picker's path field asks for as it holds
+/// `typed`.
+fn the_names(state: &mut AppState, typed: &str) -> u64 {
+    state
+        .pick_path_edited(typed)
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ListNames(request) => Some(request.generation),
+            _ => None,
+        })
+        .expect("the names are listed")
 }

@@ -104,6 +104,10 @@ pub enum MenuShown {
     /// The menu of the sidebar's empty part (the menu key on any other row): 현재 폴더를
     /// 즐겨찾기에 추가; what it chooses goes to [`AppState::favorites_blank_command`].
     FavoritesBlank,
+    /// The visit history's menu of the active pane under 뒤로 and 앞으로 (its key, NAV-04): the
+    /// folders ahead, the current one and those behind ([`AppState::history_entries`]); what it
+    /// chooses goes to [`AppState::history_chosen`].
+    History,
 }
 
 /// Where the system's own menu of items shows ([`SystemMenuAsk`]).
