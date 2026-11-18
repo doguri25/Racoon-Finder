@@ -296,6 +296,14 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(10);
     const QUIET: Duration = Duration::from_millis(200);
 
+    /// Unwinds as a panic does, without the panic hook. The hook prints a backtrace when
+    /// `RUST_BACKTRACE` is set, and the first one of a process reads the debug info of the
+    /// whole test binary from disk: with a cold file cache that took longer than [`WAIT`], and
+    /// the tests below failed. The worker catches this unwinding as it catches any panic.
+    fn bug(what: &'static str) -> ! {
+        std::panic::resume_unwind(Box::new(what))
+    }
+
     /// A worker whose jobs give their names, a job named 0 panicking, and whose outcomes come
     /// to the returned receiver.
     fn worker() -> (Newest<Named, u64>, mpsc::Receiver<Outcome<u64, u64>>) {
@@ -305,7 +313,9 @@ mod tests {
             "rf-ui-test",
             Duration::ZERO,
             |job: Named, _: &CancelToken| {
-                assert!(job.name != 0, "a bug in the work");
+                if job.name == 0 {
+                    bug("a bug in the work");
+                }
                 Some(job.name)
             },
             move |outcome| {
@@ -344,7 +354,9 @@ mod tests {
                 Some(job.name)
             },
             move |outcome: Outcome<u64, u64>| {
-                assert_ne!(outcome, Outcome::Done(1), "a bug in the delivery");
+                if outcome == Outcome::Done(1) {
+                    bug("a bug in the delivery");
+                }
                 let _ = delivered.lock().expect("one worker").send(outcome);
             },
         );

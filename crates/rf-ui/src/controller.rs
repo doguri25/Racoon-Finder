@@ -4069,6 +4069,11 @@ mod tests {
         assert!(jobs.close_down(Duration::from_secs(10)));
     }
 
+    /// When the press that is armed began, by the press machine's own clock.
+    fn pressed_at(c: &Controller) -> Instant {
+        c.press.machine.borrow().since().expect("a press is armed")
+    }
+
     #[test]
     fn a_long_press_opens_the_menu_where_it_was_pressed_and_the_release_ends_it() {
         let d = Dragging::new();
@@ -4076,7 +4081,6 @@ mod tests {
         let (x, y) = (d.row.x, d.row.y);
         let ring = c.window.upgrade().expect("the window");
         let ring = ring.global::<crate::LongPressRing<'_>>();
-        let start = Instant::now();
         // The press, as the hook and Slint see it.
         d.move_to(d.row);
         d.left(true, d.row);
@@ -4084,6 +4088,10 @@ mod tests {
         c.press_began(Spot::new(x, y), None);
         assert!(c.press.machine.borrow().is_armed());
         assert!(c.press.timer.running());
+        // The times below count from the press itself: a clock read before it would be early
+        // by however long the window took to answer, which on a cold start is longer than the
+        // ring's delay.
+        let start = pressed_at(c);
         // A click shows no ring; a press held a while does, filling.
         c.press_tick_at(start + Duration::from_millis(50));
         assert!(!ring.get_shown());
@@ -4117,11 +4125,11 @@ mod tests {
         let d = Dragging::new();
         let c = &d.controller;
         let (x, y) = (d.row.x, d.row.y);
-        let start = Instant::now();
         d.move_to(d.row);
         d.left(true, d.row);
         c.pointer.set(Some(WindowPoint { x, y }));
         c.press_began(Spot::new(x, y), None);
+        let start = pressed_at(c);
         c.press_tick_at(start + Duration::from_secs(2));
         assert!(!c.press.machine.borrow().is_armed());
         // The OS menu's loop took the release. The next press is on the toolbar, which arms
@@ -4168,11 +4176,11 @@ mod tests {
         let (x, y) = (d.row.x, d.row.y + 200.0);
         let found = d.window.invoke_press_at(x, y);
         assert!(found.found && found.index == -1, "{found:?}");
-        let start = Instant::now();
         c.pointer.set(Some(WindowPoint { x, y }));
         c.left_down.set(true);
         c.press_began(Spot::new(x, y), None);
         assert!(c.press.machine.borrow().is_armed());
+        let start = pressed_at(c);
         c.press_tick_at(start + Duration::from_secs(2));
         let menu = d.window.global::<ItemMenu<'_>>();
         assert_eq!((menu.get_at_x(), menu.get_at_y()), (x, y));

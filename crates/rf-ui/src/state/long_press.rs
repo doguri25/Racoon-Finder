@@ -115,6 +115,15 @@ impl LongPress {
         matches!(self.phase, Phase::Armed { .. })
     }
 
+    /// When the armed press began, `None` while no press waits. A test measures its ticks from
+    /// this, not from a clock of its own read some time before the press.
+    pub fn since(&self) -> Option<Instant> {
+        match self.phase {
+            Phase::Armed { since, .. } => Some(since),
+            _ => None,
+        }
+    }
+
     /// A left press at `at`, `now`. It replaces whatever the last press left.
     pub fn press(&mut self, at: Spot, now: Instant) {
         self.phase = Phase::Armed { at, since: now };
