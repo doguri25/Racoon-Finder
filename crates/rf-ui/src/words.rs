@@ -233,6 +233,8 @@ pub fn column_title(column: Column) -> &'static str {
         Column::Kind => "종류",
         Column::Extension => "확장자",
         Column::Attributes => "속성",
+        Column::Accessed => "접근한 날짜",
+        Column::Path => "경로",
     }
 }
 

@@ -31,6 +31,9 @@ export struct FileRow {
     kind: string,
     extension: string,
     attributes: string,
+    accessed: string,
+    // The folder the item is in (경로).
+    path: string,
     // The line icon of the row, in every view (`Icon.name`).
     icon: string,
     is-dir: bool,
@@ -40,8 +43,8 @@ export struct FileRow {
     // Cut to the clipboard (Ctrl+X), until it is pasted, the cut is cancelled or the clipboard
     // holds something else: it shows dimmed (DND-10).
     cut: bool,
-    // The file's thumbnail, once it came (VIEW-09): the medium icons and larger show it in the
-    // place of the icon. Empty (0 × 0) until then, and for a folder.
+    // The file's thumbnail, once it came (VIEW-09): the medium icons and larger, the thumbnails
+    // and the tiles show it in the place of the icon. Empty (0 × 0) until then, and for a folder.
     thumb: image,
 }
 
@@ -74,6 +77,12 @@ export global Cells {
         if (id == 6) {
             return row.attributes;
         }
+        if (id == 7) {
+            return row.accessed;
+        }
+        if (id == 8) {
+            return row.path;
+        }
         return row.name;
     }
 }
@@ -82,7 +91,7 @@ export component FileList inherits Rectangle {
     in property <[FileRow]> rows;
     // The keyboard cursor's row, or -1.
     in property <int> cursor: -1;
-    // The columns after the name, in their order, and which columns show by number (0 to 6),
+    // The columns after the name, in their order, and which columns show by number (0 to 8),
     // for the head's menu.
     in property <[ColumnView]> columns;
     in property <[bool]> shows;

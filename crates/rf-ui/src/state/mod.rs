@@ -112,8 +112,10 @@ pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_
 pub use tray::TrayCommand;
 pub use undo_list::{HistoryLine, HistoryView};
 pub use view::{
-    Chosen, Column, FolderView, KeyMove, MAX_COLUMN_WIDTH, MAX_FOLDER_URI, MAX_FOLDER_VIEWS,
-    MIN_COLUMN_WIDTH, Paging, ShownColumn, StoredView, UnknownParts, ViewMode, ViewStore, target,
+    Chosen, Column, DEFAULT_THUMB_SIZE, FolderView, GridShape, KeyMove, MAX_COLUMN_WIDTH,
+    MAX_FOLDER_URI, MAX_FOLDER_VIEWS, MAX_THUMB_SIZE, MIN_COLUMN_WIDTH, MIN_THUMB_SIZE, Paging,
+    ShownColumn, StoredView, THUMB_STEPS, TILE_WIDTH, UnknownParts, ViewMode, ViewStore,
+    grid_shape, target, thumb_request_side,
 };
 
 /// The left pane's position in [`AppState::panes`].
@@ -825,6 +827,8 @@ impl AppState {
             Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
             Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
             Command::ViewExtraLargeIcons => self.set_view_mode(side, ViewMode::ExtraLargeIcons),
+            Command::ViewThumbnails => self.show_thumbnail_view(side),
+            Command::ViewTiles => self.set_view_mode(side, ViewMode::Tiles),
             Command::FitColumns => self.fit_columns(side),
             Command::QuickLook => self.toggle_quick_look(side),
             Command::Copy => self.put_on_clipboard(side, false),

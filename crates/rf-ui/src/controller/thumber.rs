@@ -1,5 +1,8 @@
 //! The thumbnails of the icon views (VIEW-09) on the controller's side, and the icon size that
-//! Ctrl+wheel and a pinch change (COMP-04).
+//! Ctrl+wheel and a pinch change (COMP-04): a step of the icon sizes in the icon views, the size
+//! itself in the thumbnail view (NAV-06), whose pictures are asked for in a few sizes only
+//! ([`crate::state::thumb_request_side`]), so that a change of the size asks for nothing new
+//! until it passes a step.
 //!
 //! Each pane has a [`ThumbPool`] of its own, started the first time the pane wants a thumbnail
 //! (so 자세히 alone starts no thread), each asked with the generation of its tab's listing. What
@@ -21,7 +24,7 @@ use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
 use crate::DropPlace;
-use crate::state::{LEFT, RIGHT};
+use crate::state::{LEFT, MAX_THUMB_SIZE, MIN_THUMB_SIZE, RIGHT};
 use crate::thumbs::{self, ThumbPool, ThumbProvider, ThumbWant};
 use crate::ui_bridge::ThumbStamp;
 
@@ -35,6 +38,9 @@ const FIRST_SCREEN: usize = 64;
 const WHEEL_STEP_PIXELS: f64 = 60.0;
 /// How much a pinch scales for one icon size.
 const PINCH_STEP: f64 = 0.25;
+/// How many logical pixels a wheel's notch with Ctrl makes the thumbnail view bigger or
+/// smaller: from the smallest to the largest in 14 notches.
+pub const THUMB_NOTCH: f64 = 32.0;
 
 /// The thumbnails' part of the controller.
 pub(super) struct Thumber {
@@ -270,19 +276,30 @@ impl Controller {
     /// The wheel turned by `lines` notches, or a trackpad scrolled `pixels` logical pixels (up
     /// positive). With Ctrl (macOS ⌘) held over a pane's list, the icons of that pane step a size
     /// up or down, and the list does not scroll: `true`.
+    /// In the thumbnail view the size changes by [`THUMB_NOTCH`] a notch, or by the pixels a
+    /// trackpad scrolled.
     pub(super) fn zoom_wheel(&self, lines: Option<f64>, pixels: f64) -> bool {
+        if !self.thumber.zoom.borrow().held {
+            return false;
+        }
+        let Some(side) = self.pane_under_pointer() else {
+            return false;
+        };
+        if let Some(size) = self.thumb_size(side) {
+            let change = match lines {
+                Some(lines) => f64::from(ZoomSteps::notches(lines)) * THUMB_NOTCH,
+                None => pixels,
+            };
+            let size = self.thumber.zoom.borrow_mut().grown(size, change);
+            self.update(|state| state.set_thumb_size(side, size));
+            return true;
+        }
         let steps = {
             let mut zoom = self.thumber.zoom.borrow_mut();
-            if !zoom.held {
-                return false;
-            }
             match lines {
                 Some(lines) => ZoomSteps::notches(lines),
                 None => zoom.scrolled(pixels),
             }
-        };
-        let Some(side) = self.pane_under_pointer() else {
-            return false;
         };
         self.step_sizes(side, steps);
         true
@@ -290,20 +307,53 @@ impl Controller {
 
     /// A pinch (a trackpad's, macOS) scaled by `delta` more (`started`: a new pinch): the icons
     /// of the pane under the pointer, or the active one, step a size every [`PINCH_STEP`].
+    /// In the thumbnail view the size scales with the pinch.
     pub(super) fn zoom_pinch(&self, delta: f64, started: bool) {
-        let steps = self.thumber.zoom.borrow_mut().pinched(delta, started);
-        if steps == 0 {
-            return;
-        }
         let side = self.pane_under_pointer().or_else(|| {
             self.state
                 .borrow()
                 .as_ref()
                 .map(crate::state::AppState::active)
         });
-        if let Some(side) = side {
+        let Some(side) = side else {
+            return;
+        };
+        if let Some(size) = self.thumb_size(side) {
+            let size = {
+                let mut zoom = self.thumber.zoom.borrow_mut();
+                if started {
+                    zoom.rest = 0.0;
+                }
+                let change = if delta.is_finite() {
+                    f64::from(size) * delta
+                } else {
+                    0.0
+                };
+                zoom.grown(size, change)
+            };
+            self.update(|state| state.set_thumb_size(side, size));
+            return;
+        }
+        let steps = self.thumber.zoom.borrow_mut().pinched(delta, started);
+        if steps != 0 {
             self.step_sizes(side, steps);
         }
+    }
+
+    /// The size of the thumbnail view pane `side` shows; `None` in another view.
+    fn thumb_size(&self, side: usize) -> Option<u32> {
+        let state = self.state.borrow();
+        state.as_ref()?.panes()[side]
+            .active_tab()
+            .view()
+            .mode
+            .thumb_size()
+    }
+
+    /// The thumbnail size slider of pane `side` moved to `size` logical pixels.
+    pub(super) fn thumb_slider(&self, side: usize, size: f32) {
+        let size = slider_size(size);
+        self.update(|state| state.set_thumb_size(side, size));
     }
 
     /// The pane whose list is under the pointer.
@@ -338,6 +388,24 @@ fn physical(side: u32, scale: f32) -> u32 {
     pixels
 }
 
+/// A slider's value as a size in whole logical pixels, between the slider's ends.
+fn slider_size(value: f32) -> u32 {
+    let value = if value.is_finite() {
+        f64::from(value)
+    } else {
+        f64::from(MIN_THUMB_SIZE)
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the slider's ends, a few hundred pixels"
+    )]
+    let size = value
+        .round()
+        .clamp(f64::from(MIN_THUMB_SIZE), f64::from(MAX_THUMB_SIZE)) as u32;
+    size
+}
+
 /// What the wheel with Ctrl and a pinch have moved toward the next icon size.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct ZoomSteps {
@@ -347,6 +415,8 @@ struct ZoomSteps {
     pixels: f64,
     /// A pinch's scale since the last step.
     pinch: f64,
+    /// What a change of the thumbnail view's size left of a whole pixel, for the next one.
+    rest: f64,
 }
 
 impl ZoomSteps {
@@ -365,6 +435,24 @@ impl ZoomSteps {
     fn scrolled(&mut self, pixels: f64) -> i32 {
         self.pixels += pixels;
         take_steps(&mut self.pixels, WHEEL_STEP_PIXELS)
+    }
+
+    /// The thumbnail view's size after a change of `change` logical pixels from `size`, between
+    /// the slider's ends, in whole pixels: what is left of a pixel goes with the next change, so
+    /// a trackpad's small scrolls and a slow pinch add up.
+    fn grown(&mut self, size: u32, change: f64) -> u32 {
+        let change = if change.is_finite() { change } else { 0.0 };
+        let wanted = (f64::from(size) + self.rest + change)
+            .clamp(f64::from(MIN_THUMB_SIZE), f64::from(MAX_THUMB_SIZE));
+        let whole = wanted.round();
+        self.rest = wanted - whole;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to the slider's ends, a few hundred pixels"
+        )]
+        let whole = whole as u32;
+        whole
     }
 
     /// A pinch by `delta` (a new one when `started`): a size every [`PINCH_STEP`].
@@ -421,6 +509,38 @@ mod tests {
         assert_eq!(zoom.scrolled(25.0), 0);
         assert_eq!(zoom.scrolled(40.0), 1);
         assert_eq!(zoom.scrolled(-130.0), -2);
+    }
+
+    #[test]
+    fn the_thumbnail_size_follows_the_wheel_the_trackpad_and_the_pinch_in_whole_pixels() {
+        let mut zoom = ZoomSteps::default();
+        // A notch, either way.
+        assert_eq!(zoom.grown(192, THUMB_NOTCH), 224);
+        assert_eq!(zoom.grown(192, -THUMB_NOTCH), 160);
+        // Small scrolls add up to a pixel; what is left goes with the next one.
+        assert_eq!(zoom.grown(200, 0.3), 200);
+        assert_eq!(zoom.grown(200, 0.3), 201, "0.6 in all");
+        assert_eq!(zoom.grown(201, 0.3), 201, "-0.4 left, then 0.3");
+        assert_eq!(zoom.grown(201, 0.7), 202);
+        // A pinch scales: 10% of 300 is 30 pixels.
+        let mut pinch = ZoomSteps::default();
+        assert_eq!(pinch.grown(300, 300.0 * 0.1), 330);
+        // The slider's ends hold, and nothing is kept past them.
+        assert_eq!(pinch.grown(500, 100.0), MAX_THUMB_SIZE);
+        assert_eq!(pinch.grown(70, -100.0), MIN_THUMB_SIZE);
+        assert!(pinch.rest.abs() < f64::EPSILON);
+        assert_eq!(pinch.grown(100, f64::NAN), 100);
+        assert_eq!(pinch.grown(100, f64::INFINITY), 100);
+    }
+
+    #[test]
+    fn the_slider_s_value_is_a_size_between_its_ends() {
+        assert_eq!(slider_size(192.4), 192);
+        assert_eq!(slider_size(192.6), 193);
+        assert_eq!(slider_size(10.0), MIN_THUMB_SIZE);
+        assert_eq!(slider_size(-3.0), MIN_THUMB_SIZE);
+        assert_eq!(slider_size(9000.0), MAX_THUMB_SIZE);
+        assert_eq!(slider_size(f32::NAN), MIN_THUMB_SIZE);
     }
 
     #[test]

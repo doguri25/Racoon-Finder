@@ -49,7 +49,7 @@ use crate::settings::DragDefault;
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
     AppState, Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names,
-    PathForm, PreviewShown, RIGHT, RecentAt, SelectState,
+    PathForm, PreviewShown, RIGHT, RecentAt, SelectState, ViewMode,
 };
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
@@ -172,6 +172,7 @@ impl PaneModels {
     pub fn view_with(&self, pane: &Pane, active: bool, drive_free: Option<u64>) -> PaneView {
         let tab = pane.active_tab();
         self.rows.set_folder(tab.location().as_local());
+        self.rows.set_parent(&tab.location().to_string());
         self.rows.sync(tab.visible(), tab.selection());
         // The last tab that is not pinned: the menu of a tab before it can close tabs to its
         // right, and the menu of any other tab, when there is one, can close others.
@@ -216,7 +217,7 @@ impl PaneModels {
             std::iter::once(Column::Name)
                 .chain(Column::OPTIONAL)
                 .map(|column| (column.number(), view.shows(column)))
-                .fold(vec![false; 7], |mut shows, (number, shown)| {
+                .fold(vec![false; Column::COUNT], |mut shows, (number, shown)| {
                     if let Some(slot) = usize::try_from(number).ok().and_then(|n| shows.get_mut(n))
                     {
                         *slot = shown;
@@ -237,6 +238,7 @@ impl PaneModels {
                 .and_then(|row| i32::try_from(row).ok())
                 .unwrap_or(-1),
             mode: view.mode.number(),
+            thumb_size: thumb_size_number(view.mode),
             columns: ModelRc::from(Rc::clone(&self.columns)),
             shows: ModelRc::from(Rc::clone(&self.shows)),
             sort_key: sort_column(sort.primary.key),
@@ -359,9 +361,11 @@ pub struct FileRows {
     cut: RefCell<HashSet<OsString>>,
     /// The local folder of the rows, whose files' thumbnails show ([`FileRows::set_folder`]).
     folder: RefCell<Option<PathBuf>>,
+    /// The folder the rows are in, as the 경로 column shows it ([`FileRows::set_parent`]).
+    parent: RefCell<SharedString>,
     /// The thumbnails that show, by the file's path: what they were made for, the picture and
     /// when it came (a count), at most [`SHOWN_THUMBS`].
-    thumbs: RefCell<HashMap<PathBuf, (ThumbStamp, slint::Image, u64)>>,
+    thumbs: RefCell<ShownThumbs>,
     thumbs_came: Cell<u64>,
 }
 
@@ -382,9 +386,41 @@ impl ThumbStamp {
     }
 }
 
-/// The most thumbnails a list keeps: the pool keeps as many ([`crate::thumbs::MEMORY_THUMBS`]),
-/// so one forgotten here that comes on screen again comes back from there.
+/// The most thumbnails a list keeps, and the most bytes of pixels: the pool keeps as many
+/// ([`crate::thumbs::MEMORY_THUMBS`], [`crate::thumbs::MEMORY_BYTES`]), so one forgotten here
+/// that comes on screen again comes back from there.
 const SHOWN_THUMBS: usize = crate::thumbs::MEMORY_THUMBS;
+const SHOWN_BYTES: usize = crate::thumbs::MEMORY_BYTES;
+
+/// The thumbnails a list shows, by the file's path: what each was made for, the picture, and
+/// when it came (a count).
+type ShownThumbs = HashMap<PathBuf, (ThumbStamp, slint::Image, u64)>;
+
+/// Forgets the thumbnails that came first while there are more than `most` of them or they hold
+/// more than `budget` bytes of pixels; the one that came last stays, however large.
+fn trim_shown(thumbs: &mut ShownThumbs, most: usize, budget: usize) {
+    let mut held: usize = thumbs
+        .values()
+        .map(|(_, image, _)| image_bytes(image))
+        .sum();
+    while thumbs.len() > 1
+        && (thumbs.len() > most || held > budget)
+        && let Some(first) = thumbs
+            .iter()
+            .min_by_key(|(_, (_, _, came))| *came)
+            .map(|(path, _)| path.clone())
+    {
+        if let Some((_, gone, _)) = thumbs.remove(&first) {
+            held = held.saturating_sub(image_bytes(&gone));
+        }
+    }
+}
+
+/// How many bytes the pixels of `image` take (4 a pixel).
+fn image_bytes(image: &slint::Image) -> usize {
+    let size = image.size();
+    usize::try_from(u64::from(size.width) * u64::from(size.height) * 4).unwrap_or(usize::MAX)
+}
 
 /// One row as [`FileRows`] keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -415,6 +451,7 @@ impl Default for FileRows {
             extensions: Cell::new(true),
             cut: RefCell::default(),
             folder: RefCell::default(),
+            parent: RefCell::default(),
             thumbs: RefCell::default(),
             thumbs_came: Cell::new(0),
         }
@@ -504,6 +541,16 @@ impl FileRows {
         self.clear_thumbs();
     }
 
+    /// The rows are in the folder `parent` (as the path field shows it) from now on: what the
+    /// 경로 column shows on each row. The rows are drawn again when it changes.
+    pub fn set_parent(&self, parent: &str) {
+        if self.parent.borrow().as_str() == parent {
+            return;
+        }
+        *self.parent.borrow_mut() = parent.into();
+        self.notify.reset();
+    }
+
     /// Shows `image` (asked for at `size` pixels) as the thumbnail of the file at `path`, when
     /// it is in the rows' folder, and tells the list of its row (at `row`, or found by its
     /// name). Past [`crate::thumbs::MEMORY_THUMBS`] the one that came first is forgotten.
@@ -539,14 +586,7 @@ impl FileRows {
         {
             let mut thumbs = self.thumbs.borrow_mut();
             thumbs.insert(path.to_path_buf(), (stamp, image, came));
-            if thumbs.len() > SHOWN_THUMBS
-                && let Some(first) = thumbs
-                    .iter()
-                    .min_by_key(|(_, (_, _, came))| *came)
-                    .map(|(path, _)| path.clone())
-            {
-                thumbs.remove(&first);
-            }
+            trim_shown(&mut thumbs, SHOWN_THUMBS, SHOWN_BYTES);
         }
         // The list reads the row back while it is told, so the borrow has ended.
         if let Some(at) = at {
@@ -582,7 +622,8 @@ impl FileRows {
             .skip(first)
             .take(count)
             .map(|shown| {
-                let row = file_row(&shown.entry, shown.selected, &tz, self.extensions.get());
+                let mut row = file_row(&shown.entry, shown.selected, &tz, self.extensions.get());
+                row.path = self.parent.borrow().clone();
                 cell_text(&row, column)
             })
             .collect();
@@ -602,6 +643,8 @@ fn cell_text(row: &FileRow, column: Column) -> String {
         Column::Kind => &row.kind,
         Column::Extension => &row.extension,
         Column::Attributes => &row.attributes,
+        Column::Accessed => &row.accessed,
+        Column::Path => &row.path,
     }
     .to_string()
 }
@@ -623,6 +666,7 @@ impl Model for FileRows {
             self.extensions.get(),
         );
         file.cut = shown.cut;
+        file.path = self.parent.borrow().clone();
         if let Some(folder) = self.folder.borrow().as_ref()
             && let Some((stamp, image, _)) =
                 self.thumbs.borrow().get(&folder.join(&shown.entry.name))
@@ -1087,6 +1131,9 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         },
         modified: time(entry.modified),
         created: time(entry.created),
+        accessed: time(entry.accessed),
+        // The folder the row is in, which the list knows ([`FileRows::set_parent`]).
+        path: SharedString::new(),
         kind: kind_label(entry).into(),
         extension: file_extension(entry)
             .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -1132,8 +1179,15 @@ pub fn place_space(place: &Place) -> (String, f32) {
     }
 }
 
+/// The thumbnail view's size as the screen takes it (`PaneView.thumb-size`); 0 in another view.
+fn thumb_size_number(mode: ViewMode) -> i32 {
+    mode.thumb_size()
+        .and_then(|size| i32::try_from(size).ok())
+        .unwrap_or(0)
+}
+
 /// The number of the column of the file list that sorts by `key` ([`Column::number`]: 0 name,
-/// 1 size, 2 modified, 3 kind, 4 created, 5 extension).
+/// 1 size, 2 modified, 3 kind, 4 created, 5 extension, 7 accessed).
 pub fn sort_column(key: SortKey) -> i32 {
     Column::of_key(key).number()
 }
@@ -2686,6 +2740,45 @@ mod tests {
     }
 
     #[test]
+    fn a_list_keeps_its_thumbnails_to_a_count_and_to_bytes() {
+        let picture = |side: u32| {
+            slint::Image::from_rgba8(SharedPixelBuffer::<slint::Rgba8Pixel>::new(side, side))
+        };
+        let stamp = ThumbStamp {
+            size: 48,
+            len: 1,
+            mtime: None,
+        };
+        let mut thumbs = ShownThumbs::new();
+        for (came, (name, side)) in [("a", 10), ("b", 10), ("c", 10), ("d", 20)]
+            .into_iter()
+            .enumerate()
+        {
+            let came = u64::try_from(came).expect("a few");
+            thumbs.insert(PathBuf::from(name), (stamp, picture(side), came));
+        }
+        let names = |thumbs: &ShownThumbs| {
+            let mut names: Vec<String> = thumbs
+                .keys()
+                .map(|path| path.display().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        // 400 bytes each for the three first, 1600 for the last: 2800 bytes in all.
+        trim_shown(&mut thumbs, 10, 2800);
+        assert_eq!(names(&thumbs), ["a", "b", "c", "d"]);
+        trim_shown(&mut thumbs, 10, 2400);
+        assert_eq!(names(&thumbs), ["b", "c", "d"], "the first that came goes");
+        trim_shown(&mut thumbs, 2, 10_000);
+        assert_eq!(names(&thumbs), ["c", "d"]);
+        // The last that came stays, however large.
+        trim_shown(&mut thumbs, 10, 100);
+        assert_eq!(names(&thumbs), ["d"]);
+        assert_eq!(image_bytes(&thumbs[&PathBuf::from("d")].1), 1600);
+    }
+
+    #[test]
     fn file_rows_show_the_thumbnails_of_their_folder() {
         let model = FileRows::default();
         let dir = std::env::temp_dir().join("rf-thumb-rows");
@@ -3174,14 +3267,17 @@ mod tests {
             SortKey::Kind,
             SortKey::Created,
             SortKey::Extension,
+            SortKey::Accessed,
         ] {
             assert_eq!(sort_key(sort_column(key)), Some(key));
         }
         // The first demo's numbers stay.
         assert_eq!(sort_column(SortKey::Kind), 3);
-        // The attributes sort nothing.
+        // The attributes and the path sort nothing.
         assert_eq!(sort_key(6), None);
-        assert_eq!(sort_key(7), None);
+        assert_eq!(sort_key(7), Some(SortKey::Accessed));
+        assert_eq!(sort_key(8), None);
+        assert_eq!(sort_key(9), None);
         assert_eq!(sort_key(-1), None);
     }
 

@@ -354,6 +354,10 @@ export component MainWindow inherits Window {
     // The first and the last item the icon views of pane `side` show changed (VIEW-09: their
     // thumbnails are asked for first).
     callback visible-range(side: int, first: int, last: int);
+    // The thumbnails' size slider of pane `side` moved to `size` logical pixels (NAV-06).
+    callback thumb-size-changed(side: int, size: float);
+    // A key the size slider has not used while it has the keys: `true` when Rust used it.
+    callback size-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     callback row-activated(side: int, index: int);
     // A right click on row `index` of pane `side`, before its menu opens.
     callback row-menu(side: int, index: int);
@@ -1606,6 +1610,15 @@ export component MainWindow inherits Window {
                         visible-changed(first, last) => {
                             root.visible-range(0, first, last);
                         }
+                        thumb-size-changed(size) => {
+                            root.thumb-size-changed(0, size);
+                        }
+                        size-key(text, ctrl, shift, alt, meta) => {
+                            return root.size-key(text, ctrl, shift, alt, meta);
+                        }
+                        size-left => {
+                            keys.focus();
+                        }
                         row-activated(index) => {
                             root.row-activated(0, index);
                         }
@@ -1761,6 +1774,15 @@ export component MainWindow inherits Window {
                         }
                         visible-changed(first, last) => {
                             root.visible-range(1, first, last);
+                        }
+                        thumb-size-changed(size) => {
+                            root.thumb-size-changed(1, size);
+                        }
+                        size-key(text, ctrl, shift, alt, meta) => {
+                            return root.size-key(text, ctrl, shift, alt, meta);
+                        }
+                        size-left => {
+                            keys.focus();
                         }
                         row-activated(index) => {
                             root.row-activated(1, index);
@@ -2134,6 +2156,21 @@ export component MainWindow inherits Window {
         }
     }
 
+    // After the 보기 menu's 보기 방식 ▸ 썸네일 크기 조절, the active pane's size slider takes the
+    // keys once the menus have closed (as `tree-focus-later` for the tree).
+    size-focus-later := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (root.active-side == 1) {
+                right.focus-size();
+            } else {
+                left.focus-size();
+            }
+        }
+    }
+
     notice-timer := Timer {
         interval: root.notice-time;
         running: false;
@@ -2447,6 +2484,9 @@ export component MainWindow inherits Window {
             }
             view-command(name) => {
                 root.view-command(root.active-side, name);
+                if (name == "focus-size") {
+                    size-focus-later.running = true;
+                }
             }
             tab-command(name) => {
                 root.tab-command(root.active-side, root.active-view.active-tab, name);

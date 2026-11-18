@@ -47,7 +47,7 @@ pub struct StoredView {
 /// second key).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnknownParts {
-    /// The view mode (`thumbnails`), in the place of 자세히.
+    /// The view mode (`gallery`), in the place of 자세히.
     pub mode: Option<String>,
     /// The key that sorts first, in the place of the name (in the view's direction).
     pub sort: Option<String>,
@@ -140,6 +140,15 @@ impl ViewStore {
             Some(at) => self.touch(at).view.clone(),
             None => FolderView::default(),
         }
+    }
+
+    /// The size of the thumbnail view of the folder that shows it and was used last; `None`
+    /// when no folder remembered shows it. 보기 방식 ▸ 썸네일 opens at it elsewhere.
+    pub fn last_thumb_size(&self) -> Option<u32> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|(_, entry)| entry.view.mode.thumb_size())
     }
 
     /// The view `folder` has of its own, if it has one.
@@ -445,7 +454,7 @@ mod tests {
                 view: FolderView::default(),
                 subfolders: false,
                 unknown: UnknownParts {
-                    mode: Some("thumbnails".to_owned()),
+                    mode: Some("gallery".to_owned()),
                     sort: Some("rating".to_owned()),
                     then: Some(("tags".to_owned(), true)),
                     columns: vec![("tags".to_owned(), 80)],
@@ -459,7 +468,7 @@ mod tests {
         let mut view = FolderView::default();
         view.toggle_column(crate::state::Column::Kind);
         store.remember(&folder("new"), view.clone());
-        assert_eq!(unknown(&store).mode.as_deref(), Some("thumbnails"));
+        assert_eq!(unknown(&store).mode.as_deref(), Some("gallery"));
         assert_eq!(unknown(&store).columns, [("tags".to_owned(), 80)]);
         // The mode chosen here is this version's; the order stays unknown until it changes.
         view.mode = ViewMode::List;
@@ -476,7 +485,7 @@ mod tests {
     #[test]
     fn choosing_the_value_an_unknown_part_shows_as_makes_it_this_version_s() {
         let unknown_parts = || UnknownParts {
-            mode: Some("thumbnails".to_owned()),
+            mode: Some("gallery".to_owned()),
             sort: Some("rating".to_owned()),
             then: Some(("tags".to_owned(), true)),
             columns: vec![("tags".to_owned(), 80)],

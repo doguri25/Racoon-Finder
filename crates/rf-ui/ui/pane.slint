@@ -5,8 +5,12 @@
 // row is the address bar (NAV-03): the `›` after each piece asks for the list of that folder's
 // folders, which the window shows under it (`FolderMenu`), and the window shows the completions
 // Rust finds for the path field's text under the field (`field-x` and the others say where).
+// In the thumbnail view the status bar has the thumbnails' size slider at its right (NAV-06),
+// which the 보기 menu's 썸네일 크기 조절 gives the keys: ← → (and ↑ ↓) step it, PageUp and
+// PageDown step it further, Home and End go to its ends, and Esc, Tab and Enter give the keys
+// back to the list.
 
-import { ListView } from "std-widgets.slint";
+import { ListView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileList, FileRow, ColumnView } from "file-list.slint";
@@ -215,10 +219,15 @@ export struct PaneView {
     rows: [FileRow],
     // The keyboard cursor's row, or -1.
     cursor: int,
-    // How the rows show: 0 자세히, 1 목록, 2 small icons, 3 medium icons, 4 large icons.
+    // How the rows show: 0 자세히, 1 목록, 2 small icons, 3 medium icons, 4 large icons, 5 extra
+    // large icons, 6 thumbnails, 7 tiles.
     mode: int,
+    // The side of the thumbnails' square in logical pixels (64 to 512), in the thumbnail view;
+    // 0 in the others.
+    thumb-size: int,
     // The columns of 자세히 after the name, in their order, and which columns show by number
-    // (0 name, 1 size, 2 modified, 3 kind, 4 created, 5 extension, 6 attributes).
+    // (0 name, 1 size, 2 modified, 3 kind, 4 created, 5 extension, 6 attributes, 7 accessed,
+    // 8 path).
     columns: [ColumnView],
     shows: [bool],
     // The column the rows are sorted by first and its direction, the column of the second key
@@ -590,6 +599,119 @@ export component PaneDivider inherits Rectangle {
     }
 }
 
+// The thumbnails' size slider of the status bar (NAV-06), 64 to 512 px, and the size it is at.
+// It shows, and takes the keys, only while `shown`. Its own keys (← →, Home, End) move it as the
+// standard slider's do; ↑ and ↓ do as → and ←, PageUp and PageDown move it by 64 px, and Esc,
+// Tab, Shift+Tab and Enter leave it (`left`). Any other key is Rust's to judge (`key`): a key of
+// the panes' rows does nothing here, the window's others go on to the window.
+component SizeSlider inherits Rectangle {
+    in property <bool> shown;
+    // The size the view has, which the slider shows.
+    in property <int> size;
+    callback moved(size: float);
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    callback left();
+    // The slider takes the keys (`true`) or loses them.
+    callback has-keys(on: bool);
+
+    public function focus-slider() {
+        if (root.shown) {
+            slider.focus();
+        }
+    }
+
+    // The step of ← → ↑ ↓, and of PageUp and PageDown.
+    private property <float> step: 16;
+    private property <float> page: 64;
+
+    function step-by(delta: float) {
+        let value = clamp(slider.value + delta, slider.minimum, slider.maximum);
+        if (value != slider.value) {
+            slider.value = value;
+            root.moved(value);
+        }
+    }
+
+    visible: root.shown;
+
+    keys := FocusScope {
+        enabled: root.shown;
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+            if (plain && event.text == Key.UpArrow) {
+                root.step-by(root.step);
+                return accept;
+            }
+            if (plain && event.text == Key.DownArrow) {
+                root.step-by(-root.step);
+                return accept;
+            }
+            if (plain && event.text == Key.PageUp) {
+                root.step-by(root.page);
+                return accept;
+            }
+            if (plain && event.text == Key.PageDown) {
+                root.step-by(-root.page);
+                return accept;
+            }
+            if ((plain && (event.text == Key.Escape || event.text == Key.Tab || event.text == Key.Return)) || event.text == Key.Backtab || (event.modifiers.shift && event.text == Key.Tab)) {
+                root.left();
+                return accept;
+            }
+            if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            slider := Slider {
+                minimum: 64;
+                maximum: 512;
+                step: root.step;
+                enabled: root.shown;
+                accessible-label: "썸네일 크기";
+                init => {
+                    root.show-size();
+                }
+                changed(value) => {
+                    root.moved(value);
+                }
+                changed has-focus => {
+                    root.has-keys(self.has-focus);
+                }
+            }
+            Text {
+                width: 44px;
+                text: "\{root.size}px";
+                font-size: Theme.font-small;
+                color: Theme.muted;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // The view's size as it changes elsewhere (Ctrl+wheel, a pinch, another folder), and as
+    // the view comes.
+    changed size => {
+        root.show-size();
+    }
+    changed shown => {
+        root.show-size();
+    }
+    function show-size() {
+        if (root.size >= 64) {
+            slider.value = root.size;
+        }
+    }
+}
+
 export component Pane inherits Rectangle {
     in property <PaneView> view;
     // The pane's name for screen readers.
@@ -614,6 +736,18 @@ export component Pane inherits Rectangle {
     // items a line holds.
     out property <int> page-rows: root.view.mode == 0 ? files.page-rows : grid.page-lines;
     out property <int> line-items: root.view.mode == 0 ? 1 : grid.line-items;
+    // The thumbnail view shows, with its size slider in the status bar.
+    private property <bool> thumbs: root.view.mode == 6;
+    // The size slider has the keys (as far as the pane knows: it goes with the thumbnail view).
+    private property <bool> sizing;
+    // The slider went with the thumbnail view while it had the keys: the window gives them to
+    // the list.
+    changed thumbs => {
+        if (!root.thumbs && root.sizing) {
+            root.sizing = false;
+            root.size-left();
+        }
+    }
 
     // Any click on the pane that nothing else takes.
     callback activated();
@@ -660,6 +794,15 @@ export component Pane inherits Rectangle {
     callback row-released(index: int);
     // The first and the last item the icon views show changed (`FileGrid.visible-changed`).
     callback visible-changed(first: int, last: int);
+    // The thumbnails' size slider moved to `size` logical pixels (a drag, a click on its rail,
+    // its keys).
+    callback thumb-size-changed(size: float);
+    // A key the slider has not used while it has the keys: `true` when Rust used it (a key of
+    // the panes' rows, which does nothing there), else it goes on to the window's keys.
+    callback size-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // Esc, Tab, Shift+Tab or Enter on the slider, or the slider gone with the thumbnail view:
+    // the list takes the keys again.
+    callback size-left();
     callback row-activated(index: int);
     // A right click on row `index`, before its menu opens; a command of the list's menus.
     callback row-menu(index: int);
@@ -684,6 +827,14 @@ export component Pane inherits Rectangle {
         path-input.text = root.view.path-text;
         path-input.focus();
         path-input.set-selection-offsets(0, 2147483647);
+    }
+
+    // The thumbnails' size slider takes the keys (보기 ▸ 보기 방식 ▸ 썸네일 크기 조절), while
+    // the thumbnail view shows.
+    public function focus-size() {
+        if (root.thumbs) {
+            size-slider-keys.focus-slider();
+        }
     }
 
     public function scroll-to(index: int) {
@@ -1304,6 +1455,7 @@ export component Pane inherits Rectangle {
             grid := FileGrid {
                 visible: root.view.error == "" && root.view.mode != 0;
                 mode: root.view.mode;
+                thumb-size: max(64, root.view.thumb-size) * 1px;
                 rows: root.view.mode != 0 ? root.view.rows : [];
                 cursor: root.view.cursor;
                 active: root.view.active;
@@ -1420,7 +1572,8 @@ export component Pane inherits Rectangle {
 
             Text {
                 x: 16px;
-                width: parent.width - 32px;
+                // The thumbnails' slider takes the right end in the thumbnail view.
+                width: parent.width - 32px - (root.thumbs ? size-slider-keys.width + 8px : 0px);
                 // A cell is half the font's size: a Hangul syllable (two cells) is a little
                 // narrower than the font's size and a digit a little wider than half of it, so a
                 // line made of both fits by its pixels as it does by its cells; `elide` is for
@@ -1430,6 +1583,32 @@ export component Pane inherits Rectangle {
                 color: Theme.muted;
                 vertical-alignment: center;
                 overflow: elide;
+            }
+
+            size-slider-keys := SizeSlider {
+                x: parent.width - 16px - self.width;
+                width: root.thumbs ? 176px : 0px;
+                height: parent.height;
+                shown: root.thumbs;
+                size: root.view.thumb-size;
+                moved(size) => {
+                    root.thumb-size-changed(size);
+                }
+                key(text, ctrl, shift, alt, meta) => {
+                    return root.size-key(text, ctrl, shift, alt, meta);
+                }
+                left => {
+                    root.size-left();
+                }
+                // Gone with the thumbnail view as it had the keys (a key it passed on changed
+                // the view): the list takes them, whichever of this and `changed thumbs` comes
+                // first.
+                has-keys(on) => {
+                    root.sizing = on;
+                    if (!on && !root.thumbs) {
+                        root.size-left();
+                    }
+                }
             }
         }
     }

@@ -26,6 +26,11 @@ pub enum SortKey {
     /// The lowercase extension alone; none sorts first. Only a file has one, as the 확장자
     /// column shows: not a folder, nor a link, which may lead to a folder (`앨범.2025`).
     Extension,
+    /// The last access time, as the listing read it. An unknown time (a provider or a file
+    /// system that keeps none) sorts last in either direction: unlike a creation time, which is
+    /// missing for every file of a file system or none, an access time is missing here and there,
+    /// and those files would otherwise hide the ones used last at the top of a descending sort.
+    Accessed,
 }
 
 /// Which way a key sorts.
@@ -99,6 +104,18 @@ fn kind_rank(kind: EntryKind) -> u8 {
 
 fn compare_by(by: SortBy, a: (&Entry, &Keys), b: (&Entry, &Keys)) -> Ordering {
     let ((entry_a, keys_a), (entry_b, keys_b)) = (a, b);
+    if by.key == SortKey::Accessed {
+        // An unknown time last, whatever the direction; the known ones in the direction asked.
+        return match (entry_a.accessed, entry_b.accessed) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(time_a), Some(time_b)) => match by.order {
+                SortOrder::Ascending => time_a.cmp(&time_b),
+                SortOrder::Descending => time_b.cmp(&time_a),
+            },
+        };
+    }
     let ordering = match by.key {
         SortKey::Name => keys_a.name.compare(&keys_b.name),
         SortKey::Size => entry_a.size.cmp(&entry_b.size),
@@ -108,6 +125,8 @@ fn compare_by(by: SortBy, a: (&Entry, &Keys), b: (&Entry, &Keys)) -> Ordering {
             .then_with(|| keys_a.extension.cmp(&keys_b.extension)),
         SortKey::Created => entry_a.created.cmp(&entry_b.created),
         SortKey::Extension => keys_a.extension.cmp(&keys_b.extension),
+        // Compared above, with the unknown times kept last.
+        SortKey::Accessed => Ordering::Equal,
     };
     match by.order {
         SortOrder::Ascending => ordering,

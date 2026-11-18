@@ -20,8 +20,8 @@ import { Shortcuts } from "shortcuts.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 
 // A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
-// 5 extension, 6 attributes), what its head says, how wide it is, whether its text lines up on
-// the right, and whether a click on its head sorts.
+// 5 extension, 6 attributes, 7 accessed, 8 path), what its head says, how wide it is, whether
+// its text lines up on the right, and whether a click on its head sorts.
 export struct ColumnView {
     id: int,
     title: string,
@@ -203,9 +203,10 @@ export component FileHead inherits Rectangle {
         let base = root.columns[i].width;
         return i == root.drag-border ? base - root.drag-dx : base;
     }
-    // The room the first `k` columns after the name take, each with the gap before it.
+    // The room the first `k` columns after the name take, each with the gap before it (all
+    // eight of them: Rust's `Column::OPTIONAL`).
     pure function s(k: int) -> length {
-        return (k > 0 ? root.gap + root.w(0) : 0px) + (k > 1 ? root.gap + root.w(1) : 0px) + (k > 2 ? root.gap + root.w(2) : 0px) + (k > 3 ? root.gap + root.w(3) : 0px) + (k > 4 ? root.gap + root.w(4) : 0px) + (k > 5 ? root.gap + root.w(5) : 0px);
+        return (k > 0 ? root.gap + root.w(0) : 0px) + (k > 1 ? root.gap + root.w(1) : 0px) + (k > 2 ? root.gap + root.w(2) : 0px) + (k > 3 ? root.gap + root.w(3) : 0px) + (k > 4 ? root.gap + root.w(4) : 0px) + (k > 5 ? root.gap + root.w(5) : 0px) + (k > 6 ? root.gap + root.w(6) : 0px) + (k > 7 ? root.gap + root.w(7) : 0px);
     }
     private property <length> columns-room: root.s(root.columns.length);
     // How wide the heads and every row are: the list's width, or more when the columns would
@@ -219,7 +220,7 @@ export component FileHead inherits Rectangle {
     // The place among the columns after the name that a head let go at `at` of the row of heads
     // goes to: before the first column whose middle is right of it.
     pure function slot-at(at: length) -> int {
-        return (root.columns.length > 0 && root.col-x(0) + root.w(0) / 2 < at ? 1 : 0) + (root.columns.length > 1 && root.col-x(1) + root.w(1) / 2 < at ? 1 : 0) + (root.columns.length > 2 && root.col-x(2) + root.w(2) / 2 < at ? 1 : 0) + (root.columns.length > 3 && root.col-x(3) + root.w(3) / 2 < at ? 1 : 0) + (root.columns.length > 4 && root.col-x(4) + root.w(4) / 2 < at ? 1 : 0) + (root.columns.length > 5 && root.col-x(5) + root.w(5) / 2 < at ? 1 : 0);
+        return (root.columns.length > 0 && root.col-x(0) + root.w(0) / 2 < at ? 1 : 0) + (root.columns.length > 1 && root.col-x(1) + root.w(1) / 2 < at ? 1 : 0) + (root.columns.length > 2 && root.col-x(2) + root.w(2) / 2 < at ? 1 : 0) + (root.columns.length > 3 && root.col-x(3) + root.w(3) / 2 < at ? 1 : 0) + (root.columns.length > 4 && root.col-x(4) + root.w(4) / 2 < at ? 1 : 0) + (root.columns.length > 5 && root.col-x(5) + root.w(5) / 2 < at ? 1 : 0) + (root.columns.length > 6 && root.col-x(6) + root.w(6) / 2 < at ? 1 : 0) + (root.columns.length > 7 && root.col-x(7) + root.w(7) / 2 < at ? 1 : 0);
     }
     // Where the line that shows that place is.
     pure function slot-x(slot: int) -> length {
@@ -285,6 +286,12 @@ export component FileHead inherits Rectangle {
         if (root.columns.length > 5) {
             root.fit(5);
         }
+        if (root.columns.length > 6) {
+            root.fit(6);
+        }
+        if (root.columns.length > 7) {
+            root.fit(7);
+        }
     }
 
     // Fits column `i` after the name to its texts in the rows on screen, and to its head.
@@ -318,6 +325,8 @@ export component FileHead inherits Rectangle {
     private property <bool> mark-kind;
     private property <bool> mark-extension;
     private property <bool> mark-attributes;
+    private property <bool> mark-accessed;
+    private property <bool> mark-path;
     function show-head-menu(x: length, y: length) {
         root.mark-size = root.shows[1];
         root.mark-modified = root.shows[2];
@@ -325,6 +334,8 @@ export component FileHead inherits Rectangle {
         root.mark-created = root.shows[4];
         root.mark-extension = root.shows[5];
         root.mark-attributes = root.shows[6];
+        root.mark-accessed = root.shows[7];
+        root.mark-path = root.shows[8];
         head-menu.show({ x: x, y: y });
     }
 
@@ -366,6 +377,14 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 MenuItem {
+                    title: "접근한 날짜";
+                    checkable: true;
+                    checked <=> root.mark-accessed;
+                    activated => {
+                        root.column-toggled(7);
+                    }
+                }
+                MenuItem {
                     title: "종류";
                     checkable: true;
                     checked <=> root.mark-kind;
@@ -387,6 +406,16 @@ export component FileHead inherits Rectangle {
                     checked <=> root.mark-attributes;
                     activated => {
                         root.column-toggled(6);
+                    }
+                }
+                // The folder of each item: one folder's on every row here, many once a view
+                // lists the items of many (search, a flat view).
+                MenuItem {
+                    title: "경로";
+                    checkable: true;
+                    checked <=> root.mark-path;
+                    activated => {
+                        root.column-toggled(8);
                     }
                 }
                 MenuSeparator { }

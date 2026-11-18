@@ -1,9 +1,10 @@
 //! How a pane shows its folder (NAV-06, NAV-07, NAV-08, NAV-10), and the commands that change
 //! it. A child of [`state`](super), so these methods see the fields of [`AppState`].
 //!
-//! A [`FolderView`] is the view mode ([`ViewMode`]: 자세히, 목록, or icons of four sizes), the
-//! columns of 자세히 after the name ([`ShownColumn`]: which, in what order, how wide) and the
-//! order of the rows (a `SortSpec`: a key, a second key for ties, folders first or mixed in).
+//! A [`FolderView`] is the view mode ([`ViewMode`]: 자세히, 목록, icons of four sizes, the
+//! thumbnails at a size of their own, or tiles), the columns of 자세히 after the name
+//! ([`ShownColumn`]: which, in what order, how wide) and the order of the rows (a `SortSpec`: a
+//! key, a second key for ties, folders first or mixed in).
 //!
 //! The views are remembered per folder ([`ViewStore`], kept in the settings): a change of the
 //! view of a tab is remembered for its folder, and a tab that goes to a folder shows the view
@@ -16,8 +17,8 @@
 //! on macOS, exactly elsewhere.
 //!
 //! The keys move the cursor as the view lays the rows out ([`target`]): 자세히 one row per line,
-//! the icons left to right and then down (row-major), 목록 top to bottom and then right
-//! (column-major).
+//! the icons, the thumbnails and the tiles left to right and then down (row-major,
+//! [`grid_shape`]), 목록 top to bottom and then right (column-major).
 
 use rf_core::VPath;
 use rf_vfs::{SortBy, SortKey, SortOrder, SortSpec};
@@ -36,6 +37,19 @@ pub use store::{Chosen, MAX_FOLDER_URI, MAX_FOLDER_VIEWS, StoredView, UnknownPar
 pub const MIN_COLUMN_WIDTH: u32 = 40;
 pub const MAX_COLUMN_WIDTH: u32 = 600;
 
+/// The smallest and the largest side of a thumbnail in the thumbnail view (썸네일), in logical
+/// pixels: its size slider's ends, which Ctrl+wheel and a pinch stop at too.
+pub const MIN_THUMB_SIZE: u32 = 64;
+pub const MAX_THUMB_SIZE: u32 = 512;
+/// The size the thumbnail view takes until one is chosen (a folder that shows it for the first
+/// time in a run), and of a settings entry that names none.
+pub const DEFAULT_THUMB_SIZE: u32 = 192;
+/// The sizes a thumbnail is asked for in ([`thumb_request_side`]): the view's own size rounded
+/// up to one of them, so that a drag of the slider asks the pool for no new picture until it
+/// passes a step, and the pictures made for a step serve every size below it. The first two are
+/// the large and the extra large icons' sides, whose cache the thumbnail view shares.
+pub const THUMB_STEPS: [u32; 4] = [96, 160, 256, 512];
+
 /// How a pane lays out its rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ViewMode {
@@ -51,20 +65,44 @@ pub enum ViewMode {
     MediumIcons,
     LargeIcons,
     ExtraLargeIcons,
+    /// The thumbnails (썸네일, NAV-06) left to right and then down, each in a square of `size`
+    /// logical pixels a side ([`MIN_THUMB_SIZE`] to [`MAX_THUMB_SIZE`], any size between: the
+    /// status bar's slider, Ctrl+wheel and a pinch change it), the name under it. A folder, and
+    /// a file without a thumbnail, show their kind's icon there.
+    Thumbnails {
+        size: u32,
+    },
+    /// Tiles (타일): a 48 px icon, or the file's thumbnail, beside three lines (the name, the
+    /// kind and the size), left to right and then down as the icons.
+    Tiles,
 }
 
 impl ViewMode {
-    /// Every mode, in the order the 보기 menu lists them, the largest icons first (Explorer's).
-    pub const ALL: [ViewMode; 6] = [
+    /// Every mode, in the order the 보기 menu lists them: the thumbnails (at their default size)
+    /// and the largest icons first, then as File Explorer lists its views, 타일 after 자세히.
+    pub const ALL: [ViewMode; 8] = [
+        ViewMode::Thumbnails {
+            size: DEFAULT_THUMB_SIZE,
+        },
         ViewMode::ExtraLargeIcons,
         ViewMode::LargeIcons,
         ViewMode::MediumIcons,
         ViewMode::SmallIcons,
         ViewMode::List,
         ViewMode::Details,
+        ViewMode::Tiles,
     ];
 
-    /// The mode's name in the settings file.
+    /// The thumbnail view at `size`, made to lie between [`MIN_THUMB_SIZE`] and
+    /// [`MAX_THUMB_SIZE`].
+    pub fn thumbnails(size: u32) -> ViewMode {
+        ViewMode::Thumbnails {
+            size: size.clamp(MIN_THUMB_SIZE, MAX_THUMB_SIZE),
+        }
+    }
+
+    /// The mode's name in the settings file. The thumbnail view's size is a key of its own
+    /// (`thumb_size`), so that 0.4.0, which knows no such mode, keeps it as it is.
     pub fn name(self) -> &'static str {
         match self {
             ViewMode::Details => "details",
@@ -73,16 +111,19 @@ impl ViewMode {
             ViewMode::MediumIcons => "medium-icons",
             ViewMode::LargeIcons => "large-icons",
             ViewMode::ExtraLargeIcons => "extra-large-icons",
+            ViewMode::Thumbnails { .. } => "thumbnails",
+            ViewMode::Tiles => "tiles",
         }
     }
 
-    /// The mode the settings file calls `name`; `None` for a name this version does not know.
+    /// The mode the settings file calls `name` (the thumbnails at their default size); `None`
+    /// for a name this version does not know.
     pub fn from_name(name: &str) -> Option<ViewMode> {
         ViewMode::ALL.into_iter().find(|mode| mode.name() == name)
     }
 
     /// The number the screen knows the mode by (`PaneView.mode`): 0 자세히, 1 목록, 2 to 5 the
-    /// icons from the smallest.
+    /// icons from the smallest, 6 the thumbnails (their size is `PaneView.thumb-size`), 7 tiles.
     pub fn number(self) -> i32 {
         match self {
             ViewMode::Details => 0,
@@ -91,49 +132,122 @@ impl ViewMode {
             ViewMode::MediumIcons => 3,
             ViewMode::LargeIcons => 4,
             ViewMode::ExtraLargeIcons => 5,
+            ViewMode::Thumbnails { .. } => 6,
+            ViewMode::Tiles => 7,
         }
     }
 
-    /// The mode of the screen's number; `None` for no mode.
+    /// The mode of the screen's number (the thumbnails at their default size); `None` for no
+    /// mode.
     pub fn from_number(number: i32) -> Option<ViewMode> {
         ViewMode::ALL
             .into_iter()
             .find(|mode| mode.number() == number)
     }
 
-    /// The next icon size up (Ctrl+wheel up, a pinch out: COMP-04): 자세히 and 목록 grow into
-    /// the small icons; `None` from the largest.
-    pub fn bigger(self) -> Option<ViewMode> {
+    /// The thumbnail view's size, in logical pixels; `None` in the other views.
+    pub fn thumb_size(self) -> Option<u32> {
         match self {
-            ViewMode::Details | ViewMode::List => Some(ViewMode::SmallIcons),
-            ViewMode::SmallIcons => Some(ViewMode::MediumIcons),
-            ViewMode::MediumIcons => Some(ViewMode::LargeIcons),
-            ViewMode::LargeIcons => Some(ViewMode::ExtraLargeIcons),
-            ViewMode::ExtraLargeIcons => None,
+            ViewMode::Thumbnails { size } => Some(size),
+            _ => None,
         }
     }
 
-    /// The next icon size down; `None` from the small icons, 자세히 and 목록, which the steps
-    /// do not leave the icons for.
+    /// The next icon size up (Ctrl+wheel up, a pinch out: COMP-04): 자세히, 목록 and 타일 grow
+    /// into the small icons; `None` from the largest, and in the thumbnail view, whose size
+    /// changes in between the steps ([`AppState::set_thumb_size`]).
+    pub fn bigger(self) -> Option<ViewMode> {
+        match self {
+            ViewMode::Details | ViewMode::List | ViewMode::Tiles => Some(ViewMode::SmallIcons),
+            ViewMode::SmallIcons => Some(ViewMode::MediumIcons),
+            ViewMode::MediumIcons => Some(ViewMode::LargeIcons),
+            ViewMode::LargeIcons => Some(ViewMode::ExtraLargeIcons),
+            ViewMode::ExtraLargeIcons | ViewMode::Thumbnails { .. } => None,
+        }
+    }
+
+    /// The next icon size down; `None` from the small icons, 자세히, 목록 and 타일, which the
+    /// steps do not leave the icons for, and in the thumbnail view.
     pub fn smaller(self) -> Option<ViewMode> {
         match self {
             ViewMode::ExtraLargeIcons => Some(ViewMode::LargeIcons),
             ViewMode::LargeIcons => Some(ViewMode::MediumIcons),
             ViewMode::MediumIcons => Some(ViewMode::SmallIcons),
+            ViewMode::SmallIcons
+            | ViewMode::List
+            | ViewMode::Details
+            | ViewMode::Tiles
+            | ViewMode::Thumbnails { .. } => None,
+        }
+    }
+
+    /// The side a file's thumbnail is asked for in, in logical pixels, in the views that show
+    /// thumbnails: 보통 48, 크게 96, 특대 160, 타일 48, and the thumbnail view's size rounded up
+    /// to a step ([`thumb_request_side`]); the picture is drawn down to the view's own size. The
+    /// others show each kind's icon.
+    pub fn thumb_side(self) -> Option<u32> {
+        match self {
+            ViewMode::MediumIcons | ViewMode::Tiles => Some(48),
+            ViewMode::LargeIcons => Some(96),
+            ViewMode::ExtraLargeIcons => Some(160),
+            ViewMode::Thumbnails { size } => Some(thumb_request_side(size)),
             ViewMode::SmallIcons | ViewMode::List | ViewMode::Details => None,
         }
     }
 
-    /// The side of the square a file's thumbnail fits in, in logical pixels, in the views that
-    /// show thumbnails: 보통 48, 크게 96, 특대 160. The others show each kind's icon.
-    pub fn thumb_side(self) -> Option<u32> {
+    /// The room of one item in the views that lay the items out in rows (the icons, the
+    /// thumbnails, the tiles), in logical pixels, as the screen gives it (`FileGrid`): its width
+    /// and its height, of which the item takes all but a 4 px gap. `None` for 자세히 and 목록.
+    pub fn cell(self) -> Option<(u32, u32)> {
         match self {
-            ViewMode::MediumIcons => Some(48),
-            ViewMode::LargeIcons => Some(96),
-            ViewMode::ExtraLargeIcons => Some(160),
-            ViewMode::SmallIcons | ViewMode::List | ViewMode::Details => None,
+            ViewMode::SmallIcons => Some((200, 30)),
+            ViewMode::MediumIcons => Some((104, 112)),
+            ViewMode::LargeIcons => Some((136, 156)),
+            ViewMode::ExtraLargeIcons => Some((184, 220)),
+            // The picture with 12 px on each side, and two lines of the name under it.
+            ViewMode::Thumbnails { size } => Some((size + 24, size + 60)),
+            ViewMode::Tiles => Some((TILE_WIDTH, 64)),
+            ViewMode::Details | ViewMode::List => None,
         }
     }
+}
+
+/// How wide a tile is, in logical pixels: a 48 px icon and three lines of about 24 Hangul
+/// syllables.
+pub const TILE_WIDTH: u32 = 260;
+/// The room the grid leaves at its sides (8 px each) and for its scroll bar (14 px), in logical
+/// pixels, as `FileGrid` does.
+pub const GRID_PAD: u32 = 8;
+pub const GRID_BAR: u32 = 14;
+
+/// The side a thumbnail of the thumbnail view at `size` is asked for in: the first of
+/// [`THUMB_STEPS`] that is no smaller (the largest for a size beyond them).
+pub fn thumb_request_side(size: u32) -> u32 {
+    THUMB_STEPS
+        .into_iter()
+        .find(|&step| step >= size)
+        .unwrap_or(MAX_THUMB_SIZE)
+}
+
+/// How the items of a view lie in rows: how many a row holds, and how many rows there are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridShape {
+    pub per_row: usize,
+    pub rows: usize,
+}
+
+/// How `count` items of `mode` lie in a list `width` logical pixels wide, as `FileGrid` lays
+/// them out (`per-row`, `line-count`): as many in a row as whole cells fit beside the side pads
+/// and the scroll bar's room, at least one. `None` for 자세히 and 목록, which are no rows of
+/// items.
+pub fn grid_shape(mode: ViewMode, width: u32, count: usize) -> Option<GridShape> {
+    let (cell, _) = mode.cell()?;
+    let room = width.saturating_sub(2 * GRID_PAD + GRID_BAR);
+    let per_row = usize::try_from(room / cell).unwrap_or(usize::MAX).max(1);
+    Some(GridShape {
+        per_row,
+        rows: count.div_ceil(per_row),
+    })
 }
 
 /// A column of 자세히. The name always shows, first, and takes the room the others leave; the
@@ -148,17 +262,26 @@ pub enum Column {
     Extension,
     /// The attribute letters (R, H, S, A, ...), [`crate::format::attribute_letters`].
     Attributes,
+    /// The last access time, as the listing read it with the rest of each item's metadata (no
+    /// look of its own at the files). The file system keeps it as it likes: Linux mounts with
+    /// `relatime` or `noatime` update it seldom or never, Windows may have it off.
+    Accessed,
+    /// The folder the item is in. In a folder's listing that is the folder itself on every row;
+    /// it tells the items apart once a view lists items of many folders (search, a flat view).
+    Path,
 }
 
 impl Column {
     /// The columns besides the name, in the order the header's menu lists them.
-    pub const OPTIONAL: [Column; 6] = [
+    pub const OPTIONAL: [Column; 8] = [
         Column::Size,
         Column::Modified,
         Column::Created,
+        Column::Accessed,
         Column::Kind,
         Column::Extension,
         Column::Attributes,
+        Column::Path,
     ];
 
     /// The column's name in the settings file.
@@ -171,6 +294,8 @@ impl Column {
             Column::Kind => "kind",
             Column::Extension => "extension",
             Column::Attributes => "attributes",
+            Column::Accessed => "accessed",
+            Column::Path => "path",
         }
     }
 
@@ -182,7 +307,8 @@ impl Column {
     }
 
     /// The number the screen knows the column by: 0 name, 1 size, 2 modified, 3 kind (the
-    /// numbers of the first demo's column heads), 4 created, 5 extension, 6 attributes.
+    /// numbers of the first demo's column heads), 4 created, 5 extension, 6 attributes,
+    /// 7 accessed, 8 path.
     pub fn number(self) -> i32 {
         match self {
             Column::Name => 0,
@@ -192,8 +318,13 @@ impl Column {
             Column::Created => 4,
             Column::Extension => 5,
             Column::Attributes => 6,
+            Column::Accessed => 7,
+            Column::Path => 8,
         }
     }
+
+    /// How many numbers the columns take (0 to 8): the length of `PaneView.shows`.
+    pub const COUNT: usize = 9;
 
     /// The column of the screen's number; `None` for no column.
     pub fn from_number(number: i32) -> Option<Column> {
@@ -207,7 +338,8 @@ impl Column {
         words::column_title(self)
     }
 
-    /// The key a click on its head sorts by; `None` for the attributes, which sort nothing.
+    /// The key a click on its head sorts by; `None` for the attributes, which sort nothing, and
+    /// the path, the same on every row of a folder.
     pub fn sort_key(self) -> Option<SortKey> {
         Some(match self {
             Column::Name => SortKey::Name,
@@ -216,7 +348,8 @@ impl Column {
             Column::Created => SortKey::Created,
             Column::Kind => SortKey::Kind,
             Column::Extension => SortKey::Extension,
-            Column::Attributes => return None,
+            Column::Accessed => SortKey::Accessed,
+            Column::Attributes | Column::Path => return None,
         })
     }
 
@@ -229,6 +362,7 @@ impl Column {
             SortKey::Created => Column::Created,
             SortKey::Kind => Column::Kind,
             SortKey::Extension => Column::Extension,
+            SortKey::Accessed => Column::Accessed,
         }
     }
 
@@ -238,10 +372,11 @@ impl Column {
         match self {
             Column::Name => 120,
             Column::Size => 72,
-            Column::Modified | Column::Created => 126,
+            Column::Modified | Column::Created | Column::Accessed => 126,
             Column::Kind => 104,
             Column::Extension => 64,
             Column::Attributes => 56,
+            Column::Path => 220,
         }
     }
 
@@ -585,7 +720,8 @@ impl AppState {
         }
     }
 
-    /// Shows pane `side` in `mode`, and scrolls to its cursor there.
+    /// Shows pane `side` in `mode`, and scrolls to its cursor there. The selection and the
+    /// cursor stay as they were: a view lays the same rows out otherwise.
     pub fn set_view_mode(&mut self, side: usize, mode: ViewMode) -> Vec<Effect> {
         self.change_view(side, |view| {
             view.mode = mode;
@@ -598,9 +734,49 @@ impl AppState {
         vec![Effect::ScrollTo { side, row }]
     }
 
+    /// 보기 방식 ▸ 썸네일 for pane `side`: the thumbnail view at the size of the folder that
+    /// shows it and was used last ([`ViewStore::last_thumb_size`]; [`DEFAULT_THUMB_SIZE`] when
+    /// none does); a pane that shows it already keeps its size.
+    pub fn show_thumbnail_view(&mut self, side: usize) -> Vec<Effect> {
+        let size = self
+            .tab(side)
+            .view()
+            .mode
+            .thumb_size()
+            .or_else(|| self.views.last_thumb_size())
+            .unwrap_or(DEFAULT_THUMB_SIZE);
+        self.set_view_mode(side, ViewMode::thumbnails(size))
+    }
+
+    /// The size of the thumbnail view of pane `side`, in logical pixels: the slider's value, or
+    /// what Ctrl+wheel and a pinch made of it ([`ViewMode::thumbnails`] keeps it between the
+    /// ends). Remembered for the folder as the other parts of its view are, and the cursor's
+    /// item stays in view. Nothing in another view, or when the size is the one it has.
+    pub fn set_thumb_size(&mut self, side: usize, size: u32) -> Vec<Effect> {
+        let Some(now) = self.tab(side).view().mode.thumb_size() else {
+            return Vec::new();
+        };
+        let mode = ViewMode::thumbnails(size);
+        if mode.thumb_size() == Some(now) {
+            return Vec::new();
+        }
+        self.change_view(side, |view| {
+            view.mode = mode;
+            Chosen {
+                mode: true,
+                ..Chosen::default()
+            }
+        });
+        match self.tab(side).selection().cursor() {
+            Some(row) => vec![Effect::ScrollTo { side, row }],
+            None => Vec::new(),
+        }
+    }
+
     /// The icons of pane `side` one size bigger or smaller ([`ViewMode::bigger`],
     /// [`ViewMode::smaller`]): Ctrl+wheel (macOS ⌘+wheel) and a trackpad's pinch (COMP-04).
-    /// Nothing at the end of the steps.
+    /// Nothing at the end of the steps, and in the thumbnail view, whose size the controller
+    /// changes in between them ([`AppState::set_thumb_size`]).
     pub fn step_icon_size(&mut self, side: usize, bigger: bool) -> Vec<Effect> {
         let mode = self.tab(side).view().mode;
         let next = if bigger {
@@ -942,6 +1118,7 @@ mod tests {
     #[test]
     fn the_icon_sizes_step_up_and_down() {
         use ViewMode::{Details, ExtraLargeIcons, LargeIcons, List, MediumIcons, SmallIcons};
+        assert_eq!(ExtraLargeIcons.bigger(), None, "not into the thumbnails");
         assert_eq!(SmallIcons.bigger(), Some(MediumIcons));
         assert_eq!(MediumIcons.bigger(), Some(LargeIcons));
         assert_eq!(LargeIcons.bigger(), Some(ExtraLargeIcons));
@@ -961,8 +1138,133 @@ mod tests {
         assert_eq!(ViewMode::MediumIcons.thumb_side(), Some(48));
         assert_eq!(ViewMode::LargeIcons.thumb_side(), Some(96));
         assert_eq!(ViewMode::ExtraLargeIcons.thumb_side(), Some(160));
+        assert_eq!(ViewMode::Tiles.thumb_side(), Some(48));
         for mode in [ViewMode::SmallIcons, ViewMode::List, ViewMode::Details] {
             assert_eq!(mode.thumb_side(), None, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_thumbnail_is_asked_for_at_the_step_at_or_above_its_size() {
+        let asked = |size| ViewMode::thumbnails(size).thumb_side();
+        // From the smallest up to the first step, then each step's sizes.
+        for (size, step) in [
+            (MIN_THUMB_SIZE, 96),
+            (95, 96),
+            (96, 96),
+            (97, 160),
+            (160, 160),
+            (161, 256),
+            (DEFAULT_THUMB_SIZE, 256),
+            (256, 256),
+            (257, 512),
+            (MAX_THUMB_SIZE, 512),
+        ] {
+            assert_eq!(asked(size), Some(step), "{size}");
+            assert_eq!(thumb_request_side(size), step, "{size}");
+        }
+        // A drag across one step asks for no other size: every size of a step is one picture.
+        let sizes: std::collections::BTreeSet<u32> = (161..=256)
+            .filter_map(|size| ViewMode::thumbnails(size).thumb_side())
+            .collect();
+        assert_eq!(sizes.into_iter().collect::<Vec<_>>(), [256]);
+        // Past the steps (which the slider cannot reach), the largest.
+        assert_eq!(thumb_request_side(4000), MAX_THUMB_SIZE);
+        assert_eq!(THUMB_STEPS.last(), Some(&MAX_THUMB_SIZE));
+    }
+
+    #[test]
+    fn the_thumbnail_size_stays_between_the_slider_s_ends() {
+        assert_eq!(ViewMode::thumbnails(0).thumb_size(), Some(MIN_THUMB_SIZE));
+        assert_eq!(ViewMode::thumbnails(63).thumb_size(), Some(MIN_THUMB_SIZE));
+        assert_eq!(ViewMode::thumbnails(64).thumb_size(), Some(64));
+        assert_eq!(ViewMode::thumbnails(300).thumb_size(), Some(300));
+        assert_eq!(ViewMode::thumbnails(512).thumb_size(), Some(512));
+        assert_eq!(
+            ViewMode::thumbnails(u32::MAX).thumb_size(),
+            Some(MAX_THUMB_SIZE)
+        );
+        assert_eq!(ViewMode::Tiles.thumb_size(), None);
+        // The size is no step of the icon sizes: Ctrl+wheel changes it in between them.
+        assert_eq!(ViewMode::thumbnails(200).bigger(), None);
+        assert_eq!(ViewMode::thumbnails(200).smaller(), None);
+        // 타일 grows into the small icons, as 자세히 and 목록 do.
+        assert_eq!(ViewMode::Tiles.bigger(), Some(ViewMode::SmallIcons));
+        assert_eq!(ViewMode::Tiles.smaller(), None);
+    }
+
+    #[test]
+    fn tiles_and_thumbnails_lie_in_rows_as_wide_as_the_list_holds() {
+        let shape = |mode, width, count| grid_shape(mode, width, count);
+        // A tile is 260 wide; the list keeps 8 px at each side and 14 for its scroll bar.
+        for (width, per_row) in [
+            (0, 1),
+            (200, 1),
+            (289, 1),
+            (290, 1),
+            (549, 1),
+            (550, 2),
+            (809, 2),
+            (810, 3),
+            (1900, 7),
+        ] {
+            assert_eq!(
+                shape(ViewMode::Tiles, width, 10).map(|shape| shape.per_row),
+                Some(per_row),
+                "{width}"
+            );
+        }
+        assert_eq!(
+            shape(ViewMode::Tiles, 810, 10),
+            Some(GridShape {
+                per_row: 3,
+                rows: 4
+            })
+        );
+        assert_eq!(
+            shape(ViewMode::Tiles, 810, 9),
+            Some(GridShape {
+                per_row: 3,
+                rows: 3
+            })
+        );
+        assert_eq!(
+            shape(ViewMode::Tiles, 400, 0),
+            Some(GridShape {
+                per_row: 1,
+                rows: 0
+            })
+        );
+        // The thumbnails' cell grows with their size: 88 at the smallest, 536 at the largest.
+        let thumbs =
+            |size, width| shape(ViewMode::thumbnails(size), width, 100).map(|shape| shape.per_row);
+        assert_eq!(thumbs(64, 30 + 88 * 4), Some(4));
+        assert_eq!(thumbs(64, 30 + 88 * 4 - 1), Some(3));
+        assert_eq!(thumbs(512, 800), Some(1));
+        assert_eq!(thumbs(512, 30 + 536 * 2), Some(2));
+        assert_eq!(thumbs(200, 1000), Some(4));
+        // The icons as the screen lays them out (`FileGrid.tile-w`).
+        assert_eq!(
+            shape(ViewMode::MediumIcons, 30 + 104 * 5, 7),
+            Some(GridShape {
+                per_row: 5,
+                rows: 2
+            })
+        );
+        assert_eq!(shape(ViewMode::Details, 800, 5), None);
+        assert_eq!(shape(ViewMode::List, 800, 5), None);
+    }
+
+    #[test]
+    fn tiles_and_thumbnails_move_as_the_icons_do() {
+        for mode in [ViewMode::Tiles, ViewMode::thumbnails(300)] {
+            let at = |cursor, step| target(mode, Some(cursor), 10, step, GRID);
+            assert_eq!(at(1, KeyMove::Right), Some(2), "{mode:?}");
+            assert_eq!(at(3, KeyMove::Right), Some(4), "{mode:?}");
+            assert_eq!(at(1, KeyMove::Down), Some(5), "{mode:?}");
+            assert_eq!(at(6, KeyMove::Down), Some(9), "{mode:?}");
+            assert_eq!(at(6, KeyMove::Up), Some(2), "{mode:?}");
+            assert_eq!(at(1, KeyMove::PageDown), Some(9), "{mode:?}");
         }
     }
 
@@ -982,7 +1284,7 @@ mod tests {
         .map(ViewMode::number)
         .collect();
         assert_eq!(numbers, [0, 1, 2, 3, 4]);
-        assert_eq!(ViewMode::ALL[0], ViewMode::ExtraLargeIcons);
+        assert_eq!(ViewMode::ALL[1], ViewMode::ExtraLargeIcons);
     }
 
     #[test]
@@ -991,15 +1293,31 @@ mod tests {
             assert_eq!(ViewMode::from_name(mode.name()), Some(mode));
             assert_eq!(ViewMode::from_number(mode.number()), Some(mode));
         }
+        let numbers: Vec<i32> = ViewMode::ALL.into_iter().map(ViewMode::number).collect();
+        assert_eq!(numbers, [6, 5, 4, 3, 2, 1, 0, 7]);
+        // The thumbnails of any size have one name and one number; the size goes apart.
+        assert_eq!(ViewMode::thumbnails(300).name(), "thumbnails");
+        assert_eq!(ViewMode::thumbnails(300).number(), 6);
+        assert_eq!(
+            ViewMode::from_name("thumbnails"),
+            Some(ViewMode::thumbnails(DEFAULT_THUMB_SIZE))
+        );
+        assert_eq!(ViewMode::from_name("tiles"), Some(ViewMode::Tiles));
+        assert_eq!(ViewMode::from_name("gallery"), None);
+        assert_eq!(ViewMode::from_number(8), None);
         for column in std::iter::once(Column::Name).chain(Column::OPTIONAL) {
             assert_eq!(Column::from_name(column.name()), Some(column));
             assert_eq!(Column::from_number(column.number()), Some(column));
+            assert!(usize::try_from(column.number()).is_ok_and(|n| n < Column::COUNT));
             if let Some(key) = column.sort_key() {
                 assert_eq!(Column::of_key(key), column);
             }
         }
-        assert_eq!(ViewMode::from_name("thumbnails"), None);
-        assert_eq!(Column::from_number(7), None);
+        assert_eq!(Column::from_number(9), None);
         assert_eq!(Column::Attributes.sort_key(), None);
+        assert_eq!(Column::Path.sort_key(), None);
+        assert_eq!(Column::Accessed.sort_key(), Some(SortKey::Accessed));
+        assert_eq!(Column::from_name("accessed"), Some(Column::Accessed));
+        assert_eq!(Column::from_name("path"), Some(Column::Path));
     }
 }

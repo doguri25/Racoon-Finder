@@ -57,13 +57,15 @@ fn names(request: &MatchRequest) -> Vec<&str> {
         .collect()
 }
 
-const ALL_MODES: [ViewMode; 6] = [
+const ALL_MODES: [ViewMode; 8] = [
     ViewMode::Details,
     ViewMode::List,
     ViewMode::SmallIcons,
     ViewMode::MediumIcons,
     ViewMode::LargeIcons,
     ViewMode::ExtraLargeIcons,
+    ViewMode::Thumbnails { size: 300 },
+    ViewMode::Tiles,
 ];
 
 #[test]

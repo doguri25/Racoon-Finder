@@ -15,8 +15,8 @@ use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
 use rf_ui::state::{
-    AppState, Column, DropSpot, Effect, FolderView, Hover, MenuFacts, ShownColumn, TreeMode,
-    ViewMode,
+    AppState, Column, DEFAULT_THUMB_SIZE, DropSpot, Effect, FolderView, Hover, MAX_THUMB_SIZE,
+    MIN_THUMB_SIZE, MenuFacts, ShownColumn, TreeMode, ViewMode, grid_shape,
 };
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
@@ -1180,7 +1180,7 @@ fn a_head_held_at_an_end_of_a_wide_header_scrolls_it_that_way() {
             slint::platform::update_timers_and_animations();
         }
     };
-    // The heads are wider than the list: 속성, the last one, is out of view on the right.
+    // The heads are wider than the list: 속성, near the end, is out of view on the right.
     let list = labelled(&window, "항목 목록", AccessibleRole::List).remove(0);
     let (list_at, list_size) = (list.absolute_position(), list.size());
     let attributes = || labelled(&window, "속성", AccessibleRole::Button).len();
@@ -1197,10 +1197,13 @@ fn a_head_held_at_an_end_of_a_wide_header_scrolls_it_that_way() {
     assert!(scroll_cue_shows(&window));
     tick();
     // The header scrolled under the still pointer as far as its end: 속성 came into view, and
-    // the head goes after it.
+    // the head goes after the last one (경로).
     assert_eq!(attributes(), 1);
     pointer(&window, "release", right_end);
-    assert_eq!(moves.take(), ["move 0 0 6"]);
+    assert_eq!(
+        moves.take(),
+        [format!("move 0 0 {}", Column::OPTIONAL.len())]
+    );
     assert!(!scroll_cue_shows(&window));
 }
 
@@ -1386,7 +1389,7 @@ fn the_arrows_scroll_details_sideways() {
     }
     let list = labelled(&window, "항목 목록", AccessibleRole::List).remove(0);
     let right = list.absolute_position().x + list.size().width;
-    let (last_at, last_size) = head_box(&window, "속성");
+    let (last_at, last_size) = head_box(&window, "경로");
     assert_eq!(last_at.x + last_size.width + 12.0, right);
 
     // The bar under the rows: a press at its left end scrolls back to the start, a drag of its
@@ -1400,7 +1403,7 @@ fn the_arrows_scroll_details_sideways() {
     pointer(&window, "move", LogicalPosition::new(left + 60.0, bar_y));
     pointer(&window, "move", LogicalPosition::new(right, bar_y));
     pointer(&window, "release", LogicalPosition::new(right, bar_y));
-    let (last_at, last_size) = head_box(&window, "속성");
+    let (last_at, last_size) = head_box(&window, "경로");
     assert_eq!(last_at.x + last_size.width + 12.0, right);
 }
 
@@ -4622,8 +4625,8 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     chord(&window, &["a"]);
     assert_eq!(calls.take(), ["key a"]);
-    // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 특대
-    // 아이콘, and Enter takes it.
+    // ↓ goes to the first item, the 보기 방식 menu, → opens it, ↓ goes to its first item, 썸네일,
+    // and Enter takes it.
     let record = calls.clone();
     window.on_command(move |name| record.note(format!("command {name}")));
     window.invoke_show_view_menu();
@@ -4631,7 +4634,7 @@ fn the_shortcuts_reach_the_filter_box_and_the_view_menu() {
     press(&window, Key::RightArrow);
     press(&window, Key::DownArrow);
     press(&window, Key::Return);
-    assert_eq!(calls.take(), ["command view-extra-large-icons"]);
+    assert_eq!(calls.take(), ["command view-thumbnails"]);
     // The sub-menu and the menu have closed: the panes take the keys again.
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     chord(&window, &["b"]);
@@ -9677,4 +9680,244 @@ fn a_hidden_toolbar_leaves_the_panes_their_path_rows_and_the_view_menu_its_key()
     window.set_show_toolbar(false);
     let back = shown_at.x.min(40.0);
     assert_eq!(window.invoke_visits_button_at(back, 30.0), -1);
+}
+
+/// The thumbnails' size sliders of the panes' status bars that show (a hidden one has no room),
+/// with the value each shows.
+fn shown_size_sliders(window: &MainWindow) -> Vec<String> {
+    labelled(window, "썸네일 크기", AccessibleRole::Slider)
+        .into_iter()
+        .filter(|slider| slider.size().width > 0.0)
+        .map(|slider| {
+            assert_eq!(slider.accessible_enabled(), Some(true));
+            slider.accessible_value().unwrap_or_default().to_string()
+        })
+        .collect()
+}
+
+/// A window whose left pane lists two pictures, and a way to show it in a mode.
+fn slider_window() -> (MainWindow, impl FnMut(ViewMode)) {
+    let window = window();
+    let models = PaneModels::default();
+    let mut pane = listed_pane(vec![
+        entry("a.png", EntryKind::File, 10),
+        entry("b.png", EntryKind::File, 20),
+    ]);
+    let weak = window.as_weak();
+    let show = move |mode| {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        weak.unwrap().set_left_pane(models.view(&pane, true));
+        run_for(60);
+    };
+    (window, show)
+}
+
+#[test]
+fn the_size_slider_shows_only_in_the_thumbnail_view_at_its_size() {
+    let (window, mut show) = slider_window();
+    for mode in ViewMode::ALL {
+        show(mode);
+        let wanted: Vec<String> = match mode {
+            ViewMode::Thumbnails { size } => vec![size.to_string()],
+            _ => Vec::new(),
+        };
+        assert_eq!(shown_size_sliders(&window), wanted, "{mode:?}");
+        // A hidden one takes no input.
+        for slider in labelled(&window, "썸네일 크기", AccessibleRole::Slider) {
+            if slider.size().width <= 0.0 {
+                assert_eq!(slider.accessible_enabled(), Some(false), "{mode:?}");
+            }
+        }
+    }
+    // It shows the size the view has, as that changes elsewhere (Ctrl+wheel, a pinch).
+    show(ViewMode::thumbnails(300));
+    assert_eq!(shown_size_sliders(&window), ["300"]);
+    show(ViewMode::thumbnails(120));
+    assert_eq!(shown_size_sliders(&window), ["120"]);
+}
+
+/// The keys of the size slider reach it from the 보기 menu: 보기 방식 ▸ 썸네일 크기 조절.
+fn focus_size_slider(window: &MainWindow) {
+    window.invoke_show_view_menu();
+    choose_item(window, "보기 방식");
+    choose_item(window, "썸네일 크기 조절");
+    run_for(60);
+}
+
+#[test]
+fn the_size_slider_takes_the_keys_from_the_view_menu_and_gives_them_back() {
+    let (window, mut show) = slider_window();
+    show(ViewMode::thumbnails(120));
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_thumb_size_changed(move |side, size| record.note(format!("{side} {size}")));
+    let record = calls.clone();
+    window.on_size_key(move |text, _, _, _, _| {
+        record.note(format!("size-key {}", text.escape_unicode()));
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |text, _, _, _, _, _| {
+        record.note(format!("key {}", text.escape_unicode()));
+        true
+    });
+    let record = calls.clone();
+    window.on_view_command(move |side, name| record.note(format!("view {side} {name}")));
+    let listed = |key: Key| vec![format!("key {}", special(key).escape_unicode())];
+    // Before: the arrows are the list's.
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take(), listed(Key::RightArrow));
+    // The keyboard's way there: 보기 ▸ 보기 방식 ▸ 썸네일 크기 조절 (F10, ↑↓ → Enter).
+    focus_size_slider(&window);
+    assert_eq!(calls.take(), ["view 0 focus-size"]);
+    // → ← step it by 16 px, ↑ ↓ too, PageUp and PageDown by 64, Home and End to its ends; the
+    // list's keys do not see them.
+    for (key, wanted) in [
+        (Key::RightArrow, 136),
+        (Key::RightArrow, 152),
+        (Key::LeftArrow, 136),
+        (Key::UpArrow, 152),
+        (Key::DownArrow, 136),
+        (Key::PageUp, 200),
+        (Key::PageDown, 136),
+        (Key::End, 512),
+        (Key::Home, 64),
+    ] {
+        press(&window, key);
+        assert_eq!(calls.take(), [format!("0 {wanted}")], "{key:?}");
+    }
+    // Past an end it stays.
+    press(&window, Key::LeftArrow);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    // Another key is Rust's to judge (here it says it used it: a key of the rows).
+    press(&window, Key::Delete);
+    assert_eq!(
+        calls.take(),
+        [format!(
+            "size-key {}",
+            special(Key::Delete).escape_unicode()
+        )]
+    );
+    // Esc gives the keys back to the list, and so does Tab.
+    for key in [Key::Escape, Key::Tab] {
+        focus_size_slider(&window);
+        calls.take();
+        press(&window, key);
+        assert_eq!(calls.take(), Vec::<String>::new(), "{key:?}");
+        press(&window, Key::RightArrow);
+        assert_eq!(calls.take(), listed(Key::RightArrow), "{key:?}");
+    }
+    // The view going while the slider has the keys gives them to the list.
+    focus_size_slider(&window);
+    calls.take();
+    show(ViewMode::Details);
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), listed(Key::DownArrow));
+    // Outside the thumbnail view the menu's item does nothing.
+    focus_size_slider(&window);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    press(&window, Key::Escape);
+    press(&window, Key::Escape);
+}
+
+#[test]
+fn switching_views_keeps_the_selection_and_the_cursor_and_the_tiles_tell_three_lines() {
+    let window = window();
+    let models = PaneModels::default();
+    let mut pane = listed_pane(vec![
+        entry("docs", EntryKind::Dir, 0),
+        entry("notes.txt", EntryKind::File, 3100),
+        entry("설계안.pdf", EntryKind::File, 1_258_291),
+    ]);
+    {
+        let tab = pane.active_tab_mut();
+        let (selection, rows) = tab.selection_mut();
+        selection.click(1, rows);
+        selection.toggle(2, rows);
+    }
+    for mode in ViewMode::ALL
+        .into_iter()
+        .chain([ViewMode::thumbnails(MIN_THUMB_SIZE), ViewMode::Details])
+    {
+        pane.active_tab_mut().set_view(FolderView {
+            mode,
+            ..FolderView::default()
+        });
+        window.set_left_pane(models.view(&pane, true));
+        let view = window.get_left_pane();
+        assert_eq!(view.cursor, 2, "{mode:?}");
+        for (name, selected) in [("docs", false), ("notes.txt", true), ("설계안.pdf", true)] {
+            let items = labelled(&window, name, AccessibleRole::ListItem);
+            assert_eq!(items.len(), 1, "{name} in {mode:?}");
+            assert_eq!(
+                items[0].accessible_item_selected(),
+                Some(selected),
+                "{name} in {mode:?}"
+            );
+        }
+        // A tile has its kind and its size beside the icon; a folder no size.
+        let shows = |text: &str| !labelled(&window, text, AccessibleRole::Text).is_empty();
+        let tiles = mode == ViewMode::Tiles;
+        assert_eq!(
+            shows("1.2 MB"),
+            tiles || mode == ViewMode::Details,
+            "{mode:?}"
+        );
+        if tiles {
+            let tile = labelled(&window, "설계안.pdf", AccessibleRole::ListItem).remove(0);
+            let size = labelled(&window, "1.2 MB", AccessibleRole::Text).remove(0);
+            let (at, room) = (tile.absolute_position(), tile.size());
+            let (size_at, size_room) = (size.absolute_position(), size.size());
+            assert!(
+                size_at.x > at.x + 48.0 && size_at.y + size_room.height <= at.y + room.height,
+                "{size_at:?} in {at:?} {room:?}"
+            );
+            assert_eq!(room.height, 60.0);
+        }
+    }
+}
+
+#[test]
+fn the_grid_holds_as_many_items_a_row_as_rust_reckons() {
+    let window = window();
+    let models = PaneModels::default();
+    let mut pane = listed_pane(
+        (0..40)
+            .map(|i| entry(&format!("p{i:02}.png"), EntryKind::File, 10))
+            .collect(),
+    );
+    for (width, height) in [(1280.0, 800.0), (900.0, 560.0), (1900.0, 1000.0)] {
+        window.window().set_size(LogicalSize::new(width, height));
+        for mode in [
+            ViewMode::Tiles,
+            ViewMode::thumbnails(MIN_THUMB_SIZE),
+            ViewMode::thumbnails(DEFAULT_THUMB_SIZE),
+            ViewMode::thumbnails(MAX_THUMB_SIZE),
+            ViewMode::MediumIcons,
+            ViewMode::ExtraLargeIcons,
+        ] {
+            pane.active_tab_mut().set_view(FolderView {
+                mode,
+                ..FolderView::default()
+            });
+            window.set_left_pane(models.view(&pane, true));
+            // The icons' list is as wide as the grid: the left pane's.
+            let list = element_of(&window, "FileGrid::icons", false);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a pane is a few hundred pixels wide"
+            )]
+            let room = list.size().width.floor() as u32;
+            let shape = grid_shape(mode, room, 40).expect("rows of items");
+            assert_eq!(
+                usize::try_from(window.get_line_items()).ok(),
+                Some(shape.per_row),
+                "{mode:?} in {room}"
+            );
+        }
+    }
 }

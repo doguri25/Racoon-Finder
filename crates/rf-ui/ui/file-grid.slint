@@ -1,14 +1,19 @@
-// The rows of a folder listing in 목록 and the icon views (NAV-06); 자세히 is `file-list.slint`.
+// The rows of a folder listing in 목록, the icon views, the thumbnails and the tiles (NAV-06);
+// 자세히 is `file-list.slint`.
 //
-// Both are virtualized, as 자세히 is: the icon views are a ListView of rows of icons, as many
-// in a row as the width holds, and only the rows on screen exist; 목록 lays the names out top to
-// bottom and then in the next column, scrolls sideways (the wheel too), and makes only the
-// columns on screen. A folder of 100,000 items costs no more than one of ten.
+// All are virtualized, as 자세히 is: the icon views, the thumbnails and the tiles are a ListView
+// of rows of items, as many in a row as the width holds (Rust's `state::grid_shape` reckons it
+// the same way, from the same cells: `ViewMode::cell`), and only the rows on screen exist; 목록
+// lays the names out top to bottom and then in the next column, scrolls sideways (the wheel
+// too), and makes only the columns on screen. A folder of 100,000 items costs no more than one
+// of ten.
 //
-// From the medium icons up, a file shows its thumbnail (VIEW-09) in the place of its icon once
-// Rust has it (`FileRow.thumb`), fitted to the icon's square in its own ratio; until then, and
-// for a folder, its kind's icon shows. The list tells which items are on screen
-// (`visible-changed`), for Rust to ask for theirs first.
+// From the medium icons up, in the thumbnails and in the tiles, a file shows its thumbnail
+// (VIEW-09) in the place of its icon once Rust has it (`FileRow.thumb`), fitted to the icon's
+// square in its own ratio; until then, and for a folder, its kind's icon shows. The thumbnails
+// are a square of any size from 64 to 512 px (`thumb-size`), which Rust asks the pictures for
+// in a few steps only: a picture made for a larger step is drawn down to the square. The list
+// tells which items are on screen (`visible-changed`), for Rust to ask for theirs first.
 //
 // An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
 // same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
@@ -42,13 +47,16 @@ enum TileEvent {
     check,
 }
 
-// One item: its icon, and its name beside a small icon or under a larger one.
+// One item: its icon, and its name beside a small icon or under a larger one; in the tiles, a
+// 48 px icon beside three lines (the name, the kind and the size).
 component Tile inherits Rectangle {
     in property <FileRow> item;
     // Its position in the rows.
     in property <int> index;
-    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large.
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large, 6 thumbnails, 7 tiles.
     in property <int> mode;
+    // The side of the thumbnails' square (mode 6).
+    in property <length> thumb-size: 192px;
     // The keyboard cursor is on it (in the pane with the keyboard), a drag would go into it.
     in property <bool> cursor-here;
     in property <bool> drop-here;
@@ -59,15 +67,21 @@ component Tile inherits Rectangle {
     // What the pointer did, with the modifiers of a press and the command of a menu item.
     callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
 
-    private property <bool> big: root.mode >= 3;
+    // The name under the icon (the medium icons up, and the thumbnails), or beside it.
+    private property <bool> big: root.mode >= 3 && root.mode <= 6;
+    private property <bool> tiled: root.mode == 7;
     // What the checkbox takes before the icon of the smaller items.
     private property <length> check-room: root.checkboxes && !root.big ? 22px : 0px;
-    // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up.
-    private property <length> icon-size: root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 ? 48px : 18px;
-    private property <bool> pictured: root.big && root.item.thumb.width > 0;
+    // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up, the
+    // thumbnails' own size, and 48 in the tiles.
+    private property <length> icon-size: root.mode == 6 ? root.thumb-size : root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 || root.tiled ? 48px : 18px;
+    private property <bool> pictured: (root.big || root.tiled) && root.item.thumb.width > 0;
     // Where the name begins: under the icon of a large item, after the icon of the others.
-    private property <length> name-x: 8px + root.check-room + root.icon-size + 8px;
+    private property <length> name-x: 8px + root.check-room + root.icon-size + (root.tiled ? 10px : 8px);
     private property <length> name-y: 8px + root.icon-size + 6px;
+    // The line of a kind's icon: thinner as the icon grows, so that it looks the same past the
+    // extra large icons' 160 px.
+    private property <length> stroke: root.icon-size >= 160px ? 0.8px * (160px / root.icon-size) : root.icon-size >= 96px ? 1.1px : 1.8px;
 
     // Whether the point (`x`, `y`) of the item is on its name rather than its icon.
     pure function on-name(x: length, y: length) -> bool {
@@ -137,18 +151,43 @@ component Tile inherits Rectangle {
             y: root.big ? 8px : (parent.height - self.height) / 2;
             width: root.icon-size;
             height: root.icon-size;
-            stroke-width: root.mode == 5 ? 0.8px : root.mode == 4 ? 1.1px : 1.8px;
+            stroke-width: root.stroke;
             name: root.item.icon;
             color: root.item.is-dir ? Theme.folder : Theme.muted;
         }
         if root.pictured: Image {
-            x: (parent.width - self.width) / 2;
-            y: 8px;
+            x: root.tiled ? 8px + root.check-room : (parent.width - self.width) / 2;
+            y: root.tiled ? (parent.height - self.height) / 2 : 8px;
             width: root.icon-size;
             height: root.icon-size;
             source: root.item.thumb;
             image-fit: contain;
             accessible-role: none;
+        }
+        // The tiles' three lines: the name, the kind and the size (none for a folder).
+        if root.tiled: VerticalLayout {
+            x: root.name-x;
+            width: parent.width - self.x - 6px;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.kind;
+                color: Theme.muted;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.size;
+                color: Theme.muted;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
         }
         if root.big: Text {
             x: 4px;
@@ -162,7 +201,7 @@ component Tile inherits Rectangle {
             wrap: word-wrap;
             overflow: elide;
         }
-        if !root.big: Text {
+        if !root.big && !root.tiled: Text {
             x: root.name-x;
             width: parent.width - self.x - 6px;
             height: parent.height;
@@ -199,8 +238,10 @@ component Tile inherits Rectangle {
 
 export component FileGrid inherits Rectangle {
     in property <[FileRow]> rows;
-    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large.
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large, 6 thumbnails, 7 tiles.
     in property <int> mode: 3;
+    // The side of the thumbnails' square (mode 6), 64 to 512 px.
+    in property <length> thumb-size: 192px;
     // The keyboard cursor's item, or -1.
     in property <int> cursor: -1;
     // Whether this list's pane has the keyboard; the cursor frame shows only then.
@@ -233,9 +274,11 @@ export component FileGrid inherits Rectangle {
 
     private property <bool> columnar: root.mode == 1;
     private property <length> pad: 8px;
-    // The room of an item; an item takes all of it but a 4px gap.
-    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : root.mode == 4 ? 136px : 184px;
-    private property <length> tile-h: root.mode <= 2 ? 30px : root.mode == 3 ? 112px : root.mode == 4 ? 156px : 220px;
+    // The room of an item; an item takes all of it but a 4px gap. The same as Rust's
+    // `ViewMode::cell` (a test holds the two together): the thumbnails' square with 12px at
+    // each side and two lines of the name under it, and the tiles 260 × 64.
+    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : root.mode == 4 ? 136px : root.mode == 6 ? root.thumb-size + 24px : root.mode == 7 ? 260px : 184px;
+    private property <length> tile-h: root.mode <= 2 ? 30px : root.mode == 3 ? 112px : root.mode == 4 ? 156px : root.mode == 6 ? root.thumb-size + 60px : root.mode == 7 ? 64px : 220px;
     // The scroll bar's room, which the items leave free.
     private property <length> bar: 14px;
     // The icons: how many a row holds, and how many rows there are.
@@ -466,6 +509,7 @@ export component FileGrid inherits Rectangle {
                         visible: self.index < root.rows.length;
                         item: root.rows[self.index];
                         mode: root.mode;
+                        thumb-size: root.thumb-size;
                         cursor-here: root.active && self.index == root.cursor;
                         drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                         drag-data: root.drag-data;
@@ -518,6 +562,7 @@ export component FileGrid inherits Rectangle {
                             visible: self.index < root.rows.length;
                             item: root.rows[self.index];
                             mode: root.mode;
+                            thumb-size: root.thumb-size;
                             cursor-here: root.active && self.index == root.cursor;
                             drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
                             drag-data: root.drag-data;

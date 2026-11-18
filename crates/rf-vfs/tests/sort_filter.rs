@@ -184,6 +184,62 @@ fn created_and_extension_orders() {
     );
 }
 
+#[test]
+fn an_unknown_access_time_sorts_last_both_ways_and_ties_keep_their_order() {
+    let at = |name: &str, secs: Option<u64>| {
+        let mut x = f(name);
+        x.accessed = secs.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+        x
+    };
+    let v = || {
+        vec![
+            at("b-unknown", None),
+            at("new", Some(30)),
+            at("a-unknown", None),
+            at("old", Some(10)),
+            at("also-old", Some(10)),
+            d("folder"),
+        ]
+    };
+    // The folder has no time either: with folders first it goes first all the same, without
+    // them it goes with the other unknown times, by name.
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Accessed, Ascending), true)),
+        ["folder", "also-old", "old", "new", "a-unknown", "b-unknown"]
+    );
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Accessed, Descending), true)),
+        ["folder", "new", "also-old", "old", "a-unknown", "b-unknown"]
+    );
+    assert_eq!(
+        sorted(v(), spec(by(SortKey::Accessed, Descending), false)),
+        ["new", "also-old", "old", "a-unknown", "b-unknown", "folder"]
+    );
+    // Equal keys and names compare equal, so the sort keeps them as they came, either way.
+    let mut twins = vec![
+        at("x", None),
+        at("x", None),
+        at("x", Some(5)),
+        at("x", Some(5)),
+    ];
+    twins[0].size = 1;
+    twins[2].size = 3;
+    for order in [Ascending, Descending] {
+        let mut v = twins.clone();
+        sort_entries(&mut v, &spec(by(SortKey::Accessed, order), false));
+        let sizes: Vec<u64> = v.iter().map(|x| x.size).collect();
+        assert_eq!(sizes, [3, 0, 1, 0], "{order:?}");
+    }
+    assert_eq!(
+        compare_entries(
+            &at("x", None),
+            &at("x", Some(1)),
+            &spec(by(SortKey::Accessed, Descending), false)
+        ),
+        Ordering::Greater
+    );
+}
+
 /// Only a file has an extension to sort by, as the 확장자 column shows: a link may lead to a
 /// folder (`앨범.2025`), which the listing does not tell, so it sorts with the items that have
 /// none, by its name, and so does it among the links of a kind sort.

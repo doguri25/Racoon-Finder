@@ -1,6 +1,8 @@
-//! The thumbnails of the icon views (VIEW-09): a pool of worker threads that makes them for the
-//! items on screen, a memory cache of the last [`MEMORY_THUMBS`] and a disk cache under the app's
-//! cache folder, and what the controller asks of it.
+//! The thumbnails of the icon views, the thumbnail view and the tiles (VIEW-09, NAV-06): a pool
+//! of worker threads that makes them for the items on screen, a memory cache of the last
+//! [`MEMORY_THUMBS`] (and no more than [`MEMORY_BYTES`] of pixels: the thumbnail view asks for
+//! pictures up to 512 px a side, times the window's scale) and a disk cache under the app's cache
+//! folder, and what the controller asks of it.
 //!
 //! The window never waits for a thumbnail. The controller hands the pool the files on screen
 //! ([`ThumbPool::want`], in their order there: [`schedule`]), with the generation of the tab's
@@ -68,6 +70,10 @@ pub const THUMB_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CACHE_CAP: u64 = 256 * 1024 * 1024;
 /// How many thumbnails the pool keeps in memory: the most recently made or read.
 pub const MEMORY_THUMBS: usize = 512;
+/// How many bytes of pixels the pool keeps in memory at most, whatever their number: 512
+/// pictures of the thumbnail view's largest step at a scale of 2 would be 2 GiB. The one used
+/// longest ago goes first; the last one made stays, however large.
+pub const MEMORY_BYTES: usize = 256 * 1024 * 1024;
 /// The disk cache is checked against [`CACHE_CAP`] after this many files written.
 pub const PRUNE_EVERY: u64 = 1000;
 /// The fewest and the most workers of a pool ([`worker_count`]).
@@ -161,6 +167,8 @@ struct Inner {
     workers: usize,
     timeout: Duration,
     max_stuck: usize,
+    /// The most bytes of pixels the memory holds ([`MEMORY_BYTES`]).
+    memory_bytes: usize,
     /// The decode permits to wait for, and how long.
     permits: &'static Permits,
     permit_wait: Duration,
@@ -176,8 +184,10 @@ struct State {
     /// while it waits for a decode permit (the watchdog does not time that).
     running: HashMap<u64, (Task, Option<Instant>)>,
     ready: Vec<Done>,
-    /// The last thumbnails made or read, by key, with the time of their last use (a count).
+    /// The last thumbnails made or read, by key, with the time of their last use (a count), and
+    /// how many bytes of pixels they hold together.
     memory: HashMap<String, (Pixels, u64)>,
+    memory_held: usize,
     uses: u64,
     /// The keys of the generation's files that have no thumbnail.
     none: HashSet<String>,
@@ -235,6 +245,7 @@ impl ThumbPool {
                     running: HashMap::new(),
                     ready: Vec::new(),
                     memory: HashMap::new(),
+                    memory_held: 0,
                     uses: 0,
                     none: HashSet::new(),
                     timed_out: HashMap::new(),
@@ -254,6 +265,7 @@ impl ThumbPool {
                 workers: workers.max(1),
                 timeout,
                 max_stuck,
+                memory_bytes: MEMORY_BYTES,
                 permits: &DECODING,
                 permit_wait: PERMIT_WAIT,
             }),
@@ -358,20 +370,32 @@ impl State {
         Some(pixels.clone())
     }
 
-    /// Keeps `pixels` as `key`'s, forgetting the one used longest ago past [`MEMORY_THUMBS`].
-    fn keep(&mut self, key: String, pixels: Pixels) {
+    /// Keeps `pixels` as `key`'s, forgetting the ones used longest ago past [`MEMORY_THUMBS`]
+    /// or past `budget` bytes of pixels; the one just kept stays.
+    fn keep(&mut self, key: String, pixels: Pixels, budget: usize) {
         self.uses += 1;
-        self.memory.insert(key, (pixels, self.uses));
-        if self.memory.len() > MEMORY_THUMBS
+        self.memory_held += pixel_bytes(&pixels);
+        if let Some((old, _)) = self.memory.insert(key, (pixels, self.uses)) {
+            self.memory_held = self.memory_held.saturating_sub(pixel_bytes(&old));
+        }
+        while self.memory.len() > 1
+            && (self.memory.len() > MEMORY_THUMBS || self.memory_held > budget)
             && let Some(oldest) = self
                 .memory
                 .iter()
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(key, _)| key.clone())
         {
-            self.memory.remove(&oldest);
+            if let Some((gone, _)) = self.memory.remove(&oldest) {
+                self.memory_held = self.memory_held.saturating_sub(pixel_bytes(&gone));
+            }
         }
     }
+}
+
+/// How many bytes the pixels of a picture take (4 a pixel).
+fn pixel_bytes(pixels: &Pixels) -> usize {
+    pixels.as_bytes().len()
 }
 
 /// Starts the workers the pool lacks, and the watchdog with the first ones (which prunes the
@@ -459,7 +483,7 @@ fn work(inner: &Arc<Inner>, id: u64) {
         }
         let current = task.generation == state.generation;
         match &made {
-            Made::Pixels(pixels) => state.keep(task.key, pixels.clone()),
+            Made::Pixels(pixels) => state.keep(task.key, pixels.clone(), inner.memory_bytes),
             Made::Nothing if current => {
                 state.none.insert(task.key);
             }
@@ -1404,6 +1428,68 @@ mod tests {
         pool.want(2, vec![want(dir.path(), "a.dat", 0)]);
         assert_eq!(collect(&pool, 1), [("a.dat".to_owned(), 2, Some((20, 10)))]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_memory_keeps_to_its_bytes_as_well_as_its_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _calls) = counting();
+        let mut pool = ThumbPool::new(1, dir.path().join("cache"), provider);
+        // Room for two of the provider's 20 × 10 pictures (800 bytes each), not three.
+        Arc::get_mut(&mut pool.inner)
+            .expect("no thread holds the pool yet")
+            .memory_bytes = 2000;
+        for name in ["a.dat", "b.dat", "c.dat"] {
+            pool.want(1, vec![want(dir.path(), name, 0)]);
+            assert_eq!(collect(&pool, 1).len(), 1, "{name}");
+        }
+        assert_eq!(pool.inner.lock().memory_held, 1600);
+        // The two made last are in memory; the first went.
+        let in_memory = |name: &str| {
+            let wanted = want(dir.path(), name, 0);
+            let key = cache_key(&wanted.path, wanted.len, wanted.mtime, wanted.size);
+            pool.inner.lock().memory.contains_key(&key)
+        };
+        assert!(!in_memory("a.dat") && in_memory("b.dat") && in_memory("c.dat"));
+        // Asked for again (from the disk cache), a is in memory again, and b, used longest ago
+        // now, goes.
+        pool.want(2, vec![want(dir.path(), "a.dat", 0)]);
+        assert_eq!(collect(&pool, 1).len(), 1);
+        assert!(in_memory("a.dat") && !in_memory("b.dat") && in_memory("c.dat"));
+        // One picture larger than the whole room is kept all the same, alone.
+        let mut state = pool.inner.lock();
+        state.keep("big".to_owned(), SharedPixelBuffer::new(100, 100), 2000);
+        assert_eq!(state.memory.len(), 1);
+        assert_eq!(state.memory_held, 40_000);
+    }
+
+    #[test]
+    fn a_drag_of_the_thumbnail_size_makes_each_step_once() {
+        use crate::state::{MAX_THUMB_SIZE, MIN_THUMB_SIZE, THUMB_STEPS, thumb_request_side};
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, calls) = counting();
+        let pool = ThumbPool::new(1, dir.path().join("cache"), provider);
+        // The slider from one end to the other and back, a pixel at a time. The controller asks
+        // again only when the side asked for is not the one the file shows (`has_thumb`): here,
+        // when the step changes.
+        let up = MIN_THUMB_SIZE..=MAX_THUMB_SIZE;
+        let mut shown = None;
+        let mut asked = 0;
+        for size in up.clone().chain(up.rev()) {
+            let side = thumb_request_side(size);
+            if shown == Some(side) {
+                continue;
+            }
+            shown = Some(side);
+            let mut wanted = want(dir.path(), "a.dat", 0);
+            wanted.size = side;
+            pool.want(1, vec![wanted]);
+            assert_eq!(collect(&pool, 1).len(), 1, "{size}");
+            asked += 1;
+        }
+        // Seven asks (four steps up, three back down); the way back comes from memory.
+        assert_eq!(asked, 2 * THUMB_STEPS.len() - 1);
+        assert_eq!(calls.load(Ordering::SeqCst), THUMB_STEPS.len());
     }
 
     #[test]

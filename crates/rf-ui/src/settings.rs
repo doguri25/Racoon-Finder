@@ -69,8 +69,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::state::{
-    Column, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, SavedPlace, ShownColumn,
-    StoredView, TreeMode, UnknownParts, ViewMode, ViewStore,
+    Column, DEFAULT_THUMB_SIZE, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, SavedPlace,
+    ShownColumn, StoredView, TreeMode, UnknownParts, ViewMode, ViewStore,
 };
 
 /// The name of the settings file in the config folder.
@@ -504,15 +504,20 @@ pub struct FolderViewSettings {
     /// The folder, as `VPath::to_uri`.
     #[serde(deserialize_with = "or_default")]
     pub folder: String,
-    /// The view mode: `list`, `small-icons`, `medium-icons`, `large-icons`, or 자세히
-    /// (`details`, or none).
+    /// The view mode: `list`, `small-icons`, `medium-icons`, `large-icons`,
+    /// `extra-large-icons`, `thumbnails`, `tiles`, or 자세히 (`details`, or none).
     #[serde(
         skip_serializing_if = "String::is_empty",
         deserialize_with = "or_default"
     )]
     pub mode: String,
+    /// The size of the thumbnail view (`mode = "thumbnails"`), in logical pixels; none (0) for
+    /// the default, and in the other modes. A key of its own, not part of the mode's name, so
+    /// that 0.4.0, which knows neither, shows 자세히 and writes both back as they are.
+    #[serde(skip_serializing_if = "is_zero", deserialize_with = "or_default")]
+    pub thumb_size: u32,
     /// The columns of 자세히 after the name, in their order (`size`, `modified`, `created`,
-    /// `kind`, `extension`, `attributes`); none for the default ones.
+    /// `accessed`, `kind`, `extension`, `attributes`, `path`); none for the default ones.
     #[serde(
         skip_serializing_if = "Option::is_none",
         deserialize_with = "or_default"
@@ -556,6 +561,14 @@ pub struct FolderViewSettings {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's `skip_serializing_if` hands the field by reference"
+)]
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl FolderViewSettings {
@@ -609,7 +622,14 @@ impl FolderViewSettings {
                 key: then,
                 order: order(self.then_descending),
             });
-        let mode = ViewMode::from_name(&self.mode);
+        // The thumbnails at the size the entry gives, kept between the slider's ends; at the
+        // default size without one.
+        let mode = ViewMode::from_name(&self.mode).map(|mode| match mode {
+            ViewMode::Thumbnails { .. } if self.thumb_size > 0 => {
+                ViewMode::thumbnails(self.thumb_size)
+            }
+            mode => mode,
+        });
         if mode.is_none() && !self.mode.is_empty() {
             unknown.mode = Some(self.mode.clone());
         }
@@ -676,6 +696,11 @@ impl FolderViewSettings {
         FolderViewSettings {
             folder: stored.folder.clone(),
             mode,
+            // Of the thumbnails this version shows; an unknown mode in their place has none.
+            thumb_size: match (&unknown.mode, view.mode) {
+                (None, ViewMode::Thumbnails { size }) if size != DEFAULT_THUMB_SIZE => size,
+                _ => 0,
+            },
             columns,
             widths,
             sort: match &unknown.sort {
@@ -1491,7 +1516,9 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::state::{Column, FolderView, Layout, TreeMode, ViewMode, ViewStore};
+    use crate::state::{
+        Column, FolderView, Layout, MAX_THUMB_SIZE, MIN_THUMB_SIZE, TreeMode, ViewMode, ViewStore,
+    };
 
     fn folder(dir: &Path, name: &str) -> VPath {
         VPath::local(dir.join(name)).expect("a local path")
@@ -2131,7 +2158,7 @@ mod tests {
         let a = toml_string(&folder(dir.path(), "a").to_uri());
         let b = toml_string(&folder(dir.path(), "b").to_uri());
         let text = format!(
-            "theme = \"dark\"\n\n[[folder_views]]\nfolder = {a}\nmode = \"thumbnails\"\n\
+            "theme = \"dark\"\n\n[[folder_views]]\nfolder = {a}\nmode = \"gallery\"\n\
              columns = [\"size\", \"tags\", \"kind\", \"name\", \"size\"]\n\
              widths = [5000, 90, 0]\nsort = \"rating\"\ndescending = true\nthen = \"kind\"\n\
              zoom = 2\n\n[[folder_views]]\nfolder = {b}\nmode = 7\nsubfolders = \"yes\"\n\
@@ -2178,7 +2205,7 @@ mod tests {
         let written = again.to_text().expect("text");
         assert!(written.contains("zoom = 2"));
         let entry = &again.folder_views[0];
-        assert_eq!(entry.mode, "thumbnails");
+        assert_eq!(entry.mode, "gallery");
         assert_eq!(
             entry.columns.as_deref(),
             Some(&["size".to_owned(), "kind".to_owned(), "tags".to_owned()][..]),
@@ -2697,6 +2724,114 @@ mod tests {
             assert!(written.contains(&format!("tree = \"{name}\"")), "{written}");
             assert_eq!(load(dir.path()), writable(settings), "{layout:?}");
         }
+    }
+
+    #[test]
+    fn a_0_4_0_file_keeps_the_view_it_named_for_each_folder() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let a = toml_string(&folder(dir.path(), "a").to_uri());
+        // Each view name 0.4.0 wrote, and an entry without one (자세히).
+        let named = [
+            (Some("details"), ViewMode::Details),
+            (Some("list"), ViewMode::List),
+            (Some("small-icons"), ViewMode::SmallIcons),
+            (Some("medium-icons"), ViewMode::MediumIcons),
+            (Some("large-icons"), ViewMode::LargeIcons),
+            (Some("extra-large-icons"), ViewMode::ExtraLargeIcons),
+            (None, ViewMode::Details),
+        ];
+        let mut text = file_of_0_4_0(Some(""), &a);
+        for (i, (name, _)) in named.iter().enumerate() {
+            let at = toml_string(&folder(dir.path(), &format!("v{i}")).to_uri());
+            let mode = name
+                .map(|name| format!("mode = \"{name}\"\n"))
+                .unwrap_or_default();
+            text += "\n[[folder_views]]\nfolder = ";
+            text += &at;
+            text += "\n";
+            text += &mode;
+            text += "sort = \"modified\"\n";
+        }
+        std::fs::write(&file, &text).expect("written");
+
+        let loaded = load_at(dir.path());
+        assert!(loaded.writable && loaded.backup.is_none());
+        let views = loaded.settings.views();
+        for (i, (name, wanted)) in named.iter().enumerate() {
+            let own = views
+                .own(&folder(dir.path(), &format!("v{i}")))
+                .expect("its view");
+            assert_eq!(own.view.mode, *wanted, "{name:?}");
+            assert_eq!(own.unknown, UnknownParts::default(), "{name:?}");
+            assert_eq!(own.view.sort.primary.key, rf_vfs::SortKey::Modified);
+        }
+        // Saved and read again: the same views, the same names for them.
+        loaded.settings.save(dir.path()).expect("saved");
+        let written = std::fs::read_to_string(&file).expect("saved");
+        for (name, _) in &named {
+            if let Some(name) = name.filter(|name| *name != "details") {
+                assert!(written.contains(&format!("mode = \"{name}\"")), "{written}");
+            }
+        }
+        assert!(!written.contains("thumb_size"), "{written}");
+        assert_eq!(load(dir.path()).settings.views(), views);
+    }
+
+    #[test]
+    fn the_thumbnail_view_keeps_its_size_for_its_folder() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let (big, plain, tiles) = (
+            folder(dir.path(), "big"),
+            folder(dir.path(), "plain"),
+            folder(dir.path(), "tiles"),
+        );
+        let mut store = ViewStore::default();
+        let view = |mode| FolderView {
+            mode,
+            ..FolderView::default()
+        };
+        store.remember(&big, view(ViewMode::thumbnails(300)));
+        store.remember(&plain, view(ViewMode::thumbnails(DEFAULT_THUMB_SIZE)));
+        store.remember(&tiles, view(ViewMode::Tiles));
+        let mut settings = Settings::default();
+        settings.set_views(&store);
+        let text = settings.to_text().expect("text");
+        // The size is written apart from the mode's name, and only when it is not the default.
+        assert_eq!(text.matches("mode = \"thumbnails\"").count(), 2, "{text}");
+        assert_eq!(text.matches("thumb_size = 300").count(), 1, "{text}");
+        assert_eq!(text.matches("thumb_size").count(), 1, "{text}");
+        assert!(text.contains("mode = \"tiles\""), "{text}");
+        std::fs::write(dir.path().join(FILE_NAME), &text).expect("written");
+        let views = load(dir.path()).settings.views();
+        let mode = |at: &VPath| views.own(at).map(|own| own.view.mode);
+        assert_eq!(mode(&big), Some(ViewMode::thumbnails(300)));
+        assert_eq!(mode(&plain), Some(ViewMode::thumbnails(DEFAULT_THUMB_SIZE)));
+        assert_eq!(mode(&tiles), Some(ViewMode::Tiles));
+
+        // A size past the slider's ends is brought to them; one that is no size, or a size of
+        // another mode, is none.
+        let entry = |extra: &str| -> ViewMode {
+            let text = format!("[[folder_views]]\nfolder = \"x\"\n{extra}");
+            let settings: Settings = toml::from_str(&text).expect("read");
+            settings.folder_views[0].stored().view.mode
+        };
+        assert_eq!(
+            entry("mode = \"thumbnails\"\nthumb_size = 9000\n"),
+            ViewMode::thumbnails(MAX_THUMB_SIZE)
+        );
+        assert_eq!(
+            entry("mode = \"thumbnails\"\nthumb_size = 10\n"),
+            ViewMode::thumbnails(MIN_THUMB_SIZE)
+        );
+        for odd in ["-5", "\"big\"", "2.5", "0"] {
+            assert_eq!(
+                entry(&format!("mode = \"thumbnails\"\nthumb_size = {odd}\n")),
+                ViewMode::thumbnails(DEFAULT_THUMB_SIZE),
+                "{odd}"
+            );
+        }
+        assert_eq!(entry("mode = \"list\"\nthumb_size = 300\n"), ViewMode::List);
     }
 
     #[test]

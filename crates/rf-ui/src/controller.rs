@@ -906,8 +906,22 @@ fn connect_view(window: &MainWindow) {
             "folders-first" => c.update(|state| state.toggle_folders_first(side)),
             "apply-below" => c.update(|state| state.apply_view_to_subfolders(side)),
             "reset-view" => c.update(|state| state.reset_view(side)),
+            // "focus-size" (the slider takes the keys) is the window's alone.
             _ => {}
         });
+    });
+    // The thumbnail view's size slider (NAV-06): a drag, a click on its rail, its keys.
+    window.on_thumb_size_changed(|s, size| {
+        with(|c| c.thumb_slider(side(s), size));
+    });
+    window.on_size_key(|text, ctrl, shift, alt, meta| {
+        let mods = Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        with(|c| c.size_key(&text, mods)).unwrap_or(false)
     });
 }
 
@@ -2229,6 +2243,18 @@ impl Controller {
         keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
     }
 
+    /// A key while the size slider of the thumbnail view has the keys, which it has not used
+    /// itself (its arrows, Home and End); `true` when it is used there: one of the panes' rows
+    /// does nothing, as from the tree ([`Controller::tree_key`]), and any other goes on to the
+    /// window's keys (`false`). The keys that leave the slider are the window's own
+    /// (`MainWindow`).
+    fn size_key(&self, text: &str, mods: Mods) -> bool {
+        if let Some(used) = self.held_key(text, mods) {
+            return used;
+        }
+        keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
+    }
+
     /// A key while the job panel has the keys; `true` when it is used there, as with the tree
     /// ([`Controller::tree_key`]).
     fn panel_key(&self, text: &str, mods: Mods) -> bool {
@@ -3171,6 +3197,8 @@ impl Controller {
             "view-medium-icons" => Command::ViewMediumIcons,
             "view-large-icons" => Command::ViewLargeIcons,
             "view-extra-large-icons" => Command::ViewExtraLargeIcons,
+            "view-thumbnails" => Command::ViewThumbnails,
+            "view-tiles" => Command::ViewTiles,
             "fit-columns" => Command::FitColumns,
             "quick-look" => Command::QuickLook,
             "cut" => Command::Cut,

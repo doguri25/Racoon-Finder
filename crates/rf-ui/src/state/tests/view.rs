@@ -400,7 +400,7 @@ fn a_choice_in_a_menu_or_on_a_head_makes_an_unknown_part_this_version_s() {
                 view: FolderView::default(),
                 subfolders: false,
                 unknown: UnknownParts {
-                    mode: Some("thumbnails".to_owned()),
+                    mode: Some("gallery".to_owned()),
                     sort: Some("rating".to_owned()),
                     then: Some(("tags".to_owned(), true)),
                     columns: vec![("tags".to_owned(), 80)],
@@ -422,7 +422,7 @@ fn a_choice_in_a_menu_or_on_a_head_makes_an_unknown_part_this_version_s() {
     newer(&mut state);
     // A column shown chose none of them.
     state.toggle_column(LEFT, Column::Created);
-    assert_eq!(unknown(&state).mode.as_deref(), Some("thumbnails"));
+    assert_eq!(unknown(&state).mode.as_deref(), Some("gallery"));
     assert_eq!(unknown(&state).then, Some(("tags".to_owned(), true)));
     // 자세히 chosen, which it showed as: the mode is this version's.
     state.set_view_mode(LEFT, ViewMode::Details);
@@ -487,4 +487,116 @@ fn thumbnails_show_until_the_setting_says_otherwise() {
     assert!(state.show_thumbnails());
     state.set_show_thumbnails(false);
     assert!(!state.show_thumbnails());
+}
+
+#[test]
+fn the_thumbnail_view_keeps_its_size_for_its_folder_and_opens_at_the_last_one() {
+    let mut state = ready_settled(files(5), vec![file("z")]);
+    let menu = |state: &mut AppState, command| {
+        let effects = state
+            .key(command, NONE, Paging::rows(10), Instant::now())
+            .expect("a command of the menu");
+        settled(state, effects)
+    };
+    // 보기 방식 ▸ 썸네일: at the default size first.
+    assert_eq!(
+        menu(&mut state, Command::ViewThumbnails),
+        [Effect::ScrollTo { side: LEFT, row: 0 }]
+    );
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(DEFAULT_THUMB_SIZE));
+    // The slider: any size between its ends, remembered for the folder; none past them.
+    assert_eq!(
+        state.set_thumb_size(LEFT, 300),
+        [Effect::ScrollTo { side: LEFT, row: 0 }],
+        "the cursor stays in view"
+    );
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(300));
+    assert_eq!(
+        state.views().own(&folder("a")).map(|own| own.view.mode),
+        Some(ViewMode::thumbnails(300))
+    );
+    state.set_thumb_size(LEFT, 9_000);
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(MAX_THUMB_SIZE));
+    assert_eq!(
+        state.set_thumb_size(LEFT, MAX_THUMB_SIZE + 1),
+        [],
+        "no change"
+    );
+    state.set_thumb_size(LEFT, 0);
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(MIN_THUMB_SIZE));
+    state.set_thumb_size(LEFT, 250);
+    // 썸네일 again keeps the size the pane shows.
+    menu(&mut state, Command::ViewThumbnails);
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(250));
+    assert_eq!(state.views().last_thumb_size(), Some(250));
+
+    // Another folder opens them at the size of the folder that showed them last.
+    state.activate(RIGHT);
+    menu(&mut state, Command::ViewThumbnails);
+    assert_eq!(mode(&state, RIGHT), ViewMode::thumbnails(250));
+    state.set_thumb_size(RIGHT, 120);
+    assert_eq!(state.views().last_thumb_size(), Some(120));
+    // In another view the slider is gone, and a size changes nothing.
+    menu(&mut state, Command::ViewTiles);
+    assert_eq!(mode(&state, RIGHT), ViewMode::Tiles);
+    assert_eq!(state.set_thumb_size(RIGHT, 100), []);
+    assert_eq!(mode(&state, RIGHT), ViewMode::Tiles);
+    // Now the left pane's folder is the last to show them.
+    assert_eq!(state.views().last_thumb_size(), Some(250));
+    // The left pane's folder keeps its own size through a visit elsewhere.
+    state.activate(LEFT);
+    let effects = state.go_to(folder("b"));
+    settled(&mut state, effects);
+    assert_eq!(mode(&state, LEFT), ViewMode::Tiles, "b's view");
+    let effects = press(&mut state, &special(Key::LeftArrow), ALT).expect("used");
+    settled(&mut state, effects);
+    assert_eq!(mode(&state, LEFT), ViewMode::thumbnails(250), "a's view");
+}
+
+#[test]
+fn a_change_of_the_thumbnail_size_keeps_the_cursor_in_view() {
+    let mut state = ready_settled(files(40), vec![]);
+    state.show_thumbnail_view(LEFT);
+    state.click_row(LEFT, 30, false, false);
+    assert_eq!(
+        state.set_thumb_size(LEFT, 100),
+        [Effect::ScrollTo {
+            side: LEFT,
+            row: 30
+        }]
+    );
+    // An empty folder has no cursor to keep in view.
+    let mut empty = ready_settled(Vec::new(), vec![]);
+    empty.show_thumbnail_view(LEFT);
+    assert_eq!(cursor(&empty, LEFT), None);
+    assert_eq!(empty.set_thumb_size(LEFT, 100), []);
+    assert_eq!(mode(&empty, LEFT), ViewMode::thumbnails(100));
+}
+
+#[test]
+fn switching_views_keeps_the_selection_and_the_cursor() {
+    let mut state = ready_settled(files(12), vec![]);
+    state.click_row(LEFT, 2, false, false);
+    state.click_row(LEFT, 7, true, false);
+    state.click_row(LEFT, 9, true, false);
+    let wanted = (selected(&state, LEFT), cursor(&state, LEFT));
+    assert_eq!(wanted, (vec![2, 7, 9], Some(9)));
+    for mode_now in ViewMode::ALL
+        .into_iter()
+        .chain([ViewMode::thumbnails(80), ViewMode::Details])
+    {
+        let effects = state.set_view_mode(LEFT, mode_now);
+        let effects = settled(&mut state, effects);
+        assert_eq!(
+            effects,
+            [Effect::ScrollTo { side: LEFT, row: 9 }],
+            "{mode_now:?}"
+        );
+        assert_eq!(mode(&state, LEFT), mode_now);
+        assert_eq!(
+            (selected(&state, LEFT), cursor(&state, LEFT)),
+            wanted,
+            "{mode_now:?}"
+        );
+    }
 }

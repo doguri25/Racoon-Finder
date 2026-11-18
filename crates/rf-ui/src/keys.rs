@@ -131,14 +131,17 @@ pub enum Command {
     /// Show or hide the extensions of the files' names (파일 확장자 보기).
     ToggleExtensions,
     /// The view modes (NAV-06): one row per item with columns (자세히), names in columns (목록),
-    /// and icons of four sizes. 특대 has no key (File Explorer's Ctrl+Shift+1 is not assigned):
-    /// the 보기 menu, Ctrl+wheel and a pinch reach it.
+    /// icons of four sizes, the thumbnails at a size of their own, and tiles. 특대, 썸네일 and
+    /// 타일 have no key (File Explorer's Ctrl+Shift+1 and Ctrl+Shift+7 are not assigned): the
+    /// 보기 menu reaches them, and Ctrl+wheel and a pinch 특대.
     ViewDetails,
     ViewList,
     ViewSmallIcons,
     ViewMediumIcons,
     ViewLargeIcons,
     ViewExtraLargeIcons,
+    ViewThumbnails,
+    ViewTiles,
     /// Fit every column of 자세히 to its texts in the rows on screen (모든 열 너비 맞추기).
     FitColumns,
     /// Open the 보기 menu.
@@ -2108,6 +2111,8 @@ mod tests {
             C::ViewMediumIcons,
             C::ViewLargeIcons,
             C::ViewExtraLargeIcons,
+            C::ViewThumbnails,
+            C::ViewTiles,
         ] {
             assert!(!command.acts_on_rows(), "{command:?}");
         }
