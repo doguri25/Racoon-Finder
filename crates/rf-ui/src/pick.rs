@@ -364,6 +364,11 @@ pub struct Picker {
     /// The folder 새 폴더 asked for, by its folder and its name: it becomes the target once
     /// its job has made it.
     pub making: Option<(VPath, OsString)>,
+    /// The target is the last place a copy or a move went to, which 보기 ▸ 설정 has the picker
+    /// start at (PICK-05), and no choice of the user's: when a worker finds that it can take
+    /// nothing (it is gone), the picker goes to its first quick target. Any target chosen or
+    /// typed since clears it.
+    pub from_last: bool,
 }
 
 /// What [`Picker::looked`] did with a worker's result.
@@ -407,6 +412,7 @@ impl Picker {
             policy: ConflictPolicy::Ask,
             follow_links: false,
             making: None,
+            from_last: false,
         }
     }
 
@@ -467,6 +473,14 @@ impl Picker {
         }
     }
 
+    /// The first quick target that can be chosen, as far as is known without looking at it,
+    /// other than `not`: where the picker starts by default (the other pane's folder).
+    pub fn first_target(&self, not: &VPath) -> Option<VPath> {
+        self.targets()
+            .find(|item| item.validity.can_choose() && item.path != *not)
+            .map(|item| item.path.clone())
+    }
+
     /// The quick targets in the order they show, every head's in turn.
     pub fn targets(&self) -> impl Iterator<Item = &Target> {
         self.groups.iter().flat_map(|group| &group.items)
@@ -522,6 +536,7 @@ impl Picker {
     /// the look a worker is to take at it. The path field shows it from now on, whatever was
     /// typed there, and the filter's first folder is no longer taken by Enter.
     pub fn choose(&mut self, path: VPath) -> u64 {
+        self.from_last = false;
         self.target = Some(path);
         self.facts = None;
         self.typed = None;
@@ -569,6 +584,7 @@ impl Picker {
             self.typed = None;
             return match facts.folder {
                 Ok(()) => {
+                    self.from_last = false;
                     self.target = Some(path.clone());
                     self.facts = Some(facts);
                     self.path_edited = false;

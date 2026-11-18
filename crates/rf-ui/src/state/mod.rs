@@ -816,6 +816,12 @@ impl AppState {
         Some(effects)
     }
 
+    /// A left press anywhere in the window (or a finger's): the rename the name window applied
+    /// opens no other window over what the press does (OPS-02).
+    pub fn left_pressed(&mut self) {
+        self.rename_walk = None;
+    }
+
     /// A command of the window came: the list of subfolders under a `›` closes, and the rename
     /// a Tab of the name window applied opens no next one over what the command does.
     fn interrupted(&mut self) {
@@ -929,6 +935,8 @@ impl AppState {
     /// only the rows whose names hold it (all of them for an empty one), and scrolls to its
     /// cursor.
     pub fn filter_edited(&mut self, text: &str) -> Vec<Effect> {
+        // A rename the name window applied opens no other window over the filter.
+        self.rename_walk = None;
         let side = self.active;
         let tab = self.tab_mut(side);
         tab.set_name_filter(text);

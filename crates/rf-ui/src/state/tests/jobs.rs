@@ -2080,38 +2080,130 @@ fn a_rename_that_fails_does_not_move_on() {
     // Nothing, either: the window waits for a name.
     assert_eq!(state.name_tabbed("  ", false), []);
     assert_eq!(renaming(&state), "a.txt");
-    // A name that is taken: the job fails, which says why as any rename does, and the next
-    // rename does not open.
-    let effects = state.name_tabbed("c.txt", false);
+    // A name another item of the list has: refused before any job, the name typed kept and
+    // the window on the item, with why (Tab and Enter alike).
+    let taken = "같은 이름의 항목이 이미 있습니다";
+    for tabbed in [true, false] {
+        let effects = if tabbed {
+            state.name_tabbed("c.txt", false)
+        } else {
+            state.name_confirmed("c.txt")
+        };
+        assert_eq!(effects, [], "tab: {tabbed}");
+        assert_eq!(renaming(&state), "a.txt");
+        assert_eq!(typed(&state), "c.txt");
+        let Some(Modal::Name(dialog)) = state.modal() else {
+            panic!("the window stays");
+        };
+        assert_eq!(
+            dialog.check(),
+            crate::dialogs::NameCheck::Invalid(taken.to_owned())
+        );
+    }
+    // As the file systems of this system compare names: in another case on Windows and macOS,
+    // and the item's own name in another case is no other item's.
+    let other_case = state.name_tabbed("C.TXT", false);
+    assert_eq!(
+        other_case.is_empty(),
+        Os::CURRENT != Os::Other,
+        "{other_case:?}"
+    );
+    if Os::CURRENT == Os::Other {
+        // The rename went ahead: back to the window of a.txt for the rest of the test.
+        press(&mut state, &special(Key::F2), NONE);
+    }
+    let effects = state.name_confirmed("A.TXT");
     assert_eq!(
         the_submit(&effects),
-        (rename_of("a.txt", "c.txt"), Some(LEFT))
+        (rename_of("a.txt", "A.TXT"), Some(LEFT))
     );
-    let effects = finish(
-        &mut state,
-        1,
-        &rename_of("a.txt", "c.txt"),
-        JobWork::Rename,
-        |r| {
+    // A name the list does not know (a hidden item, one made since): the job finds it taken,
+    // and the rename of the same item asks again with the name typed and why, in place of the
+    // notice; nothing moves on.
+    for (id, tabbed) in [(1, true), (2, false)] {
+        state.click_row(LEFT, 0, false, false);
+        press(&mut state, &special(Key::F2), NONE);
+        let spec = rename_of("a.txt", "숨김.txt");
+        let effects = if tabbed {
+            state.name_tabbed("숨김.txt", false)
+        } else {
+            state.name_confirmed("숨김.txt")
+        };
+        assert_eq!(the_submit(&effects), (spec.clone(), Some(LEFT)));
+        assert_eq!(state.modal(), None);
+        let effects = finish(&mut state, id, &spec, JobWork::Rename, |r| {
             r.outcome = Outcome::CompletedWithErrors;
             r.failures
                 .push(failure(in_a("a.txt"), ErrorKind::AlreadyExists, None));
-        },
+        });
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Notice(_))),
+            "{effects:?}"
+        );
+        assert_eq!(renaming(&state), "a.txt");
+        assert_eq!(typed(&state), "숨김.txt");
+        let Some(Modal::Name(dialog)) = state.modal() else {
+            panic!("the window is back");
+        };
+        assert_eq!(
+            dialog.check(),
+            crate::dialogs::NameCheck::Invalid(taken.to_owned())
+        );
+        assert_eq!(&dialog.text[..dialog.select_end], "숨김");
+        assert_eq!(selected(&state, LEFT), [0]);
+        state.dialog_cancelled();
+    }
+    // Another failure is told as any rename's, and asks nothing again.
+    press(&mut state, &special(Key::F2), NONE);
+    let spec = rename_of("a.txt", "z.txt");
+    state.name_tabbed("z.txt", false);
+    let effects = finish(&mut state, 3, &spec, JobWork::Rename, |r| {
+        r.outcome = Outcome::CompletedWithErrors;
+        r.failures
+            .push(failure(in_a("a.txt"), ErrorKind::PermissionDenied, None));
+    });
+    assert!(
+        matches!(effects.as_slice(), [Effect::Notice(_)]),
+        "{effects:?}"
     );
-    assert_eq!(
-        effects,
-        [Effect::Notice(
-            "이름을 바꾸지 못했습니다: 같은 이름의 항목이 이미 있습니다".to_owned()
-        )]
+    assert_eq!(state.modal(), None);
+}
+
+/// What the field of the name window that shows holds.
+fn typed(state: &AppState) -> String {
+    match state.modal() {
+        Some(Modal::Name(dialog)) => dialog.text.clone(),
+        other => panic!("a name window: {other:?}"),
+    }
+}
+
+#[test]
+fn a_name_kept_moves_on_only_while_nothing_else_comes_up() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![]);
+    state.click_row(LEFT, 0, false, false);
+    press(&mut state, &special(Key::F2), NONE);
+    // A job's question waits behind the name window: as the window closes it shows, and the
+    // next rename does not open behind it.
+    state.question(conflict_question(9));
+    assert!(matches!(state.modal(), Some(Modal::Name(_))));
+    assert_eq!(state.name_tabbed("a.txt", false), []);
+    assert!(
+        matches!(state.modal(), Some(Modal::Conflict(_))),
+        "{:?}",
+        state.modal()
     );
+    state.dialog_cancelled();
     assert_eq!(state.modal(), None);
 }
 
 #[test]
 fn what_the_user_does_before_the_rename_lands_keeps_the_next_one_from_opening() {
     let spec = rename_of("a.txt", "z.txt");
-    // A key, a press on a row, another folder in the pane, or a window over the main one.
-    for case in 0..4 {
+    // A key, a press on a row, another folder in the pane, a window over the main one, any
+    // left press in the window, or an edit of the filter.
+    for case in 0..6 {
         let mut state = ready(vec![file("a.txt"), file("b.txt")], vec![dir("d")]);
         state.click_row(LEFT, 0, false, false);
         press(&mut state, &special(Key::F2), NONE);
@@ -2126,8 +2218,12 @@ fn what_the_user_does_before_the_rename_lands_keeps_the_next_one_from_opening() 
             2 => {
                 assert_eq!(the_load(&state.go_to(folder("c"))).path, folder("c"));
             }
-            _ => {
+            3 => {
                 state.new_file();
+            }
+            4 => state.left_pressed(),
+            _ => {
+                state.filter_edited("b");
             }
         }
         finish(&mut state, 1, &spec, JobWork::Rename, |r| {

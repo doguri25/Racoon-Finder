@@ -793,3 +793,52 @@ fn the_names(state: &mut AppState, typed: &str) -> u64 {
         })
         .expect("the names are listed")
 }
+
+#[test]
+fn a_last_place_that_is_gone_gives_way_to_the_other_pane() {
+    let mut state = with_items();
+    state.set_recent_targets(vec![folder("c")]);
+    state.set_pick_start(PickStart::Last);
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
+    let (look, path) = the_look(&effects);
+    assert_eq!(path, folder("c"));
+    assert!(picker(&state).from_last);
+    // The worker finds it gone: the picker goes to the other pane's folder, and looks there.
+    let gone = TargetFacts {
+        folder: Err(ErrorKind::NotFound),
+        ..folder_facts()
+    };
+    let effects = state.target_inspected(look, &folder("c"), gone.clone());
+    let (look, path) = the_look(&effects);
+    assert_eq!(path, folder("b"));
+    assert_eq!(picker(&state).target, Some(folder("b")));
+    assert!(!picker(&state).from_last);
+    // Enter confirms there once it is found to be a folder.
+    state.target_inspected(look, &folder("b"), folder_facts());
+    let (JobSpec::Transfer(transfer), _) = the_submit(&state.pick_enter()) else {
+        panic!("a transfer");
+    };
+    assert_eq!(transfer.items[0].target, in_b("docs"));
+
+    // A folder the user chose or typed is not replaced, gone or not: only the setting's.
+    state.set_recent_targets(vec![folder("c")]);
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
+    let (look, _) = the_look(&effects);
+    let (chosen, _) = the_look(&state.pick_step(-1));
+    assert!(!picker(&state).from_last);
+    // The late look at the last place says nothing now.
+    assert_eq!(state.target_inspected(look, &folder("c"), gone.clone()), []);
+    let target = picker(&state).target.clone().expect("a target");
+    assert_eq!(state.target_inspected(chosen, &target, gone.clone()), []);
+    assert_eq!(picker(&state).target, Some(target));
+    state.dialog_cancelled();
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
+    let (look, _) = the_look(&effects);
+    let typed = folder("typed");
+    let (typing, _) = the_look(&state.pick_path_entered(&typed.to_string()));
+    state.target_inspected(typing, &typed, folder_facts());
+    assert_eq!(picker(&state).target, Some(typed.clone()));
+    assert!(!picker(&state).from_last);
+    assert_eq!(state.target_inspected(look, &folder("c"), gone), []);
+    assert_eq!(picker(&state).target, Some(typed));
+}

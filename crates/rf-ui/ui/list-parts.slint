@@ -550,7 +550,9 @@ export struct VisitEntry {
 
 // The visit history's menu under 뒤로 and 앞으로 (NAV-04): the folders behind (a right click or a
 // long press on 뒤로), those ahead (on 앞으로), or, from its key, those ahead over the current one
-// and those behind under it, as File Explorer's list of recent locations has them. Rust fills
+// and those behind under it, as File Explorer's list of recent locations has them (the nearest
+// seven each way: a menu the window draws itself does not scroll, and 15 lines fit a 900×560
+// window). Rust fills
 // `lines` as it opens. It takes no click itself (`enabled: false`): it shows only when it is
 // asked to.
 export component VisitsMenu inherits ContextMenuArea {

@@ -643,7 +643,11 @@ fn connect(window: &MainWindow) {
     });
     connect_checkboxes(window);
     window.on_row_activated(|s, i| {
-        with(|c| c.update_at(i, |state, i| state.open_row(side(s), i)));
+        with(|c| {
+            // A double click opens: its first click renames nothing (OPS-02).
+            c.slow_cancel();
+            c.update_at(i, |state, i| state.open_row(side(s), i));
+        });
     });
     window.on_retry(|s| {
         with(|c| c.update(|state| state.retry(side(s))));
@@ -713,9 +717,7 @@ fn connect_visits(window: &MainWindow) {
         with(|c| c.show_visits(ui_bridge::way_of(way)));
     });
     window.on_visit_chosen(|way, i| {
-        if let Some(way) = ui_bridge::way_of(way) {
-            with(|c| c.update_at(i, |state, i| state.history_chosen(way, i)));
-        }
+        with(|c| c.visit_chosen(way, i));
     });
 }
 
@@ -1647,8 +1649,10 @@ pub struct Controller {
     /// The number of the item the name window names, a new one for each item, which starts the
     /// window again (`NameView.serial`: a Tab of a rename names the next item in it).
     name_serial: Cell<i32>,
-    /// The lines of the visit history's menu (NAV-04), filled as it opens.
+    /// The lines of the visit history's menu (NAV-04), filled as it opens, and the folder each
+    /// line names, by its way and its place.
     visit_rows: Rc<VecModel<VisitEntry>>,
+    visit_paths: RefCell<Vec<(i32, i32, VPath)>>,
     /// The models of the destination picker's view.
     pick: PickModels,
     /// The running loads of the tabs and the tree, by the generation of their request.
@@ -1782,6 +1786,7 @@ impl Controller {
             shown_modal: RefCell::new(None),
             name_serial: Cell::new(0),
             visit_rows,
+            visit_paths: RefCell::new(Vec::new()),
             pick: PickModels::default(),
             tickets: RefCell::new(HashMap::new()),
             places: RefCell::new(Vec::new()),
@@ -2916,12 +2921,37 @@ impl Controller {
     /// The visit history's menu is about to show `way` (`None`: both ways around the current
     /// folder, from its key): its lines, from the active pane's tab (NAV-04).
     fn show_visits(&self, way: Option<Way>) {
-        let rows = self
+        let lines = self
             .state
             .borrow()
             .as_ref()
             .map_or_else(Vec::new, |state| ui_bridge::visit_rows(state, way));
+        let (rows, paths): (Vec<VisitEntry>, Vec<(i32, i32, VPath)>) = lines
+            .into_iter()
+            .map(|(row, path)| {
+                let place = (row.way, row.index, path);
+                (row, place)
+            })
+            .unzip();
+        *self.visit_paths.borrow_mut() = paths;
         ui_bridge::set_rows(&self.visit_rows, rows);
+    }
+
+    /// Line `index` of way `way` of the visit history's menu was chosen: the folder it named,
+    /// which the state checks the history still has there.
+    fn visit_chosen(&self, way: i32, index: i32) {
+        let (Some(which), Some(at)) = (ui_bridge::way_of(way), self::index(index)) else {
+            return;
+        };
+        let shown = self
+            .visit_paths
+            .borrow()
+            .iter()
+            .find(|(each, place, _)| *each == way && *place == index)
+            .map(|(_, _, path)| path.clone());
+        if let Some(shown) = shown {
+            self.update(|state| state.history_chosen(which, at, &shown));
+        }
     }
 
     /// Entry `index` of the item menu's 링크 만들기 ▸ was chosen: links in the folder of the pane,
@@ -4489,6 +4519,81 @@ mod tests {
     /// When the press that is armed began, by the press machine's own clock.
     fn pressed_at(c: &Controller) -> Instant {
         c.press.machine.borrow().since().expect("a press is armed")
+    }
+
+    /// The rename window that shows, by the name of the item it renames.
+    fn renaming(c: &Controller) -> Option<String> {
+        match c.state.borrow().as_ref()?.modal() {
+            Some(Modal::Name(dialog)) if dialog.renames().is_some() => Some(dialog.initial.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_slow_second_click_on_the_name_renames_once_its_wait_is_over() {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+
+        let d = Dragging::new();
+        let c = &d.controller;
+        // x.txt is the only selection already (the keys chose it, say).
+        if let Some(state) = c.state.borrow_mut().as_mut() {
+            state.click_row(LEFT, 0, false, false);
+        }
+        c.redraw();
+        let name = ElementHandle::find_by_accessible_label(&d.window, "x.txt")
+            .find(|found| found.accessible_role() == Some(AccessibleRole::Text))
+            .expect("the name of x.txt");
+        let at = name.absolute_position();
+        let middle = at.y + name.size().height / 2.0;
+        // Two places on the name farther apart than Slint's double click allows (10 px), so
+        // that no press pair here opens the file.
+        let first = slint::LogicalPosition::new(at.x + 3.0, middle);
+        let second = slint::LogicalPosition::new(at.x + 14.0, middle);
+        let click = |place: slint::LogicalPosition| {
+            d.left(true, place);
+            d.left(false, place);
+        };
+        // Each case starts a second (of Slint's clock) after the last: Slint takes no press of
+        // one case and the next for a double click, which would open the file.
+        let next_case = || {
+            c.slow_forget();
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(1));
+        };
+        // A click on the name: the rename waits out the double-click time, timed by the
+        // machine's own clock.
+        next_case();
+        click(first);
+        let due = c.slow_waits_until().expect("the rename waits");
+        c.slow_tick_at(
+            due.checked_sub(Duration::from_millis(1))
+                .expect("an instant"),
+        );
+        assert_eq!(renaming(c), None);
+        c.slow_tick_at(due);
+        assert_eq!(renaming(c).as_deref(), Some("x.txt"));
+        assert_eq!(c.slow_waits_until(), None);
+        c.update(AppState::dialog_cancelled);
+
+        // A second press within the time (a double click's): nothing waits, nothing opens.
+        next_case();
+        click(first);
+        assert!(c.slow_waits_until().is_some());
+        click(second);
+        assert_eq!(c.slow_waits_until(), None);
+        c.slow_tick_at(due + Duration::from_secs(10));
+        assert_eq!(renaming(c), None);
+        // A row's activation (a double click), or a key (the hook cancels the press), in the
+        // meantime: nothing opens either.
+        next_case();
+        click(first);
+        d.window.invoke_row_activated(0, 99);
+        assert_eq!(c.slow_waits_until(), None);
+        next_case();
+        click(first);
+        c.press_cancel();
+        assert_eq!(c.slow_waits_until(), None);
+        c.slow_tick_at(due + Duration::from_secs(10));
+        assert_eq!(renaming(c), None);
     }
 
     #[test]

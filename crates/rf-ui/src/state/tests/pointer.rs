@@ -464,6 +464,17 @@ mod visits {
     use crate::history::{HISTORY_MENU, Way};
     use crate::state::MenuShown;
 
+    /// Line `index` of the menu of `way`, chosen as the menu showed it: with the folder it
+    /// names.
+    fn jump(state: &mut AppState, way: Way, index: usize) -> Vec<Effect> {
+        let shown = state
+            .history_entries(way)
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| folder("없는 줄"));
+        state.history_chosen(way, index, &shown)
+    }
+
     #[test]
     fn the_menu_lists_each_way_nearest_first_and_a_choice_jumps_there() {
         let mut state = travelled();
@@ -472,7 +483,7 @@ mod visits {
         assert_eq!(state.history_entries(Way::Back), [sub.clone(), folder("a")]);
         assert_eq!(state.history_entries(Way::Forward), []);
         // The farther one, in one move: two steps back.
-        let effects = state.history_chosen(Way::Back, 1);
+        let effects = jump(&mut state, Way::Back, 1);
         assert_eq!(the_load(&effects).path, folder("a"));
         assert_eq!(shown(&state, LEFT), folder("a"));
         // The folders passed over are ahead, nearest first, as a browser keeps them.
@@ -481,16 +492,31 @@ mod visits {
             [sub.clone(), folder("b")]
         );
         assert_eq!(state.history_entries(Way::Back), []);
-        let effects = state.history_chosen(Way::Forward, 1);
+        let effects = jump(&mut state, Way::Forward, 1);
         assert_eq!(the_load(&effects).path, folder("b"));
         assert_eq!(state.history_entries(Way::Back), [sub, folder("a")]);
-        // Past the end, or past what the menu lists, nothing moves.
-        assert_eq!(state.history_chosen(Way::Back, 2), []);
-        assert_eq!(state.history_chosen(Way::Back, HISTORY_MENU), []);
+        // Past what the menu lists, nothing moves.
+        assert_eq!(jump(&mut state, Way::Back, HISTORY_MENU), []);
         assert_eq!(shown(&state, LEFT), folder("b"));
         // Not over a window either.
         state.new_file();
-        assert_eq!(state.history_chosen(Way::Back, 0), []);
+        assert_eq!(jump(&mut state, Way::Back, 0), []);
+    }
+
+    #[test]
+    fn a_line_whose_place_the_history_has_left_goes_to_the_folder_it_named() {
+        let mut state = travelled();
+        let sub = folder("a").join("sub").expect("a name");
+        // The menu showed sub as the nearest behind; meanwhile the pane moved on, so that the
+        // nearest behind is b now. The line still goes to sub, as a typed path goes, not to b.
+        state.go_to(folder("c"));
+        assert_eq!(state.history_entries(Way::Back)[0], folder("b"));
+        let effects = state.history_chosen(Way::Back, 0, &sub);
+        assert_eq!(the_load(&effects).path, sub);
+        assert_eq!(shown(&state, LEFT), sub);
+        // A visit of its own: c is behind it now, and nothing ahead.
+        assert_eq!(state.history_entries(Way::Back)[0], folder("c"));
+        assert_eq!(state.history_entries(Way::Forward), []);
     }
 
     #[test]
@@ -518,7 +544,7 @@ mod visits {
             Some(vec![Effect::ShowMenu(MenuShown::History)])
         );
         // With the pane at the start of its history, ahead is enough.
-        state.history_chosen(Way::Back, 1);
+        jump(&mut state, Way::Back, 1);
         assert_eq!(
             state.key(Command::HistoryMenu, NONE, Paging::rows(1), Instant::now()),
             Some(vec![Effect::ShowMenu(MenuShown::History)])
@@ -538,7 +564,7 @@ mod visits {
         press(&mut state, &special(Key::F9), SHIFT).expect("sync");
         assert!(state.syncing());
         // Two places back in the left pane: the right one makes the same jump.
-        let effects = state.history_chosen(Way::Back, 1);
+        let effects = jump(&mut state, Way::Back, 1);
         let paths: Vec<VPath> = loads(&effects)
             .iter()
             .map(|request| request.path.clone())
@@ -549,7 +575,7 @@ mod visits {
         state.activate(RIGHT);
         state.go_to(folder("g"));
         state.activate(LEFT);
-        state.history_chosen(Way::Forward, 1);
+        jump(&mut state, Way::Forward, 1);
         assert_eq!(shown(&state, LEFT), folder("d"));
         assert!(!state.syncing());
     }

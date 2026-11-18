@@ -9187,12 +9187,12 @@ fn the_favorites_menu_and_the_view_menu_say_their_keys_and_settings() {
         choose_item(&window, title);
     }
     assert_eq!(calls.take(), ["0 open", "0 open"]);
-    // 보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴 곳부터 (PICK-05), inside the smallest window.
+    // 보기 ▸ 설정 ▸ 복사·이동 창을 최근 위치의 첫 폴더로 열기 (PICK-05), inside the smallest window.
     window.window().set_size(LogicalSize::new(900.0, 560.0));
     let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
     button.invoke_accessible_default_action();
     choose_item(&window, "설정");
-    let title = "위치 고르기는 마지막으로 쓴 곳부터";
+    let title = "복사·이동 창을 최근 위치의 첫 폴더로 열기";
     let item = ElementHandle::find_by_accessible_label(&window, title)
         .next()
         .expect("the item");
@@ -9276,4 +9276,65 @@ fn the_picker_s_path_field_completes_with_tab_and_the_window_s_key_makes_a_folde
             Some("Ctrl+Shift+N")
         );
     }
+}
+
+#[test]
+fn the_visit_history_s_menus_fit_the_smallest_window() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let rows = Rc::new(slint::VecModel::<VisitEntry>::default());
+    window.set_visit_entries(ModelRc::from(Rc::clone(&rows)));
+    let model = Rc::clone(&rows);
+    // As many lines as Rust gives at most: fifteen one way (rf_ui::history::HISTORY_MENU), and
+    // from the key seven ahead, the current folder and seven behind.
+    window.on_visits_asked(move |way| {
+        let line = |title: String, way: i32, index: i32| VisitEntry {
+            title: title.into(),
+            way,
+            index,
+        };
+        let lines: Vec<VisitEntry> = match way {
+            0 | 1 => (0..15)
+                .map(|i| line(format!("폴더 {way}-{i:02} — /home/me"), way, i))
+                .collect(),
+            _ => (0..7)
+                .rev()
+                .map(|i| line(format!("앞 {i} — /home/me"), 1, i))
+                .chain([line("지금 — /home/me".to_owned(), -1, 0)])
+                .chain((0..7).map(|i| line(format!("뒤 {i} — /home/me"), 0, i)))
+                .collect(),
+        };
+        model.set_vec(lines);
+    });
+    window.set_can_back(true);
+    window.set_can_forward(true);
+    assert_eq!(rf_ui::history::HISTORY_MENU, 15);
+    assert_eq!(2 * rf_ui::history::HISTORY_KEY_MENU + 1, 15);
+    let line = |title: &str| {
+        ElementHandle::find_by_accessible_label(&window, title)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {title}"))
+    };
+    // The menu shows whole: its first line and its last inside the window. A menu the window
+    // draws itself (Linux) neither scrolls nor goes past its edges: Slint moves one that would
+    // end below the window up, over the buttons, and cuts one taller than the window.
+    let whole = |first: &str, last: &str| {
+        let top = line(first).absolute_position().y;
+        let shown = line(last);
+        let end = shown.absolute_position().y + shown.size().height;
+        assert!(top >= 0.0, "{first} starts at {top}px, above the window");
+        assert!(end <= 560.0, "{last} ends at {end}px of 560");
+    };
+    for (way, button) in [(0, "뒤로"), (1, "앞으로")] {
+        labelled(&window, button, AccessibleRole::Button)
+            .remove(0)
+            .mock_single_click(slint::platform::PointerEventButton::Right);
+        whole(
+            &format!("폴더 {way}-00 — /home/me"),
+            &format!("폴더 {way}-14 — /home/me"),
+        );
+        press(&window, Key::Escape);
+    }
+    window.invoke_show_visits_menu(-1);
+    whole("앞 6 — /home/me", "뒤 6 — /home/me");
 }

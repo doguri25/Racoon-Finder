@@ -36,7 +36,7 @@ use crate::format::{
     kind_label, short_path, shown_name,
 };
 use crate::hashing::Algorithm;
-use crate::history::Way;
+use crate::history::{HISTORY_KEY_MENU, HISTORY_MENU, Way};
 use crate::jobs::{JobRow, RecentRow, speed_points};
 use crate::keys::{self, Command, PanelKey};
 use crate::pane::{LoadStatus, Pane, ancestors};
@@ -1388,32 +1388,41 @@ pub fn way_of(number: i32) -> Option<Way> {
     }
 }
 
-/// The lines of the visit history's menu of the active pane's tab (NAV-04): the folders `way`
-/// goes, nearest first; with no way (its key), those ahead, the farthest first, then the
-/// current folder (checked, off), then those behind, the nearest first, as File Explorer's list
-/// of recent locations has them. Each line is the folder's name and the folder it is in.
-pub fn visit_rows(state: &AppState, way: Option<Way>) -> Vec<VisitEntry> {
-    let line = |path: &VPath, number: i32, index: usize| VisitEntry {
-        title: visit_title(path).into(),
-        way: number,
-        index: i32::try_from(index).unwrap_or(i32::MAX),
+/// The lines of the visit history's menu of the active pane's tab (NAV-04), each with the
+/// folder it names: the folders `way` goes, nearest first; with no way (its key), the
+/// [`HISTORY_KEY_MENU`] nearest ahead, the farthest of them first, then the current folder
+/// (checked, off), then the nearest behind, the nearest first, as File Explorer's list of
+/// recent locations has them, in no more lines than a menu of one way. Each line is the
+/// folder's name and the folder it is in.
+pub fn visit_rows(state: &AppState, way: Option<Way>) -> Vec<(VisitEntry, VPath)> {
+    let line = |path: &VPath, number: i32, index: usize| {
+        let entry = VisitEntry {
+            title: visit_title(path).into(),
+            way: number,
+            index: i32::try_from(index).unwrap_or(i32::MAX),
+        };
+        (entry, path.clone())
     };
-    let lines = |way: Way, number: i32| {
+    let lines = |way: Way, number: i32, most: usize| {
         state
             .history_entries(way)
             .iter()
+            .take(most)
             .enumerate()
             .map(|(index, path)| line(path, number, index))
             .collect::<Vec<_>>()
     };
     match way {
-        Some(Way::Back) => lines(Way::Back, 0),
-        Some(Way::Forward) => lines(Way::Forward, 1),
+        Some(Way::Back) => lines(Way::Back, 0, HISTORY_MENU),
+        Some(Way::Forward) => lines(Way::Forward, 1, HISTORY_MENU),
         None => {
-            let mut rows: Vec<VisitEntry> = lines(Way::Forward, 1).into_iter().rev().collect();
+            let mut rows: Vec<(VisitEntry, VPath)> = lines(Way::Forward, 1, HISTORY_KEY_MENU)
+                .into_iter()
+                .rev()
+                .collect();
             let current = state.panes()[state.active()].active_tab().location();
             rows.push(line(current, -1, 0));
-            rows.extend(lines(Way::Back, 0));
+            rows.extend(lines(Way::Back, 0, HISTORY_KEY_MENU));
             rows
         }
     }
@@ -2112,7 +2121,7 @@ pub fn name_view(dialog: &NameDialog, serial: i32) -> NameView {
     NameView {
         serial,
         title: dialog.title().into(),
-        initial: dialog.initial.as_str().into(),
+        initial: dialog.text.as_str().into(),
         select_end: i32::try_from(dialog.select_end).unwrap_or(i32::MAX),
         ok_enabled: check == NameCheck::Ready,
         warning: match check {
@@ -3574,14 +3583,18 @@ mod tests {
         for folder in ["c", "d", "e"] {
             state.go_to(at(folder));
         }
-        state.history_chosen(Way::Back, 1);
+        state.history_chosen(Way::Back, 1, &at("c"));
         let parent = at("a").parent().expect("a folder it is in");
         let place = short_path(&parent.to_string(), VISIT_PLACE_CHARS);
         let title = |name: &str| format!("{name} — {place}");
         let lines = |state: &AppState, way| -> Vec<(String, i32, i32)> {
             visit_rows(state, way)
                 .into_iter()
-                .map(|line| (line.title.to_string(), line.way, line.index))
+                .map(|(line, path)| {
+                    // Each line goes with the folder it names.
+                    assert_eq!(line.title.as_str(), visit_title(&path));
+                    (line.title.to_string(), line.way, line.index)
+                })
                 .collect()
         };
         assert_eq!(lines(&state, Some(Way::Back)), [(title("a"), 0, 0)]);
@@ -3605,6 +3618,42 @@ mod tests {
         assert_eq!(way_of(-1), None);
         // A root is in no folder: its name alone.
         assert_eq!(words::history_entry("C:", None), "C:");
+    }
+
+    #[test]
+    fn the_key_s_history_menu_lists_no_more_lines_than_a_menu_of_one_way() {
+        use crate::history::{HISTORY_KEY_MENU, HISTORY_MENU, Way};
+        use crate::state::AppState;
+
+        let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+        let (mut state, _) = AppState::new(at("start"), at("b"), None);
+        // 30 folders on, then 12 back: 12 ahead and 18 behind, at f17.
+        for i in 0..30 {
+            state.go_to(at(&format!("f{i:02}")));
+        }
+        let back = state.history_entries(Way::Back);
+        state.history_chosen(Way::Back, 11, &back[11]);
+        let rows = visit_rows(&state, None);
+        assert_eq!(rows.len(), 2 * HISTORY_KEY_MENU + 1);
+        assert!(rows.len() <= HISTORY_MENU);
+        let ways: Vec<(i32, i32)> = rows
+            .iter()
+            .map(|(line, _)| (line.way, line.index))
+            .collect();
+        let mut wanted: Vec<(i32, i32)> = (0..7).rev().map(|index| (1, index)).collect();
+        wanted.push((-1, 0));
+        wanted.extend((0..7).map(|index| (0, index)));
+        assert_eq!(ways, wanted);
+        // The nearest ones: f17 is the current folder, f18 ahead and f16 behind next to it,
+        // f24 and f10 at the ends.
+        assert_eq!(rows[7].1, at("f17"));
+        assert_eq!(rows[6].1, at("f18"));
+        assert_eq!(rows[8].1, at("f16"));
+        assert_eq!(rows[0].1, at("f24"));
+        assert_eq!(rows[14].1, at("f10"));
+        // One way lists its fifteen at most.
+        assert_eq!(visit_rows(&state, Some(Way::Back)).len(), HISTORY_MENU);
+        assert_eq!(visit_rows(&state, Some(Way::Forward)).len(), 12);
     }
 
     #[test]

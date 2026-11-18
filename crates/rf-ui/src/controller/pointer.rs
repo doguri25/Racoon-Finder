@@ -241,6 +241,13 @@ impl Controller {
         self.press.machine.borrow_mut().reset();
         self.press_stop();
         self.slow_cancel();
+        // Every left press: a rename the name window applied opens no other window over what
+        // it does. Not while the state is borrowed (it never is here, outside a change).
+        if let Ok(mut state) = self.state.try_borrow_mut()
+            && let Some(state) = state.as_mut()
+        {
+            state.left_pressed();
+        }
     }
 
     /// A left press on row `row` of pane `side`, with Ctrl or Shift held (`modified`) and on the
@@ -289,11 +296,31 @@ impl Controller {
 
     /// The timer of the slow second click: its rename, once the double-click time has passed.
     fn slow_tick(&self) {
-        let due = self.press.slow.borrow_mut().tick(Instant::now());
+        self.slow_tick_at(Instant::now());
+    }
+
+    /// [`Controller::slow_tick`] at `now`, which the tests choose.
+    pub(super) fn slow_tick_at(&self, now: Instant) {
+        let due = self.press.slow.borrow_mut().tick(now);
         match due {
             Some(target) => self.slow_due(&target),
             None => self.slow_wait(),
         }
+    }
+
+    /// When the rename a slow second click left waiting is due; `None` while none waits. A test
+    /// takes the time of its tick from this, not from a clock of its own.
+    #[cfg(test)]
+    pub(super) fn slow_waits_until(&self) -> Option<Instant> {
+        self.press.slow.borrow().waiting_until()
+    }
+
+    /// The slow second click starts again, as after a long pause: no press came before. For
+    /// the tests, whose presses come within the double-click time of each other.
+    #[cfg(test)]
+    pub(super) fn slow_forget(&self) {
+        *self.press.slow.borrow_mut() = SlowClick::new(DOUBLE_CLICK, THRESHOLD_PX);
+        self.press.slow_timer.stop();
     }
 
     /// The slow second click came due on `target`: its name window opens.
@@ -301,8 +328,9 @@ impl Controller {
         self.update(|state| state.slow_rename(target));
     }
 
-    /// No rename comes of the slow second click under way.
-    fn slow_cancel(&self) {
+    /// No rename comes of the slow second click under way: a double click opened the row, or
+    /// the press was cancelled.
+    pub(super) fn slow_cancel(&self) {
         self.press.slow.borrow_mut().cancel();
         self.press.slow_timer.stop();
     }

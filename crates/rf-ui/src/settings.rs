@@ -147,8 +147,8 @@ impl OnError {
     }
 }
 
-/// Where the destination picker starts when it opens (보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴
-/// 곳부터, PICK-05): `pick_start = "opposite"` or `"last"`.
+/// Where the destination picker starts when it opens (보기 ▸ 설정 ▸ 복사·이동 창을 최근 위치의 첫
+/// 폴더로 열기, PICK-05): `pick_start = "opposite"` or `"last"`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PickStart {

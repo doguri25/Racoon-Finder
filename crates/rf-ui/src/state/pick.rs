@@ -109,6 +109,7 @@ impl AppState {
     /// copy, a move or links start there, when it can take the items (the first of the recent
     /// targets); a log starts at the app's folder for logs all the same.
     pub(super) fn show_picker(&mut self, mut picker: Picker) -> Vec<Effect> {
+        let mut from_last = false;
         if self.pick_start == PickStart::Last
             && !picker.for_a_log()
             && let Some(last) = self
@@ -117,6 +118,7 @@ impl AppState {
                 .filter(|last| validate(&picker.request, last, None).can_choose())
         {
             picker.target = Some(last.clone());
+            from_last = true;
         }
         let target = picker.target.clone();
         self.pick_tree = Tree::new(VisibilityFilter {
@@ -128,6 +130,10 @@ impl AppState {
         let mut effects = self.with_pick_tree(|tree| tree.set_roots(roots));
         if let Some(target) = target {
             effects.extend(self.choose(target, None));
+        }
+        // After the choice, which clears it: the target came of the setting.
+        if let Some(picker) = self.picker_mut() {
+            picker.from_last = from_last;
         }
         effects
     }
@@ -417,7 +423,10 @@ impl AppState {
 
     /// What a worker found at `path` for the look `generation` of the picker
     /// ([`Effect::InspectTarget`]). A typed path that is a folder becomes the target, and the
-    /// tree opens on the way to it; a late result is dropped.
+    /// tree opens on the way to it; a late result is dropped. The last place a copy or a move
+    /// went to, where 보기 ▸ 설정 has the picker start (PICK-05), that turns out to take nothing
+    /// (it is gone, or no folder any more) gives way to the first quick target, the other
+    /// pane's folder, as the picker starts without the setting: Enter goes there then.
     pub fn target_inspected(
         &mut self,
         generation: u64,
@@ -429,6 +438,13 @@ impl AppState {
         };
         match picker.looked(generation, path, facts) {
             Looked::Chosen => self.with_pick_tree(|tree| tree.reveal(path)),
+            Looked::Facts if picker.from_last && !picker_can_take(picker, path) => {
+                picker.from_last = false;
+                match picker.first_target(path) {
+                    Some(first) => self.choose(first, None),
+                    None => Vec::new(),
+                }
+            }
             Looked::Stale | Looked::Facts | Looked::Refused => Vec::new(),
         }
     }
@@ -615,6 +631,11 @@ impl AppState {
                 _ => None,
             })
     }
+}
+
+/// Whether `path`, the target of `picker`, can take its items, with what a worker found there.
+fn picker_can_take(picker: &Picker, path: &VPath) -> bool {
+    validate(&picker.request, path, picker.facts.as_ref()).can_choose()
 }
 
 /// The roots of a folder tree for `places`: their names and folders.

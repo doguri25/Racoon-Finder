@@ -971,7 +971,7 @@ export component ViewMenu inherits ContextMenuArea {
             // PICK-05: off (the default), the picker of a copy or a move starts at the other
             // pane's folder; on, at the folder one went to last.
             MenuItem {
-                title: "위치 고르기는 마지막으로 쓴 곳부터";
+                title: "복사·이동 창을 최근 위치의 첫 폴더로 열기";
                 checkable: true;
                 checked <=> root.pick-from-last;
                 activated => {

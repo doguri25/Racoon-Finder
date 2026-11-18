@@ -168,7 +168,7 @@ export component MainWindow inherits Window {
     // 보기 ▸ 설정 ▸ 복사·이동 오류는 파일마다 묻기 (XFER-09), which Rust sets back to the state's
     // after the toggle; off, a copy or a move carries on and lists its failed items at its end.
     in-out property <bool> ask-on-error;
-    // 보기 ▸ 설정 ▸ 위치 고르기는 마지막으로 쓴 곳부터 (PICK-05), which Rust sets back to the state's
+    // 보기 ▸ 설정 ▸ 복사·이동 창을 최근 위치의 첫 폴더로 열기 (PICK-05), which Rust sets back to the state's
     // after the toggle; off, the destination picker starts at the other pane's folder.
     in-out property <bool> pick-from-last;
     // 보기 ▸ 설정 ▸ 썸네일 보이기, which Rust sets back to the state's after the toggle.

@@ -9,8 +9,15 @@ use rf_core::VPath;
 /// the back list empties, so it stays within this too.
 pub const HISTORY_LIMIT: usize = 50;
 
-/// The most folders the visit history's menu lists in one direction.
+/// The most folders the visit history's menu lists in one direction (a right click or a long
+/// press on 뒤로 or 앞으로). Fifteen lines are as many as a menu the window draws itself (Linux:
+/// it does not scroll) shows whole under the buttons of a 900×560 window.
 pub const HISTORY_MENU: usize = 15;
+
+/// The most folders the menu of the history's key lists each way around the current folder:
+/// the nearest ones, so that its lines, with the current folder's, are no more than
+/// [`HISTORY_MENU`].
+pub const HISTORY_KEY_MENU: usize = 7;
 
 /// A direction of the history: the folders before the current one, or after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

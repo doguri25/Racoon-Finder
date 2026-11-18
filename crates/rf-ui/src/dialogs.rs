@@ -87,13 +87,19 @@ pub enum NamePurpose {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameDialog {
     pub purpose: NamePurpose,
-    /// The name the field starts with.
+    /// The name the window starts with: the default name of a new item, or the name the item
+    /// has.
     pub initial: String,
-    /// Where the selection the field starts with ends, in bytes from the start: before the
-    /// extension of a file, so that typing replaces the name and keeps the extension.
+    /// Where the selection the field starts with ends, in bytes from the start of `text`:
+    /// before the extension of a file, so that typing replaces the name and keeps the
+    /// extension.
     pub select_end: usize,
-    /// What the field holds now.
+    /// What the field holds now; it starts with `initial`, or with a name refused before
+    /// ([`NameDialog::rename_again`]).
     pub text: String,
+    /// A name the window refused (it is taken), with why: the warning shows, and the name is
+    /// not asked for, while the field holds it ([`NameDialog::refuse`]).
+    pub refused: Option<(String, String)>,
 }
 
 /// What [`NameDialog::check`] makes of the field.
@@ -118,6 +124,7 @@ impl NameDialog {
             select_end: name.len(),
             text: name.clone(),
             initial: name,
+            refused: None,
         }
     }
 
@@ -130,6 +137,7 @@ impl NameDialog {
             select_end: stem_end(&name, false),
             text: name.clone(),
             initial: name,
+            refused: None,
         }
     }
 
@@ -142,6 +150,7 @@ impl NameDialog {
             select_end: name.len(),
             text: name.clone(),
             initial: name,
+            refused: None,
         }
     }
 
@@ -153,6 +162,7 @@ impl NameDialog {
             select_end: name.len(),
             text: name.to_owned(),
             initial: name.to_owned(),
+            refused: None,
         }
     }
 
@@ -165,7 +175,31 @@ impl NameDialog {
             purpose: NamePurpose::Rename { from, origin },
             text: name.clone(),
             initial: name,
+            refused: None,
         })
+    }
+
+    /// The window for a new name of `from` that starts with `text`, a name refused before for
+    /// `warning` (it is taken), with the part of it before the extension selected: the rename
+    /// of a name another item has is asked again, the name typed kept.
+    pub fn rename_again(
+        from: VPath,
+        is_dir: bool,
+        origin: usize,
+        text: &str,
+        warning: String,
+    ) -> Option<NameDialog> {
+        let mut dialog = NameDialog::rename(from, is_dir, origin)?;
+        text.clone_into(&mut dialog.text);
+        dialog.select_end = stem_end(text, is_dir);
+        dialog.refuse(warning);
+        Some(dialog)
+    }
+
+    /// The name the field holds cannot be had, for `warning`: the window says so and asks for
+    /// nothing until the name changes.
+    pub fn refuse(&mut self, warning: String) {
+        self.refused = Some((self.text.clone(), warning));
     }
 
     pub fn title(&self) -> &'static str {
@@ -196,6 +230,11 @@ impl NameDialog {
         let is_label = matches!(self.purpose, NamePurpose::Favorite { .. });
         if !is_label && let Some(problem) = name_problem(&self.text, Os::CURRENT) {
             return NameCheck::Invalid(problem);
+        }
+        if let Some((text, warning)) = &self.refused
+            && *text == self.text
+        {
+            return NameCheck::Invalid(warning.clone());
         }
         if matches!(
             self.purpose,
@@ -921,6 +960,38 @@ mod tests {
         assert!(dialog.job().is_err());
         let rename = NameDialog::rename(path("a.txt"), false, 0).expect("a name");
         assert_eq!(rename.renames(), Some((&path("a.txt"), 0)));
+    }
+
+    #[test]
+    fn a_refused_name_warns_until_it_changes() {
+        let mut dialog = NameDialog::rename(path("a.txt"), false, 0).expect("a name");
+        dialog.text = "b.txt".to_owned();
+        dialog.refuse("같은 이름의 항목이 이미 있습니다".to_owned());
+        let taken = NameCheck::Invalid("같은 이름의 항목이 이미 있습니다".to_owned());
+        assert_eq!(dialog.check(), taken);
+        assert_eq!(
+            dialog.job(),
+            Err("같은 이름의 항목이 이미 있습니다".to_owned())
+        );
+        // Another name is asked for again; the refused one, typed back, is not.
+        dialog.text = "c.txt".to_owned();
+        assert_eq!(dialog.check(), NameCheck::Ready);
+        dialog.text = "b.txt".to_owned();
+        assert_eq!(dialog.check(), taken);
+        // Asked again: the window starts with the name typed, its stem selected, and the
+        // warning; the name the item has is still the one that changes nothing.
+        let again = NameDialog::rename_again(
+            path("a.txt"),
+            false,
+            0,
+            "설계안.pdf",
+            "같은 이름의 항목이 이미 있습니다".to_owned(),
+        )
+        .expect("a name");
+        assert_eq!(again.initial, "a.txt");
+        assert_eq!(again.text, "설계안.pdf");
+        assert_eq!(&again.text[..again.select_end], "설계안");
+        assert!(matches!(again.check(), NameCheck::Invalid(_)));
     }
 
     #[test]

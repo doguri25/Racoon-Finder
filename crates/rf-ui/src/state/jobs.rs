@@ -16,12 +16,13 @@ use std::slice;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rf_core::{EntryKind, VPath};
+use rf_core::{EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
     JobSpec, LanePolicy, Outcome, Stage, TransferMode, TransferOptions, TransferSpec, UndoRecord,
     retry_spec,
 };
+use rf_vfs::{NameFolding, fold_name};
 
 use super::{AppState, Effect, MOVE_TOAST_TIME, RIGHT, ToastAction};
 use crate::dialogs::{
@@ -214,9 +215,11 @@ impl AppState {
     }
 
     /// The name window was confirmed with `text`: its job is submitted and it closes. A name
-    /// that cannot be used keeps it open with its warning, and the name the item has already
-    /// closes it with nothing to do. The destination picker under a window for its 새 폴더
-    /// shows again, and waits for the folder.
+    /// that cannot be used keeps it open with its warning, and so does a rename to a name
+    /// another item of the list has ([`AppState::refuse_taken`]); the name the item has
+    /// already closes it with nothing to do. A rename the job finds taken all the same asks
+    /// again with the name typed ([`RenameWalk`]). The destination picker under a window for
+    /// its 새 폴더 shows again, and waits for the folder.
     pub fn name_confirmed(&mut self, text: &str) -> Vec<Effect> {
         let Some(Modal::Name(dialog)) = &mut self.modal else {
             return Vec::new();
@@ -238,9 +241,16 @@ impl AppState {
             };
         }
         let for_picker = matches!(dialog.purpose, NamePurpose::PickFolder { .. });
+        if self.refuse_taken() {
+            return Vec::new();
+        }
+        let Some(Modal::Name(dialog)) = &self.modal else {
+            return Vec::new();
+        };
         match (dialog.check(), dialog.job()) {
             (_, Ok(Some((spec, origin)))) => {
                 self.close();
+                self.rename_walk = self.walk_of(&spec, origin, None);
                 if for_picker
                     && let JobSpec::Create { parent, name, .. } = &spec
                     && let Some(Modal::Pick(picker)) = &mut self.modal
@@ -261,10 +271,12 @@ impl AppState {
     /// window of a rename, the name is applied as Enter applies it, and the rename of the item
     /// after it in the list as it is ordered now (before it, with Shift+Tab) opens once that
     /// rename has landed ([`RenameWalk`]); after the last item (before the first) none opens. A
-    /// name kept as it is moves on at once. A name that cannot be used keeps the window open
-    /// with its warning, and a rename that fails (the name is taken) says why as any rename does
-    /// and moves on to nothing. Each rename is a job of its own, with its own undo. In any other
-    /// name window Tab applies the name, as Enter does.
+    /// name kept as it is moves on at once, unless another window (a job's question) came up as
+    /// this one closed. A name that cannot be used keeps the window open with its warning, and
+    /// so does a name another item of the list has ([`AppState::refuse_taken`]); a rename the
+    /// job finds taken all the same (an item the list does not show) asks again with the name
+    /// typed and moves on to nothing. Each rename is a job of its own, with its own undo. In any
+    /// other name window Tab applies the name, as Enter does.
     pub fn name_tabbed(&mut self, text: &str, backward: bool) -> Vec<Effect> {
         let Some(Modal::Name(dialog)) = &mut self.modal else {
             return Vec::new();
@@ -273,29 +285,86 @@ impl AppState {
         let Some((from, side)) = dialog.renames().map(|(from, side)| (from.clone(), side)) else {
             return self.name_confirmed(text);
         };
-        let check = dialog.check();
-        let job = dialog.job();
+        if self.refuse_taken() {
+            return Vec::new();
+        }
+        let Some(Modal::Name(dialog)) = &self.modal else {
+            return Vec::new();
+        };
+        let (check, job) = (dialog.check(), dialog.job());
         let next = self.beside(side, &from, backward);
         match (check, job) {
             (NameCheck::Unchanged, _) => {
                 self.close();
-                next.map(|next| self.rename_named(side, &next))
-                    .unwrap_or_default()
+                match next {
+                    Some(next) if self.modal.is_none() => self.rename_named(side, &next),
+                    _ => Vec::new(),
+                }
             }
             (NameCheck::Ready, Ok(Some((spec, origin)))) => {
                 self.close();
-                let tab = self.tab(side);
-                self.rename_walk = next.map(|next| RenameWalk {
-                    spec: spec.clone(),
-                    side,
-                    tab: tab.id(),
-                    folder: tab.location().clone(),
-                    next,
-                });
+                self.rename_walk = self.walk_of(&spec, origin, next);
                 vec![submit(spec, origin)]
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The rename the name window asks for is to a name another item of its pane's list has,
+    /// hidden ones too, as this system's file systems compare names (`rf_vfs::fold_name`; the
+    /// item's own name in another case is no other item): the window refuses it with why and
+    /// keeps the name typed, before any job. `true` when it did. Nothing is looked at on the
+    /// disk: a name the list does not know of is the job's to refuse.
+    fn refuse_taken(&mut self) -> bool {
+        let Some(Modal::Name(dialog)) = &self.modal else {
+            return false;
+        };
+        let Some((from, side)) = dialog.renames() else {
+            return false;
+        };
+        if dialog.check() != NameCheck::Ready || !self.name_taken(side, from, &dialog.text) {
+            return false;
+        }
+        if let Some(Modal::Name(dialog)) = &mut self.modal {
+            dialog.refuse(words::error_kind(ErrorKind::AlreadyExists).to_owned());
+        }
+        true
+    }
+
+    /// Whether an item of pane `side`'s folder other than `item` has the name `name`, as the
+    /// file systems of this system compare names.
+    fn name_taken(&self, side: usize, item: &VPath, name: &str) -> bool {
+        let tab = self.tab(side);
+        if item.parent().as_ref() != Some(tab.location()) {
+            return false;
+        }
+        let own = item.file_name();
+        let folding = NameFolding::of(Os::CURRENT);
+        let wanted = fold_name(OsStr::new(name), folding);
+        tab.all()
+            .iter()
+            .filter(|entry| Some(entry.name.as_os_str()) != own)
+            .any(|entry| fold_name(&entry.name, folding) == wanted)
+    }
+
+    /// The walk of the rename `spec`, asked for in pane `origin`, which opens the rename of
+    /// `next` once it has landed, or asks again with the name typed when the name is taken;
+    /// `None` for a job that is no rename.
+    fn walk_of(
+        &self,
+        spec: &JobSpec,
+        origin: Option<usize>,
+        next: Option<OsString>,
+    ) -> Option<RenameWalk> {
+        let side = origin.filter(|_| matches!(spec, JobSpec::Rename { .. }))?;
+        let tab = self.tab(side);
+        Some(RenameWalk {
+            spec: spec.clone(),
+            side,
+            tab: tab.id(),
+            folder: tab.location().clone(),
+            next,
+        })
     }
 
     /// The name of the item beside `item` in pane `side`, after it in the order of its rows (or
@@ -338,21 +407,75 @@ impl AppState {
         effects
     }
 
-    /// The rename of `walk`, which the name window's Tab applied, ended as `report` tells: when
-    /// it renamed the item and its pane still shows the same tab at the same folder, with
-    /// nothing over the main window, the rename of the item it noted beside it opens, found by
-    /// its name (the rows may have changed meanwhile: the watch, a sort).
-    fn walk_on(&mut self, walk: &RenameWalk, report: &JobReport) -> Vec<Effect> {
+    /// The rename of `walk` (if one waited for this job), which the name window applied, ended
+    /// as `report` tells, while its pane still shows the same tab at the same folder and nothing
+    /// is over the main window; what it asks for goes to `effects`. Renamed: the rename of the
+    /// item it noted beside it opens, found by its name (the rows may have changed meanwhile:
+    /// the watch, a sort). The name was taken (an item the list does not show, or one made
+    /// since): the rename of the same item opens again with the name typed and why, which is
+    /// then all that tells of the failure (`true`).
+    fn walk_on(
+        &mut self,
+        walk: Option<&RenameWalk>,
+        report: &JobReport,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let Some(walk) = walk else {
+            return false;
+        };
         let tab = self.tab(walk.side);
-        let still = report.outcome == Outcome::Completed
-            && self.modal.is_none()
+        let here = self.modal.is_none()
             && !self.quitting
             && tab.id() == walk.tab
             && *tab.location() == walk.folder;
-        if !still {
-            return Vec::new();
+        if !here {
+            return false;
         }
-        self.rename_named(walk.side, &walk.next)
+        if report.outcome == Outcome::Completed {
+            if let Some(next) = &walk.next {
+                effects.extend(self.rename_named(walk.side, next));
+            }
+            return false;
+        }
+        let taken = report
+            .failures
+            .iter()
+            .any(|failure| failure.kind == ErrorKind::AlreadyExists);
+        let JobSpec::Rename { from, to } = &walk.spec else {
+            return false;
+        };
+        if !taken {
+            return false;
+        }
+        let typed = to
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        effects.extend(self.rename_again(walk.side, from, &typed));
+        matches!(&self.modal, Some(Modal::Name(dialog)) if dialog.refused.is_some())
+    }
+
+    /// The rename of `item` in pane `side` opens again with `typed`, a name the job found
+    /// taken, and why; the item becomes the selection. Nothing when the pane no longer shows it.
+    fn rename_again(&mut self, side: usize, item: &VPath, typed: &str) -> Vec<Effect> {
+        let Some(name) = item.file_name().map(OsStr::to_os_string) else {
+            return Vec::new();
+        };
+        let tab = self.tab_mut(side);
+        let Some(entry) = tab.visible().iter().find(|entry| entry.name == name) else {
+            return Vec::new();
+        };
+        let is_dir = entry.kind == EntryKind::Dir;
+        let effects = tab
+            .select_names(slice::from_ref(&name))
+            .map(|row| Effect::ScrollTo { side, row })
+            .into_iter()
+            .collect();
+        let warning = words::error_kind(ErrorKind::AlreadyExists).to_owned();
+        if let Some(dialog) = NameDialog::rename_again(item.clone(), is_dir, side, typed, warning) {
+            self.open(Modal::Name(dialog));
+        }
+        effects
     }
 
     /// The window that shows was closed without its main button (Esc, Cancel, the close
@@ -726,9 +849,7 @@ impl AppState {
             effects.extend(self.select_outputs(side, slice::from_ref(output), marks.as_deref()));
         }
         effects.extend(self.select_made_links(work, origin, &report, marks.as_deref()));
-        if let Some(walk) = walk {
-            effects.extend(self.walk_on(&walk, &report));
-        }
+        let asked_again = self.walk_on(walk.as_ref(), &report, &mut effects);
         // What a paste made is selected in the pane it was asked in, as File Explorer does;
         // what it could not make (a failure) is not among its outputs.
         if matches!(
@@ -789,7 +910,9 @@ impl AppState {
         // that was cut short, or copied for want of rights on the source, is told as others are.
         let moved_by_drag = dragged
             .filter(|_| report.outcome == Outcome::Completed && !report.copied_instead_of_moved);
-        if !failures.is_empty() {
+        if asked_again {
+            // The name window says why, with the name typed.
+        } else if !failures.is_empty() {
             effects.push(self.failure_notice(work, &failures, &report));
         } else if work == JobWork::Trash {
             effects.extend(self.trash_toast(&report));
@@ -1136,17 +1259,19 @@ impl AppState {
     }
 }
 
-/// The rename the name window's Tab applied (OPS-02): once its job `spec` has renamed the item,
-/// the rename of the item called `next` opens, which was beside it in pane `side` when Tab was
-/// pressed, while that pane still shows the same tab (its id) at `folder`. A key or a press on
-/// a row in the meantime drops it.
+/// The rename the name window applied (OPS-02): once its job `spec` has renamed the item, the
+/// rename of the item called `next` opens, which was beside it in pane `side` when Tab was
+/// pressed (none for Enter, or at the end of the list); when the job finds the name taken, the
+/// rename of the same item opens again with the name typed. Either only while that pane still
+/// shows the same tab (its id) at `folder`. A key, a left press, an edit of the filter in the
+/// meantime drop it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RenameWalk {
     spec: JobSpec,
     side: usize,
     tab: u64,
     folder: VPath,
-    next: OsString,
+    next: Option<OsString>,
 }
 
 /// The effect that submits `spec`, asked for in pane `origin`.

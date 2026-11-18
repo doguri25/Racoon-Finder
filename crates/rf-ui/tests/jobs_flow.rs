@@ -516,18 +516,39 @@ fn rename_onto_existing_name_reports_and_keeps_both() {
 
     click(&mut state, LEFT, "a.txt");
     assert_eq!(key(&mut state, Key::F2, false), []);
-    let effects = state.name_confirmed("b.txt");
+    // A name the listing has: refused before any job, the name typed kept, with why.
+    assert_eq!(state.name_confirmed("b.txt"), []);
+    let refused = |state: &AppState, typed: &str| match state.modal() {
+        Some(Modal::Name(dialog)) => {
+            assert_eq!(dialog.text, typed);
+            assert_eq!(
+                dialog.refused.as_ref().map(|(_, why)| why.as_str()),
+                Some("같은 이름의 항목이 이미 있습니다")
+            );
+        }
+        other => panic!("the rename window: {other:?}"),
+    };
+    refused(&state, "b.txt");
+    state.dialog_cancelled();
+    // A name the listing does not know yet (another program made it since): the engine finds
+    // it taken and keeps both, and the rename asks again with the name typed, which tells of it
+    // in place of the notice.
+    write(&left.join("c.txt"), "C");
+    assert_eq!(key(&mut state, Key::F2, false), []);
+    let effects = state.name_confirmed("c.txt");
     let seen = harness.run(&mut state, effects);
     assert!(
-        seen.contains(&Effect::Notice(
-            "이름을 바꾸지 못했습니다: 같은 이름의 항목이 이미 있습니다".to_owned()
-        )),
+        !seen
+            .iter()
+            .any(|effect| matches!(effect, Effect::Notice(_))),
         "{seen:?}"
     );
-    // Nothing was written over: both files are as they were.
+    refused(&state, "c.txt");
+    // Nothing was written over: the files are as they were.
     assert_eq!(read(&left.join("a.txt")), "A");
     assert_eq!(read(&left.join("b.txt")), "B");
-    assert_eq!(std::fs::read_dir(&left).expect("left").count(), 2);
+    assert_eq!(read(&left.join("c.txt")), "C");
+    assert_eq!(std::fs::read_dir(&left).expect("left").count(), 3);
 }
 
 #[test]

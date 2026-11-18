@@ -28,7 +28,7 @@ use rf_core::{EntryKind, VPath};
 
 use super::layout::Step;
 use super::long_press::Spot;
-use super::{AppState, Effect, MenuShown};
+use super::{AppState, Effect, MenuShown, load};
 use crate::dialogs::{Modal, NameDialog};
 use crate::history::{HISTORY_MENU, Way};
 
@@ -313,17 +313,23 @@ impl AppState {
         }
     }
 
-    /// Entry `index` of the visit history's menu `way` was chosen (0 the nearest): the active
-    /// pane goes there in one move, in a new tab beside a pinned one, and navigation sync makes
-    /// the same move in the other pane. Nothing while a window shows over the main one, or past
-    /// the entries the menu lists.
-    pub fn history_chosen(&mut self, way: Way, index: usize) -> Vec<Effect> {
+    /// Entry `index` of the visit history's menu `way` was chosen (0 the nearest), which named
+    /// the folder `shown`: the active pane goes there in one move, in a new tab beside a pinned
+    /// one, and navigation sync makes the same move in the other pane. When the history no
+    /// longer has `shown` there (the pane moved while the menu showed: its folder was deleted,
+    /// a job's end), the pane goes to `shown` as to a typed path, the folder the line named,
+    /// rather than to whatever that place holds now. Nothing while a window shows over the main
+    /// one, or past the entries the menu lists.
+    pub fn history_chosen(&mut self, way: Way, index: usize, shown: &VPath) -> Vec<Effect> {
         if self.modal.is_some() || self.quitting || index >= HISTORY_MENU {
             return Vec::new();
         }
         self.subfolders = None;
         let side = self.active;
-        self.go(side, Step::to(way, index))
+        if self.history_entries(way).get(index) == Some(shown) {
+            return self.go(side, Step::to(way, index));
+        }
+        load(self.navigate_shown(side, shown.clone()))
     }
 
     /// What a left press on row `row` of pane `side` is to the slow second click, before the
