@@ -3936,16 +3936,15 @@ impl Controller {
             }
             return;
         }
+        // The window that shows takes the keyboard, as the system gives it. The main window is
+        // not brought forward to keep it: with no window of the main one's own (an owned
+        // window needs code for each window system), that would hide the panel's window behind
+        // it, all of it when the main window is maximized. A click or F6 gives the keys back.
         let opened = match own {
             Some(own) => own.show(),
             None => self.open_job_window(),
         };
-        if opened.is_ok() {
-            // The system gives the keyboard to a window that shows. It stays in the main
-            // window, at the start of the app and when the menu puts the panel in its window:
-            // the panel takes the keys when it is asked to (F6, `Controller::give_keys`).
-            self.show_main_window();
-        } else {
+        if opened.is_err() {
             // The panel goes back under the panes, and a notice says why.
             self.update(|state| {
                 state.set_jobs_window(false);
