@@ -29,8 +29,10 @@
 //! with `create_new`, then renamed). "No thumbnail" is remembered in memory only, for the
 //! generation of the listing (the system's "none" can pass: Windows' `E_FAIL` for a file whose
 //! handler is busy), so the next listing of the folder asks again. The disk cache keeps to
-//! [`CACHE_CAP`]: the oldest files go first ([`prune_plan`]), checked when the pool starts and
-//! after every [`PRUNE_EVERY`] files written. The cache is the app's own data, and the only
+//! [`CACHE_CAP`]: the oldest files go first ([`prune_plan`]), checked when the pool starts, after
+//! every [`PRUNE_EVERY`] files written, and after every [`PRUNE_BYTES`] written (the thumbnail
+//! view's large steps make files of a megabyte; [`prune_due`]). The cache is the app's own data,
+//! and the only
 //! files the UI code writes itself besides those of the settings and the logs; only the workers
 //! touch it.
 //!
@@ -70,12 +72,17 @@ pub const THUMB_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CACHE_CAP: u64 = 256 * 1024 * 1024;
 /// How many thumbnails the pool keeps in memory: the most recently made or read.
 pub const MEMORY_THUMBS: usize = 512;
-/// How many bytes of pixels the pool keeps in memory at most, whatever their number: 512
-/// pictures of the thumbnail view's largest step at a scale of 2 would be 2 GiB. The one used
-/// longest ago goes first; the last one made stays, however large.
+/// How many bytes of pixels a pool (each pane has its own) keeps in memory at most, whatever
+/// their number: 512 pictures of the thumbnail view's largest step at a scale of 2 would be
+/// 2 GiB. The one used longest ago goes first; the last one made stays, however large. The
+/// pane's list keeps as many of the pictures it shows (`ui_bridge`), sharing their pixels.
 pub const MEMORY_BYTES: usize = 256 * 1024 * 1024;
-/// The disk cache is checked against [`CACHE_CAP`] after this many files written.
+/// The disk cache is checked against [`CACHE_CAP`] after this many files written,
 pub const PRUNE_EVERY: u64 = 1000;
+/// and after this many bytes written since it was last checked: an eighth of the cap, so that
+/// it stays within an eighth over it however large the files are (a 1024 px picture of the
+/// thumbnail view's largest step at a scale of 2 is about a megabyte).
+pub const PRUNE_BYTES: u64 = CACHE_CAP / 8;
 /// The fewest and the most workers of a pool ([`worker_count`]).
 pub const DEFAULT_WORKERS: usize = 2;
 pub const MAX_WORKERS: usize = 4;
@@ -204,8 +211,28 @@ struct State {
     closed: bool,
 }
 
-/// The files written to the disk cache by every pool, for [`PRUNE_EVERY`].
+/// The files written to the disk cache by every pool, for [`PRUNE_EVERY`], and the bytes
+/// written since the last check, for [`PRUNE_BYTES`].
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
+static WRITTEN_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the disk cache is to be checked against [`CACHE_CAP`] after a file was written: the
+/// `files` written by then (that one counted) are a multiple of [`PRUNE_EVERY`], or the `bytes`
+/// written since the last check (that file's counted) have reached [`PRUNE_BYTES`].
+pub fn prune_due(files: u64, bytes: u64) -> bool {
+    (files > 0 && files.is_multiple_of(PRUNE_EVERY)) || bytes >= PRUNE_BYTES
+}
+
+/// Counts a file of `len` bytes written to the disk cache, and checks the cache when that is
+/// due ([`prune_due`]).
+fn written(cache: &Path, len: u64) {
+    let files = WRITTEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let bytes = WRITTEN_BYTES.fetch_add(len, Ordering::Relaxed) + len;
+    if prune_due(files, bytes) {
+        WRITTEN_BYTES.store(0, Ordering::Relaxed);
+        prune_in_background(cache);
+    }
+}
 
 /// Makes the thumbnails of the files on screen on worker threads; see the module.
 pub struct ThumbPool {
@@ -637,10 +664,8 @@ fn make_pixels(
             None => return Ok(None),
         }
     };
-    if write_cached(&file, &picture)
-        && WRITTEN.fetch_add(1, Ordering::Relaxed) % PRUNE_EVERY == PRUNE_EVERY - 1
-    {
-        prune_in_background(&inner.cache);
+    if let Some(len) = write_cached(&file, &picture) {
+        written(&inner.cache, len);
     }
     Ok(Some(Pixels::clone_from_slice(
         picture.as_raw(),
@@ -694,21 +719,19 @@ fn read_cached(file: &Path, size: u32) -> Option<Pixels> {
 }
 
 /// Writes `picture` to the cache file `file` as a PNG, when there is none: to a temporary name
-/// beside it made with `create_new`, then renamed. Whether it wrote it.
-fn write_cached(file: &Path, picture: &RgbaImage) -> bool {
+/// beside it made with `create_new`, then renamed. How many bytes it wrote; `None` for none.
+fn write_cached(file: &Path, picture: &RgbaImage) -> Option<u64> {
     static TEMPS: AtomicU64 = AtomicU64::new(0);
-    let Some(folder) = file.parent() else {
-        return false;
-    };
+    let folder = file.parent()?;
     if file.exists() || fs::create_dir_all(folder).is_err() {
-        return false;
+        return None;
     }
     let mut bytes = Vec::new();
     if picture
         .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
         .is_err()
     {
-        return false;
+        return None;
     }
     let temp = file.with_extension(format!(
         "{}-{}.tmp",
@@ -722,9 +745,9 @@ fn write_cached(file: &Path, picture: &RgbaImage) -> bool {
         .and_then(|mut out| out.write_all(&bytes));
     if written.is_err() || fs::rename(&temp, file).is_err() {
         let _ = fs::remove_file(&temp);
-        return false;
+        return None;
     }
-    true
+    u64::try_from(bytes.len()).ok()
 }
 
 /// Whether a pruning runs now: one at a time.
@@ -1428,6 +1451,35 @@ mod tests {
         pool.want(2, vec![want(dir.path(), "a.dat", 0)]);
         assert_eq!(collect(&pool, 1), [("a.dat".to_owned(), 2, Some((20, 10)))]);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_disk_cache_is_checked_after_so_many_files_or_so_many_bytes() {
+        // Every thousandth file, however small.
+        assert!(!prune_due(1, 0));
+        assert!(!prune_due(PRUNE_EVERY - 1, 1000));
+        assert!(prune_due(PRUNE_EVERY, 0));
+        assert!(!prune_due(PRUNE_EVERY + 1, 0));
+        assert!(prune_due(3 * PRUNE_EVERY, 0));
+        assert!(!prune_due(0, 0));
+        // And once an eighth of the cap has been written since the last check, however few files
+        // that took: 32 of the thumbnail view's 1 MiB pictures.
+        assert_eq!(PRUNE_BYTES, 32 * 1024 * 1024);
+        assert!(!prune_due(31, 31 * 1024 * 1024));
+        assert!(prune_due(32, 32 * 1024 * 1024));
+        assert!(prune_due(7, PRUNE_BYTES + 1));
+        assert!(!prune_due(7, PRUNE_BYTES - 1));
+    }
+
+    #[test]
+    fn a_file_written_to_the_cache_counts_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("thumbs").join("96").join("key.png");
+        let picture = RgbaImage::from_pixel(40, 30, image::Rgba([10, 20, 30, 255]));
+        let len = write_cached(&file, &picture).expect("written");
+        assert_eq!(fs::metadata(&file).unwrap().len(), len);
+        // A file that is there is not written again, and counts nothing.
+        assert_eq!(write_cached(&file, &picture), None);
     }
 
     #[test]

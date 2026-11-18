@@ -47,6 +47,17 @@ enum TileEvent {
     check,
 }
 
+// The line of a kind's icon drawn `size` a side. Slint strokes a path in logical pixels, not in
+// the units of its viewbox, so a line is as wide whatever the icon's size: 1.8 px up to the
+// medium icons, 1.1 px for the large ones, 0.8 px for the extra large ones, and past them (the
+// thumbnail view, to 512 px) 0.8 px grown with the icon, so that a 512 px icon is the 160 px one
+// drawn larger.
+export global IconLines {
+    public pure function stroke(size: length) -> length {
+        return size >= 160px ? 0.8px * (size / 160px) : size >= 96px ? 1.1px : 1.8px;
+    }
+}
+
 // One item: its icon, and its name beside a small icon or under a larger one; in the tiles, a
 // 48 px icon beside three lines (the name, the kind and the size).
 component Tile inherits Rectangle {
@@ -79,9 +90,8 @@ component Tile inherits Rectangle {
     // Where the name begins: under the icon of a large item, after the icon of the others.
     private property <length> name-x: 8px + root.check-room + root.icon-size + (root.tiled ? 10px : 8px);
     private property <length> name-y: 8px + root.icon-size + 6px;
-    // The line of a kind's icon: thinner as the icon grows, so that it looks the same past the
-    // extra large icons' 160 px.
-    private property <length> stroke: root.icon-size >= 160px ? 0.8px * (160px / root.icon-size) : root.icon-size >= 96px ? 1.1px : 1.8px;
+    // The line of a kind's icon (`IconLines`).
+    private property <length> stroke: IconLines.stroke(root.icon-size);
 
     // Whether the point (`x`, `y`) of the item is on its name rather than its icon.
     pure function on-name(x: length, y: length) -> bool {

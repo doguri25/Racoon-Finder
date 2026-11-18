@@ -120,6 +120,8 @@ impl Controller {
             .filter(|(first, last)| first <= last)
             .unwrap_or((1, 0));
         self.thumber.ranges[side].set(Some(range));
+        // The list keeps the thumbnails on screen past its budget.
+        self.panes[side].set_on_screen(range.0, range.1);
         self.schedule_thumbs();
     }
 
@@ -276,8 +278,9 @@ impl Controller {
     /// The wheel turned by `lines` notches, or a trackpad scrolled `pixels` logical pixels (up
     /// positive). With Ctrl (macOS ⌘) held over a pane's list, the icons of that pane step a size
     /// up or down, and the list does not scroll: `true`.
-    /// In the thumbnail view the size changes by [`THUMB_NOTCH`] a notch, or by the pixels a
-    /// trackpad scrolled.
+    /// In the thumbnail view the size changes by [`THUMB_NOTCH`] a notch (by the wheel's own
+    /// delta: a high-resolution wheel's fractions of a notch move it a fraction), or by the
+    /// pixels a trackpad scrolled ([`thumb_wheel_change`]).
     pub(super) fn zoom_wheel(&self, lines: Option<f64>, pixels: f64) -> bool {
         if !self.thumber.zoom.borrow().held {
             return false;
@@ -286,10 +289,7 @@ impl Controller {
             return false;
         };
         if let Some(size) = self.thumb_size(side) {
-            let change = match lines {
-                Some(lines) => f64::from(ZoomSteps::notches(lines)) * THUMB_NOTCH,
-                None => pixels,
-            };
+            let change = thumb_wheel_change(lines, pixels);
             let size = self.thumber.zoom.borrow_mut().grown(size, change);
             self.update(|state| state.set_thumb_size(side, size));
             return true;
@@ -386,6 +386,15 @@ fn physical(side: u32, scale: f32) -> u32 {
     )]
     let pixels = (f64::from(side) * scale).round().clamp(1.0, 4096.0) as u32;
     pixels
+}
+
+/// How many logical pixels the wheel with Ctrl changes the thumbnail view's size by: its delta
+/// in notches (`lines`, fractions too) times [`THUMB_NOTCH`], or a trackpad's `pixels`.
+fn thumb_wheel_change(lines: Option<f64>, pixels: f64) -> f64 {
+    match lines {
+        Some(lines) => lines * THUMB_NOTCH,
+        None => pixels,
+    }
 }
 
 /// A slider's value as a size in whole logical pixels, between the slider's ends.
@@ -531,6 +540,33 @@ mod tests {
         assert!(pinch.rest.abs() < f64::EPSILON);
         assert_eq!(pinch.grown(100, f64::NAN), 100);
         assert_eq!(pinch.grown(100, f64::INFINITY), 100);
+    }
+
+    #[test]
+    fn the_wheel_changes_the_thumbnail_size_by_its_delta() {
+        assert!((thumb_wheel_change(Some(1.0), 0.0) - THUMB_NOTCH).abs() < f64::EPSILON);
+        assert!((thumb_wheel_change(Some(-2.0), 0.0) + 2.0 * THUMB_NOTCH).abs() < f64::EPSILON);
+        assert!((thumb_wheel_change(None, 7.5) - 7.5).abs() < f64::EPSILON);
+        // A high-resolution wheel: eight eighths of a notch make one notch, a pixel at a time
+        // carried over, and no more.
+        let mut zoom = ZoomSteps::default();
+        let mut size = 192;
+        for _ in 0..8 {
+            size = zoom.grown(size, thumb_wheel_change(Some(0.125), 0.0));
+        }
+        assert_eq!(size, 192 + 32);
+        // A third of a notch three times: 32 px, the fractions carried.
+        let mut zoom = ZoomSteps::default();
+        let mut size = 192;
+        for _ in 0..3 {
+            size = zoom.grown(size, thumb_wheel_change(Some(1.0 / 3.0), 0.0));
+        }
+        assert_eq!(size, 192 + 32);
+        // Down as well.
+        for _ in 0..3 {
+            size = zoom.grown(size, thumb_wheel_change(Some(-1.0 / 3.0), 0.0));
+        }
+        assert_eq!(size, 192);
     }
 
     #[test]

@@ -512,8 +512,9 @@ pub struct FolderViewSettings {
     )]
     pub mode: String,
     /// The size of the thumbnail view (`mode = "thumbnails"`), in logical pixels; none (0) for
-    /// the default, and in the other modes. A key of its own, not part of the mode's name, so
-    /// that 0.4.0, which knows neither, shows 자세히 and writes both back as they are.
+    /// the default. A key of its own, not part of the mode's name, so that 0.4.0, which knows
+    /// neither, shows 자세히 and writes both back as they are. Beside another mode it means
+    /// nothing to this version, which writes it back as it is ([`UnknownParts::thumb_size`]).
     #[serde(skip_serializing_if = "is_zero", deserialize_with = "or_default")]
     pub thumb_size: u32,
     /// The columns of 자세히 after the name, in their order (`size`, `modified`, `created`,
@@ -633,6 +634,10 @@ impl FolderViewSettings {
         if mode.is_none() && !self.mode.is_empty() {
             unknown.mode = Some(self.mode.clone());
         }
+        // A size beside another mode is no size of this version's: it is kept as written.
+        if self.thumb_size > 0 && mode.and_then(ViewMode::thumb_size).is_none() {
+            unknown.thumb_size = Some(self.thumb_size);
+        }
         if key(&self.sort).is_none() && !self.sort.is_empty() {
             unknown.sort = Some(self.sort.clone());
         }
@@ -696,10 +701,11 @@ impl FolderViewSettings {
         FolderViewSettings {
             folder: stored.folder.clone(),
             mode,
-            // Of the thumbnails this version shows; an unknown mode in their place has none.
+            // Of the thumbnails this version shows; beside another mode, the one written there.
             thumb_size: match (&unknown.mode, view.mode) {
                 (None, ViewMode::Thumbnails { size }) if size != DEFAULT_THUMB_SIZE => size,
-                _ => 0,
+                (None, ViewMode::Thumbnails { .. }) => 0,
+                _ => unknown.thumb_size.unwrap_or(0),
             },
             columns,
             widths,
@@ -2832,6 +2838,45 @@ mod tests {
             );
         }
         assert_eq!(entry("mode = \"list\"\nthumb_size = 300\n"), ViewMode::List);
+    }
+
+    #[test]
+    fn a_thumbnail_size_beside_another_mode_is_written_back_as_it_is() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let at = folder(dir.path(), "x");
+        let uri = toml_string(&at.to_uri());
+        let read = |text: &str| -> FolderViewSettings {
+            let settings: Settings =
+                toml::from_str(&format!("[[folder_views]]\nfolder = {uri}\n{text}")).expect("read");
+            settings.folder_views[0].clone()
+        };
+        // Beside a mode this version knows, and one it does not: shown as that mode (자세히 for
+        // the unknown one), the size kept as written.
+        for (text, shown) in [
+            ("mode = \"list\"\nthumb_size = 300\n", ViewMode::List),
+            ("thumb_size = 9000\n", ViewMode::Details),
+            ("mode = \"gallery\"\nthumb_size = 300\n", ViewMode::Details),
+        ] {
+            let stored = read(text).stored();
+            assert_eq!(stored.view.mode, shown, "{text}");
+            assert_eq!(FolderViewSettings::of(&stored), read(text), "{text}");
+        }
+        // The thumbnails chosen here: their own size from then on, the written one gone, also
+        // after another mode is chosen.
+        let mut store = ViewStore::new(
+            vec![read("mode = \"list\"\nthumb_size = 300\n").stored()],
+            Os::CURRENT,
+        );
+        let own = |store: &ViewStore| store.own(&at).expect("its view").clone();
+        assert_eq!(own(&store).unknown.thumb_size, Some(300));
+        let mut view = own(&store).view;
+        view.mode = ViewMode::thumbnails(250);
+        store.remember(&at, view.clone());
+        assert_eq!(own(&store).unknown.thumb_size, None);
+        assert_eq!(FolderViewSettings::of(&own(&store)).thumb_size, 250);
+        view.mode = ViewMode::Details;
+        store.remember(&at, view);
+        assert_eq!(FolderViewSettings::of(&own(&store)).thumb_size, 0);
     }
 
     #[test]

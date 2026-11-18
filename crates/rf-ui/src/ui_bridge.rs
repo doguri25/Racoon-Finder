@@ -144,6 +144,11 @@ impl PaneModels {
         self.rows.has_thumb(path, stamp)
     }
 
+    /// The rows `first..=last` are on screen ([`FileRows::set_on_screen`]).
+    pub fn set_on_screen(&self, first: usize, last: usize) {
+        self.rows.set_on_screen(first, last);
+    }
+
     /// Shows each kind's icon again in the place of every thumbnail.
     pub fn clear_thumbs(&self) {
         self.rows.clear_thumbs();
@@ -363,6 +368,8 @@ pub struct FileRows {
     folder: RefCell<Option<PathBuf>>,
     /// The folder the rows are in, as the 경로 column shows it ([`FileRows::set_parent`]).
     parent: RefCell<SharedString>,
+    /// The first and the last row on screen ([`FileRows::set_on_screen`]).
+    on_screen: Cell<(usize, usize)>,
     /// The thumbnails that show, by the file's path: what they were made for, the picture and
     /// when it came (a count), at most [`SHOWN_THUMBS`].
     thumbs: RefCell<ShownThumbs>,
@@ -386,9 +393,10 @@ impl ThumbStamp {
     }
 }
 
-/// The most thumbnails a list keeps, and the most bytes of pixels: the pool keeps as many
-/// ([`crate::thumbs::MEMORY_THUMBS`], [`crate::thumbs::MEMORY_BYTES`]), so one forgotten here
-/// that comes on screen again comes back from there.
+/// The most thumbnails a list (each pane's) keeps, and the most bytes of pixels: the pane's pool
+/// keeps as many ([`crate::thumbs::MEMORY_THUMBS`], [`crate::thumbs::MEMORY_BYTES`]), so one
+/// forgotten here that comes on screen again comes back from there. The list's pictures share
+/// their pixels with the pool's, so a pane holds about that much, twice at most.
 const SHOWN_THUMBS: usize = crate::thumbs::MEMORY_THUMBS;
 const SHOWN_BYTES: usize = crate::thumbs::MEMORY_BYTES;
 
@@ -397,16 +405,19 @@ const SHOWN_BYTES: usize = crate::thumbs::MEMORY_BYTES;
 type ShownThumbs = HashMap<PathBuf, (ThumbStamp, slint::Image, u64)>;
 
 /// Forgets the thumbnails that came first while there are more than `most` of them or they hold
-/// more than `budget` bytes of pixels; the one that came last stays, however large.
-fn trim_shown(thumbs: &mut ShownThumbs, most: usize, budget: usize) {
+/// more than `budget` bytes of pixels, but those of the files on screen (`on_screen`), so that a
+/// screenful larger than the budget is not forgotten and asked for again at every redraw; the
+/// one that came last stays, however large.
+fn trim_shown(thumbs: &mut ShownThumbs, most: usize, budget: usize, on_screen: &HashSet<PathBuf>) {
     let mut held: usize = thumbs
         .values()
         .map(|(_, image, _)| image_bytes(image))
         .sum();
-    while thumbs.len() > 1
-        && (thumbs.len() > most || held > budget)
+    let last = thumbs.values().map(|(_, _, came)| *came).max();
+    while (thumbs.len() > most || held > budget)
         && let Some(first) = thumbs
             .iter()
+            .filter(|(path, (_, _, came))| Some(*came) != last && !on_screen.contains(*path))
             .min_by_key(|(_, (_, _, came))| *came)
             .map(|(path, _)| path.clone())
     {
@@ -452,6 +463,7 @@ impl Default for FileRows {
             cut: RefCell::default(),
             folder: RefCell::default(),
             parent: RefCell::default(),
+            on_screen: Cell::new((1, 0)),
             thumbs: RefCell::default(),
             thumbs_came: Cell::new(0),
         }
@@ -586,12 +598,42 @@ impl FileRows {
         {
             let mut thumbs = self.thumbs.borrow_mut();
             thumbs.insert(path.to_path_buf(), (stamp, image, came));
-            trim_shown(&mut thumbs, SHOWN_THUMBS, SHOWN_BYTES);
+            trim_shown(
+                &mut thumbs,
+                SHOWN_THUMBS,
+                SHOWN_BYTES,
+                &self.on_screen_paths(),
+            );
         }
         // The list reads the row back while it is told, so the borrow has ended.
         if let Some(at) = at {
             self.notify.row_changed(at);
         }
+    }
+
+    /// The rows `first..=last` are on screen from now on (the icon views tell it): their
+    /// thumbnails are the last a trim forgets ([`trim_shown`]). An empty range when `last` is
+    /// before `first`.
+    pub fn set_on_screen(&self, first: usize, last: usize) {
+        self.on_screen.set((first, last));
+    }
+
+    /// The paths of the files on the rows on screen ([`FileRows::set_on_screen`]).
+    fn on_screen_paths(&self) -> HashSet<PathBuf> {
+        let (first, last) = self.on_screen.get();
+        let Some(folder) = self.folder.borrow().clone() else {
+            return HashSet::new();
+        };
+        if last < first {
+            return HashSet::new();
+        }
+        self.rows
+            .borrow()
+            .iter()
+            .skip(first)
+            .take(last - first + 1)
+            .map(|shown| folder.join(&shown.entry.name))
+            .collect()
     }
 
     /// Whether the file at `path` shows the thumbnail for `stamp`: asked for at that size, of
@@ -2765,17 +2807,48 @@ mod tests {
             names.sort();
             names
         };
+        let none = HashSet::new();
         // 400 bytes each for the three first, 1600 for the last: 2800 bytes in all.
-        trim_shown(&mut thumbs, 10, 2800);
+        trim_shown(&mut thumbs, 10, 2800, &none);
         assert_eq!(names(&thumbs), ["a", "b", "c", "d"]);
-        trim_shown(&mut thumbs, 10, 2400);
+        trim_shown(&mut thumbs, 10, 2400, &none);
         assert_eq!(names(&thumbs), ["b", "c", "d"], "the first that came goes");
-        trim_shown(&mut thumbs, 2, 10_000);
-        assert_eq!(names(&thumbs), ["c", "d"]);
+        // Those on screen stay, over the budget too: the next one goes in their place.
+        let screen = HashSet::from([PathBuf::from("b")]);
+        trim_shown(&mut thumbs, 2, 10_000, &screen);
+        assert_eq!(names(&thumbs), ["b", "d"]);
+        trim_shown(&mut thumbs, 1, 100, &screen);
+        assert_eq!(names(&thumbs), ["b", "d"], "nothing left to forget");
         // The last that came stays, however large.
-        trim_shown(&mut thumbs, 10, 100);
+        trim_shown(&mut thumbs, 10, 100, &none);
         assert_eq!(names(&thumbs), ["d"]);
         assert_eq!(image_bytes(&thumbs[&PathBuf::from("d")].1), 1600);
+    }
+
+    #[test]
+    fn a_list_keeps_the_thumbnails_on_screen_past_its_budget() {
+        let model = FileRows::default();
+        let dir = std::env::temp_dir().join("rf-thumb-screen");
+        let list: Vec<Entry> = (0..4)
+            .map(|i| entry(&format!("p{i}.png"), EntryKind::File, 1))
+            .collect();
+        model.set_folder(Some(&dir));
+        model.sync(&list, &Selection::default());
+        model.set_on_screen(0, 1);
+        assert_eq!(
+            model.on_screen_paths(),
+            HashSet::from([dir.join("p0.png"), dir.join("p1.png")])
+        );
+        model.set_on_screen(3, 9);
+        assert_eq!(model.on_screen_paths(), HashSet::from([dir.join("p3.png")]));
+        model.set_on_screen(1, 0);
+        assert!(model.on_screen_paths().is_empty());
+        model.set_folder(None);
+        model.set_on_screen(0, 3);
+        assert!(
+            model.on_screen_paths().is_empty(),
+            "no folder, no thumbnails"
+        );
     }
 
     #[test]

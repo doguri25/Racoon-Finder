@@ -600,10 +600,13 @@ export component PaneDivider inherits Rectangle {
 }
 
 // The thumbnails' size slider of the status bar (NAV-06), 64 to 512 px, and the size it is at.
-// It shows, and takes the keys, only while `shown`. Its own keys (← →, Home, End) move it as the
-// standard slider's do; ↑ and ↓ do as → and ←, PageUp and PageDown move it by 64 px, and Esc,
-// Tab, Shift+Tab and Enter leave it (`left`). Any other key is Rust's to judge (`key`): a key of
-// the panes' rows does nothing here, the window's others go on to the window.
+// It shows, and takes the keys, only while `shown`. Without a modifier, → and ↑ move it 16 px up,
+// ← and ↓ down, PageUp and PageDown 64 px, Home and End to its ends; Esc, Tab, Shift+Tab and
+// Enter leave it (`left`). The standard slider's own keys are off (`step: 0`): it would take the
+// arrows with any modifier, and Alt+← (macOS ⌘←) is the window's 뒤로. Any other key is Rust's to
+// judge (`key`): a key of the panes' rows does nothing here, the window's others go on to the
+// window. A press of the pointer on it gives it the keys (the standard slider's way); they go
+// back to the list as the press ends, unless the 보기 menu gave them (`focus-slider`).
 component SizeSlider inherits Rectangle {
     in property <bool> shown;
     // The size the view has, which the slider shows.
@@ -616,16 +619,23 @@ component SizeSlider inherits Rectangle {
 
     public function focus-slider() {
         if (root.shown) {
+            root.from-menu = true;
             slider.focus();
         }
     }
+
+    // The keys came from the 보기 menu: they stay after a press of the pointer.
+    private property <bool> from-menu;
 
     // The step of ← → ↑ ↓, and of PageUp and PageDown.
     private property <float> step: 16;
     private property <float> page: 64;
 
     function step-by(delta: float) {
-        let value = clamp(slider.value + delta, slider.minimum, slider.maximum);
+        root.go-to(slider.value + delta);
+    }
+    function go-to(wanted: float) {
+        let value = clamp(wanted, slider.minimum, slider.maximum);
         if (value != slider.value) {
             slider.value = value;
             root.moved(value);
@@ -640,12 +650,20 @@ component SizeSlider inherits Rectangle {
         focus-on-tab-navigation: false;
         key-pressed(event) => {
             let plain = !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
-            if (plain && event.text == Key.UpArrow) {
+            if (plain && (event.text == Key.UpArrow || event.text == Key.RightArrow)) {
                 root.step-by(root.step);
                 return accept;
             }
-            if (plain && event.text == Key.DownArrow) {
+            if (plain && (event.text == Key.DownArrow || event.text == Key.LeftArrow)) {
                 root.step-by(-root.step);
+                return accept;
+            }
+            if (plain && event.text == Key.Home) {
+                root.go-to(slider.minimum);
+                return accept;
+            }
+            if (plain && event.text == Key.End) {
+                root.go-to(slider.maximum);
                 return accept;
             }
             if (plain && event.text == Key.PageUp) {
@@ -672,16 +690,34 @@ component SizeSlider inherits Rectangle {
             slider := Slider {
                 minimum: 64;
                 maximum: 512;
-                step: root.step;
+                // Its own keys off (see above); a screen reader steps it as the keys do.
+                step: 0;
                 enabled: root.shown;
                 accessible-label: "썸네일 크기";
+                accessible-value-step: root.step;
+                accessible-action-increment => {
+                    root.step-by(root.step);
+                }
+                accessible-action-decrement => {
+                    root.step-by(-root.step);
+                }
                 init => {
                     root.show-size();
                 }
                 changed(value) => {
                     root.moved(value);
                 }
+                // A press of the pointer ended: the keys go back to the list, unless the menu
+                // gave them.
+                released(value) => {
+                    if (!root.from-menu) {
+                        root.left();
+                    }
+                }
                 changed has-focus => {
+                    if (!self.has-focus) {
+                        root.from-menu = false;
+                    }
                     root.has-keys(self.has-focus);
                 }
             }

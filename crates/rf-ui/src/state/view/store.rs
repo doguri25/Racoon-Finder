@@ -55,6 +55,10 @@ pub struct UnknownParts {
     pub then: Option<(String, bool)>,
     /// The columns, with their widths (0 for none), after the columns of the view.
     pub columns: Vec<(String, u32)>,
+    /// A thumbnail size (`thumb_size`) written beside a mode other than the thumbnails, which
+    /// this version keeps in the mode alone: written back as it is, until this version shows the
+    /// folder's thumbnails at a size of its own.
+    pub thumb_size: Option<u32>,
 }
 
 /// The parts of a view that a change chose ([`ViewStore::remember_choice`]): their unknown
@@ -76,6 +80,9 @@ impl UnknownParts {
     fn changed(&mut self, old: &FolderView, new: &FolderView, chosen: Chosen) {
         if chosen.mode || new.mode != old.mode {
             self.mode = None;
+        }
+        if new.mode.thumb_size().is_some() {
+            self.thumb_size = None;
         }
         if chosen.sort || new.sort.primary != old.sort.primary {
             self.sort = None;
@@ -458,6 +465,7 @@ mod tests {
                     sort: Some("rating".to_owned()),
                     then: Some(("tags".to_owned(), true)),
                     columns: vec![("tags".to_owned(), 80)],
+                    thumb_size: None,
                 },
                 extra: toml::Table::new(),
             }],
@@ -489,6 +497,7 @@ mod tests {
             sort: Some("rating".to_owned()),
             then: Some(("tags".to_owned(), true)),
             columns: vec![("tags".to_owned(), 80)],
+            thumb_size: None,
         };
         let mut store = ViewStore::new(
             vec![StoredView {

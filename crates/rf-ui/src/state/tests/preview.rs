@@ -9,15 +9,6 @@ use crate::preview::{PreviewContent, Previewed};
 use crate::words;
 use rf_vfs::Change;
 
-const ALL_MODES: [ViewMode; 6] = [
-    ViewMode::Details,
-    ViewMode::List,
-    ViewMode::SmallIcons,
-    ViewMode::MediumIcons,
-    ViewMode::LargeIcons,
-    ViewMode::ExtraLargeIcons,
-];
-
 /// The one request for a preview among `effects`.
 fn the_preview(effects: &[Effect]) -> PreviewRequest {
     let requests: Vec<&PreviewRequest> = effects
@@ -205,7 +196,7 @@ fn space_opens_quick_look_and_the_arrows_go_from_file_to_file() {
 
 #[test]
 fn quick_look_is_the_same_in_every_view_and_with_one_pane() {
-    for mode in ALL_MODES {
+    for mode in ViewMode::ALL {
         for dual in [true, false] {
             let mut state = ready(mixed(), mixed());
             if !dual {

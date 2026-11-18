@@ -22,10 +22,10 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow,
-    FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobGraph, JobRowView,
-    JobTray, JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView,
-    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView,
-    RecoveryView, StatusFit, Theme, VisitEntry,
+    FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, IconLines, ItemMenu, JobGraph,
+    JobRowView, JobTray, JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
+    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
+    RecentRowView, RecoveryView, StatusFit, Theme, VisitEntry,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -9855,6 +9855,120 @@ fn the_size_slider_takes_the_keys_from_the_view_menu_and_gives_them_back() {
     assert_eq!(calls.take(), Vec::<String>::new());
     press(&window, Key::Escape);
     press(&window, Key::Escape);
+}
+
+/// Whether `text` is a modifier key's own press (the tests below tell only the others).
+fn is_modifier(text: &str) -> bool {
+    [Key::Alt, Key::Control, Key::Shift, Key::Meta]
+        .into_iter()
+        .any(|key| special(key) == text)
+}
+
+#[test]
+fn the_size_slider_leaves_the_modified_arrows_to_the_window_and_a_press_gives_the_keys_back() {
+    let (window, mut show) = slider_window();
+    show(ViewMode::thumbnails(120));
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_thumb_size_changed(move |side, size| record.note(format!("{side} {size}")));
+    // As the controller judges them (`Controller::size_key`): a key of the rows is used there.
+    let record = calls.clone();
+    window.on_size_key(move |text, ctrl, shift, alt, meta| {
+        let mods = rf_ui::keys::Mods {
+            ctrl,
+            shift,
+            alt,
+            meta,
+        };
+        let used = rf_ui::keys::command_for(&text, mods, Os::Windows)
+            .is_some_and(|command| command.acts_on_rows());
+        if !is_modifier(&text) {
+            record.note(format!("size-key {} {used}", text.escape_unicode()));
+        }
+        used
+    });
+    let record = calls.clone();
+    window.on_key(move |text, ctrl, _, alt, _, _| {
+        if !is_modifier(&text) {
+            record.note(format!("key {} {ctrl} {alt}", text.escape_unicode()));
+        }
+        true
+    });
+    let arrow = |key: Key| special(key).escape_unicode().to_string();
+    focus_size_slider(&window);
+    calls.take();
+    // Alt+← is the window's 뒤로 (macOS ⌘←): it goes on to the window, and the slider stays.
+    chord(&window, &[&special(Key::Alt), &special(Key::LeftArrow)]);
+    assert_eq!(
+        calls.take(),
+        [
+            format!("size-key {} false", arrow(Key::LeftArrow)),
+            format!("key {} false true", arrow(Key::LeftArrow))
+        ]
+    );
+    // Ctrl+→ (the list's cursor alone) is a key of the rows: nothing, and the slider stays.
+    chord(
+        &window,
+        &[&special(Key::Control), &special(Key::RightArrow)],
+    );
+    assert_eq!(
+        calls.take(),
+        [format!("size-key {} true", arrow(Key::RightArrow))]
+    );
+    // Without a modifier the arrows still move it: it kept the keys.
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take(), ["0 136"]);
+    // A press of the pointer on it, while the menu gave it the keys, keeps them there.
+    let slider = || {
+        labelled(&window, "썸네일 크기", AccessibleRole::Slider)
+            .into_iter()
+            .find(|slider| slider.size().width > 0.0)
+            .expect("the left pane's slider")
+    };
+    slider().mock_single_click(slint::platform::PointerEventButton::Left);
+    run_for(60);
+    calls.take();
+    press(&window, Key::RightArrow);
+    assert_eq!(calls.take().len(), 1, "the slider moved");
+    // Back in the list, a press of the pointer moves it (here from its end to its middle), and
+    // the keys come back to the list as the press ends.
+    press(&window, Key::End);
+    press(&window, Key::Escape);
+    calls.take();
+    slider().mock_single_click(slint::platform::PointerEventButton::Left);
+    run_for(60);
+    let moved = calls.take();
+    assert!(
+        moved.len() == 1 && moved[0].starts_with("0 "),
+        "the press moved it: {moved:?}"
+    );
+    press(&window, Key::DownArrow);
+    assert_eq!(
+        calls.take(),
+        [format!("key {} false false", arrow(Key::DownArrow))]
+    );
+}
+
+#[test]
+fn a_kind_icon_s_line_grows_with_it_past_the_extra_large_icons() {
+    let window = window();
+    let lines = window.global::<IconLines<'_>>();
+    // Slint draws a path's line in logical pixels, whatever its viewbox: the icon sizes' own
+    // lines up to 160 px, then as much wider as the icon is.
+    for (size, line) in [
+        (18.0, 1.8),
+        (48.0, 1.8),
+        (64.0, 1.8),
+        (96.0, 1.1),
+        (159.0, 1.1),
+        (160.0, 0.8),
+        (192.0, 0.96),
+        (320.0, 1.6),
+        (512.0, 2.56),
+    ] {
+        let drawn: f32 = lines.invoke_stroke(size);
+        assert!((drawn - line).abs() < 1e-4, "{size}: {drawn}");
+    }
 }
 
 #[test]

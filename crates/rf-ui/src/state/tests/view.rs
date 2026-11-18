@@ -404,6 +404,7 @@ fn a_choice_in_a_menu_or_on_a_head_makes_an_unknown_part_this_version_s() {
                     sort: Some("rating".to_owned()),
                     then: Some(("tags".to_owned(), true)),
                     columns: vec![("tags".to_owned(), 80)],
+                    thumb_size: None,
                 },
                 extra: toml::Table::new(),
             }],
