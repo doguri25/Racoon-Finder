@@ -9682,6 +9682,40 @@ fn a_hidden_toolbar_leaves_the_panes_their_path_rows_and_the_view_menu_its_key()
     assert_eq!(window.invoke_visits_button_at(back, 30.0), -1);
 }
 
+#[test]
+fn the_folder_s_menu_gives_the_pointer_a_way_back_to_a_hidden_toolbar() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let offered = || {
+        ElementHandle::find_by_accessible_label(&window, "툴바 보이기")
+            .next()
+            .is_some()
+    };
+    // While the toolbar shows, the folder's menu (a right click on the list's empty part, or
+    // its key) does not offer it.
+    window.invoke_show_blank_menu(0);
+    assert!(!offered());
+    press(&window, Key::Escape);
+    // Hidden, the menu ends with 툴바 보이기, which asks Rust to show it again: in either pane.
+    // (The window tells the menus as its change handlers run, before the next event.)
+    window.set_show_toolbar(false);
+    slint::platform::update_timers_and_animations();
+    for side in [0, 1] {
+        window.invoke_show_blank_menu(side);
+        assert!(offered(), "pane {side}");
+        choose_item(&window, "툴바 보이기");
+        assert_eq!(calls.take(), ["toggle-toolbar"], "pane {side}");
+    }
+    // Shown again (Rust sets it back), the item goes.
+    window.set_show_toolbar(true);
+    slint::platform::update_timers_and_animations();
+    window.invoke_show_blank_menu(0);
+    assert!(!offered());
+    press(&window, Key::Escape);
+}
+
 /// The thumbnails' size sliders of the panes' status bars that show (a hidden one has no room),
 /// with the value each shows.
 fn shown_size_sliders(window: &MainWindow) -> Vec<String> {

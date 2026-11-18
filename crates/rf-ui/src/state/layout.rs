@@ -579,16 +579,28 @@ pub const DEFAULT_WINDOW: (u32, u32) = (1280, 800);
 /// window to count as on it: enough of its title bar to take hold of and drag.
 pub const ON_SCREEN: (u32, u32) = (64, 32);
 
+/// What the window system adds around the window's own size, about, in logical pixels across
+/// and down: its borders and its title bar. The saved corner is the outer one and the saved
+/// size the inner one, so a window fitted to a screen takes this much more there.
+pub const FRAME: (u32, u32) = (16, 40);
+
+/// The room at a screen's bottom edge, in logical pixels, that a window [`placement`] fits or
+/// moves keeps free: about a taskbar's or a dock's. winit tells each screen whole, not the
+/// part the system's bars leave.
+pub const BOTTOM_EDGE: u32 = 48;
+
 /// Where the window opens on `screens` (the first one the system's main screen), from where it
 /// was (`saved`), as LAY-07 has it:
 ///
-/// - on a screen, it opens where it was; partly off it (by more than all but [`ON_SCREEN`] of
-///   it), it is moved onto the screen that holds most of it, as little as it takes to be whole
-///   there;
+/// - whole on a screen (its size and [`FRAME`] from its corner), it opens where it was, as it
+///   was;
+/// - partly off it (by more than all but [`ON_SCREEN`] of it), it is moved onto the screen that
+///   holds most of it, as little as it takes to be whole there, above the screen's
+///   [`BOTTOM_EDGE`];
 /// - off every screen (the screen it was on is gone), or nowhere known, it opens where the
 ///   window system puts a new window;
-/// - larger than the screen it opens on, it is made as large as that screen, but never smaller
-///   than `settings::MIN_WINDOW`;
+/// - larger than the screen it opens on, it is made as large as that screen less its frame and
+///   the bottom edge, but never smaller than `settings::MIN_WINDOW`;
 /// - maximized, it opens maximized on that screen (its size the one it goes back to).
 ///
 /// Without a screen the system tells of, the place is as saved: nothing to check it against.
@@ -614,41 +626,83 @@ pub fn placement(saved: SavedPlace, screens: &[Screen]) -> Placement {
             .max_by_key(|&(area, _)| area)
             .map(|(_, screen)| screen)
     });
-    let (position, screen) = match (saved.position, on) {
+    let (position, size) = match (saved.position, on) {
+        (Some(corner), Some(screen)) if whole_on(corner, wanted, screen) => (corner, wanted),
         (Some(corner), Some(screen)) => {
-            let size = physical(fit(wanted, screen), screen.scale);
-            (Some(inside(corner, size, screen)), screen)
+            let size = fit(wanted, screen);
+            (inside(corner, outer(size, screen.scale), screen), size)
         }
-        _ => (None, main),
+        _ => {
+            let size = if whole_on((main.x, main.y), wanted, main) {
+                wanted
+            } else {
+                fit(wanted, main)
+            };
+            return Placement {
+                position: None,
+                size: Some(size),
+                maximized: saved.maximized,
+            };
+        }
     };
     Placement {
-        position,
-        size: Some(fit(wanted, screen)),
+        position: Some(position),
+        size: Some(size),
         maximized: saved.maximized,
     }
 }
 
-/// `size` (logical) made no larger than `screen`, and no smaller than the window's least.
+/// Whether a window at `corner` of `size` (logical) is whole on `screen` with its frame.
+fn whole_on(corner: (i32, i32), size: (u32, u32), screen: &Screen) -> bool {
+    let size = outer(size, screen.scale);
+    overlap(corner, size, screen) == size
+}
+
+/// The size on a screen of `scale`, in physical pixels, of a window of `size` (logical) with
+/// its frame.
+fn outer(size: (u32, u32), scale: f64) -> (u32, u32) {
+    physical(
+        (
+            size.0.saturating_add(FRAME.0),
+            size.1.saturating_add(FRAME.1),
+        ),
+        scale,
+    )
+}
+
+/// `size` (logical) made no larger than `screen` less [`FRAME`] and [`BOTTOM_EDGE`], and no
+/// smaller than the window's least.
 fn fit(size: (u32, u32), screen: &Screen) -> (u32, u32) {
     let least = crate::settings::MIN_WINDOW;
     let room = logical((screen.width, screen.height), screen.scale);
+    let room = (
+        room.0.saturating_sub(FRAME.0),
+        room.1.saturating_sub(FRAME.1 + BOTTOM_EDGE),
+    );
     (
         size.0.min(room.0).max(least.0),
         size.1.min(room.1).max(least.1),
     )
 }
 
-/// The top left corner `corner` of a window of `size` (physical) moved as little as it takes
-/// for the window to be whole on `screen`; at the screen's corner when it is larger.
+/// The top left corner `corner` of a window of `size` (physical, with its frame) moved as
+/// little as it takes for the window to be whole on `screen` above its [`BOTTOM_EDGE`]; at the
+/// screen's corner when it is larger.
 fn inside(corner: (i32, i32), size: (u32, u32), screen: &Screen) -> (i32, i32) {
     let along = |at: i32, length: u32, start: i32, room: u32| {
         let end = i64::from(start) + i64::from(room) - i64::from(length);
         let end = i32::try_from(end.max(i64::from(start))).unwrap_or(start);
         at.clamp(start, end)
     };
+    let edge = physical((0, BOTTOM_EDGE), screen.scale).1;
     (
         along(corner.0, size.0, screen.x, screen.width),
-        along(corner.1, size.1, screen.y, screen.height),
+        along(
+            corner.1,
+            size.1,
+            screen.y,
+            screen.height.saturating_sub(edge),
+        ),
     )
 }
 

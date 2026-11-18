@@ -143,7 +143,7 @@ use matcher::Matcher;
 use newest::Outcome;
 pub(crate) use persist::theme_number;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
-use persist::{SaveLedger, logical, look_for, theme_of, wait_for};
+use persist::{SaveLedger, WindowKept, logical, look_for, theme_of, wait_for};
 pub use previewer::Previewer;
 use properties::{Hasher, Measurer};
 use sorter::Sorter;
@@ -230,8 +230,10 @@ pub fn place_window(event_loop: &slint::winit_030::winit::event_loop::ActiveEven
 
 /// The window shows (its first show, its return from the tray): once its winit window is
 /// there, which it is not until the event loop runs at the first show and which may be a new
-/// one after the tray, the window's drop target takes the system's drags on it (DND-05 받기).
-/// Nothing for a window of another backend than winit's (the tests').
+/// one after the tray, the window's drop target takes the system's drags on it (DND-05 받기),
+/// and at the first show a window the start asked to be maximized is maximized once more
+/// ([`Controller::maximize_as_placed`]). Nothing for a window of another backend than winit's
+/// (the tests').
 pub fn window_shown(window: &MainWindow) {
     let weak = window.as_weak();
     let _ = slint::spawn_local(async move {
@@ -242,7 +244,10 @@ pub fn window_shown(window: &MainWindow) {
         // after a hide.
         let made = window.window().winit_window().await.is_ok();
         if made {
-            with(Controller::follow_window);
+            with(|c| {
+                c.follow_window();
+                c.maximize_as_placed();
+            });
         }
     });
 }
@@ -1315,8 +1320,9 @@ fn watch_winit_events(window: &MainWindow) {
                 with(Controller::press_focus_lost);
             }
             // The settings keep the window's place (LAY-07).
-            WinitEvent::Moved(_) => {
-                with(Controller::plan_save);
+            WinitEvent::Moved(at) => {
+                let corner = (at.x, at.y);
+                with(|c| c.window_moved(corner));
             }
             WinitEvent::Touch(touch) => {
                 if winit_touch(window, touch) {
@@ -1770,11 +1776,12 @@ pub struct Controller {
     /// Where the settings say the window was (LAY-07), until it is put there once, as the
     /// window system is about to make it ([`place_window`]).
     saved_place: Cell<Option<SavedPlace>>,
-    /// The window's place and whether it is maximized, as last told (module `persist`): what
-    /// the settings keep of them once the window no longer tells (hidden at the end, or a
-    /// window system that never tells its place).
-    window_at: Cell<Option<(i32, i32)>>,
-    maximized: Cell<bool>,
+    /// The window's size, place and whether it is maximized, as the window system told them
+    /// at its moves and resizes (module `persist`): what the settings keep of them.
+    window_kept: RefCell<WindowKept>,
+    /// The start asked for a maximized window: it is maximized once more as it shows
+    /// ([`Controller::maximize_as_placed`]).
+    maximize_after_show: Cell<bool>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
     /// every look as the app ends.
     checks: RefCell<CopyChecks>,
@@ -1870,8 +1877,8 @@ impl Controller {
             shown: RefCell::new([None, None]),
             theme: Cell::new(settings.theme),
             saved_place: Cell::new(Some(settings.saved_place())),
-            window_at: Cell::new(settings.window_at),
-            maximized: Cell::new(settings.maximized),
+            window_kept: RefCell::new(WindowKept::new(&settings)),
+            maximize_after_show: Cell::new(false),
             ledger: RefCell::new(SaveLedger::new(
                 settings.to_text().unwrap_or_default(),
                 saver.writable(),
@@ -2937,6 +2944,7 @@ impl Controller {
     fn window_resized(&self) {
         self.close_subfolders();
         self.fit_preview();
+        self.note_window_size();
         self.plan_save();
     }
 

@@ -895,16 +895,21 @@ fn a_window_on_a_screen_opens_where_it_was() {
     assert_eq!(place.position, Some((-2000, 300)));
     // At a scale of 2, a size in logical pixels takes twice as many physical ones.
     let sharp = screen(0, 0, 3840, 2160, 2.0);
-    let place = placement(saved(Some((1000, 500)), (1200, 800), false), &[sharp]);
-    assert_eq!(place.position, Some((1000, 500)));
+    let place = placement(saved(Some((1000, 400)), (1200, 800), false), &[sharp]);
+    assert_eq!(place.position, Some((1000, 400)));
+    assert_eq!(place.size, Some((1200, 800)));
+    // Left where a taskbar is, but whole on the screen: as the user left it.
+    let place = placement(saved(Some((0, 200)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, Some((0, 200)));
     assert_eq!(place.size, Some((1200, 800)));
 }
 
 #[test]
 fn a_window_partly_off_its_screen_is_moved_onto_it_as_little_as_it_takes() {
-    // Off the right and the bottom: whole on the screen, at its right and bottom edges.
+    // Off the right and the bottom: whole on the screen with its frame (16×40 more than its
+    // size), at the right edge, and above the room of a taskbar (48) at the bottom.
     let place = placement(saved(Some((1500, 900)), (1200, 800), false), &[MAIN]);
-    assert_eq!(place.position, Some((720, 280)));
+    assert_eq!(place.position, Some((704, 192)));
     assert_eq!(place.size, Some((1200, 800)));
     // Off the left and the top.
     let place = placement(saved(Some((-300, -50)), (1200, 800), false), &[MAIN]);
@@ -914,11 +919,11 @@ fn a_window_partly_off_its_screen_is_moved_onto_it_as_little_as_it_takes() {
     let place = placement(saved(Some((1700, 100)), (1200, 800), false), &[MAIN, right]);
     assert_eq!(place.position, Some((1920, 100)));
     let place = placement(saved(Some((1000, 100)), (1200, 800), false), &[MAIN, right]);
-    assert_eq!(place.position, Some((720, 100)));
-    // At a scale of 2, by the window's physical size there.
+    assert_eq!(place.position, Some((704, 100)));
+    // At a scale of 2, by the window's physical size there, the frame and the edge too.
     let sharp = screen(0, 0, 3840, 2160, 2.0);
     let place = placement(saved(Some((3000, 1000)), (1200, 800), false), &[sharp]);
-    assert_eq!(place.position, Some((1440, 560)));
+    assert_eq!(place.position, Some((1408, 384)));
 }
 
 #[test]
@@ -938,7 +943,7 @@ fn a_window_off_every_screen_opens_where_the_system_puts_a_window() {
     let place = placement(saved(Some((edge, 100)), (1200, 800), false), &[MAIN]);
     assert_eq!(place.position, None);
     let place = placement(saved(Some((edge - 1, 100)), (1200, 800), false), &[MAIN]);
-    assert_eq!(place.position, Some((720, 100)), "enough of it to hold");
+    assert_eq!(place.position, Some((704, 100)), "enough of it to hold");
     let below = 1080 - i32::try_from(ON_SCREEN.1).expect("small") + 1;
     let place = placement(saved(Some((100, below)), (1200, 800), false), &[MAIN]);
     assert_eq!(place.position, None);
@@ -955,21 +960,25 @@ fn a_window_off_every_screen_opens_where_the_system_puts_a_window() {
 
 #[test]
 fn a_window_larger_than_its_screen_is_made_as_large_as_the_screen() {
-    // Saved on a large screen, opened on a laptop's.
+    // Saved on a large screen, opened on a laptop's: the screen less the window's frame
+    // (16×40) and a taskbar's room at the bottom (48), so that the whole window shows above it.
     let laptop = screen(0, 0, 1366, 768, 1.0);
     let place = placement(saved(Some((40, 30)), (2400, 1300), false), &[laptop]);
     assert_eq!(
         place,
         Placement {
             position: Some((0, 0)),
-            size: Some((1366, 768)),
+            size: Some((1350, 680)),
             maximized: false,
         }
     );
+    let (size, frame) = (place.size.expect("a size"), FRAME);
+    assert!(size.1 + frame.1 + BOTTOM_EDGE <= 768);
+    assert!(size.0 + frame.0 <= 1366);
     // At a scale of 2 the screen holds half as many logical pixels.
     let sharp = screen(0, 0, 2560, 1600, 2.0);
     let place = placement(saved(Some((0, 0)), (1600, 1000), false), &[sharp]);
-    assert_eq!(place.size, Some((1280, 800)));
+    assert_eq!(place.size, Some((1264, 712)));
     // Never smaller than the window's least, at the screen's corner then.
     let tiny = screen(100, 100, 800, 500, 1.0);
     let place = placement(saved(Some((150, 150)), (1200, 800), false), &[tiny]);
@@ -978,8 +987,10 @@ fn a_window_larger_than_its_screen_is_made_as_large_as_the_screen() {
     // Off every screen, it fits the system's main one, where it will open.
     let place = placement(saved(Some((5000, 0)), (2400, 1300), false), &[laptop]);
     assert_eq!(place.position, None);
-    assert_eq!(place.size, Some((1366, 768)));
-    // Without a size of its own, the window's default, fitted.
+    assert_eq!(place.size, Some((1350, 680)));
+    let place = placement(saved(None, (2400, 1300), false), &[laptop]);
+    assert_eq!(place.size, Some((1350, 680)));
+    // Without a size of its own, the window's default, fitted; moved as little as it takes.
     let place = placement(
         SavedPlace {
             position: Some((10, 10)),
@@ -988,7 +999,8 @@ fn a_window_larger_than_its_screen_is_made_as_large_as_the_screen() {
         },
         &[laptop],
     );
-    assert_eq!(place.size, Some((1280, 768)));
+    assert_eq!(place.size, Some((1280, 680)));
+    assert_eq!(place.position, Some((10, 0)));
 }
 
 #[test]

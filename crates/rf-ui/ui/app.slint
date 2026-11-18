@@ -1010,6 +1010,11 @@ export component MainWindow inherits Window {
         root.titled = root.width >= 1400px;
         root.recent-lines = root.height < 700px ? 2 : 3;
         root.show-theme();
+        ItemMenu.toolbar-shown = root.show-toolbar;
+    }
+    // The folder's menu offers 툴바 보이기 while the toolbar is hidden.
+    changed show-toolbar => {
+        ItemMenu.toolbar-shown = root.show-toolbar;
     }
     changed width => {
         // The same widths as in `init`: a new toolbar button means checking them again.

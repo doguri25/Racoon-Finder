@@ -183,6 +183,9 @@ export global ItemMenu {
     // under way. The toolbar's 되돌리기 and the folder's menu follow them.
     in property <bool> can-undo;
     in property <bool> can-redo;
+    // The toolbar shows (LAY-10; the main window keeps it as its `show-toolbar` says): while it
+    // does not, the folder's menu offers 툴바 보이기, the pointer's way back to it.
+    in-out property <bool> toolbar-shown: true;
     // Where a menu of a list showed last, in the window: the item menu, the folder's, or a
     // right press on a list (Rust notes it where the system has a menu of its own). The menu of
     // the apps (macOS), the system's own menu of 더 많은 옵션 표시 (Windows) and the picker of
@@ -391,13 +394,14 @@ export component RowMenu inherits ContextMenuArea {
 // 텍스트 파일, OPS-01; no key, as neither File Explorer nor Finder has one), a paste into the folder
 // (off while the clipboard holds no files), 되돌리기 and 다시 실행 (off while there is nothing
 // to undo or to do again), the folder listed again (NAV-13), each with its key (KEY-03), a
-// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer; at the end the
-// system's own menu of the folder (더 많은 옵션 표시), where the system has one. It wraps that
-// part of the list.
+// terminal in the folder (OPS-11), and the folder's own 속성, as in File Explorer; then the
+// system's own menu of the folder (더 많은 옵션 표시), where the system has one; and at the end,
+// while the toolbar is hidden, 툴바 보이기 (LAY-10), which shows it again. It wraps that part of
+// the list.
 export component BlankMenu inherits ContextMenuArea {
     // An item of the menu: the name of the window's command it runs (new-folder, new-file,
     // paste, paste-move, undo, redo, refresh, folder-terminal, folder-properties,
-    // folder-more-options).
+    // folder-more-options, toggle-toolbar).
     callback command(name: string);
 
     // What the menu is of (before the menu: see `RowMenu`).
@@ -479,6 +483,15 @@ export component BlankMenu inherits ContextMenuArea {
             title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
             activated => {
                 root.command("folder-more-options");
+            }
+        }
+        // The toolbar, with the 보기 menu's button, is hidden: a way back for the pointer (the
+        // keys have F10 and the 보기 menu's 툴바).
+        if !ItemMenu.toolbar-shown: MenuSeparator { }
+        if !ItemMenu.toolbar-shown: MenuItem {
+            title: "툴바 보이기";
+            activated => {
+                root.command("toggle-toolbar");
             }
         }
     }

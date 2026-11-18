@@ -96,8 +96,8 @@ pub use drag::{
 pub use favorites::{RECENT_FOLDERS, RecentAt, Unkept};
 use layout::Step;
 pub use layout::{
-    DEFAULT_WINDOW, EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE, ON_SCREEN, Placement, SavedPlace,
-    Screen, TreeMode, placement,
+    BOTTOM_EDGE, DEFAULT_WINDOW, EVEN_SHARE, FRAME, Layout, MAX_SHARE, MIN_SHARE, ON_SCREEN,
+    Placement, SavedPlace, Screen, TreeMode, placement,
 };
 pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
 pub use panel::PanelButton;

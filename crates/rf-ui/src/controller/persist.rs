@@ -17,7 +17,7 @@ use slint::{ComponentHandle, TimerMode};
 use super::{Controller, with};
 use crate::pane::ancestors;
 use crate::settings::{Found, Settings, ThemeChoice};
-use crate::state::{Screen, placement};
+use crate::state::{Placement, Screen, placement};
 use crate::ui_bridge::post;
 use crate::words;
 
@@ -239,6 +239,109 @@ pub(super) fn theme_of(choice: i32) -> Option<ThemeChoice> {
     }
 }
 
+/// What the window is, as the window system tells it at a move or a resize of it: shown or
+/// not, and maximized, minimized or full screen, by Slint's word or the system's own (a window
+/// being maximized may not have told Slint yet).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact the window system tells"
+)]
+pub(super) struct WindowWord {
+    pub(super) visible: bool,
+    pub(super) maximized: bool,
+    pub(super) minimized: bool,
+    pub(super) fullscreen: bool,
+}
+
+impl WindowWord {
+    /// The window shows with a size and a place of its own.
+    fn own(self) -> bool {
+        self.visible && !self.maximized && !self.minimized && !self.fullscreen
+    }
+}
+
+/// What the settings keep of the window (LAY-07), from what the window system tells as the
+/// window moves and is resized, so that a save asks it nothing: the last size (logical) and
+/// outer corner (physical) the window had of its own, and whether it is maximized. A hidden,
+/// minimized or full-screen window tells nothing of either: a minimized one on Windows sits at
+/// (-32000, -32000). A maximize the start asked for is kept until the window has shown
+/// maximized: the words before it (the window made at its normal size, then maximized) do not
+/// undo it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WindowKept {
+    size: Option<(u32, u32)>,
+    position: Option<(i32, i32)>,
+    maximized: bool,
+    /// The start asked for a maximized window, which has not shown maximized yet.
+    maximizing: bool,
+}
+
+impl WindowKept {
+    /// What the settings say of the window at the start.
+    pub(super) fn new(settings: &Settings) -> WindowKept {
+        WindowKept {
+            size: settings.window,
+            position: settings.window_at,
+            maximized: settings.maximized,
+            maximizing: settings.maximized,
+        }
+    }
+
+    /// The start puts the window at `placed` ([`placement`]).
+    pub(super) fn placed(&mut self, placed: Placement) {
+        self.size = placed.size.or(self.size);
+        self.position = placed.position;
+        self.maximized = placed.maximized;
+        self.maximizing = placed.maximized;
+    }
+
+    /// The window moved to `corner` (outer, physical), being as `word` says.
+    pub(super) fn moved(&mut self, corner: (i32, i32), word: WindowWord) {
+        self.told(word);
+        if word.own() {
+            self.position = Some(corner);
+        }
+    }
+
+    /// The window has `size` (logical) now, being as `word` says.
+    pub(super) fn resized(&mut self, size: Option<(u32, u32)>, word: WindowWord) {
+        self.told(word);
+        if word.own()
+            && let Some(size) = size
+        {
+            self.size = Some(size);
+        }
+    }
+
+    fn told(&mut self, word: WindowWord) {
+        if !word.visible || word.minimized || word.fullscreen {
+            return;
+        }
+        if word.maximized {
+            self.maximizing = false;
+            self.maximized = true;
+        } else if !self.maximizing {
+            self.maximized = false;
+        }
+    }
+
+    /// The window's last size of its own, as the settings keep it.
+    pub(super) fn size(&self) -> Option<(u32, u32)> {
+        self.size
+    }
+
+    /// The window's last outer corner of its own; `None` before the first one is known.
+    pub(super) fn position(&self) -> Option<(i32, i32)> {
+        self.position
+    }
+
+    /// Whether the window is maximized, as the settings keep it.
+    pub(super) fn maximized(&self) -> bool {
+        self.maximized
+    }
+}
+
 /// What has been written of the settings, and whether to write more: from the text of the
 /// settings after a change ([`Settings::to_text`]), it decides when a save is due. Texts, not
 /// values, are compared: a newer version's `nan` is never equal to itself as a value, and would
@@ -364,11 +467,12 @@ impl Controller {
             settings.checkbox_select = state.checkbox_select();
         }
         settings.theme = self.theme.get();
-        if let Some(size) = self.window_size() {
+        let kept = *self.window_kept.borrow();
+        if let Some(size) = kept.size() {
             settings.window = Some(size);
         }
-        settings.window_at = self.window_position();
-        settings.maximized = self.window_maximized();
+        settings.window_at = kept.position();
+        settings.maximized = kept.maximized();
         let text = settings.to_text().ok()?;
         Some((settings, text))
     }
@@ -378,6 +482,12 @@ impl Controller {
     /// onto the screen; larger than it, made to fit), before the window system makes it: its
     /// size, its place and whether it is maximized. Once; the window keeps whatever place it
     /// takes from then on.
+    ///
+    /// The size is the window's own (`set_size`), not only its preferred one: Slint's first
+    /// show then leaves the window as the system made it, maximized when asked. Given only as
+    /// the preferred size, the first show asks for that size, and on Windows and macOS a window
+    /// asked for a size is maximized no more (winit's `request_inner_size`). The window is made
+    /// at this size, which is the size a maximized window goes back to.
     pub(super) fn place_window(&self, screens: &[Screen]) {
         let Some(saved) = self.saved_place.take() else {
             return;
@@ -389,6 +499,9 @@ impl Controller {
         if let Some((width, height)) = placed.size {
             window.set_start_width(logical(width));
             window.set_start_height(logical(height));
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(logical(width), logical(height)));
         }
         if let Some((x, y)) = placed.position {
             window
@@ -396,56 +509,68 @@ impl Controller {
                 .set_position(slint::PhysicalPosition::new(x, y));
         }
         window.window().set_maximized(placed.maximized);
+        self.window_kept.borrow_mut().placed(placed);
+        self.maximize_after_show.set(placed.maximized);
     }
 
-    /// The window's place, its outer top left corner on the desktop in physical pixels, as the
-    /// window system last told it while the window showed with a place of its own (neither
-    /// maximized, full screen nor minimized); the settings' until it tells one. Wayland tells
-    /// none.
-    fn window_position(&self) -> Option<(i32, i32)> {
+    /// The window that the start asked to be maximized is there and shows: it is maximized
+    /// once more, by the window system's own call. X11 window managers do not take a maximize
+    /// asked for before the window is mapped, and Slint makes it unmapped; on Windows and macOS
+    /// the window is maximized already, and this does nothing. Once, at the start.
+    pub(super) fn maximize_as_placed(&self) {
+        if !self.maximize_after_show.take() {
+            return;
+        }
         if let Some(window) = self.window.upgrade() {
-            let shown = window.window();
-            let own = shown.is_visible()
-                && !shown.is_maximized()
-                && !shown.is_fullscreen()
-                && !shown.is_minimized();
-            let told = shown
-                .with_winit_window(|winit| {
-                    // The system's own word: a window being maximized may not have told Slint
-                    // yet, and a maximized window's corner is no place of its own.
-                    (!winit.is_maximized())
-                        .then(|| winit.outer_position().ok())
-                        .flatten()
-                })
-                .flatten()
-                .filter(|_| own);
-            if let Some(corner) = told {
-                self.window_at.set(Some((corner.x, corner.y)));
-            }
+            window
+                .window()
+                .with_winit_window(|winit| winit.set_maximized(true));
         }
-        self.window_at.get()
     }
 
-    /// Whether the window is maximized, as it was when it last showed (not full screen).
-    fn window_maximized(&self) -> bool {
-        if let Some(window) = self.window.upgrade() {
-            let shown = window.window();
-            if shown.is_visible() && !shown.is_fullscreen() {
-                self.maximized.set(shown.is_maximized());
-            }
-        }
-        self.maximized.get()
+    /// The window moved to `corner` (outer, physical, as winit's `Moved` tells): the settings
+    /// keep it while the window has a place of its own ([`WindowKept`]).
+    pub(super) fn window_moved(&self, corner: (i32, i32)) {
+        let word = self.window_word();
+        self.window_kept.borrow_mut().moved(corner, word);
+        self.plan_save();
     }
 
-    /// The window's size in logical pixels, while it has one of its own.
-    fn window_size(&self) -> Option<(u32, u32)> {
-        let window = self.window.upgrade()?;
-        let window = window.window();
-        if window.is_maximized() || window.is_fullscreen() || window.is_minimized() {
-            return None;
+    /// The window's size changed: the settings keep it while the window has a size of its own
+    /// ([`WindowKept`]).
+    pub(super) fn note_window_size(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let shown = window.window();
+        let size = shown.size().to_logical(shown.scale_factor());
+        let size = whole_pixels(size.width).zip(whole_pixels(size.height));
+        let word = self.window_word();
+        self.window_kept.borrow_mut().resized(size, word);
+    }
+
+    /// What the window is now, by Slint's word and the window system's own: asked at a move or
+    /// a resize of the window, not at every change of the state.
+    fn window_word(&self) -> WindowWord {
+        let Some(window) = self.window.upgrade() else {
+            return WindowWord::default();
+        };
+        let shown = window.window();
+        let (maximized, minimized, fullscreen) = shown
+            .with_winit_window(|winit| {
+                (
+                    winit.is_maximized(),
+                    winit.is_minimized() == Some(true),
+                    winit.fullscreen().is_some(),
+                )
+            })
+            .unwrap_or_default();
+        WindowWord {
+            visible: shown.is_visible(),
+            maximized: maximized || shown.is_maximized(),
+            minimized: minimized || shown.is_minimized(),
+            fullscreen: fullscreen || shown.is_fullscreen(),
         }
-        let size = window.size().to_logical(window.scale_factor());
-        Some((whole_pixels(size.width)?, whole_pixels(size.height)?))
     }
 
     /// After a change (the window moved, too): a save [`SAVE_DELAY`] from now, when the
@@ -780,6 +905,107 @@ mod tests {
         let mut ledger = SaveLedger::new(read, true);
         let again = settings.clone().to_text().expect("text");
         assert!(!ledger.plan(&again), "the same text is no change");
+    }
+
+    /// A window that shows, maximized or not.
+    fn shown(maximized: bool) -> WindowWord {
+        WindowWord {
+            visible: true,
+            maximized,
+            ..WindowWord::default()
+        }
+    }
+
+    #[test]
+    fn a_maximize_the_start_asks_for_holds_until_the_window_shows_it() {
+        let saved = Settings {
+            window: Some((1400, 900)),
+            window_at: Some((100, 80)),
+            maximized: true,
+            ..Settings::default()
+        };
+        let mut kept = WindowKept::new(&saved);
+        kept.placed(Placement {
+            position: Some((100, 80)),
+            size: Some((1400, 900)),
+            maximized: true,
+        });
+        // Made at its normal size and place first: that is what it goes back to, and the
+        // maximize stays asked for.
+        kept.moved((100, 80), shown(false));
+        kept.resized(Some((1400, 900)), shown(false));
+        assert!(kept.maximized());
+        assert_eq!(kept.size(), Some((1400, 900)));
+        // Maximized, its corner and size are no place of its own.
+        kept.moved((-8, -8), shown(true));
+        kept.resized(Some((1920, 1040)), shown(true));
+        assert!(kept.maximized());
+        assert_eq!(kept.position(), Some((100, 80)));
+        assert_eq!(kept.size(), Some((1400, 900)));
+        // The user restores it: no longer maximized, back at its own place.
+        kept.resized(Some((1400, 900)), shown(false));
+        assert!(!kept.maximized());
+        kept.moved((300, 200), shown(false));
+        assert_eq!(kept.position(), Some((300, 200)));
+        // Without a maximize asked for, the first word is the window's.
+        let mut normal = WindowKept::new(&Settings::default());
+        normal.resized(Some((1280, 800)), shown(false));
+        assert!(!normal.maximized());
+        normal.resized(Some((1920, 1040)), shown(true));
+        assert!(normal.maximized());
+        assert_eq!(normal.size(), Some((1280, 800)));
+    }
+
+    #[test]
+    fn a_minimized_hidden_or_full_screen_window_tells_nothing_of_its_place() {
+        let mut kept = WindowKept::new(&Settings {
+            window: Some((1200, 800)),
+            window_at: Some((40, 30)),
+            ..Settings::default()
+        });
+        // Windows moves a minimized window to (-32000, -32000) before it tells its new size.
+        for word in [
+            WindowWord {
+                visible: true,
+                minimized: true,
+                ..WindowWord::default()
+            },
+            WindowWord::default(),
+            WindowWord {
+                visible: true,
+                fullscreen: true,
+                ..WindowWord::default()
+            },
+        ] {
+            kept.moved((-32000, -32000), word);
+            kept.resized(Some((160, 28)), word);
+            assert_eq!(kept.position(), Some((40, 30)), "{word:?}");
+            assert_eq!(kept.size(), Some((1200, 800)), "{word:?}");
+            assert!(!kept.maximized(), "{word:?}");
+        }
+        // A maximized window that is minimized stays maximized for the settings.
+        kept.resized(Some((1920, 1040)), shown(true));
+        kept.resized(
+            Some((160, 28)),
+            WindowWord {
+                visible: true,
+                minimized: true,
+                ..WindowWord::default()
+            },
+        );
+        assert!(kept.maximized());
+        // A size the window cannot say (below a pixel) changes nothing.
+        kept.resized(None, shown(false));
+        assert_eq!(kept.size(), Some((1200, 800)));
+        // The place the start puts it at is the one kept until it moves; off every screen,
+        // none.
+        kept.placed(Placement {
+            position: None,
+            size: Some((1000, 700)),
+            maximized: false,
+        });
+        assert_eq!(kept.position(), None);
+        assert_eq!(kept.size(), Some((1000, 700)));
     }
 
     #[test]
