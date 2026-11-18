@@ -3945,7 +3945,8 @@ impl Controller {
     /// is not under the panes, and hides when it is, while the main window is hidden behind
     /// the tray icon, and as the app ends. Called after a redraw with no borrow of the state
     /// held: the window is made, shown and hidden here, and may call back as it is. The window
-    /// that shows does not keep the keyboard: the main window takes it back.
+    /// that shows keeps the front and the keyboard, as the system gives them: bringing the
+    /// main window forward instead would hide it behind a maximized main window.
     fn place_job_panel(&self) {
         let wanted = self.state.borrow().as_ref().is_some_and(|state| {
             state.layout().jobs_window && !state.background() && !state.quitting()
@@ -4033,9 +4034,10 @@ impl Controller {
     }
 
     /// The main window comes to the front, with the keyboard: for the dialog that shows over
-    /// it, from the job panel's own window, and as that window shows, which the system would
-    /// give the keyboard to ([`Controller::place_job_panel`]). Nothing for a window of another
-    /// backend than winit's (the tests'), and nothing while the main window is hidden.
+    /// it, from the job panel's own window, and when that window's panel is dimmed under a
+    /// dialog and clicked. Not as that window shows ([`Controller::place_job_panel`]). Nothing
+    /// for a window of another backend than winit's (the tests'), and nothing while the main
+    /// window is hidden.
     fn show_main_window(&self) {
         if let Some(window) = self.window.upgrade() {
             window
