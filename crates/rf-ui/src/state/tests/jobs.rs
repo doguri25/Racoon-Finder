@@ -1872,6 +1872,21 @@ fn a_stopped_job_counts_only_what_it_never_came_to() {
         the_toast(&effects).1,
         "복사를 중단했습니다 · 실패 2개 · 남은 항목 1개는 처리하지 않았습니다"
     );
+    // An item the review before the job left out is a planned item that was not done: of
+    // four, `a` was copied, `b` was left out, the user stopped at `c`, and `d` is left.
+    let effects = finish(&mut state, 13, &spec, JobWork::Copy, |report| {
+        report.outcome = Outcome::Aborted;
+        report.planned.files = 4;
+        report.done.files = 1;
+        report
+            .failures
+            .push(copy_failure("b.txt", Stage::Preflight));
+        report.failures.push(copy_failure("c.txt", Stage::Write));
+    });
+    assert_eq!(
+        the_toast(&effects).1,
+        "복사를 중단했습니다 · 실패 2개 · 남은 항목 1개는 처리하지 않았습니다"
+    );
     // A failure whose place in the plan is not known (a fault of the engine itself): that
     // items were left is said, and no number is made up.
     let effects = finish(&mut state, 12, &spec, JobWork::Copy, |report| {

@@ -1032,7 +1032,7 @@ pub(super) fn not_reached(report: &JobReport) -> Option<u64> {
     for failure in &report.failures {
         match failure.stage {
             Stage::Plan | Stage::DeleteSource => {}
-            Stage::Conflict | Stage::Read | Stage::Write | Stage::Commit => {
+            Stage::Preflight | Stage::Conflict | Stage::Read | Stage::Write | Stage::Commit => {
                 failed = failed.saturating_add(1);
             }
             // A step of another kind of job, or of the engine itself.
