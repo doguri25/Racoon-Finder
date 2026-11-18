@@ -1639,3 +1639,144 @@ mod without_a_trash {
         }
     }
 }
+
+#[test]
+fn a_waiting_job_moved_along_the_queue_runs_in_its_new_place() {
+    let (_dir, left, right) = folders();
+    let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+    for name in names {
+        write(&left.join(name), name);
+    }
+    // The first copy asks about a name that is taken, and holds its lane until it is answered:
+    // the three behind it wait meanwhile.
+    write(&right.join("a.txt"), "there");
+    let mut harness = Harness::new();
+    harness.feed_questions = false;
+    let mut state = harness.open(&left, &right);
+    for name in names {
+        let submit = Effect::Job(JobEffect::Submit {
+            spec: copy(&left.join(name), &right),
+            origin: None,
+        });
+        harness.carry_out(&mut state, vec![submit]);
+    }
+    // What each row of the panel says its job works on, in the rows' order.
+    let details = |state: &AppState| -> Vec<String> {
+        state
+            .job_rows()
+            .iter()
+            .map(|row| row.detail.clone())
+            .collect()
+    };
+    let shown = |order: [&str; 4]| -> Vec<String> {
+        let [running, rest @ ..] = order;
+        std::iter::once(format!("{running}.txt → right"))
+            .chain(rest.iter().map(|name| format!("복사 · {name}.txt → right")))
+            .collect()
+    };
+    // The first one asks; the others wait in the order they were asked for, which the engine
+    // has told (the last one can go up).
+    harness.until(&mut state, "the queue behind the job that asks", |state| {
+        let rows = state.job_rows();
+        rows.len() == 4 && rows[0].waiting && rows[3].queued.is_some_and(|moves| moves.up)
+    });
+    assert_eq!(details(&state), shown(["a", "b", "c", "d"]));
+    // The job a worker has taken up does not move, and the first that waits goes no further
+    // up, nor the last further down.
+    assert_eq!(state.job_move(0, false), []);
+    assert_eq!(state.job_move(0, true), []);
+    assert_eq!(state.job_move(1, true), []);
+    assert_eq!(state.job_move(3, false), []);
+
+    // 위로 of `d` twice, then 아래로 of `b`: the engine's queue is d, c, b.
+    for (row, up, order) in [
+        (3, true, ["a", "b", "d", "c"]),
+        (2, true, ["a", "d", "b", "c"]),
+        (2, false, ["a", "d", "c", "b"]),
+    ] {
+        let effects = state.job_move(row, up);
+        assert!(
+            matches!(effects.as_slice(), [Effect::Job(JobEffect::MoveTo { .. })]),
+            "{effects:?}"
+        );
+        harness.carry_out(&mut state, effects);
+        let wanted = shown(order);
+        harness.until(&mut state, "the queue's new order", |state| {
+            details(state) == wanted
+        });
+    }
+    // The job that asks is where it was through all this, and nothing has been copied.
+    assert!(state.job_rows()[0].waiting);
+    assert!(!right.join("d.txt").exists());
+
+    // Its question is answered (the file that is there stays): the jobs that waited then run
+    // one after the other, in the order the queue has now.
+    harness.feed_questions = true;
+    harness.until(&mut state, "the question", |state| {
+        matches!(state.modal(), Some(Modal::Conflict(_)))
+    });
+    let effects = state.conflict_answered(ConflictChoice::Skip, false);
+    harness.run(&mut state, effects);
+    assert_eq!(read(&right.join("a.txt")), "there");
+    for name in ["b.txt", "c.txt", "d.txt"] {
+        assert_eq!(read(&right.join(name)), name);
+    }
+    // 최근 완료 lists them the newest first.
+    let ended: Vec<String> = state
+        .recent_rows()
+        .iter()
+        .rev()
+        .map(|row| row.detail.clone())
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            "a.txt → right",
+            "d.txt → right",
+            "c.txt → right",
+            "b.txt → right"
+        ]
+    );
+    assert_eq!(state.job_rows(), []);
+}
+
+#[test]
+fn a_running_copy_names_the_file_it_is_at_in_its_row() {
+    let (_dir, left, right) = folders();
+    write(&left.join("보고서.txt"), "new");
+    // The copy asks before it writes: its row holds still at its one file.
+    write(&right.join("보고서.txt"), "old");
+    let mut harness = Harness::new();
+    harness.feed_questions = false;
+    let mut state = harness.open(&left, &right);
+    click(&mut state, LEFT, "보고서.txt");
+    let effects = state.transfer(
+        LEFT,
+        TransferMode::Copy,
+        &local(&right),
+        TransferOptions::default(),
+    );
+    harness.carry_out(&mut state, effects);
+    harness.until(&mut state, "the copy to ask", |state| {
+        state.job_rows().first().is_some_and(|row| row.waiting)
+    });
+    // It overwrites: the engine's report names the file while it is copied, and the row shows
+    // its name; the job's last report names none, and the row goes with the job.
+    harness.feed_questions = true;
+    harness.until(&mut state, "the question", |state| {
+        matches!(state.modal(), Some(Modal::Conflict(_)))
+    });
+    let effects = state.conflict_answered(ConflictChoice::Overwrite, false);
+    harness.carry_out(&mut state, effects);
+    harness.until(&mut state, "the row to name the file", |state| {
+        state
+            .job_rows()
+            .first()
+            .is_some_and(|row| row.current == "보고서.txt")
+    });
+    let row = &state.job_rows()[0];
+    assert_eq!((row.title.as_str(), row.queued), ("복사 중", None));
+    harness.run(&mut state, Vec::new());
+    assert_eq!(state.job_rows(), []);
+    assert_eq!(read(&right.join("보고서.txt")), "new");
+}

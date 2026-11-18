@@ -36,7 +36,7 @@ use crate::format::{
     kind_label, short_path, shown_name,
 };
 use crate::hashing::Algorithm;
-use crate::jobs::{JobRow, RecentRow};
+use crate::jobs::{JobRow, RecentRow, speed_points};
 use crate::keys::{self, Command};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, overwrites, validate};
@@ -1566,8 +1566,37 @@ impl PreviewModels {
     }
 }
 
-/// A row of the job panel.
+/// The box the line of a job's speed graph is drawn in, in logical pixels: the `Path` of the
+/// job panel's row has this size, and this viewbox (`job-panel.slint`). A sample is 120 / 59,
+/// about 2px, wide, so a minute of them fills the box.
+pub const GRAPH_WIDTH: f32 = 120.0;
+pub const GRAPH_HEIGHT: f32 = 28.0;
+
+/// The line through `points` as the commands of an SVG path (`M x y L x y …`), to a tenth of a
+/// pixel. Empty for fewer than two points, which make no line.
+pub fn graph_path(points: &[(f32, f32)]) -> String {
+    use std::fmt::Write as _;
+
+    if points.len() < 2 {
+        return String::new();
+    }
+    let mut path = String::new();
+    for (i, (x, y)) in points.iter().enumerate() {
+        let command = if i == 0 { 'M' } else { 'L' };
+        // Writing into a string does not fail.
+        let _ = write!(path, "{command}{x:.1} {y:.1} ");
+    }
+    path.truncate(path.trim_end().len());
+    path
+}
+
+/// A row of the job panel: of a job a worker has taken up, with the file it works on and the
+/// line of its speed graph ([`speed_points`] in a box of [`GRAPH_WIDTH`] by [`GRAPH_HEIGHT`]),
+/// or of a job that waits, with whether it can go up and down the queue.
 pub fn job_row_view(row: &JobRow) -> JobRowView {
+    let graph = row.speeds.as_deref().map_or_else(String::new, |speeds| {
+        graph_path(&speed_points(speeds, GRAPH_WIDTH, GRAPH_HEIGHT))
+    });
     JobRowView {
         title: row.title.as_str().into(),
         detail: row.detail.as_str().into(),
@@ -1575,6 +1604,11 @@ pub fn job_row_view(row: &JobRow) -> JobRowView {
         progress_text: row.progress.as_str().into(),
         paused: row.paused,
         waiting: row.waiting,
+        current: row.current.as_str().into(),
+        graphed: row.speeds.is_some(),
+        graph: graph.into(),
+        can_up: row.queued.is_some_and(|moves| moves.up),
+        can_down: row.queued.is_some_and(|moves| moves.down),
     }
 }
 
@@ -2251,6 +2285,73 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_graph_s_line_goes_through_its_points() {
+        // Fewer than two points make no line.
+        assert_eq!(graph_path(&[]), "");
+        assert_eq!(graph_path(&[(120.0, 0.0)]), "");
+        assert_eq!(
+            graph_path(&[(115.93, 28.0), (117.966, 14.0), (120.0, 0.0)]),
+            "M115.9 28.0 L118.0 14.0 L120.0 0.0"
+        );
+        // Samples of zero draw a line along the bottom of the box.
+        let flat = graph_path(&speed_points(&[0, 0], GRAPH_WIDTH, GRAPH_HEIGHT));
+        assert_eq!(flat, "M118.0 28.0 L120.0 28.0");
+        // A full minute spans the box.
+        let full: Vec<u64> = (0..60).collect();
+        let line = graph_path(&speed_points(&full, GRAPH_WIDTH, GRAPH_HEIGHT));
+        assert!(line.starts_with("M0.0 28.0 L"), "{line}");
+        assert!(line.ends_with(" L120.0 0.0"), "{line}");
+        assert_eq!(line.matches('L').count(), 59);
+    }
+
+    #[test]
+    fn a_job_s_row_shows_its_file_its_graph_and_its_place_in_the_queue() {
+        use crate::jobs::QueueMoves;
+
+        let row = JobRow {
+            id: rf_jobs::JobId(1),
+            title: "복사 중".to_owned(),
+            detail: "assets → 백업".to_owned(),
+            fraction: 0.5,
+            progress: "1 / 2 항목".to_owned(),
+            paused: false,
+            waiting: false,
+            current: "로고.png".to_owned(),
+            speeds: Some(vec![10, 20]),
+            queued: None,
+        };
+        let view = job_row_view(&row);
+        assert_eq!(view.current, "로고.png");
+        assert!(view.graphed);
+        assert_eq!(view.graph, "M118.0 14.0 L120.0 0.0");
+        assert!(!view.can_up && !view.can_down);
+        // A copy that has no sample yet has its box, and no line in it.
+        let fresh = job_row_view(&JobRow {
+            speeds: Some(Vec::new()),
+            ..row.clone()
+        });
+        assert!(fresh.graphed);
+        assert_eq!(fresh.graph, "");
+        // A job that moves no bytes has neither.
+        let trash = job_row_view(&JobRow {
+            speeds: None,
+            ..row.clone()
+        });
+        assert!(!trash.graphed);
+        assert_eq!(trash.graph, "");
+        // A job that waits: its buttons are on for the ways it can go.
+        for (up, down) in [(false, false), (false, true), (true, true), (true, false)] {
+            let view = job_row_view(&JobRow {
+                speeds: None,
+                queued: Some(QueueMoves { up, down }),
+                ..row.clone()
+            });
+            assert_eq!((view.can_up, view.can_down), (up, down));
+            assert!(!view.graphed);
+        }
     }
 
     /// The root of the system's drive, which `VPath::local` takes on every system: `C:\` on

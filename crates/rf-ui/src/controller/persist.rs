@@ -424,11 +424,14 @@ impl Controller {
     }
 
     /// The 보기 menu chose `theme`: the window shows it at once (its colors follow
-    /// `theme-choice`).
+    /// `theme-choice`), and so does the job panel's own window, while there is one.
     pub(super) fn choose_theme(&self, theme: ThemeChoice) {
         self.theme.set(theme);
         if let Some(window) = self.window.upgrade() {
             window.set_theme_choice(theme_number(theme));
+        }
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.set_theme_choice(theme_number(theme));
         }
         self.plan_save();
     }

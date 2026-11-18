@@ -10,7 +10,11 @@
 //!
 //! [`JobRows`] is plain data: it takes the events and gives the rows of the panel and, for a job
 //! that ended, an [`Ended`] that the window turns into a notice
-//! ([`AppState::job_event`](crate::state::AppState::job_event)).
+//! ([`AppState::job_event`](crate::state::AppState::job_event)). A job a worker has taken up has
+//! a row with the file it works on now and, for one that moves bytes, its speed over the last
+//! minute ([`SpeedSamples`], a sample a second, which [`speed_points`] turns into the line of
+//! its graph); a job that waits has a row in the order of the queue, where it can be moved
+//! ([`JobRows::move_target`], XFER-01).
 //!
 //! [`RecentJobs`] keeps the jobs that ended for the panel's 최근 완료 (XFER-14), the newest
 //! first and [`RECENT_JOBS`] of them at most, each with its report; [`save_log`] writes a
@@ -25,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use jiff::tz::TimeZone;
 use rf_jobs::{
@@ -82,6 +86,12 @@ pub enum JobEffect {
     Pause(JobId),
     Resume(JobId),
     Cancel(JobId),
+    /// Move the queued job `id` to `position` in the queue, 0 being next
+    /// (`JobEngine::move_to`). A job that no longer waits there stays as it is.
+    MoveTo {
+        id: JobId,
+        position: usize,
+    },
     /// The answer to a conflict question.
     AnswerConflict(QuestionId, ConflictAnswer),
     /// The answer to the question about an item that failed (XFER-09, 파일마다 묻기).
@@ -235,6 +245,10 @@ impl Jobs {
             }
             JobEffect::Cancel(id) => {
                 self.engine.cancel(id);
+                None
+            }
+            JobEffect::MoveTo { id, position } => {
+                self.engine.move_to(id, position);
                 None
             }
             JobEffect::AnswerConflict(question, answer) => {
@@ -532,21 +546,150 @@ pub fn log_error(folder: &Path, error: io::Error) -> rf_core::ErrorKind {
     }
 }
 
+/// How many speed samples a job keeps for its graph: its last minute, a sample a second.
+pub const SPEED_SAMPLES: usize = 60;
+
+/// The time between two speed samples.
+pub const SPEED_SAMPLE_EVERY: Duration = Duration::from_secs(1);
+
+/// The speed of a job over its last minute of work, for the graph of its row: a ring of the
+/// last [`SPEED_SAMPLES`] samples, one for each second, each the bytes the job moved in that
+/// second. The time comes from the caller ([`SpeedSamples::sample`]), so nothing here reads a
+/// clock.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpeedSamples {
+    /// The samples, the oldest first.
+    ring: VecDeque<u64>,
+    /// When the bytes were last looked at, and how many the job had done then.
+    last: Option<(Instant, u64)>,
+}
+
+impl SpeedSamples {
+    /// Adds the sample `bytes_per_sec`; the oldest one goes past [`SPEED_SAMPLES`].
+    pub fn push(&mut self, bytes_per_sec: u64) {
+        if self.ring.len() == SPEED_SAMPLES {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(bytes_per_sec);
+    }
+
+    /// Looks at the job at `now`, when it has done `bytes_done` bytes in all, and takes the
+    /// samples that are due: one for each second since the last look, to the nearest second,
+    /// each the bytes per second over that time (a look that comes late, after a timer the
+    /// system held back, fills the seconds it missed with their average). The first look only
+    /// notes where the job is, and so does one that comes within half a second of the last.
+    ///
+    /// While the job does not work (`working` is false: it is paused, plans, or waits for an
+    /// answer), no sample is taken and the time does not count: the graph shows the seconds
+    /// the job worked. Bytes taken back (a failed attempt) count as none moved. `true` if a
+    /// sample was added.
+    pub fn sample(&mut self, now: Instant, bytes_done: u64, working: bool) -> bool {
+        let Some((at, bytes)) = self.last else {
+            self.last = Some((now, bytes_done));
+            return false;
+        };
+        if !working {
+            self.last = Some((now, bytes_done));
+            return false;
+        }
+        let millis = now.saturating_duration_since(at).as_millis();
+        let every = SPEED_SAMPLE_EVERY.as_millis();
+        let due = usize::try_from((millis + every / 2) / every).unwrap_or(usize::MAX);
+        if due == 0 {
+            return false;
+        }
+        let moved = u128::from(bytes_done.saturating_sub(bytes));
+        let rate = u64::try_from(moved * 1_000 / millis).unwrap_or(u64::MAX);
+        // More than a ring of them would push each other out again.
+        for _ in 0..due.min(SPEED_SAMPLES) {
+            self.push(rate);
+        }
+        self.last = Some((now, bytes_done));
+        true
+    }
+
+    /// The samples, the oldest first.
+    pub fn samples(&self) -> Vec<u64> {
+        self.ring.iter().copied().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.ring.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
+    }
+}
+
+/// The points of the line that draws `samples` (speeds, the oldest first) in a box `width` by
+/// `height`: one point for each sample, the newest at the right edge and each older one a step
+/// to its left, a step being the box's width over the gaps of a full ring
+/// ([`SPEED_SAMPLES`]` - 1`), so that the line grows from the right as the samples come and a
+/// second is as wide whatever their number. The fastest sample is at the top (`y` 0) and a
+/// speed of 0 at the bottom (`y` is `height`), the others between them by their share of the
+/// fastest, to a ten-thousandth; when every sample is 0, all are at the bottom. Of more
+/// samples than a ring holds, the newest ones are drawn. No point for no sample.
+pub fn speed_points(samples: &[u64], width: f32, height: f32) -> Vec<(f32, f32)> {
+    let shown = &samples[samples.len().saturating_sub(SPEED_SAMPLES)..];
+    let top = shown.iter().copied().max().unwrap_or(0);
+    let step = width / small(SPEED_SAMPLES - 1);
+    shown
+        .iter()
+        .enumerate()
+        .map(|(i, &sample)| {
+            let from_right = small(shown.len() - 1 - i);
+            (
+                width - from_right * step,
+                height * (1.0 - fraction(sample, top)),
+            )
+        })
+        .collect()
+}
+
+/// `count` as a float; exact, for it is at most [`SPEED_SAMPLES`].
+fn small(count: usize) -> f32 {
+    f32::from(u16::try_from(count).unwrap_or(u16::MAX))
+}
+
+/// Which way a job that waits in the queue can be moved: whether its 위로 and its 아래로 do
+/// anything ([`JobRows::move_target`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct QueueMoves {
+    /// It can go a place earlier: it is not the first of those that wait, and the engine has
+    /// told its place in the queue and that of the job above it.
+    pub up: bool,
+    /// It can go a place later: it is not the last, and the engine has told its place and
+    /// that of the job below it.
+    pub down: bool,
+}
+
 /// One row of the job panel, as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JobRow {
     pub id: JobId,
-    /// `복사 중`, `일시정지됨` ([`words::job_title`]).
+    /// `복사 중`, `일시정지됨`, `대기 중` ([`words::job_title`]).
     pub title: String,
-    /// What the job works on ([`words::job_detail`]).
+    /// What the job works on ([`words::job_detail`]); for a job that waits, after what it will
+    /// do ([`words::queued_detail`]).
     pub detail: String,
     /// How far it has got, 0 to 1: by bytes, or by items when it moves no bytes.
     pub fraction: f32,
-    /// [`words::job_progress`], or what the job waits for.
+    /// [`words::job_progress`], or what the job waits for; empty for a job in the queue.
     pub progress: String,
     pub paused: bool,
     /// The job waits for an answer to its question.
     pub waiting: bool,
+    /// The name of the file it works on now, a long one shortened in the middle
+    /// ([`words::job_current`]); empty while none is known, and for a job in the queue.
+    pub current: String,
+    /// Its speed over its last minute of work, a sample a second, the oldest first
+    /// ([`SpeedSamples`]): the graph of its row. `None` for a job that moves no bytes (a trash,
+    /// a rename), which has no graph, and for a job in the queue.
+    pub speeds: Option<Vec<u64>>,
+    /// For a job that waits in the queue, which way it can be moved there; `None` once a
+    /// worker has taken it up. The jobs that wait come after the others, in the queue's order.
+    pub queued: Option<QueueMoves>,
 }
 
 /// A job that ended, for the window to tell of.
@@ -571,11 +714,13 @@ struct Tracked {
     /// When a worker took it up, in the order the jobs started; `None` while it is queued.
     started: Option<u64>,
     progress: Progress,
+    /// Its speed over its last minute of work ([`JobRows::sample_speeds`]).
+    speeds: SpeedSamples,
 }
 
 /// The jobs that have not ended, as the job panel shows them: one row for each job a worker
-/// has taken up, in the order they started; the queued ones are counted on the first row
-/// (`대기 중인 작업 1개`).
+/// has taken up, in the order they started, the first of which also counts the queued ones
+/// (`대기 중인 작업 1개`); then one row for each job that waits, in the order of the queue.
 #[derive(Clone, Debug, Default)]
 pub struct JobRows {
     jobs: Vec<Tracked>,
@@ -583,6 +728,8 @@ pub struct JobRows {
     next_start: u64,
     /// The engine's lanes ([`JobRows::set_lanes`]).
     lanes: Lanes,
+    /// The queued jobs in the order they wait in, as the engine last told (`JobEvent::Queue`).
+    queue: Vec<JobId>,
 }
 
 /// Which lane each job runs in, as the engine's config says: [`DefaultLanes`], the engine's
@@ -630,6 +777,7 @@ impl JobRows {
                 state: JobState::Queued,
                 started: None,
                 progress: Progress::default(),
+                speeds: SpeedSamples::default(),
             }),
         }
     }
@@ -683,25 +831,102 @@ impl JobRows {
                     report,
                 })
             }
-            // The queue order shows in the states; the journal's news is the window's.
+            JobEvent::Queue { order } => {
+                self.queue = order;
+                None
+            }
+            // The journal's news is the window's.
             _ => None,
         }
     }
 
-    /// The rows of the panel.
+    /// The rows of the panel: the jobs a worker has taken up, then those that wait.
     pub fn rows(&self) -> Vec<JobRow> {
-        let queued = self.jobs.iter().filter(|job| job.started.is_none()).count();
+        let waiting = self.waiting();
         let mut started: Vec<&Tracked> = self
             .jobs
             .iter()
             .filter(|job| job.started.is_some())
             .collect();
         started.sort_by_key(|job| job.started);
-        started
+        let started = started
             .into_iter()
             .enumerate()
-            .map(|(i, job)| row(job, if i == 0 { queued } else { 0 }))
-            .collect()
+            .map(|(i, job)| row(job, if i == 0 { waiting.len() } else { 0 }));
+        let queued = waiting.iter().enumerate().map(|(at, job)| {
+            let moves = QueueMoves {
+                up: self.target(&waiting, at, true).is_some(),
+                down: self.target(&waiting, at, false).is_some(),
+            };
+            queued_row(job, moves)
+        });
+        started.chain(queued).collect()
+    }
+
+    /// The jobs no worker has taken up, in the order they wait in: as the engine told the
+    /// queue, and after them, as they were submitted, those it has not told of yet.
+    fn waiting(&self) -> Vec<&Tracked> {
+        let mut waiting: Vec<&Tracked> = self
+            .jobs
+            .iter()
+            .filter(|job| job.started.is_none())
+            .collect();
+        // Stable: the jobs the queue does not name keep their order, after the others.
+        waiting.sort_by_key(|job| {
+            self.queue
+                .iter()
+                .position(|id| *id == job.id)
+                .unwrap_or(usize::MAX)
+        });
+        waiting
+    }
+
+    /// Where the job of row `row` goes when it is moved a place up the queue (`up`) or down:
+    /// its id and its new position in the engine's queue (`JobEngine::move_to`), which puts it
+    /// just before the job that waits above it, or just after the one below. `None` for a row
+    /// that cannot move: a job a worker has taken up (running, paused or asking: it has left
+    /// the queue), the first one going up, the last one going down, a row that is not there,
+    /// and a job the engine has not told the place of yet.
+    pub fn move_target(&self, row: usize, up: bool) -> Option<(JobId, usize)> {
+        let waiting = self.waiting();
+        let at = row.checked_sub(self.jobs.len() - waiting.len())?;
+        self.target(&waiting, at, up)
+    }
+
+    /// [`JobRows::move_target`] for the job at `at` of `waiting`, the jobs that wait in their
+    /// order ([`JobRows::waiting`]).
+    fn target(&self, waiting: &[&Tracked], at: usize, up: bool) -> Option<(JobId, usize)> {
+        let job = waiting.get(at)?;
+        let beside = if up {
+            waiting.get(at.checked_sub(1)?)?
+        } else {
+            waiting.get(at.checked_add(1)?)?
+        };
+        // Both have a place in the queue the engine told.
+        let place = |id: JobId| self.queue.iter().position(|queued| *queued == id);
+        place(job.id)?;
+        Some((job.id, place(beside.id)?))
+    }
+
+    /// The row of the job `id` while it waits in the queue.
+    pub fn queued_row(&self, id: JobId) -> Option<usize> {
+        let waiting = self.waiting();
+        let at = waiting.iter().position(|job| job.id == id)?;
+        Some(self.jobs.len() - waiting.len() + at)
+    }
+
+    /// Takes the speed samples that are due at `now` of every job a worker has taken up that
+    /// moves bytes, the jobs whose rows have a graph ([`SpeedSamples::sample`]): a job works
+    /// while it runs, and not while it is paused or waits for an answer. `true` if a graph has
+    /// a new sample to show.
+    pub fn sample_speeds(&mut self, now: Instant) -> bool {
+        let mut sampled = false;
+        let graphed = |job: &&mut Tracked| job.started.is_some() && job.progress.total.bytes > 0;
+        for job in self.jobs.iter_mut().filter(graphed) {
+            let working = job.state == JobState::Running;
+            sampled |= job.speeds.sample(now, job.progress.done.bytes, working);
+        }
+        sampled
     }
 
     /// The number of jobs that have not ended, queued ones included.
@@ -787,6 +1012,7 @@ impl JobRows {
                 state: JobState::Queued,
                 started: None,
                 progress: Progress::default(),
+                speeds: SpeedSamples::default(),
             });
             self.jobs.len() - 1
         };
@@ -837,15 +1063,44 @@ fn row(job: &Tracked, queued: usize) -> JobRow {
     JobRow {
         id: job.id,
         title: words::job_title(job.work, job.state),
-        detail: job
-            .spec
-            .as_deref()
-            .map(words::job_detail)
-            .unwrap_or_default(),
+        detail: detail(job),
         fraction,
         progress,
         paused,
         waiting,
+        current: job
+            .progress
+            .current
+            .as_ref()
+            .map(words::job_current)
+            .unwrap_or_default(),
+        speeds: (total.bytes > 0).then(|| job.speeds.samples()),
+        queued: None,
+    }
+}
+
+/// What `job` works on ([`words::job_detail`]), once its spec is known.
+fn detail(job: &Tracked) -> String {
+    job.spec
+        .as_deref()
+        .map(words::job_detail)
+        .unwrap_or_default()
+}
+
+/// The row of `job`, which waits in the queue and can be moved as `moves` says: `대기 중`, or
+/// `일시정지됨` for one its lane passes over, with what it will do and on what.
+fn queued_row(job: &Tracked, moves: QueueMoves) -> JobRow {
+    JobRow {
+        id: job.id,
+        title: words::job_title(job.work, job.state),
+        detail: words::queued_detail(job.work, &detail(job)),
+        fraction: 0.0,
+        progress: String::new(),
+        paused: job.state == JobState::Paused,
+        waiting: false,
+        current: String::new(),
+        speeds: None,
+        queued: Some(moves),
     }
 }
 
@@ -898,17 +1153,33 @@ mod tests {
         rows.track(started(2, copy_spec()));
         rows.apply(state(1, JobState::Queued));
         rows.apply(state(2, JobState::Queued));
-        // Nothing has started: no row, but two jobs are under way.
-        assert_eq!(rows.rows(), []);
+        // Nothing has started: both wait, each with a row that says what it will do.
+        let shown = rows.rows();
+        assert_eq!(shown.len(), 2);
+        for row in &shown {
+            assert_eq!(row.title, "대기 중");
+            assert_eq!(row.detail, "복사 · assets → 백업");
+            // Neither moves until the engine has told the queue's order.
+            let stays = QueueMoves {
+                up: false,
+                down: false,
+            };
+            assert_eq!(row.queued, Some(stays));
+            assert_eq!((row.progress.as_str(), row.current.as_str()), ("", ""));
+            assert_eq!(row.speeds, None);
+        }
         assert_eq!(rows.active(), 2);
 
         rows.apply(state(1, JobState::Planning));
         let shown = rows.rows();
-        assert_eq!(shown.len(), 1);
+        // The job a worker took up comes first; the other one still waits.
+        assert_eq!(shown.len(), 2);
         assert_eq!(shown[0].title, "복사 중");
         assert_eq!(shown[0].progress, "준비 중");
+        assert_eq!(shown[0].queued, None);
         // The target folder by its name, as the 화면 사양 shows it.
         assert_eq!(shown[0].detail, "assets → 백업");
+        assert!(shown[1].queued.is_some());
 
         rows.apply(JobEvent::Planned {
             id: JobId(1),
@@ -958,7 +1229,370 @@ mod tests {
         assert!(shown[0].waiting && !shown[0].paused);
         assert_eq!(shown[0].progress, "답을 기다리는 중");
         assert_eq!(rows.row_id(0), Some(JobId(1)));
-        assert_eq!(rows.row_id(1), None);
+        // The job that waits has the row after it.
+        assert_eq!(rows.row_id(1), Some(JobId(2)));
+        assert_eq!(rows.row_id(2), None);
+    }
+
+    /// The rows of four copies: job 1 runs, jobs 2, 3 and 4 wait in that order.
+    fn one_running_three_waiting() -> JobRows {
+        let mut rows = JobRows::default();
+        for id in 1..=4 {
+            rows.track(started(id, copy_spec()));
+            rows.apply(state(id, JobState::Queued));
+        }
+        rows.apply(state(1, JobState::Planning));
+        rows.apply(state(1, JobState::Running));
+        rows.apply(JobEvent::Queue {
+            order: vec![JobId(2), JobId(3), JobId(4)],
+        });
+        rows
+    }
+
+    /// The ids of the rows, in their order.
+    fn ids(rows: &JobRows) -> Vec<u64> {
+        rows.rows().iter().map(|row| row.id.0).collect()
+    }
+
+    #[test]
+    fn the_jobs_that_wait_show_in_the_order_of_the_queue() {
+        let mut rows = one_running_three_waiting();
+        assert_eq!(ids(&rows), [1, 2, 3, 4]);
+        // The engine tells a new order: the rows follow it.
+        rows.apply(JobEvent::Queue {
+            order: vec![JobId(4), JobId(2), JobId(3)],
+        });
+        assert_eq!(ids(&rows), [1, 4, 2, 3]);
+        // The running job has no place in the queue; of those that wait, the first cannot go
+        // up and the last cannot go down.
+        let moves = |rows: &JobRows| -> Vec<Option<(bool, bool)>> {
+            rows.rows()
+                .iter()
+                .map(|row| row.queued.map(|moves| (moves.up, moves.down)))
+                .collect()
+        };
+        assert_eq!(
+            moves(&rows),
+            [
+                None,
+                Some((false, true)),
+                Some((true, true)),
+                Some((true, false))
+            ]
+        );
+        assert_eq!(rows.queued_row(JobId(2)), Some(2));
+        assert_eq!(rows.queued_row(JobId(1)), None, "it runs");
+        // A job submitted that the queue has not told of yet comes last, and neither it nor
+        // the job above it moves past the other until it has.
+        rows.track(started(5, copy_spec()));
+        assert_eq!(ids(&rows), [1, 4, 2, 3, 5]);
+        assert_eq!(
+            moves(&rows)[3..],
+            [Some((true, false)), Some((false, false))]
+        );
+        rows.apply(JobEvent::Queue {
+            order: vec![JobId(4), JobId(2), JobId(3), JobId(5)],
+        });
+        assert_eq!(moves(&rows)[3..], [Some((true, true)), Some((true, false))]);
+        // One that is paused while it waits keeps its place, and says so.
+        rows.apply(state(2, JobState::Paused));
+        let paused = &rows.rows()[2];
+        assert_eq!((paused.id, paused.title.as_str()), (JobId(2), "일시정지됨"));
+        assert!(paused.paused && paused.queued.is_some());
+    }
+
+    #[test]
+    fn only_a_job_that_waits_moves_and_only_within_the_queue() {
+        let mut rows = one_running_three_waiting();
+        // Rows: 1 runs; 2, 3, 4 wait at the engine's places 0, 1, 2.
+        // The running job does not move, either way.
+        assert_eq!(rows.move_target(0, true), None);
+        assert_eq!(rows.move_target(0, false), None);
+        // The first one that waits cannot go up, the last one cannot go down.
+        assert_eq!(rows.move_target(1, true), None);
+        assert_eq!(rows.move_target(3, false), None);
+        // The others go to the place of the job beside them.
+        assert_eq!(rows.move_target(1, false), Some((JobId(2), 1)));
+        assert_eq!(rows.move_target(2, true), Some((JobId(3), 0)));
+        assert_eq!(rows.move_target(2, false), Some((JobId(3), 2)));
+        assert_eq!(rows.move_target(3, true), Some((JobId(4), 1)));
+        // No row there.
+        assert_eq!(rows.move_target(4, true), None);
+        assert_eq!(rows.move_target(usize::MAX, false), None);
+
+        // A job paused in mid-run has left the queue too: it does not move.
+        rows.apply(state(1, JobState::Paused));
+        assert_eq!(rows.move_target(0, false), None);
+        // One paused while it waits still does.
+        rows.apply(state(3, JobState::Paused));
+        assert_eq!(rows.move_target(2, true), Some((JobId(3), 0)));
+
+        // A worker takes job 2 up; the queue's news has not come yet. Job 3 is first of those
+        // that wait now and cannot go up, and going down it goes behind job 4, by the place
+        // job 4 has in the queue as it was told.
+        rows.apply(state(2, JobState::Planning));
+        assert_eq!(ids(&rows), [1, 2, 3, 4]);
+        assert_eq!(rows.move_target(1, false), None, "job 2 runs now");
+        assert_eq!(rows.move_target(2, true), None);
+        assert_eq!(rows.move_target(2, false), Some((JobId(3), 2)));
+        rows.apply(JobEvent::Queue {
+            order: vec![JobId(3), JobId(4)],
+        });
+        assert_eq!(rows.move_target(2, false), Some((JobId(3), 1)));
+
+        // A job that ended has no row, and nothing moves in its place.
+        let spec = copy_spec();
+        rows.apply(JobEvent::Queue {
+            order: vec![JobId(3)],
+        });
+        rows.apply(JobEvent::Finished {
+            id: JobId(4),
+            report: Arc::new(JobReport::new(JobId(4), &spec)),
+        });
+        assert_eq!(ids(&rows), [1, 2, 3]);
+        assert_eq!(rows.move_target(2, true), None);
+        assert_eq!(rows.move_target(2, false), None);
+        assert_eq!(rows.move_target(3, true), None);
+
+        // A job the engine has not told the place of does not move, nor does one move past it.
+        rows.track(started(9, copy_spec()));
+        assert_eq!(ids(&rows), [1, 2, 3, 9]);
+        assert_eq!(rows.move_target(3, true), None);
+        assert_eq!(rows.move_target(2, false), None);
+    }
+
+    /// A progress report of job `id` with `bytes` of `total` bytes done, at the file `current`.
+    fn progress_at(id: u64, bytes: u64, total: u64, current: Option<VPath>) -> JobEvent {
+        JobEvent::Progress {
+            id: JobId(id),
+            progress: Progress {
+                done: Totals {
+                    files: 0,
+                    dirs: 0,
+                    bytes,
+                },
+                total: Totals {
+                    files: 4,
+                    dirs: 0,
+                    bytes: total,
+                },
+                current,
+                bytes_per_sec: 0,
+                eta: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_running_row_names_the_file_it_works_on() {
+        let mut rows = JobRows::default();
+        rows.track(started(1, copy_spec()));
+        rows.apply(state(1, JobState::Planning));
+        assert_eq!(rows.rows()[0].current, "", "none while it plans");
+        rows.apply(state(1, JobState::Running));
+        rows.apply(progress_at(
+            1,
+            10,
+            400,
+            Some(path("assets").join("로고.png").expect("a name")),
+        ));
+        // The name, without its folders.
+        assert_eq!(rows.rows()[0].current, "로고.png");
+        // A long name keeps its beginning and its extension.
+        let long = format!("{}-최종.psd", "아주-긴-이름".repeat(12));
+        rows.apply(progress_at(1, 20, 400, Some(path(&long))));
+        let shown = rows.rows()[0].current.clone();
+        assert!(shown.starts_with("아주-긴-이름"), "{shown}");
+        assert!(shown.ends_with("-최종.psd"), "{shown}");
+        assert!(shown.contains('…'), "{shown}");
+        assert!(
+            words::text_cells(&shown) <= words::JOB_FILE_CELLS,
+            "{shown}"
+        );
+        // It stays while the job is paused, and goes with the job's last report.
+        rows.apply(state(1, JobState::Paused));
+        assert_eq!(rows.rows()[0].current, shown);
+        rows.apply(progress_at(1, 400, 400, None));
+        assert_eq!(rows.rows()[0].current, "");
+    }
+
+    #[test]
+    fn the_ring_keeps_the_last_sixty_samples() {
+        let mut ring = SpeedSamples::default();
+        assert!(ring.is_empty());
+        assert_eq!(ring.samples(), Vec::<u64>::new());
+        for speed in 1..=u64::try_from(SPEED_SAMPLES + 5).expect("a small number") {
+            ring.push(speed);
+        }
+        assert_eq!(ring.len(), SPEED_SAMPLES);
+        let samples = ring.samples();
+        // The oldest five have gone; the newest is last.
+        assert_eq!(samples.first(), Some(&6));
+        assert_eq!(samples.last(), Some(&65));
+        assert!(samples.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    }
+
+    #[test]
+    fn a_sample_is_taken_for_each_second_of_work() {
+        const MB: u64 = 1024 * 1024;
+        // Every time below counts from this one; none is compared with the clock.
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let mut ring = SpeedSamples::default();
+        // The first look only notes where the job is.
+        assert!(!ring.sample(at(0), 0, true));
+        assert!(ring.is_empty());
+        // A second later: what it moved in that second.
+        assert!(ring.sample(at(1_000), 4 * MB, true));
+        assert_eq!(ring.samples(), [4 * MB]);
+        // A look that comes early, within half a second, takes nothing and loses nothing.
+        assert!(!ring.sample(at(1_400), 5 * MB, true));
+        assert_eq!(ring.samples(), [4 * MB]);
+        assert!(ring.sample(at(2_000), 6 * MB, true));
+        assert_eq!(ring.samples(), [4 * MB, 2 * MB]);
+        // A timer the system held back for three seconds: three samples of their average.
+        assert!(ring.sample(at(5_000), 12 * MB, true));
+        assert_eq!(ring.samples(), [4 * MB, 2 * MB, 2 * MB, 2 * MB, 2 * MB]);
+        // A tick that is a little late is one sample, of the speed over the time it took.
+        assert!(ring.sample(at(6_250), 17 * MB, true));
+        assert_eq!(ring.samples().last(), Some(&(4 * MB)));
+        // A stall shows as a second of nothing.
+        assert!(ring.sample(at(7_250), 17 * MB, true));
+        assert_eq!(ring.samples().last(), Some(&0));
+        // Bytes taken back after a failed attempt are none moved.
+        assert!(ring.sample(at(8_250), 16 * MB, true));
+        assert_eq!(ring.samples().last(), Some(&0));
+        let before = ring.len();
+        // While the job does not work (paused, asking) no sample is taken, however long, and
+        // the time does not count toward the next one.
+        assert!(!ring.sample(at(60_000), 16 * MB, false));
+        assert!(!ring.sample(at(120_000), 16 * MB, false));
+        assert_eq!(ring.len(), before);
+        assert!(ring.sample(at(121_000), 19 * MB, true));
+        assert_eq!(ring.len(), before + 1);
+        assert_eq!(ring.samples().last(), Some(&(3 * MB)));
+        // A very long gap fills the ring at most.
+        assert!(ring.sample(at(1_000_000), 19 * MB, true));
+        assert_eq!(ring.len(), SPEED_SAMPLES);
+        assert!(ring.samples().iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
+    fn the_rows_sample_the_jobs_that_run_and_only_copies_have_a_graph() {
+        const MB: u64 = 1024 * 1024;
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut rows = JobRows::default();
+        rows.track(started(1, copy_spec()));
+        rows.track(Started {
+            id: JobId(2),
+            spec: None,
+            work: JobWork::Trash,
+            origin: None,
+            via_history: false,
+        });
+        rows.track(started(3, copy_spec()));
+        rows.apply(state(1, JobState::Planning));
+        rows.apply(state(2, JobState::Running));
+        // Before its plan the copy has no bytes to move yet, and no graph; a trash never has.
+        assert_eq!(rows.rows()[0].speeds, None);
+        assert!(!rows.sample_speeds(at(0)), "nothing to sample yet");
+        rows.apply(state(1, JobState::Running));
+        rows.apply(progress_at(1, 0, 100 * MB, None));
+        assert_eq!(rows.rows()[0].speeds, Some(Vec::new()));
+        assert!(
+            !rows.sample_speeds(at(1)),
+            "the first look of a running job"
+        );
+        rows.apply(progress_at(1, 8 * MB, 100 * MB, None));
+        assert!(rows.sample_speeds(at(2)));
+        rows.apply(progress_at(1, 10 * MB, 100 * MB, None));
+        assert!(rows.sample_speeds(at(3)));
+        let shown = rows.rows();
+        assert_eq!(shown[0].speeds, Some(vec![8 * MB, 2 * MB]));
+        // A trash moves no bytes: no graph, though it runs.
+        assert_eq!((shown[1].id, &shown[1].speeds), (JobId(2), &None));
+        // The copy that waits has none either, and is not sampled.
+        assert_eq!((shown[2].id, &shown[2].speeds), (JobId(3), &None));
+        // Paused, the copy takes no sample; going on, it measures from there.
+        rows.apply(state(1, JobState::Paused));
+        assert!(!rows.sample_speeds(at(30)));
+        assert_eq!(rows.rows()[0].speeds.as_ref().map(Vec::len), Some(2));
+        rows.apply(state(1, JobState::Running));
+        rows.apply(progress_at(1, 13 * MB, 100 * MB, None));
+        assert!(rows.sample_speeds(at(31)));
+        assert_eq!(rows.rows()[0].speeds, Some(vec![8 * MB, 2 * MB, 3 * MB]));
+    }
+
+    /// Whether `a` and `b` are the same to a hundredth.
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn no_sample_makes_no_point_and_one_sample_one_at_the_right_edge() {
+        assert_eq!(speed_points(&[], 120.0, 28.0), []);
+        // The one sample is the fastest: at the top, where the newest one always is.
+        let points = speed_points(&[5], 120.0, 28.0);
+        assert_eq!(points.len(), 1);
+        assert!(
+            close(points[0].0, 120.0) && close(points[0].1, 0.0),
+            "{points:?}"
+        );
+    }
+
+    #[test]
+    fn samples_of_zero_lie_on_the_bottom() {
+        let points = speed_points(&[0, 0, 0], 120.0, 28.0);
+        assert_eq!(points.len(), 3);
+        for (x, y) in &points {
+            assert!(y.is_finite() && x.is_finite());
+            assert!(close(*y, 28.0), "{points:?}");
+        }
+        // One of them alone too: nothing divides by a top speed of 0.
+        let one = speed_points(&[0], 120.0, 28.0);
+        assert!(close(one[0].1, 28.0), "{one:?}");
+    }
+
+    #[test]
+    fn the_line_is_normalised_to_the_fastest_sample_and_grows_from_the_right() {
+        let points = speed_points(&[0, 50, 100, 25], 120.0, 28.0);
+        assert_eq!(points.len(), 4);
+        // The fastest at the top, half of it halfway, a quarter three quarters down.
+        let ys: Vec<f32> = points.iter().map(|point| point.1).collect();
+        for (y, wanted) in ys.iter().zip([28.0, 14.0, 0.0, 21.0]) {
+            assert!(close(*y, wanted), "{ys:?}");
+        }
+        // The newest at the right edge, each older one a step of a sixtieth's gap to its left.
+        let step = 120.0 / 59.0;
+        let xs: Vec<f32> = points.iter().map(|point| point.0).collect();
+        for (x, back) in xs.iter().zip([3.0_f32, 2.0, 1.0, 0.0]) {
+            assert!(close(*x, 120.0 - back * step), "{xs:?}");
+        }
+        // The same speeds a thousand times faster draw the same line.
+        let faster = speed_points(&[0, 50_000, 100_000, 25_000], 120.0, 28.0);
+        for (a, b) in points.iter().zip(&faster) {
+            assert!(close(a.0, b.0) && close(a.1, b.1));
+        }
+        // A full ring spans the box; of more samples, the newest are drawn.
+        let full: Vec<u64> = (1..=60).collect();
+        let points = speed_points(&full, 120.0, 28.0);
+        assert_eq!(points.len(), SPEED_SAMPLES);
+        assert!(close(points[0].0, 0.0) && close(points[59].0, 120.0));
+        assert!(close(points[59].1, 0.0));
+        let more: Vec<u64> = (1..=70).collect();
+        let points = speed_points(&more, 120.0, 28.0);
+        assert_eq!(points.len(), SPEED_SAMPLES);
+        assert!(close(points[0].0, 0.0) && close(points[59].1, 0.0));
+        // The oldest drawn is sample 11 of 70, a little above the bottom.
+        assert!(
+            close(points[0].1, 28.0 * (1.0 - 11.0 / 70.0)),
+            "{:?}",
+            points[0]
+        );
+        // A box of another size scales with it.
+        let wide = speed_points(&[10, 20], 59.0, 10.0);
+        assert!(close(wide[0].0, 58.0) && close(wide[0].1, 5.0), "{wide:?}");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
 //! (`AppPaths::config_dir`): the theme, whether hidden items show and whether the names show
 //! their extensions (`hide_extensions`, NAV-11), the window's size and layout
-//! (`[layout]`), the tabs of both panes (in their order, pinned or not) and which one has the
+//! (`[layout]`, with the job panel's place, `jobs_window`, LAY-09), the tabs of both panes (in
+//! their order, pinned or not) and which one has the
 //! keyboard, the destination picker's recent targets, the views remembered per folder
 //! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
 //! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
@@ -180,8 +181,9 @@ pub fn pinned_flags(flags: impl IntoIterator<Item = bool>) -> Vec<bool> {
 }
 
 /// The window's layout, as stored (`[layout]`). Each key the file lacks, or whose value this
-/// version cannot read, takes its default: two panes side by side, split evenly, the tree shown
-/// and the preview panel not. So the names say what differs from that default.
+/// version cannot read, takes its default: two panes side by side, split evenly, the tree shown,
+/// the preview panel not, and the job panel under the panes. So the names say what differs from
+/// that default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[expect(
@@ -208,6 +210,11 @@ pub struct LayoutSettings {
     /// The preview panel shows.
     #[serde(deserialize_with = "or_default")]
     pub preview: bool,
+    /// The job panel shows in a window of its own rather than under the panes (LAY-09). A file
+    /// without the key (0.4.0 and before) shows it under the panes; not written while it is
+    /// there.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub jobs_window: bool,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -221,6 +228,7 @@ impl LayoutSettings {
         layout.stacked = self.stacked;
         layout.tree = !self.hide_tree;
         layout.preview = self.preview;
+        layout.jobs_window = self.jobs_window;
         if let Some(split) = self.split {
             layout.set_share(split);
         }
@@ -234,6 +242,7 @@ impl LayoutSettings {
         self.split = Some(f64::from(layout.thousandths()) / 1000.0);
         self.hide_tree = !layout.tree;
         self.preview = layout.preview;
+        self.jobs_window = layout.jobs_window;
     }
 }
 
@@ -1467,6 +1476,7 @@ mod tests {
         layout.stacked = true;
         layout.tree = false;
         layout.preview = true;
+        layout.jobs_window = true;
         layout.set_share(0.3);
         layout
     }
@@ -1702,6 +1712,62 @@ mod tests {
         let loaded = load(dir.path()).settings;
         assert_eq!(loaded.on_error, OnError::Continue);
         assert_eq!(loaded.theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn the_job_panel_s_place_round_trips_and_an_older_file_keeps_it_under_the_panes() {
+        // Under the panes unless the file says otherwise, as the demos before had it.
+        let defaults = Settings::default();
+        assert!(!defaults.layout.jobs_window);
+        assert!(!defaults.session().layout.jobs_window);
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        // While it is there the key is not written: the file reads as 0.4.0 wrote it.
+        defaults.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("read");
+        assert!(!text.contains("jobs_window"), "{text}");
+
+        // In a window of its own: the layout keeps it, and a start gives it back.
+        let mut session = defaults.session();
+        session.layout.jobs_window = true;
+        let mut settings = defaults.clone();
+        settings.set_session(&session);
+        settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(&file).expect("read");
+        assert!(text.contains("[layout]"), "{text}");
+        assert!(text.contains("jobs_window = true"), "{text}");
+        // The key adds no version: the file is still the version it was.
+        assert!(
+            text.contains(&format!("version = {SETTINGS_VERSION}")),
+            "{text}"
+        );
+        assert_eq!(SETTINGS_VERSION, 1);
+        let loaded = load(dir.path());
+        assert_eq!(loaded, writable(settings));
+        assert!(loaded.settings.session().layout.jobs_window);
+        // Back under the panes, the key goes again.
+        let mut docked = loaded.settings;
+        session.layout.jobs_window = false;
+        docked.set_session(&session);
+        assert!(!docked.to_text().expect("text").contains("jobs_window"));
+
+        // A 0.4.0 file, which has its version and no such key, loads as it is.
+        std::fs::write(
+            &file,
+            "version = 1\ntheme = \"dark\"\n\n[layout]\nhide_tree = true\npreview = true\n",
+        )
+        .expect("written");
+        let loaded = load(dir.path());
+        assert!(loaded.backup.is_none() && loaded.writable);
+        assert_eq!(loaded.settings.version, 1);
+        let layout = loaded.settings.session().layout;
+        assert!(!layout.jobs_window && !layout.tree && layout.preview);
+        // A value this version cannot read is the panel under the panes, and costs no other
+        // key of the layout.
+        std::fs::write(&file, "[layout]\njobs_window = \"left\"\nstacked = true\n")
+            .expect("written");
+        let layout = load(dir.path()).settings.session().layout;
+        assert!(!layout.jobs_window && layout.stacked);
     }
 
     #[test]

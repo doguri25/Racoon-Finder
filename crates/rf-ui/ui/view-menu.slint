@@ -3,7 +3,8 @@
 // the names, the sidebar and the preview panel, the layout and the commands between the panes,
 // the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
 // the icon views, the undo of a dragged move, whether a copy or a move asks about each item that
-// fails, and on Windows the menu of a right click). It is short enough for a 560px window,
+// fails, and on Windows the menu of a right click), and where the job panel shows (작업 패널 ▸
+// 별도 창, LAY-09). It is short enough for a 560px window,
 // with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
 // their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
 // 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach every item:
@@ -53,6 +54,8 @@ export component ViewMenu inherits ContextMenuArea {
     // The rows start with checkboxes (NAV-15), two-way with the window's: the same switch as the
     // 선택 menu's, which the keys cannot open.
     in-out property <bool> checkbox-select;
+    // The job panel shows in a window of its own (LAY-09), two-way with the window's.
+    in-out property <bool> jobs-window;
 
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
@@ -651,6 +654,21 @@ export component ViewMenu inherits ContextMenuArea {
             checked <=> root.show-preview;
             activated => {
                 root.command("toggle-preview");
+            }
+        }
+        // Where the job panel shows (LAY-09): under the panes, or in a window of its own, whose
+        // close button puts it back. No key: neither file manager has such a panel.
+        Menu {
+            title: "작업 패널";
+
+            MenuItem {
+                title: "별도 창";
+                checkable: true;
+                checked <=> root.jobs-window;
+                activated => {
+                    root.command("toggle-jobs-window");
+                    root.done();
+                }
             }
         }
         MenuSeparator { }

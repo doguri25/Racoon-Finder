@@ -51,6 +51,14 @@
 //! share them (macOS) run on the UI thread, on the next turn of the event loop after they are
 //! asked for, with no borrow of the state held (module `system_menu`).
 //!
+//! The job panel shows under the panes or in a window of its own (LAY-09, [`JobWindow`]), as
+//! the layout says: both are a [`PanelHost`], given the same models and the same facts, and
+//! their buttons and keys reach the controller the same way. The window of its own is made and
+//! shown, or hidden, after a redraw, once no borrow of the state is held
+//! ([`Controller::place_job_panel`]); its close button puts the panel back under the panes.
+//! While jobs are under way a timer takes a sample of their speeds every second for the graphs
+//! of their rows ([`Controller::sample_speeds`]).
+//!
 //! The notifications of jobs that ended go to the system on worker threads too
 //! ([`OsNotifier`]), and a job's log is written on one ([`jobs::save_log`]). While the window is
 //! hidden and the jobs go on behind the tray icon (XFER-15), the icon follows the state at each
@@ -80,7 +88,9 @@ use slint::winit_030::winit::event::{
     ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent as WinitEvent,
 };
 use slint::winit_030::{EventResult, WinitWindowAccessor};
-use slint::{CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, VecModel};
+use slint::{
+    CloseRequestResponse, ComponentHandle, DataTransfer, ModelRc, SharedString, TimerMode, VecModel,
+};
 
 use crate::dialogs::Modal;
 use crate::format::folder_label;
@@ -109,7 +119,7 @@ use crate::ui_bridge::{
 };
 use crate::{
     DialogKind, DragPointer, DropPlace, FolderMenuRow, HistoryRowView, ItemMenu, JobRowView,
-    MainWindow, RecentRowView, StatusFit, TabDrop, open, words,
+    JobWindow, MainWindow, RecentRowView, StatusFit, TabDrop, open, words,
 };
 
 pub mod clipboard;
@@ -566,15 +576,7 @@ fn connect(window: &MainWindow) {
         };
         with(|c| c.tree_key(&text, mods)).unwrap_or(false)
     });
-    window.on_panel_key(|text, ctrl, shift, alt, meta| {
-        let mods = Mods {
-            ctrl,
-            shift,
-            alt,
-            meta,
-        };
-        with(|c| c.panel_key(&text, mods)).unwrap_or(false)
-    });
+    window.connect_panel();
     connect_quick_look(window);
     window.on_split_changed(|share| {
         with(|c| {
@@ -822,7 +824,7 @@ fn connect_view(window: &MainWindow) {
         let (Some(column), Some(first), Some(count)) =
             (Column::from_number(column), index(first), index(count))
         else {
-            return slint::SharedString::new();
+            return SharedString::new();
         };
         with(|c| c.panes[side(s)].column_texts(column, first, count))
             .unwrap_or_default()
@@ -1334,41 +1336,146 @@ fn connect_pick(window: &MainWindow) {
     });
 }
 
-/// The buttons of the job panel's 최근 완료, and the question's 트레이에서 계속.
+/// The job panel's models, which both of its places show (the main window, under its panes,
+/// and the window the panel has to itself), with what goes with them.
+#[derive(Default)]
+struct PanelPlace {
+    /// The rows of the jobs a worker has taken up, and of those that wait.
+    rows: Rc<VecModel<JobRowView>>,
+    queue: Rc<VecModel<JobRowView>>,
+    /// The lines of 최근 완료.
+    recent: Rc<VecModel<RecentRowView>>,
+    /// The rows of 되돌리기 기록.
+    history: Rc<VecModel<HistoryRowView>>,
+    /// What the panel shows besides its rows, as last shown ([`PanelHost::show_panel`]).
+    shown: RefCell<PanelShown>,
+    /// The window the job panel has to itself (LAY-09), once it was asked for; hidden while
+    /// the panel shows under the panes.
+    window: RefCell<Option<JobWindow>>,
+    /// Takes a sample of the running jobs' speeds every second, while jobs are under way.
+    speed_timer: slint::Timer,
+    /// A window opened over the main window at the last redraw
+    /// ([`Controller::bring_dialog_forward`]).
+    dialog_opened: Cell<bool>,
+}
+
+/// What the job panel shows besides the rows of its models, in either of its places.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PanelShown {
+    /// 최근 완료 shows its lines.
+    recent_open: bool,
+    /// The head of 되돌리기 기록, empty while the history holds nothing; whether its rows show;
+    /// and how many of them are heads.
+    history_title: SharedString,
+    history_open: bool,
+    history_heads: i32,
+    /// The line and the button of the keyboard cursor; -1 for none.
+    line: i32,
+    button: i32,
+}
+
+/// A window that shows the job panel: the main window, under its panes, and the window the
+/// panel has to itself (LAY-09). Both name the panel's properties and callbacks alike, so one
+/// set of handlers and one set of facts serve both: neither keeps anything of its own.
+trait PanelHost {
+    /// Connects the panel's buttons and keys to the controller of this thread. Each handler
+    /// borrows the state only while it changes it ([`Controller::update`]).
+    fn connect_panel(&self);
+
+    /// Takes the panel's models, the same for every place.
+    fn take_models(&self, panel: &PanelPlace);
+
+    /// Shows what of the panel is no model.
+    fn show_panel(&self, shown: &PanelShown);
+}
+
+macro_rules! panel_host {
+    ($window:ty) => {
+        impl PanelHost for $window {
+            fn connect_panel(&self) {
+                self.on_panel_key(|text, ctrl, shift, alt, meta| {
+                    let mods = Mods {
+                        ctrl,
+                        shift,
+                        alt,
+                        meta,
+                    };
+                    with(|c| c.panel_key(&text, mods)).unwrap_or(false)
+                });
+                self.on_job_pause(|i| {
+                    with(|c| c.update_at(i, |state, i| state.job_control(i, 0)));
+                });
+                self.on_job_resume(|i| {
+                    with(|c| c.update_at(i, |state, i| state.job_control(i, 1)));
+                });
+                self.on_job_cancel(|i| {
+                    with(|c| c.update_at(i, |state, i| state.job_control(i, 2)));
+                });
+                self.on_job_move_up(|i| {
+                    with(|c| c.update_at(i, |state, i| state.job_move(i, true)));
+                });
+                self.on_job_move_down(|i| {
+                    with(|c| c.update_at(i, |state, i| state.job_move(i, false)));
+                });
+                self.on_recent_toggled(|| {
+                    with(|c| {
+                        c.update(|state| {
+                            state.recent_toggled();
+                            Vec::new()
+                        });
+                    });
+                });
+                self.on_recent_cleared(|| {
+                    with(|c| {
+                        c.update(|state| {
+                            state.recent_cleared();
+                            Vec::new()
+                        });
+                    });
+                });
+                self.on_recent_details(|i| {
+                    with(|c| c.update_at(i, AppState::recent_details));
+                });
+                self.on_recent_save(|i| {
+                    with(|c| c.update_at(i, AppState::save_log_asked));
+                });
+                self.on_history_toggled(|| {
+                    with(|c| {
+                        c.update(|state| {
+                            state.history_toggled();
+                            Vec::new()
+                        });
+                    });
+                });
+                self.on_history_run(|redo, i| {
+                    with(|c| c.update_at(i, |state, i| state.history_run(redo, i)));
+                });
+            }
+
+            fn take_models(&self, panel: &PanelPlace) {
+                self.set_job_rows(ModelRc::from(Rc::clone(&panel.rows)));
+                self.set_job_queue(ModelRc::from(Rc::clone(&panel.queue)));
+                self.set_recent_rows(ModelRc::from(Rc::clone(&panel.recent)));
+                self.set_history_rows(ModelRc::from(Rc::clone(&panel.history)));
+            }
+
+            fn show_panel(&self, shown: &PanelShown) {
+                self.set_recent_open(shown.recent_open);
+                self.set_history_title(shown.history_title.clone());
+                self.set_history_open(shown.history_open);
+                self.set_history_heads(shown.history_heads);
+                self.set_panel_line(shown.line);
+                self.set_panel_button(shown.button);
+            }
+        }
+    };
+}
+
+panel_host!(MainWindow);
+panel_host!(JobWindow);
+
+/// The question's 트레이에서 계속, and the fitting of the panes' status lines.
 fn connect_report(window: &MainWindow) {
-    window.on_recent_toggled(|| {
-        with(|c| {
-            c.update(|state| {
-                state.recent_toggled();
-                Vec::new()
-            });
-        });
-    });
-    window.on_recent_cleared(|| {
-        with(|c| {
-            c.update(|state| {
-                state.recent_cleared();
-                Vec::new()
-            });
-        });
-    });
-    window.on_recent_details(|i| {
-        with(|c| c.update_at(i, AppState::recent_details));
-    });
-    window.on_recent_save(|i| {
-        with(|c| c.update_at(i, AppState::save_log_asked));
-    });
-    window.on_history_toggled(|| {
-        with(|c| {
-            c.update(|state| {
-                state.history_toggled();
-                Vec::new()
-            });
-        });
-    });
-    window.on_history_run(|redo, i| {
-        with(|c| c.update_at(i, |state, i| state.history_run(redo, i)));
-    });
     // The status lines of the panes take as many of their parts as the pane is wide.
     window
         .global::<StatusFit<'_>>()
@@ -1378,7 +1485,7 @@ fn connect_report(window: &MainWindow) {
     });
 }
 
-/// The callbacks of the dialogs, the job panel and the toast, and the close button.
+/// The callbacks of the dialogs and the toast, and the close button.
 fn connect_jobs(window: &MainWindow) {
     window.on_row_menu(|s, i| {
         with(|c| c.update_at(i, |state, i| state.row_menu(side(s), i)));
@@ -1450,15 +1557,6 @@ fn connect_jobs(window: &MainWindow) {
     window.on_pattern_accepted(|text| {
         with(|c| c.update(|state| state.pattern_confirmed(&text)));
     });
-    window.on_job_pause(|i| {
-        with(|c| c.update_at(i, |state, i| state.job_control(i, 0)));
-    });
-    window.on_job_resume(|i| {
-        with(|c| c.update_at(i, |state, i| state.job_control(i, 1)));
-    });
-    window.on_job_cancel(|i| {
-        with(|c| c.update_at(i, |state, i| state.job_control(i, 2)));
-    });
     window.on_notice_action(|token| {
         if let Ok(token) = u64::try_from(token) {
             with(|c| c.update(|state| state.toast_clicked(token)));
@@ -1500,7 +1598,8 @@ pub struct Controller {
     early: RefCell<Vec<Early>>,
     /// The time zone of the dates the dialogs show, once known.
     tz: RefCell<TimeZone>,
-    job_rows: Rc<VecModel<JobRowView>>,
+    /// What the job panel shows, and where ([`PanelPlace`]).
+    panel: PanelPlace,
     /// The dialog the screen shows, as it was last handed over: a view is set again only when
     /// it changed, so a list in it keeps its scroll position while the jobs report progress.
     shown_modal: RefCell<Option<(DialogKind, Option<Modal>)>>,
@@ -1583,11 +1682,7 @@ pub struct Controller {
     /// Asks the clipboard's change count while items the window cut are on it.
     clipboard_timer: slint::Timer,
     /// The titles of the menu of the apps that can open a file (macOS).
-    open_with_apps: Rc<VecModel<slint::SharedString>>,
-    /// The lines of the job panel's 최근 완료.
-    recent_rows: Rc<VecModel<RecentRowView>>,
-    /// The rows of the job panel's 되돌리기 기록.
-    history_rows: Rc<VecModel<HistoryRowView>>,
+    open_with_apps: Rc<VecModel<SharedString>>,
     /// The app's folder for logs, until the state has it.
     log_dir: RefCell<Option<VPath>>,
     /// Shows the notifications of the system.
@@ -1623,14 +1718,10 @@ impl Controller {
     fn new(window: &MainWindow, jobs: Jobs, settings: Settings, saver: Saver) -> Controller {
         let tree_rows = Rc::new(TreeRows::default());
         window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
-        let job_rows = Rc::new(VecModel::default());
-        window.set_job_rows(ModelRc::from(Rc::clone(&job_rows)));
+        let panel = PanelPlace::default();
+        window.take_models(&panel);
         let open_with_apps = Rc::new(VecModel::default());
         window.set_open_with_apps(ModelRc::from(Rc::clone(&open_with_apps)));
-        let recent_rows = Rc::new(VecModel::default());
-        window.set_recent_rows(ModelRc::from(Rc::clone(&recent_rows)));
-        let history_rows = Rc::new(VecModel::default());
-        window.set_history_rows(ModelRc::from(Rc::clone(&history_rows)));
         set_first_drag_payloads(window);
         Controller {
             window: window.as_weak(),
@@ -1639,7 +1730,7 @@ impl Controller {
             state: RefCell::new(None),
             early: RefCell::new(Vec::new()),
             tz: RefCell::new(TimeZone::UTC),
-            job_rows,
+            panel,
             shown_modal: RefCell::new(None),
             pick: PickModels::default(),
             tickets: RefCell::new(HashMap::new()),
@@ -1709,8 +1800,6 @@ impl Controller {
             }),
             clipboard_timer: slint::Timer::default(),
             open_with_apps,
-            recent_rows,
-            history_rows,
             log_dir: RefCell::new(None),
             notifier: OsNotifier::system(None),
             tray: Tray::new(Box::new(SlintTray::new(|command| {
@@ -2750,7 +2839,7 @@ impl Controller {
         });
     }
 
-    /// The toggles of 보기 ▸ 설정 and 선택: true when `name` was one of them.
+    /// The toggles of 보기 ▸ 설정, 선택 and 보기 ▸ 작업 패널: true when `name` was one of them.
     fn toggle_command(&self, name: &str) -> bool {
         match name {
             "toggle-move-undo-toast" => {
@@ -2789,6 +2878,12 @@ impl Controller {
             "toggle-thumbnails" => {
                 self.update(|state| {
                     state.set_show_thumbnails(!state.show_thumbnails());
+                    Vec::new()
+                });
+            }
+            "toggle-jobs-window" => {
+                self.update(|state| {
+                    state.set_jobs_window(!state.layout().jobs_window);
                     Vec::new()
                 });
             }
@@ -3072,7 +3167,7 @@ impl Controller {
         }
         if watched {
             self.clipboard_timer
-                .start(slint::TimerMode::Repeated, CLIPBOARD_POLL, || {
+                .start(TimerMode::Repeated, CLIPBOARD_POLL, || {
                     with(|c| c.clipper.poll());
                 });
         } else {
@@ -3189,7 +3284,7 @@ impl Controller {
     }
 
     /// Gives the keys to the part of the window `effect` names: the filter box, the tree, the
-    /// panes or the job panel.
+    /// panes or the job panel (in its own window, when it shows there).
     fn give_keys(&self, effect: &Effect) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -3197,8 +3292,25 @@ impl Controller {
         match effect {
             Effect::FocusFilter => window.invoke_focus_filter(),
             Effect::FocusTree => window.invoke_focus_tree(),
-            Effect::FocusPanel => window.invoke_focus_panel(),
-            _ => window.invoke_focus_panes(),
+            // The panel is under the panes, or in its own window, which comes to the front.
+            Effect::FocusPanel => match self.shown_job_window() {
+                Some(own) => {
+                    own.invoke_take_keys();
+                    own.window()
+                        .with_winit_window(slint::winit_030::winit::window::Window::focus_window);
+                }
+                None => window.invoke_focus_panel(),
+            },
+            _ => {
+                window.invoke_focus_panes();
+                // From the panel's own window (Esc, Tab, F6 there): the main window comes to
+                // the front with the keys.
+                if self.job_window_active() {
+                    window
+                        .window()
+                        .with_winit_window(slint::winit_030::winit::window::Window::focus_window);
+                }
+            }
         }
     }
 
@@ -3463,6 +3575,9 @@ impl Controller {
             self.show_jobs(&window, state, true);
             self.show_dialog(&window, state);
         }
+        // With no borrow of the state held: a window that shows or hides may call back.
+        self.place_job_panel();
+        self.bring_dialog_forward();
         for (side, row) in scrolls {
             self.scroll_to(side, row);
         }
@@ -3566,54 +3681,211 @@ impl Controller {
     }
 
     fn show_jobs(&self, window: &MainWindow, state: &AppState, history: bool) {
+        // The jobs a worker has taken up come first, then those that wait.
         let rows = state.job_rows();
+        let (waiting, started): (Vec<_>, Vec<_>) =
+            rows.iter().partition(|row| row.queued.is_some());
         ui_bridge::set_rows(
-            &self.job_rows,
-            rows.iter().map(ui_bridge::job_row_view).collect(),
+            &self.panel.rows,
+            started.into_iter().map(ui_bridge::job_row_view).collect(),
+        );
+        ui_bridge::set_rows(
+            &self.panel.queue,
+            waiting.into_iter().map(ui_bridge::job_row_view).collect(),
         );
         let menu = window.global::<ItemMenu<'_>>();
         menu.set_can_undo(state.can_undo());
         menu.set_can_redo(state.can_redo());
         window.set_notice_action_live(state.toast_button_live());
         ui_bridge::set_rows(
-            &self.recent_rows,
+            &self.panel.recent,
             state
                 .recent_rows()
                 .iter()
                 .map(ui_bridge::recent_row_view)
                 .collect(),
         );
-        window.set_recent_open(state.recent_open());
+        let mut shown = self.panel.shown.borrow().clone();
+        shown.recent_open = state.recent_open();
         if history {
-            self.show_history(window, state);
+            self.show_history(state, &mut shown);
         }
-        let (line, button) = state
+        (shown.line, shown.button) = state
             .panel_cursor()
             .map_or((-1, -1), |(line, button)| (number(line), number(button)));
-        window.set_panel_line(line);
-        window.set_panel_button(button);
+        // Both places of the panel, whichever shows it.
+        window.show_panel(&shown);
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.show_panel(&shown);
+        }
+        *self.panel.shown.borrow_mut() = shown;
         self.tray
             .follow(state.tray_view(rf_core::identity::DISPLAY_NAME));
+        self.time_speeds(state.active_jobs() > 0);
     }
 
     /// The job panel's 되돌리기 기록: its head always, its rows while it is open.
-    fn show_history(&self, window: &MainWindow, state: &AppState) {
+    fn show_history(&self, state: &AppState, shown: &mut PanelShown) {
         let (undo, redo) = state.history_counts();
         let title = if undo + redo == 0 {
             String::new()
         } else {
             words::history_head(undo + redo)
         };
-        window.set_history_title(title.into());
-        window.set_history_open(state.history_open());
+        shown.history_title = title.into();
+        shown.history_open = state.history_open();
         let (rows, heads) = if state.history_open() {
             let view = state.history_view(&self.tz.borrow(), SystemTime::now());
             ui_bridge::history_rows(&view)
         } else {
             (Vec::new(), 0)
         };
-        ui_bridge::set_rows(&self.history_rows, rows);
-        window.set_history_heads(heads);
+        ui_bridge::set_rows(&self.panel.history, rows);
+        shown.history_heads = heads;
+    }
+
+    /// Runs the timer of the speed graphs while jobs are under way (`active`), and stops it
+    /// when none is: a sample every [`jobs::SPEED_SAMPLE_EVERY`].
+    fn time_speeds(&self, active: bool) {
+        if !active {
+            self.panel.speed_timer.stop();
+        } else if !self.panel.speed_timer.running() {
+            self.panel
+                .speed_timer
+                .start(TimerMode::Repeated, jobs::SPEED_SAMPLE_EVERY, || {
+                    with(Controller::sample_speeds);
+                });
+        }
+    }
+
+    /// The timer of the speed graphs: the running jobs' speeds are sampled at the time it is
+    /// now, and their rows drawn again when a graph has a new sample. A tick that comes while
+    /// the state is borrowed (a turn of the event loop inside one of the system's own loops)
+    /// is left out; the next one covers its time ([`jobs::SpeedSamples::sample`]).
+    fn sample_speeds(&self) {
+        let sampled = self.state.try_borrow_mut().is_ok_and(|mut state| {
+            state
+                .as_mut()
+                .is_some_and(|state| state.sample_speeds(Instant::now()))
+        });
+        if sampled {
+            self.redraw_jobs(false);
+        }
+    }
+
+    /// The job panel's own window, while it shows.
+    fn shown_job_window(&self) -> Option<JobWindow> {
+        self.panel
+            .window
+            .borrow()
+            .as_ref()
+            .filter(|own| own.window().is_visible())
+            .map(ComponentHandle::clone_strong)
+    }
+
+    /// Whether the job panel's own window is the one in front, with the keyboard. Never so for
+    /// a window of another backend than winit's (the tests').
+    fn job_window_active(&self) -> bool {
+        self.shown_job_window().is_some_and(|own| {
+            own.window()
+                .with_winit_window(slint::winit_030::winit::window::Window::has_focus)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Puts the job panel where the layout says (LAY-09): its own window shows while the panel
+    /// is not under the panes, and hides when it is, while the main window is hidden behind
+    /// the tray icon, and as the app ends. Called after a redraw with no borrow of the state
+    /// held: the window is made, shown and hidden here, and may call back as it is.
+    fn place_job_panel(&self) {
+        let wanted = self.state.borrow().as_ref().is_some_and(|state| {
+            state.layout().jobs_window && !state.background() && !state.quitting()
+        });
+        let own = self
+            .panel
+            .window
+            .borrow()
+            .as_ref()
+            .map(ComponentHandle::clone_strong);
+        let shown = own.as_ref().is_some_and(|own| own.window().is_visible());
+        if wanted == shown {
+            return;
+        }
+        if !wanted {
+            if let Some(own) = own {
+                let _ = own.hide();
+            }
+            return;
+        }
+        let opened = match own {
+            Some(own) => own.show(),
+            None => self.open_job_window(),
+        };
+        if opened.is_err() {
+            // The panel goes back under the panes, and a notice says why.
+            self.update(|state| {
+                state.set_jobs_window(false);
+                vec![Effect::Notice(words::job_window_failed().to_owned())]
+            });
+        }
+    }
+
+    /// Makes the job panel's own window and shows it: with the models the panel under the
+    /// panes has, what else it showed last, the theme of the main window, and the same
+    /// handlers. Its close button puts the panel back under the panes
+    /// ([`Controller::dock_jobs`]).
+    fn open_job_window(&self) -> Result<(), slint::PlatformError> {
+        let own = JobWindow::new()?;
+        own.set_window_title(words::job_window_title().into());
+        own.set_theme_choice(theme_number(self.theme.get()));
+        own.take_models(&self.panel);
+        own.show_panel(&self.panel.shown.borrow());
+        // Under a dialog of the main window the panel waits, wherever it shows.
+        let blocked = self
+            .shown_modal
+            .borrow()
+            .as_ref()
+            .is_some_and(|(kind, _)| *kind != DialogKind::None);
+        own.set_blocked(blocked);
+        own.connect_panel();
+        own.on_blocked_clicked(|| {
+            with(Controller::show_main_window);
+        });
+        own.window().on_close_requested(|| {
+            with(Controller::dock_jobs);
+            CloseRequestResponse::HideWindow
+        });
+        *self.panel.window.borrow_mut() = Some(own.clone_strong());
+        own.show()
+    }
+
+    /// The close button of the job panel's own window: the panel shows under the panes again,
+    /// and the settings keep that.
+    fn dock_jobs(&self) {
+        self.update(|state| {
+            state.set_jobs_window(false);
+            Vec::new()
+        });
+    }
+
+    /// A window opened over the main window while the job panel's own window had the keys (its
+    /// 자세히 or 로그 저장…, or a job's question): the main window, where it shows, comes to the
+    /// front. Called after a redraw, with no borrow of the state held.
+    fn bring_dialog_forward(&self) {
+        if self.panel.dialog_opened.take() && self.job_window_active() {
+            self.show_main_window();
+        }
+    }
+
+    /// The main window comes to the front, with the keyboard: for the dialog that shows over
+    /// it, from the job panel's own window. Nothing for a window of another backend than
+    /// winit's (the tests').
+    fn show_main_window(&self) {
+        if let Some(window) = self.window.upgrade() {
+            window
+                .window()
+                .with_winit_window(slint::winit_030::winit::window::Window::focus_window);
+        }
     }
 
     /// The window's drop target goes on the handle the window has now, unless it is there
@@ -3629,16 +3901,17 @@ impl Controller {
             .map_or(Owner::NONE, |window| ui_bridge::owner_of(&window))
     }
 
-    /// Whether the window is the one in front, with the keyboard: not while it is hidden or
-    /// minimized, or another app's window is in front. A window of another backend than
-    /// winit's (the tests') counts as in front.
+    /// Whether the app is the one in front, with the keyboard in the main window or in the
+    /// job panel's own: not while it is hidden or minimized, or another app's window is in
+    /// front. A window of another backend than winit's (the tests') counts as in front.
     fn window_active(&self) -> bool {
-        self.window.upgrade().is_none_or(|window| {
-            window
-                .window()
-                .with_winit_window(slint::winit_030::winit::window::Window::has_focus)
-                .unwrap_or(true)
-        })
+        self.job_window_active()
+            || self.window.upgrade().is_none_or(|window| {
+                window
+                    .window()
+                    .with_winit_window(slint::winit_030::winit::window::Window::has_focus)
+                    .unwrap_or(true)
+            })
     }
 
     /// Carries out what the window asks of the desktop outside it: a notification of the
@@ -3741,6 +4014,10 @@ impl Controller {
     /// worker found at its target change without a change of the dialog.
     fn show_dialog(&self, window: &MainWindow, state: &AppState) {
         let kind = ui_bridge::dialog_kind(state.modal(), state.quitting());
+        // The job panel in its own window waits for the dialog, as the one under the panes.
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.set_blocked(kind != DialogKind::None);
+        }
         // Its view changes without a change of the dialog, and is set before it shows.
         self.show_properties(window, state);
         let picker = state.shown_picker();
@@ -3805,6 +4082,9 @@ impl Controller {
         if !behind {
             window.set_pick_behind(false);
         }
+        if !matches!(kind, DialogKind::None | DialogKind::Closing) {
+            self.panel.dialog_opened.set(true);
+        }
         *self.shown_modal.borrow_mut() = Some(now);
     }
 }
@@ -3861,6 +4141,7 @@ fn show_layout(window: &MainWindow, layout: Layout, sync: bool) {
     window.set_split_share(layout.share());
     window.set_show_tree(layout.tree);
     window.set_show_preview(layout.preview);
+    window.set_jobs_window(layout.jobs_window);
     window.set_sync_navigation(sync);
 }
 
@@ -4506,6 +4787,271 @@ mod tests {
             drop(self.controller);
             assert!(self.jobs.close_down(Duration::from_secs(10)));
         }
+    }
+
+    /// The job `id`, a copy of `x.txt` into the right pane's folder, as the state follows it
+    /// once the engine has announced it: the file it copies, and what it was asked.
+    fn follow_copy(d: &Dragging, id: u64) -> (VPath, rf_jobs::JobSpec) {
+        use rf_jobs::{JobId, JobSpec, JobState, TransferOptions, TransferSpec};
+
+        let (from, to) = d
+            .controller
+            .state
+            .borrow()
+            .as_ref()
+            .map(|state| {
+                let from = state.panes()[LEFT].active_tab().location().clone();
+                let to = state.panes()[RIGHT].active_tab().location().clone();
+                (from, to)
+            })
+            .expect("the state");
+        let source = from.join("x.txt").expect("a name");
+        let spec = JobSpec::Transfer(
+            TransferSpec::into_dir(
+                TransferMode::Copy,
+                std::slice::from_ref(&source),
+                &to,
+                TransferOptions::default(),
+            )
+            .expect("a transfer"),
+        );
+        d.controller.update(|state| {
+            state.track(jobs::Started {
+                id: JobId(id),
+                work: words::JobWork::of(&spec),
+                spec: Some(Arc::new(spec.clone())),
+                origin: None,
+                via_history: false,
+            });
+            Vec::new()
+        });
+        d.controller.job_event(JobEvent::State {
+            id: JobId(id),
+            state: JobState::Queued,
+        });
+        (source, spec)
+    }
+
+    /// Two copies of `x.txt`: job 1 runs and names its file, job 2 waits behind it. What job 2
+    /// was asked.
+    fn one_copy_runs_and_one_waits(d: &Dragging) -> rf_jobs::JobSpec {
+        use rf_jobs::{JobId, JobState, Progress, Totals};
+
+        let c = &d.controller;
+        let (source, _) = follow_copy(d, 1);
+        let (_, second) = follow_copy(d, 2);
+        c.job_event(JobEvent::Queue {
+            order: vec![JobId(1), JobId(2)],
+        });
+        c.job_event(JobEvent::State {
+            id: JobId(1),
+            state: JobState::Running,
+        });
+        c.job_event(JobEvent::Queue {
+            order: vec![JobId(2)],
+        });
+        c.job_event(JobEvent::Progress {
+            id: JobId(1),
+            progress: Progress {
+                done: Totals::default(),
+                total: Totals {
+                    files: 1,
+                    dirs: 0,
+                    bytes: 1,
+                },
+                current: Some(source),
+                bytes_per_sec: 0,
+                eta: None,
+            },
+        });
+        second
+    }
+
+    /// How many texts of `window` read `label`; with `buttons`, how many buttons are named so.
+    fn count_in(
+        window: &impl i_slint_backend_testing::ElementRoot,
+        label: &str,
+        buttons: bool,
+    ) -> usize {
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+
+        let role = if buttons {
+            AccessibleRole::Button
+        } else {
+            AccessibleRole::Text
+        };
+        ElementHandle::find_by_accessible_label(window, label)
+            .filter(|found| found.accessible_role() == Some(role))
+            .count()
+    }
+
+    /// The job panel's own window.
+    fn job_window(c: &Controller) -> JobWindow {
+        c.panel
+            .window
+            .borrow()
+            .as_ref()
+            .map(ComponentHandle::clone_strong)
+            .expect("the window of the job panel")
+    }
+
+    /// The texts of the job panel's own window that read `label`.
+    fn in_job_window(c: &Controller, label: &str) -> usize {
+        count_in(&job_window(c), label, false)
+    }
+
+    /// Whether the layout has the job panel in its own window, and whether that window shows.
+    fn floating(c: &Controller) -> (bool, bool) {
+        let wanted = c
+            .state
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.layout().jobs_window);
+        let shows = c
+            .panel
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|own| own.window().is_visible());
+        (wanted, shows)
+    }
+
+    #[test]
+    fn the_job_panel_goes_to_its_own_window_by_the_menu_and_back_by_its_close_button() {
+        let d = Dragging::new();
+        let c = &d.controller;
+        let in_main = |label: &str| count_in(&d.window, label, false);
+        // The file's name shows in the left pane's list, whatever the jobs do.
+        let listed = in_main("x.txt");
+        assert!(listed >= 1);
+        one_copy_runs_and_one_waits(&d);
+        // Under the panes at first: the running job's row with its file, and the waiting one's.
+        assert_eq!(floating(c), (false, false));
+        assert!(c.panel.window.borrow().is_none());
+        assert_eq!(in_main("x.txt"), listed + 1, "the job's row names its file");
+        assert_eq!(in_main("대기 중"), 1);
+        // The timer of the speed graphs runs while jobs are under way.
+        assert!(c.panel.speed_timer.running());
+
+        // 보기 ▸ 작업 패널 ▸ 별도 창: the panel leaves the main window for its own, which shows
+        // the same rows, in the theme of the main window; the settings keep the choice.
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (true, true));
+        assert!(d.window.get_jobs_window());
+        assert_eq!(
+            in_main("x.txt"),
+            listed,
+            "the list alone names it there now"
+        );
+        assert_eq!(in_main("대기 중"), 0);
+        assert_eq!(in_job_window(c, "x.txt"), 1);
+        assert_eq!(in_job_window(c, "대기 중"), 1);
+        let settings = c.settings_text().expect("the settings");
+        assert!(settings.contains("jobs_window = true"), "{settings}");
+        let own = job_window(c);
+        c.choose_theme(ThemeChoice::Dark);
+        slint::platform::update_timers_and_animations();
+        assert!(own.global::<crate::Theme<'_>>().get_dark());
+
+        // Its close button: the panel is under the panes again, and the settings say so.
+        own.window()
+            .dispatch_event(slint::platform::WindowEvent::CloseRequested);
+        assert_eq!(floating(c), (false, false));
+        assert!(!d.window.get_jobs_window());
+        assert_eq!(in_main("복사 중"), 1);
+        assert_eq!(in_main("대기 중"), 1);
+        let settings = c.settings_text().expect("the settings");
+        assert!(!settings.contains("jobs_window"), "{settings}");
+
+        // The menu again shows the same window again, not a second one.
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (true, true));
+        assert_eq!(in_main("복사 중"), 0);
+        assert_eq!(in_job_window(c, "복사 중"), 1);
+        assert!(own.window().is_visible(), "the window made first");
+        // And the menu once more puts the panel back.
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (false, false));
+        assert_eq!(in_main("복사 중"), 1);
+        drop(own);
+        d.end();
+    }
+
+    #[test]
+    fn the_job_panel_s_own_window_follows_the_jobs_and_waits_under_a_dialog() {
+        use rf_jobs::{JobId, JobState};
+
+        let d = Dragging::new();
+        let c = &d.controller;
+        let second = one_copy_runs_and_one_waits(&d);
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (true, true));
+        let own = job_window(c);
+        // A dialog over the main window (the question before the app ends, with jobs under
+        // way) holds the panel there too, until it is answered.
+        assert!(!own.get_blocked());
+        c.update(AppState::request_close);
+        assert_eq!(d.window.get_dialog(), DialogKind::Confirm);
+        assert!(own.get_blocked());
+        c.update(AppState::dialog_cancelled);
+        assert_eq!(d.window.get_dialog(), DialogKind::None);
+        assert!(!own.get_blocked());
+
+        // What the jobs tell goes on showing there: the one that waited runs now.
+        c.job_event(JobEvent::State {
+            id: JobId(2),
+            state: JobState::Running,
+        });
+        c.job_event(JobEvent::Queue { order: Vec::new() });
+        assert_eq!(in_job_window(c, "대기 중"), 0);
+        assert_eq!(in_job_window(c, "복사 중"), 2);
+        // It ends, and is listed there; the button of the list reaches the state as the one
+        // under the panes does, and what it changed shows in both places.
+        c.job_event(JobEvent::Finished {
+            id: JobId(2),
+            report: Arc::new(rf_jobs::JobReport::new(JobId(2), &second)),
+        });
+        assert_eq!(in_job_window(c, "복사 중"), 1);
+        assert_eq!(in_job_window(c, "최근 완료 1개"), 1);
+        let open = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&own, "펼치기")
+            .find(|found| {
+                found.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+            })
+            .expect("the button of 최근 완료");
+        open.invoke_accessible_default_action();
+        let opened = c.state.borrow().as_ref().map(AppState::recent_open);
+        assert_eq!(opened, Some(true));
+        assert_eq!(count_in(&own, "접기", true), 1);
+        // Back under the panes, the list is open there too.
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (false, false));
+        assert_eq!(count_in(&d.window, "접기", true), 1);
+        drop(own);
+        d.end();
+    }
+
+    #[test]
+    fn the_job_panel_opens_in_its_own_window_when_the_settings_say_so() {
+        // As at a start: the layout of the last run has the panel in its own window, and the
+        // first redraw opens it, with nothing to show yet.
+        let d = Dragging::new();
+        let c = &d.controller;
+        assert!(c.panel.window.borrow().is_none());
+        c.update(|state| {
+            state.set_jobs_window(true);
+            Vec::new()
+        });
+        assert!(d.window.get_jobs_window());
+        assert_eq!(floating(c), (true, true));
+        assert_eq!(in_job_window(c, "진행 중인 작업이 없습니다"), 1);
+        assert!(!c.panel.speed_timer.running(), "no job, no samples");
+        // The app ends: its window goes with the main one.
+        c.update(|state| {
+            state.begin_quit();
+            Vec::new()
+        });
+        assert_eq!(floating(c), (true, false));
+        d.end();
     }
 
     #[test]

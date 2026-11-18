@@ -17,7 +17,8 @@
 //! item the preview panel and quick look show (module `preview`), what it put on the
 //! system's clipboard and pastes from there (module `clipboard`), the properties window
 //! with the checksums of its files (module `properties`), the job panel from the keyboard
-//! (module `panel`), the jobs that ended and their logs and notifications (module `report`),
+//! and the order of its queue (module `panel`), the jobs that ended and their logs and
+//! notifications (module `report`),
 //! and the jobs going on behind the tray icon while the window is hidden (module `tray`). Its
 //! methods
 //! change it and return the [`Effect`]s that need a worker
@@ -470,6 +471,9 @@ pub struct AppState {
     /// The line and the button of the job panel's keyboard cursor (module `panel`), as last
     /// moved; [`AppState::panel_cursor`] keeps it within the lines there are.
     panel_at: (usize, usize),
+    /// The job the keys moved in the queue last (module `panel`): the cursor stays on its line
+    /// as the queue's new order comes, until the keys move the cursor.
+    panel_follows: Option<JobId>,
     /// The jobs that ended, for the job panel's 최근 완료 (module `report`), and whether the
     /// list is open below its head.
     recent_jobs: RecentJobs,
@@ -593,6 +597,7 @@ impl AppState {
             properties: properties::PropertiesWork::default(),
             shell: shell::ShellState::default(),
             panel_at: (0, 0),
+            panel_follows: None,
             recent_jobs: RecentJobs::default(),
             recent_open: false,
             log_dir: None,

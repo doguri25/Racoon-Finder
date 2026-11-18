@@ -1,6 +1,7 @@
 // Main window: toolbar on top, the sidebar, the panes and the preview panel's place below (one
 // pane or two, side by side or one above the other, with a divider to drag between them), the
-// job panel under them while a job runs, notices in the lower right corner, and a dialog over
+// job panel under them while a job runs (unless it shows in a window of its own, `JobWindow`,
+// LAY-09), notices in the lower right corner, and a dialog over
 // all of it when one is open. Every key goes to Rust first (`key`, or `tree-key` while the
 // sidebar's tree has the keys), except while a text field or a dialog has focus; Rust's
 // shortcut table (`keys.rs`) decides what it does, and gives the keys the toolbar's tooltips
@@ -26,6 +27,7 @@ import {
 } from "pane.slint";
 import { Sidebar, TreeRow, SectionHead, RowKind } from "sidebar.slint";
 import { JobPanel, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
+import { JobWindow } from "job-window.slint";
 import { JobTray } from "tray.slint";
 import {
     NameDialog, NameView, ConfirmDialog, ConfirmView, MessageDialog, MessageView, RecoveryDialog,
@@ -43,7 +45,7 @@ import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, HistoryRowView, StatusFit, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, ErrorView, PickView, PickTarget,
-    NoticeWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
+    NoticeWindow, JobWindow, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt
 }
 
@@ -90,8 +92,14 @@ export component MainWindow inherits Window {
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <bool> can-up;
-    // The rows of the job panel; the panel shows while there is one.
+    // The rows of the job panel, of the jobs a worker has taken up; the panel shows while
+    // there is one.
     in property <[JobRowView]> job-rows;
+    // The rows of the jobs that wait, in the order of the queue.
+    in property <[JobRowView]> job-queue;
+    // The job panel shows in a window of its own (`JobWindow`, LAY-09), not under the panes:
+    // 보기 ▸ 작업 패널 ▸ 별도 창, which Rust sets back to the state's after the toggle.
+    in-out property <bool> jobs-window;
     // The line and the button of the job panel's keyboard cursor, which shows while the panel
     // has the keys; -1 for none.
     in property <int> panel-line: -1;
@@ -105,7 +113,7 @@ export component MainWindow inherits Window {
     in property <bool> history-open;
     in property <[HistoryRowView]> history-rows;
     in property <int> history-heads;
-    private property <bool> panel-shows: root.job-rows.length > 0 || root.recent-rows.length > 0 || root.history-title != "";
+    private property <bool> panel-shows: !root.jobs-window && (root.job-rows.length > 0 || root.job-queue.length > 0 || root.recent-rows.length > 0 || root.history-title != "");
     // How many lines of 최근 완료 show at once: a window below 700px high (it can be 560px)
     // keeps room for the panes with two. Set by the handlers of the height, as `compact` is:
     // the window's height depends on the panel's.
@@ -389,9 +397,14 @@ export component MainWindow inherits Window {
     callback pick-tree-toggled(index: int);
     callback pick-new-folder();
     // The buttons of row `index` of the job panel.
+    // The buttons of a job of the job panel: `index` counts the rows of `job-rows`, then those
+    // of `job-queue`.
     callback job-pause(index: int);
     callback job-resume(index: int);
     callback job-cancel(index: int);
+    // 위로 and 아래로 of a job that waits in the queue.
+    callback job-move-up(index: int);
+    callback job-move-down(index: int);
     // The buttons of 최근 완료: 펼치기 or 접기, 지우기, and 자세히 and 로그 저장… of line `index`.
     callback recent-toggled();
     callback recent-cleared();
@@ -1117,6 +1130,7 @@ export component MainWindow inherits Window {
                             long-press <=> root.long-press;
                             long-press-ms: root.long-press-ms;
                             checkbox-select <=> root.checkbox-select;
+                            jobs-window <=> root.jobs-window;
                             long-press-ms-chosen(ms) => {
                                 root.long-press-ms-chosen(ms);
                             }
@@ -1619,7 +1633,8 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // The job panel takes room only while a job runs. It takes the keys of its buttons
+            // The job panel takes room only while a job runs, and none while it shows in a
+            // window of its own. It takes the keys of its buttons
             // while it has them (F6 after the tree), and passes the others on to the window's.
             panel-keys := FocusScope {
                 height: root.panel-shows ? jobs.preferred-height : 0px;
@@ -1650,6 +1665,11 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     rows: root.job-rows;
+                    queue: root.job-queue;
+                    // One job that waits fewer than lines of 최근 완료 (one in a window below
+                    // 700px high, else two): the list scrolls for the others, and the panes
+                    // keep their room. The panel's own window shows more of them.
+                    queue-lines: max(1, root.recent-lines - 1);
                     recent: root.recent-rows;
                     recent-open: root.recent-open;
                     recent-lines: root.recent-lines;
@@ -1670,6 +1690,12 @@ export component MainWindow inherits Window {
                     }
                     cancel(index) => {
                         root.job-cancel(index);
+                    }
+                    move-up(index) => {
+                        root.job-move-up(index);
+                    }
+                    move-down(index) => {
+                        root.job-move-down(index);
                     }
                     recent-toggled => {
                         root.recent-toggled();

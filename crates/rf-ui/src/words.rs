@@ -1058,6 +1058,40 @@ pub fn time_left(eta: Duration) -> String {
     format!("남은 시간 약 {about}")
 }
 
+/// How many cells of a file's name the row of a running job shows at most: a longer name is
+/// shortened in the middle. It fits the job panel's window of its own at its narrowest
+/// (520px, a line of 480px), at the 8px a cell of the small font takes at most.
+pub const JOB_FILE_CELLS: usize = 60;
+
+/// The file a job works on now, as its row names it: the name of `path` (not its folders,
+/// which the row's first line tells of), a long one shortened in the middle so that its
+/// beginning and its extension both stay in view.
+pub fn job_current(path: &VPath) -> String {
+    clip_middle(&name_of(path), JOB_FILE_CELLS)
+}
+
+/// What the row of a job that waits in the queue says after `대기 중`: what it will do and on
+/// what (`detail`, [`job_detail`]), as `복사 · assets → 백업`; the work alone for a job whose
+/// items are not known.
+pub fn queued_detail(work: JobWork, detail: &str) -> String {
+    if detail.is_empty() {
+        work.noun().to_owned()
+    } else {
+        format!("{} · {detail}", work.noun())
+    }
+}
+
+/// The title of the window the job panel shows in when it is not under the panes (LAY-09).
+pub fn job_window_title() -> String {
+    format!("작업 - {}", rf_core::identity::DISPLAY_NAME)
+}
+
+/// The notice when the window of the job panel could not be opened: the panel shows under the
+/// panes again.
+pub fn job_window_failed() -> &'static str {
+    "작업 패널 창을 열지 못해 창 아래에 다시 붙였습니다"
+}
+
 /// The progress line of a job that is still counting what it will do.
 pub fn job_planning() -> &'static str {
     "준비 중"
@@ -3574,6 +3608,58 @@ mod tests {
     ];
 
     #[test]
+    fn a_job_s_row_names_its_file_and_a_waiting_one_what_it_will_do() {
+        let file =
+            |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+        // The name alone, whatever its folders.
+        assert_eq!(job_current(&file("보고서.pdf")), "보고서.pdf");
+        // A name as wide as the line stays whole.
+        let fits = format!("{}.txt", "a".repeat(JOB_FILE_CELLS - 4));
+        assert_eq!(job_current(&file(&fits)), fits);
+        // A longer one loses its middle: the beginning and the extension stay.
+        let long = format!("{}.tar.gz", "backup-2026-11-18-".repeat(6));
+        let shown = job_current(&file(&long));
+        assert!(text_cells(&shown) <= JOB_FILE_CELLS, "{shown}");
+        assert!(shown.starts_with("backup-2026-11-18-"), "{shown}");
+        assert!(shown.ends_with(".tar.gz"), "{shown}");
+        assert_eq!(shown.matches('…').count(), 1, "{shown}");
+        // Hangul counts two cells a syllable.
+        let korean = format!("{}.hwp", "회의록".repeat(15));
+        let shown = job_current(&file(&korean));
+        assert!(text_cells(&shown) <= JOB_FILE_CELLS, "{shown}");
+        assert!(
+            shown.starts_with("회의록") && shown.ends_with("회의록.hwp"),
+            "{shown}"
+        );
+
+        // A job that waits says what it will do, and on what.
+        assert_eq!(
+            queued_detail(JobWork::Copy, "assets → 백업"),
+            "복사 · assets → 백업"
+        );
+        assert_eq!(
+            queued_detail(JobWork::Move, "항목 3개 → 백업"),
+            "이동 · 항목 3개 → 백업"
+        );
+        assert_eq!(
+            queued_detail(JobWork::Trash, "a.txt"),
+            "휴지통으로 보내기 · a.txt"
+        );
+        // One whose items are not known yet says the work alone.
+        assert_eq!(queued_detail(JobWork::Other, ""), "작업");
+        for work in WORKS {
+            assert!(is_korean(&queued_detail(work, "")), "{work:?}");
+        }
+
+        // The window of the job panel is named after the app, wherever the name comes from.
+        assert_eq!(
+            job_window_title(),
+            format!("작업 - {}", rf_core::identity::DISPLAY_NAME)
+        );
+        assert!(is_korean(job_window_failed()));
+    }
+
+    #[test]
     fn job_titles_follow_state() {
         let running = [
             (JobWork::Copy, "복사 중"),
@@ -3694,6 +3780,9 @@ mod tests {
             progress: progress.to_owned(),
             paused: false,
             waiting: false,
+            current: String::new(),
+            speeds: None,
+            queued: None,
         };
         assert_eq!(tray_status("앱", &[]), "앱\n대기 중");
         assert_eq!(

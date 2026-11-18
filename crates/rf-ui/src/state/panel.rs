@@ -4,7 +4,10 @@
 //! F6 goes round the parts of the window, as File Explorer's does: from the panes to the
 //! sidebar's tree ([`AppState::tree_key`]), from there to the job panel while it shows, and
 //! from the panel back to the panes. The panel's buttons are in lines: each job's row has
-//! 일시정지 (or 계속) and 취소; the head of 최근 완료 has 펼치기 (or 접기) and 지우기; and while
+//! 일시정지 (or 계속) and 취소, and the row of a job that waits in the queue has 위로 and 아래로
+//! after them, which move it a place up or down the queue (XFER-01), as the panel's own keys
+//! do for the job the keys are on ([`PanelKey::MoveUp`], [`PanelKey::MoveDown`]): the keys then
+//! stay with that job as it moves; the head of 최근 완료 has 펼치기 (or 접기) and 지우기; and while
 //! that list is open, each finished job's line has 자세히, when it has items to tell of, and 로그
 //! 저장…, which is also the way of the keys to the 자세히 of a toast: the toast's job is in the
 //! list; and the head of 되돌리기 기록 (module `undo_list`) has 펼치기 (or 접기), and, while it
@@ -26,6 +29,11 @@ pub enum PanelButton {
     PauseOrResume(usize),
     /// 취소 of the job of row `row`.
     Cancel(usize),
+    /// 위로 of the job of row `row`, which waits in the queue: a place earlier in it. It does
+    /// nothing for the first job of the queue.
+    MoveUp(usize),
+    /// 아래로 of the job of row `row`: a place later. It does nothing for the last job.
+    MoveDown(usize),
     /// 펼치기 or 접기 of 최근 완료.
     ToggleRecent,
     /// 지우기 of 최근 완료.
@@ -43,13 +51,24 @@ pub enum PanelButton {
 
 impl AppState {
     /// The buttons of the job panel, a line at a time, in the order they show: one line for
-    /// each job's row, then the head of 최근 완료 and, while it is open, each of its lines,
+    /// each job's row (the jobs a worker has taken up, then those that wait, whose lines have
+    /// 위로 and 아래로 too), then the head of 최근 완료 and, while it is open, each of its lines,
     /// then the head of 되돌리기 기록 and, while it is open, a line for each of its rows (the
-    /// list of what can be undone, then what can be done again). Empty while the panel does
-    /// not show.
+    /// list of what can be undone, then what can be done again). Empty while the panel has
+    /// nothing to show.
     pub fn panel_lines(&self) -> Vec<Vec<PanelButton>> {
-        let mut lines: Vec<Vec<PanelButton>> = (0..self.jobs.rows().len())
-            .map(|row| vec![PanelButton::PauseOrResume(row), PanelButton::Cancel(row)])
+        let mut lines: Vec<Vec<PanelButton>> = self
+            .jobs
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(row, job)| {
+                let mut line = vec![PanelButton::PauseOrResume(row), PanelButton::Cancel(row)];
+                if job.queued.is_some() {
+                    line.extend([PanelButton::MoveUp(row), PanelButton::MoveDown(row)]);
+                }
+                line
+            })
             .collect();
         if !self.recent_jobs.is_empty() {
             lines.push(vec![PanelButton::ToggleRecent, PanelButton::ClearRecent]);
@@ -100,6 +119,7 @@ impl AppState {
             return vec![Effect::FocusPanes];
         }
         self.panel_at = (0, 0);
+        self.panel_follows = None;
         vec![Effect::FocusPanel]
     }
 
@@ -111,8 +131,15 @@ impl AppState {
             return vec![Effect::FocusPanes];
         };
         let to = match key {
-            PanelKey::Leave => return vec![Effect::FocusPanes],
+            PanelKey::Leave => {
+                self.panel_follows = None;
+                return vec![Effect::FocusPanes];
+            }
             PanelKey::Press => return self.press_panel(lines[line][button]),
+            // The job of the line the keys are on, when it waits in the queue: the lines of the
+            // jobs are the first ones, a line for each row.
+            PanelKey::MoveUp => return self.move_by_keys(line, true),
+            PanelKey::MoveDown => return self.move_by_keys(line, false),
             PanelKey::Up => (line.saturating_sub(1), button),
             PanelKey::Down => ((line + 1).min(lines.len() - 1), button),
             PanelKey::Left => (line, button.saturating_sub(1)),
@@ -120,7 +147,34 @@ impl AppState {
         };
         // Up and down keep the column where the line has one, else take its last button.
         self.panel_at = (to.0, to.1.min(lines[to.0].len() - 1));
+        // The keys have left the job they moved.
+        self.panel_follows = None;
         Vec::new()
+    }
+
+    /// The keys move the job of row `row` a place up the queue (`up`) or down
+    /// ([`AppState::job_move`]), and stay with it: the cursor goes to the job's line as the
+    /// queue's new order comes ([`AppState::follow_moved_job`]), so that the key pressed again
+    /// moves the same job on.
+    fn move_by_keys(&mut self, row: usize, up: bool) -> Vec<Effect> {
+        let effects = self.job_move(row, up);
+        if !effects.is_empty() {
+            self.panel_follows = self.jobs.row_id(row);
+        }
+        effects
+    }
+
+    /// The engine told the queue's order: the keyboard cursor goes to the line of the job the
+    /// keys moved last, while it still waits there (a job a worker took up has left the queue,
+    /// and the keys stay on the line they are on).
+    pub(super) fn follow_moved_job(&mut self) {
+        let Some(id) = self.panel_follows else {
+            return;
+        };
+        match self.jobs.queued_row(id) {
+            Some(row) => self.panel_at.0 = row,
+            None => self.panel_follows = None,
+        }
     }
 
     /// What `button` of the panel does when pressed: what a click on it does.
@@ -131,6 +185,8 @@ impl AppState {
                 self.job_control(row, i32::from(paused))
             }
             PanelButton::Cancel(row) => self.job_control(row, 2),
+            PanelButton::MoveUp(row) => self.move_by_keys(row, true),
+            PanelButton::MoveDown(row) => self.move_by_keys(row, false),
             PanelButton::ToggleRecent => {
                 self.recent_toggled();
                 Vec::new()

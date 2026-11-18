@@ -1,9 +1,10 @@
 //! The layout of the main window, and the commands between its two panes. A child of
 //! [`state`](super), so these methods see the fields of [`AppState`].
 //!
-//! The [`Layout`] (LAY-01~03, LAY-06): one pane or two, side by side or one above the other,
-//! how the divider shares the room between them, whether the sidebar with the folder tree
-//! shows (LAY-03 a and c), and the preview panel's place (LAY-06). The settings keep it.
+//! The [`Layout`] (LAY-01~03, LAY-06, LAY-09): one pane or two, side by side or one above the
+//! other, how the divider shares the room between them, whether the sidebar with the folder
+//! tree shows (LAY-03 a and c), the preview panel's place (LAY-06), and whether the job panel
+//! shows under the panes or in a window of its own (LAY-09). The settings keep it.
 //!
 //! The commands between the panes (LAY-05): swapping their tab sets, opening the active
 //! pane's folder in the other one, and navigation sync. The last two act on the other pane, so
@@ -66,18 +67,22 @@ pub struct Layout {
     pub tree: bool,
     /// The preview panel's place shows, at the right end (LAY-06).
     pub preview: bool,
+    /// The job panel shows in a window of its own rather than under the panes (LAY-09).
+    pub jobs_window: bool,
     /// The first pane's share of the room both have, in thousandths: from 100 to 900.
     thousandths: u16,
 }
 
 impl Default for Layout {
-    /// Two panes side by side, split evenly, the tree shown and the preview panel not.
+    /// Two panes side by side, split evenly, the tree shown, the preview panel not, and the
+    /// job panel under the panes.
     fn default() -> Layout {
         Layout {
             dual: true,
             stacked: false,
             tree: true,
             preview: false,
+            jobs_window: false,
             thousandths: 500,
         }
     }
@@ -131,6 +136,14 @@ impl AppState {
     /// The divider was dragged to `share` of the room, or double-clicked ([`EVEN_SHARE`]).
     pub fn set_split_share(&mut self, share: f64) {
         self.layout.set_share(share);
+    }
+
+    /// 보기 ▸ 작업 패널 ▸ 별도 창 (LAY-09): the job panel shows in a window of its own
+    /// (`in_window`), or under the panes again, which the close button of that window asks for
+    /// too. Either place shows the same jobs. The keys the panel under the panes had go back to
+    /// the panes as it leaves (the window does that, as for a panel whose last job ended).
+    pub fn set_jobs_window(&mut self, in_window: bool) {
+        self.layout.jobs_window = in_window;
     }
 
     /// F12: one pane or two. The pane with the keyboard is the one that stays; sync, which

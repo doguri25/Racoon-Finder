@@ -64,7 +64,9 @@ impl AppState {
         if !self.background || self.quitting {
             return None;
         }
-        let rows = self.jobs.rows();
+        // The jobs a worker has taken up; the first one's line counts those that wait.
+        let mut rows = self.jobs.rows();
+        rows.retain(|row| row.queued.is_none());
         let states = self.jobs.states();
         Some(TrayView {
             status: words::tray_status(app, &rows),

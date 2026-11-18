@@ -6,7 +6,9 @@
 //! Windows, Finder on macOS); an action only a dual-pane file manager has gets a key neither
 //! uses; no Ctrl+Alt key on Windows and Linux, where it is `AltGr` on European layouts and
 //! types characters. Linux, a system for development only, takes the Windows table, but for the
-//! keys of the item menu: it has no menu of the system's, which Windows' Shift+F10 shows.
+//! keys of the item menu: it has no menu of the system's, which Windows' Shift+F10 shows. The
+//! job panel has two keys of its own while it has the keys, in a table for each system too
+//! (`WINDOWS_PANEL`, `MACOS_PANEL`): no key of the window's tables is among them.
 //!
 //! Slint hands a key press to `FocusScope.key-pressed` as `event.text`: the typed text for a
 //! printable key (the shifted letter with Shift, `"N"`), or one character of the private-use
@@ -328,7 +330,9 @@ pub fn tree_key(text: &str, mods: Mods, os: Os) -> Option<TreeKey> {
 }
 
 /// What a key does while the job panel has the keys (KEY-02), which F6 gives it after the tree:
-/// the moves among its buttons, as among a dialog's.
+/// the moves among its buttons, as among a dialog's, and the keys that move a job that waits
+/// along the queue (XFER-01), which each system has in a table of its own
+/// ([`panel_bindings`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PanelKey {
     /// ↑: the line above (a job's row, and below them the lines of the finished jobs).
@@ -344,6 +348,30 @@ pub enum PanelKey {
     /// Esc, Tab, Shift+Tab, and F6 (the next part of the window after the panel): back to the
     /// active pane.
     Leave,
+    /// Ctrl+Shift+↑ (macOS ⇧⌘↑): the job the keys are on, when it waits in the queue, goes one
+    /// place up in it.
+    MoveUp,
+    /// Ctrl+Shift+↓ (macOS ⇧⌘↓): one place down.
+    MoveDown,
+}
+
+/// The keys only the job panel has on `os`, from its table: they act while the panel has the
+/// keys, and are no keys of the window's ([`bindings`]), whose commands work from the panel
+/// too. Windows and Linux share one table.
+pub fn panel_bindings(os: Os) -> impl Iterator<Item = (Chord, PanelKey)> {
+    let table: &[(Chord, PanelKey)] = match os {
+        Os::MacOs => MACOS_PANEL,
+        Os::Windows | Os::Other => WINDOWS_PANEL,
+    };
+    table.iter().copied()
+}
+
+/// How `os` writes the first key of the job panel's own that does `key` ("Ctrl+Shift+↑",
+/// "⇧⌘↑"); `None` for a key of the panel that is the same on every system (the arrows, Space).
+pub fn panel_shortcut(key: PanelKey, os: Os) -> Option<String> {
+    panel_bindings(os)
+        .find(|(_, bound)| *bound == key)
+        .map(|(chord, _)| label(chord, os))
 }
 
 /// What `text`, held with `mods`, does in the job panel on `os`; `None` for a key that is the
@@ -352,6 +380,9 @@ pub fn panel_key(text: &str, mods: Mods, os: Os) -> Option<PanelKey> {
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         let (c, held) = pressed(c, mods);
+        if let Some((_, key)) = panel_bindings(os).find(|(chord, _)| chord.matches(c, held)) {
+            return Some(key);
+        }
         let plain = [
             (Key::UpArrow, PanelKey::Up),
             (Key::DownArrow, PanelKey::Down),
@@ -860,6 +891,24 @@ static WINDOWS_MENUS: &[(Chord, Command)] = &[
 static LINUX_MENUS: &[(Chord, Command)] = &[
     (k(Key::F10, SHIFT), C::ContextMenu),
     (k(Key::Menu, NONE), C::ContextMenu),
+];
+
+/// The job panel's own keys on Windows and Linux: Ctrl+Shift with ↑ and ↓ move the job that
+/// waits one place along the queue, as Ctrl+Shift with `PageUp` and `PageDown` move a tab
+/// along its strip. File Explorer has no queue to order; the keys are neither in the list of
+/// its keys this file's tests keep nor in the table above, and they are not Ctrl+Alt.
+static WINDOWS_PANEL: &[(Chord, PanelKey)] = &[
+    (k(Key::UpArrow, CTRL_SHIFT), PanelKey::MoveUp),
+    (k(Key::DownArrow, CTRL_SHIFT), PanelKey::MoveDown),
+];
+
+/// The job panel's own keys on macOS: ⇧⌘ with ↑ and ↓, as ⇧⌘ with ← and → move a tab. Finder
+/// has ⌘↑ and ⌘↓ (the enclosing folder, open) and macOS ⌃ with the arrows (Mission Control);
+/// ⇧⌘↑ and ⇧⌘↓ are in neither list of the keys this file's tests keep for them, nor in the
+/// table below. Not tried on a Mac yet (`docs/ux/keyboard.md` lists it to check).
+static MACOS_PANEL: &[(Chord, PanelKey)] = &[
+    (k(Key::UpArrow, CMD_SHIFT), PanelKey::MoveUp),
+    (k(Key::DownArrow, CMD_SHIFT), PanelKey::MoveDown),
 ];
 
 /// macOS, after Finder. A command's first key is the one its menu item and tooltip show.
@@ -1868,6 +1917,72 @@ mod tests {
                 assert_eq!(p(os, &text, mods), None, "{os:?} {text:?} {mods:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_job_panel_moves_a_waiting_job_with_keys_nothing_else_has() {
+        let cases = [
+            (Os::Windows, CTRL_SHIFT, "Ctrl+Shift+↑", "Ctrl+Shift+↓"),
+            (Os::Other, CTRL_SHIFT, "Ctrl+Shift+↑", "Ctrl+Shift+↓"),
+            (Os::MacOs, CMD_SHIFT, "⇧⌘↑", "⇧⌘↓"),
+        ];
+        for (os, mods, up, down) in cases {
+            assert_eq!(
+                panel_key(&key(Key::UpArrow), mods, os),
+                Some(PanelKey::MoveUp),
+                "{os:?}"
+            );
+            assert_eq!(
+                panel_key(&key(Key::DownArrow), mods, os),
+                Some(PanelKey::MoveDown),
+                "{os:?}"
+            );
+            assert_eq!(panel_shortcut(PanelKey::MoveUp, os).as_deref(), Some(up));
+            assert_eq!(
+                panel_shortcut(PanelKey::MoveDown, os).as_deref(),
+                Some(down)
+            );
+            // The keys every system has alike are in no table.
+            assert_eq!(panel_shortcut(PanelKey::Press, os), None, "{os:?}");
+
+            let taken = match os {
+                Os::MacOs => [finder_keys(), macos_reserved_keys()].concat(),
+                Os::Windows | Os::Other => explorer_keys(),
+            };
+            let own: Vec<(Chord, PanelKey)> = panel_bindings(os).collect();
+            assert_eq!(own.len(), 2, "{os:?}");
+            for (i, (chord, bound)) in own.iter().enumerate() {
+                let (text, held) = chord_input(*chord);
+                let name = label(*chord, os);
+                // No command of the window has the key: those work from the panel too.
+                assert!(
+                    bindings(os).all(|(other, _)| other != *chord),
+                    "{os:?}: {name} is the window's too"
+                );
+                assert_eq!(command_for(&text, held, os), None, "{os:?} {name}");
+                // Nor the system or its file manager, and no Ctrl+Alt (AltGr) where that types.
+                assert!(!taken.contains(chord), "{os:?}: {name} is the system's");
+                assert!(
+                    os == Os::MacOs || !(chord.mods.ctrl && chord.mods.alt),
+                    "{os:?}: {name}"
+                );
+                // One key, one move.
+                for (other, other_bound) in &own[i + 1..] {
+                    assert_ne!(chord, other, "{os:?}: {bound:?} and {other_bound:?}");
+                }
+                // In the tree and in the list of subfolders the key does nothing.
+                assert_eq!(tree_key(&text, held, os), None, "{os:?} {name}");
+                assert_eq!(list_key(&text, held, os), None, "{os:?} {name}");
+            }
+        }
+        // The keys beside them stay what they were: Alt+↑ is the window's (the folder above),
+        // and macOS keeps ⌃⇧↑ for itself.
+        assert_eq!(panel_key(&key(Key::UpArrow), ALT, Os::Windows), None);
+        assert_eq!(panel_key(&key(Key::UpArrow), CTL_SHIFT, Os::MacOs), None);
+        assert_eq!(
+            panel_key(&key(Key::UpArrow), NONE, Os::MacOs),
+            Some(PanelKey::Up)
+        );
     }
 
     #[test]

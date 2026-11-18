@@ -21,8 +21,8 @@ use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, Ro
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow,
     FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray,
-    MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView,
-    PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
+    JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget,
+    PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
     StatusFit, Theme,
 };
 use rf_vfs::VisibilityFilter;
@@ -1538,8 +1538,7 @@ fn the_job_panel_shows_its_rows_and_buttons() {
         detail: "assets → /home/me/백업".into(),
         progress: 0.25,
         progress_text: "3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 · 대기 중인 작업 1개".into(),
-        paused: false,
-        waiting: false,
+        ..JobRowView::default()
     }]));
     window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     assert_eq!(labelled(&window, "복사 중", AccessibleRole::Text).len(), 1);
@@ -5342,6 +5341,7 @@ fn default_layout(window: &MainWindow) {
     window.set_dual_pane(true);
     window.set_stacked(false);
     window.set_sync_navigation(false);
+    window.set_jobs_window(false);
 }
 
 #[test]
@@ -5447,6 +5447,47 @@ fn the_view_menu_switches_the_layout() {
         press(&window, Key::Escape);
         press(&window, Key::Escape);
     }
+}
+
+#[test]
+fn the_view_menu_puts_the_job_panel_in_a_window_of_its_own() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open = || {
+        button.invoke_accessible_default_action();
+        choose_item(&window, "작업 패널");
+    };
+    // 작업 패널 ▸ 별도 창 (LAY-09) asks Rust, which keeps the choice.
+    open();
+    choose_item(&window, "별도 창");
+    assert_eq!(calls.take(), ["toggle-jobs-window"]);
+    // Its mark shows while the panel is in its own window, as Rust sets it (with the marks of
+    // 폴더 트리 and 파일 확장자 보기 in the menu behind it).
+    for (in_window, marks) in [(false, 2), (true, 3)] {
+        window.set_jobs_window(in_window);
+        open();
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&window, "✓").count(),
+            marks,
+            "별도 창 {in_window}"
+        );
+        press(&window, Key::Escape);
+        press(&window, Key::Escape);
+    }
+    // With the keys: the tenth item of the menu, after 미리 보기 패널; → opens it, ↓ and Enter
+    // take its one item.
+    window.set_jobs_window(false);
+    window.invoke_show_view_menu();
+    for _ in 0..10 {
+        press(&window, Key::DownArrow);
+    }
+    press(&window, Key::RightArrow);
+    press(&window, Key::DownArrow);
+    press(&window, Key::Return);
+    assert_eq!(calls.take(), ["toggle-jobs-window"]);
 }
 
 #[test]
@@ -5734,9 +5775,407 @@ fn job_row(title: &str) -> JobRowView {
         detail: "assets → 백업".into(),
         progress: 0.25,
         progress_text: "3 / 12 항목".into(),
-        paused: false,
-        waiting: false,
+        ..JobRowView::default()
     }
+}
+
+/// A row of a job that waits in the queue, which can go up, down, or both.
+fn waiting_row(detail: &str, can_up: bool, can_down: bool) -> JobRowView {
+    JobRowView {
+        title: "대기 중".into(),
+        detail: detail.into(),
+        can_up,
+        can_down,
+        ..JobRowView::default()
+    }
+}
+
+/// The elements of `window`, the main window or the job panel's own, whose accessible label is
+/// `label` and whose role is `role`.
+fn labelled_in(window: &impl ElementRoot, label: &str, role: AccessibleRole) -> Vec<ElementHandle> {
+    ElementHandle::find_by_accessible_label(window, label)
+        .filter(|element| element.accessible_role() == Some(role))
+        .collect()
+}
+
+#[test]
+fn a_running_job_shows_the_file_it_works_on_and_the_graph_of_its_speed() {
+    let window = window();
+    let graphs = || labelled(&window, "속도 그래프", AccessibleRole::Image);
+    let top_of = |label: &str| {
+        labelled(&window, label, AccessibleRole::Text)
+            .remove(0)
+            .absolute_position()
+            .y
+    };
+    let rows = Rc::new(slint::VecModel::from(vec![
+        JobRowView {
+            current: "보고서-2026-최종.pdf".into(),
+            ..job_row("복사 중")
+        },
+        job_row("이름 바꾸는 중"),
+    ]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    // The line of the file the job works on now, under its progress line and above the next
+    // job's row.
+    assert_eq!(
+        labelled(&window, "보고서-2026-최종.pdf", AccessibleRole::Text).len(),
+        1
+    );
+    let file = top_of("보고서-2026-최종.pdf");
+    let next = top_of("이름 바꾸는 중");
+    let progress = labelled(&window, "3 / 12 항목", AccessibleRole::Text);
+    assert_eq!(progress.len(), 2);
+    assert!(progress[0].absolute_position().y < file && file < next);
+    // A job that moves no bytes has no graph.
+    assert!(graphs().is_empty());
+    // One that does has its box from the first, and its line once there are two samples.
+    let first = |change: &dyn Fn(JobRowView) -> JobRowView| {
+        rows.set_row_data(0, change(rows.row_data(0).expect("a row")));
+    };
+    first(&|row| JobRowView {
+        graphed: true,
+        ..row
+    });
+    let graph = graphs();
+    assert_eq!(graph.len(), 1);
+    let size = graph[0].size();
+    assert!(
+        (size.width - 124.0).abs() < 0.5 && (size.height - 34.0).abs() < 0.5,
+        "{size:?}"
+    );
+    first(&|row| JobRowView {
+        graph: "M0.0 28.0 L60.0 14.0 L120.0 0.0".into(),
+        ..row
+    });
+    assert_eq!(graphs().len(), 1);
+    assert!(
+        (top_of("이름 바꾸는 중") - next).abs() < 0.5,
+        "the graph is as tall as the row"
+    );
+    // The file changes, and between two files there is none: the row keeps its height.
+    for name in ["다음-파일.txt", ""] {
+        first(&|row| JobRowView {
+            current: name.into(),
+            ..row
+        });
+        assert!((top_of("이름 바꾸는 중") - next).abs() < 0.5, "{name:?}");
+    }
+    assert!(labelled(&window, "다음-파일.txt", AccessibleRole::Text).is_empty());
+}
+
+#[test]
+fn the_jobs_that_wait_have_rows_with_buttons_that_move_them() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_job_move_up(move |i| record.note(format!("up {i}")));
+    let record = calls.clone();
+    window.on_job_move_down(move |i| record.note(format!("down {i}")));
+    let record = calls.clone();
+    window.on_job_pause(move |i| record.note(format!("pause {i}")));
+    let record = calls.clone();
+    window.on_job_resume(move |i| record.note(format!("resume {i}")));
+    let record = calls.clone();
+    window.on_job_cancel(move |i| record.note(format!("cancel {i}")));
+    assert!(labelled(&window, "작업 순서 위로", AccessibleRole::Button).is_empty());
+
+    // One job runs; four wait behind it, in the order of the queue.
+    let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    let queue = Rc::new(slint::VecModel::from(vec![
+        waiting_row("복사 · a → 백업", false, true),
+        waiting_row("이동 · b → 백업", true, true),
+        waiting_row("복사 · c → 백업", true, true),
+        JobRowView {
+            title: "일시정지됨".into(),
+            paused: true,
+            ..waiting_row("복사 · d → 백업", true, false)
+        },
+    ]));
+    window.set_job_queue(ModelRc::from(Rc::clone(&queue)));
+    let shows = |detail: &str| !labelled(&window, detail, AccessibleRole::Text).is_empty();
+    let top_of = |label: &str| {
+        labelled(&window, label, AccessibleRole::Text)
+            .remove(0)
+            .absolute_position()
+            .y
+    };
+    let ups = || labelled(&window, "작업 순서 위로", AccessibleRole::Button);
+    let downs = || labelled(&window, "작업 순서 아래로", AccessibleRole::Button);
+    let enabled = |buttons: &[ElementHandle]| -> Vec<Option<bool>> {
+        buttons
+            .iter()
+            .map(ElementHandle::accessible_enabled)
+            .collect()
+    };
+    // Two of them show at once under the panes, below the running job's row and in the
+    // queue's order; the list scrolls for the others.
+    assert!(shows("복사 · a → 백업") && shows("이동 · b → 백업"));
+    assert!(!shows("복사 · d → 백업"));
+    assert!(top_of("복사 중") < top_of("복사 · a → 백업"));
+    assert!(top_of("복사 · a → 백업") < top_of("이동 · b → 백업"));
+    // The first cannot go up; each button names its job by its row, the running one being
+    // row 0, and a button that is off does nothing.
+    assert_eq!(enabled(&ups()), [Some(false), Some(true)]);
+    assert_eq!(enabled(&downs()), [Some(true), Some(true)]);
+    ups()[1].invoke_accessible_default_action();
+    downs()[0].invoke_accessible_default_action();
+    ups()[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["up 2", "down 1"]);
+    // A job that waits is paused and cancelled as a running one.
+    let pauses = labelled(&window, "일시정지", AccessibleRole::Button);
+    assert_eq!(pauses.len(), 3, "the running job's, and two that wait");
+    pauses[2].invoke_accessible_default_action();
+    labelled(&window, "취소", AccessibleRole::Button)
+        .remove(2)
+        .invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["pause 2", "cancel 2"]);
+
+    // The keys on the last job that waits (the line after the running job's and the three
+    // before it): the list scrolls to it. It cannot go down; paused in the queue, it offers
+    // to go on.
+    window.set_panel_line(4);
+    window.set_panel_button(2);
+    window.invoke_focus_panel();
+    slint::platform::update_timers_and_animations();
+    assert!(shows("복사 · c → 백업") && shows("복사 · d → 백업"));
+    assert!(!shows("복사 · a → 백업"));
+    assert_eq!(enabled(&ups()), [Some(true), Some(true)]);
+    assert_eq!(enabled(&downs()), [Some(true), Some(false)]);
+    downs()[1].invoke_accessible_default_action();
+    ups()[1].invoke_accessible_default_action();
+    labelled(&window, "계속", AccessibleRole::Button)
+        .remove(0)
+        .invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["up 4", "resume 4"]);
+
+    // With only jobs that wait, the panel shows too, and its rows count from 0.
+    rows.remove(0);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(ups().len(), 2);
+    ups()[1].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["up 3"]);
+}
+
+#[test]
+fn the_job_panel_goes_to_a_window_of_its_own_and_back() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_job_pause(move |i| record.note(format!("main pause {i}")));
+    let rows = Rc::new(slint::VecModel::from(vec![JobRowView {
+        current: "a.bin".into(),
+        ..job_row("복사 중")
+    }]));
+    let queue = Rc::new(slint::VecModel::from(vec![waiting_row(
+        "복사 · b → 백업",
+        false,
+        false,
+    )]));
+    let recent = Rc::new(slint::VecModel::from(vec![recent_row(
+        "복사했습니다",
+        false,
+    )]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    window.set_job_queue(ModelRc::from(Rc::clone(&queue)));
+    window.set_recent_rows(ModelRc::from(Rc::clone(&recent)));
+    let in_main = |label: &str, role| labelled(&window, label, role).len();
+    assert_eq!(in_main("복사 중", AccessibleRole::Text), 1);
+    assert_eq!(in_main("일시정지", AccessibleRole::Button), 2);
+    assert_eq!(in_main("최근 완료 1개", AccessibleRole::Text), 1);
+
+    // The window of its own, with the same models, as the controller gives them to both.
+    let own = JobWindow::new().expect("JobWindow builds");
+    own.set_window_title("작업 - 앱".into());
+    own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    own.set_job_queue(ModelRc::from(Rc::clone(&queue)));
+    own.set_recent_rows(ModelRc::from(Rc::clone(&recent)));
+    let record = calls.clone();
+    own.on_job_pause(move |i| record.note(format!("own pause {i}")));
+    let record = calls.clone();
+    own.on_job_move_up(move |i| record.note(format!("own up {i}")));
+    let record = calls.clone();
+    own.on_recent_toggled(move || record.note("own toggled"));
+    own.show().expect("the window shows");
+    let in_own = |label: &str, role| labelled_in(&own, label, role).len();
+
+    // 별도 창: the panel leaves the main window, which keeps no row and no button of it, and
+    // shows in its own.
+    window.set_jobs_window(true);
+    slint::platform::update_timers_and_animations();
+    for (label, role) in [
+        ("복사 중", AccessibleRole::Text),
+        ("a.bin", AccessibleRole::Text),
+        ("일시정지", AccessibleRole::Button),
+        ("작업 순서 위로", AccessibleRole::Button),
+        ("최근 완료 1개", AccessibleRole::Text),
+    ] {
+        assert_eq!(in_main(label, role), 0, "{label} in the main window");
+        assert!(in_own(label, role) >= 1, "{label} in its own window");
+    }
+    // The buttons there are the same callbacks.
+    labelled_in(&own, "일시정지", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    labelled_in(&own, "펼치기", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["own pause 0", "own toggled"]);
+    // A change of the model shows there at once: the same rows, not a copy of them.
+    rows.set_row_data(
+        0,
+        JobRowView {
+            current: "b.bin".into(),
+            ..rows.row_data(0).expect("a row")
+        },
+    );
+    assert_eq!(in_own("b.bin", AccessibleRole::Text), 1);
+    assert_eq!(in_own("a.bin", AccessibleRole::Text), 0);
+    queue.push(waiting_row("이동 · c → 백업", true, false));
+    assert_eq!(in_own("작업 순서 위로", AccessibleRole::Button), 2);
+
+    // Back under the panes (the menu again, or the window's close button): the main window
+    // shows the panel as the models are now.
+    own.hide().expect("the window hides");
+    window.set_jobs_window(false);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(in_main("b.bin", AccessibleRole::Text), 1);
+    assert_eq!(in_main("작업 순서 위로", AccessibleRole::Button), 2);
+    labelled(&window, "일시정지", AccessibleRole::Button)[0].invoke_accessible_default_action();
+    assert_eq!(calls.take(), ["main pause 0"]);
+}
+
+#[test]
+fn the_job_window_takes_the_panels_keys_shows_the_theme_and_says_when_it_is_empty() {
+    i_slint_backend_testing::init_no_event_loop();
+    let own = JobWindow::new().expect("JobWindow builds");
+    let calls = Calls::default();
+    let record = calls.clone();
+    let down = special(Key::DownArrow);
+    own.on_panel_key(move |text, ctrl, shift, _, _| {
+        let used = text == down.as_str();
+        record.note(format!(
+            "{} {ctrl} {shift}",
+            if used { "↓" } else { "other" }
+        ));
+        used
+    });
+    own.show().expect("the window shows");
+    // With nothing to show, it says so.
+    let empty = || labelled_in(&own, "진행 중인 작업이 없습니다", AccessibleRole::Text).len();
+    assert_eq!(empty(), 1);
+    let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
+    own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    assert_eq!(empty(), 0);
+    // The theme of the settings, as the main window's and the notice window's.
+    for (choice, dark) in [(1, false), (2, true), (1, false)] {
+        own.set_theme_choice(choice);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(own.global::<Theme<'_>>().get_dark(), dark, "{choice}");
+    }
+    // Its keys go to the panel's handler, the modifiers with them (the keys that move a job).
+    let send = |keys: &[&str]| {
+        for key in keys {
+            own.window().dispatch_event(WindowEvent::KeyPressed {
+                text: (*key).into(),
+            });
+        }
+        for key in keys.iter().rev() {
+            own.window().dispatch_event(WindowEvent::KeyReleased {
+                text: (*key).into(),
+            });
+        }
+    };
+    own.invoke_take_keys();
+    send(&[&special(Key::DownArrow)]);
+    send(&[
+        &special(Key::Control),
+        &special(Key::Shift),
+        &special(Key::UpArrow),
+    ]);
+    let seen = calls.take();
+    assert_eq!(seen.first().map(String::as_str), Some("↓ false false"));
+    assert_eq!(seen.last().map(String::as_str), Some("other true true"));
+    // The ring of the keyboard cursor shows on the button the state names.
+    own.set_panel_line(0);
+    own.set_panel_button(1);
+    assert_eq!(labelled_in(&own, "취소", AccessibleRole::Button).len(), 1);
+
+    // While a dialog shows over the main window the panel waits, as the one under the panes
+    // does under a dialog: no key and no click reaches it, and a click asks for the main window.
+    let record = calls.clone();
+    own.on_job_cancel(move |i| record.note(format!("cancel {i}")));
+    let record = calls.clone();
+    own.on_blocked_clicked(move || record.note("to the main window"));
+    let cancel = labelled_in(&own, "취소", AccessibleRole::Button).remove(0);
+    cancel.mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(calls.take(), ["cancel 0"]);
+    own.set_blocked(true);
+    slint::platform::update_timers_and_animations();
+    send(&[&special(Key::DownArrow)]);
+    assert_eq!(calls.take(), Vec::<String>::new());
+    cancel.mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(calls.take(), ["to the main window"]);
+    own.set_blocked(false);
+    slint::platform::update_timers_and_animations();
+    cancel.mock_single_click(slint::platform::PointerEventButton::Left);
+    send(&[&special(Key::DownArrow)]);
+    assert_eq!(calls.take(), ["cancel 0", "↓ false false"]);
+}
+
+#[test]
+fn the_job_window_at_its_smallest_holds_the_panel_with_every_list_open() {
+    i_slint_backend_testing::init_no_event_loop();
+    let own = JobWindow::new().expect("JobWindow builds");
+    own.window().set_size(LogicalSize::new(520.0, 460.0));
+    // Two jobs run (one in each lane), one waits, and both lists are open.
+    let rows = Rc::new(slint::VecModel::from(vec![
+        JobRowView {
+            current: "a.bin".into(),
+            graphed: true,
+            ..job_row("복사 중")
+        },
+        job_row("이름 바꾸는 중"),
+    ]));
+    own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    own.set_job_queue(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        waiting_row("복사 · b → 백업", false, false),
+    ]))));
+    own.set_recent_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        recent_row("복사했습니다", false),
+        recent_row("이동했습니다", false),
+    ]))));
+    own.set_recent_open(true);
+    own.set_history_title("되돌리기 기록 1개".into());
+    own.set_history_open(true);
+    own.set_history_heads(1);
+    own.set_history_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        HistoryRowView {
+            head: true,
+            title: "되돌릴 수 있음 1개".into(),
+            line: -1,
+            ..HistoryRowView::default()
+        },
+        HistoryRowView {
+            title: "이름 바꾸기: a.txt → b.txt".into(),
+            button: "되돌리기".into(),
+            next: true,
+            enabled: true,
+            heads_before: 1,
+            ..HistoryRowView::default()
+        },
+    ]))));
+    own.show().expect("the window shows");
+    slint::platform::update_timers_and_animations();
+    let panel = labelled_in(&own, "작업", AccessibleRole::Groupbox).remove(0);
+    let bottom = panel.absolute_position().y + panel.size().height;
+    assert!(
+        bottom <= 460.0,
+        "the panel is {bottom}px tall in a window of 460px"
+    );
+    // Its last button is within the window, at its narrowest too.
+    let undo = labelled_in(&own, "되돌리기", AccessibleRole::Button).remove(0);
+    let (at, size) = (undo.absolute_position(), undo.size());
+    assert!(at.y + size.height <= 460.0 && at.x + size.width <= 520.0);
+    let down = labelled_in(&own, "작업 순서 아래로", AccessibleRole::Button).remove(0);
+    assert!(down.absolute_position().x + down.size().width <= 520.0);
 }
 
 #[test]

@@ -326,6 +326,9 @@ export component Toast inherits Rectangle {
 // Bordered button of the job panel and the dialogs (the mockup's secondary action).
 export component OutlineButton inherits Rectangle {
     in property <string> text;
+    // What a screen reader says for the button: its text, unless that alone does not tell it
+    // from another button on screen (the job queue's 위로 and the toolbar's).
+    in property <string> spoken: root.text;
     in property <bool> enabled: true;
     in property <length> button-height: 36px;
     // The keys of the dialog are on this button: its border shows it.
@@ -340,7 +343,7 @@ export component OutlineButton inherits Rectangle {
     border-radius: 10px;
     background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
-    accessible-label: root.text;
+    accessible-label: root.spoken;
     accessible-enabled: root.enabled;
     accessible-action-default => {
         if (root.enabled) {

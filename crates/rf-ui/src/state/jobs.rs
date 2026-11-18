@@ -14,7 +14,7 @@
 use std::ffi::{OsStr, OsString};
 use std::slice;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{
@@ -88,6 +88,13 @@ impl AppState {
         self.jobs.active()
     }
 
+    /// Takes the speed samples of the running jobs that are due at `now`, for the graphs of
+    /// their rows ([`crate::jobs::SpeedSamples`]); the window calls it about every second while
+    /// jobs are under way. `true` if a graph has a new sample to show.
+    pub fn sample_speeds(&mut self, now: Instant) -> bool {
+        self.jobs.sample_speeds(now)
+    }
+
     /// Whether Undo can start now: there is something to undo, and no undo or redo is under
     /// way (one runs at a time).
     pub fn can_undo(&self) -> bool {
@@ -150,10 +157,17 @@ impl AppState {
                 self.journal_error_told = true;
                 vec![Effect::Notice(words::journal_error().to_owned())]
             }
-            event => match self.jobs.apply(event) {
-                Some(ended) => self.finished(ended),
-                None => Vec::new(),
-            },
+            event => {
+                let queue_news = matches!(event, JobEvent::Queue { .. });
+                let ended = self.jobs.apply(event);
+                if queue_news {
+                    self.follow_moved_job();
+                }
+                match ended {
+                    Some(ended) => self.finished(ended),
+                    None => Vec::new(),
+                }
+            }
         }
     }
 
@@ -398,6 +412,23 @@ impl AppState {
             _ => JobEffect::Cancel(id),
         };
         vec![Effect::Job(effect)]
+    }
+
+    /// 위로 (`up`) or 아래로 of row `row` of the job panel (XFER-01): the job, which waits in the
+    /// queue, goes one place earlier or later in it, past the job that waits above or below
+    /// (`JobEngine::move_to`). Nothing for a job a worker has taken up (it runs, is paused in
+    /// mid-run or asks, and has left the queue; one that ended has no row at all), and nothing
+    /// for the first one going up or the last one going down.
+    ///
+    /// The place is worked out from the queue as the engine last told it. Should a worker take
+    /// a job up in the moment between, the engine puts the job at that place of the queue as it
+    /// is then, or leaves alone a job that waits no more: the move may fall a place short, and
+    /// never touches a job that runs.
+    pub fn job_move(&mut self, row: usize, up: bool) -> Vec<Effect> {
+        match self.jobs.move_target(row, up) {
+            Some((id, position)) => vec![Effect::Job(JobEffect::MoveTo { id, position })],
+            None => Vec::new(),
+        }
     }
 
     /// The button of the toast `token` was clicked. An undo starts only while the toast's job
