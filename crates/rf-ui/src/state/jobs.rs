@@ -518,10 +518,13 @@ impl AppState {
     /// mid-run or asks, and has left the queue; one that ended has no row at all), and nothing
     /// for the first one going up or the last one going down.
     ///
-    /// The place is worked out from the queue as the engine last told it. Should a worker take
-    /// a job up in the moment between, the engine puts the job at that place of the queue as it
-    /// is then, or leaves alone a job that waits no more: the move may fall a place short, and
-    /// never touches a job that runs.
+    /// The place is the job's own among the rows that wait, one up or one down
+    /// ([`JobRows::move_target`](crate::jobs::JobRows::move_target)): the queue as the engine
+    /// last told it, less the jobs a worker is known to have taken up since, so the move is
+    /// one place also just after a worker took a job. Only a click that comes before any news
+    /// of that (the worker took the job, and the window has heard nothing yet) can be a place
+    /// off, either way: the engine puts the job at that place of the queue as it is then, or
+    /// leaves alone a job that waits no more. It never touches a job that runs.
     pub fn job_move(&mut self, row: usize, up: bool) -> Vec<Effect> {
         match self.jobs.move_target(row, up) {
             Some((id, position)) => vec![Effect::Job(JobEffect::MoveTo { id, position })],

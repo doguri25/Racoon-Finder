@@ -13,14 +13,30 @@
 // height otherwise). F6 gives it the keys after the tree (KEY-02): the button they are on has the
 // dialogs' focus border.
 //
-// The graph is a line in a box of 124 by 34 (its line in 120 by 28 of it, the numbers Rust's
-// `ui_bridge::GRAPH_WIDTH` and `GRAPH_HEIGHT` make its points for), on `Theme.raised`, drawn in
-// `Theme.accent`, or in `Theme.muted` while the job is paused, as its bar is.
+// The graph is a line in a box on `Theme.raised`, drawn in `Theme.accent`, or in `Theme.muted`
+// while the job is paused, as its bar is. `JobGraph` below is the one place that says how large
+// the line's box is: Rust makes the line's points for it (`ui_bridge::graph_box`).
+//
+// 위로 and 아래로 show their keys (KEY-03, `Shortcuts.move-job-up` and `move-job-down`) in their
+// tooltips, and say them to a screen reader.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
+import { Shortcuts } from "shortcuts.slint";
 import { ProgressBar, OutlineButton } from "widgets.slint";
+
+// The box the line of a job's speed graph is drawn in, in the units of the line's points, a
+// pixel each on screen: the row's `Path` has this viewbox and this size, and Rust reads it here
+// to make the points (`ui_bridge::graph_box`). A second's sample is 120 / 59, about 2, wide, so
+// a minute of them fills the box.
+export global JobGraph {
+    out property <float> width: 120;
+    out property <float> height: 28;
+    // The room between the line's box and the edge of the box the row shows.
+    out property <length> pad-x: 2px;
+    out property <length> pad-y: 3px;
+}
 
 // One row, as Rust words it.
 export struct JobRowView {
@@ -37,7 +53,7 @@ export struct JobRowView {
     current: string,
     // The job moves bytes, and has a graph of its speed.
     graphed: bool,
-    // The line of that graph, as the commands of a path in a box of 120 by 28; empty until the
+    // The line of that graph, as the commands of a path in the box of `JobGraph`; empty until the
     // job has two samples.
     graph: string,
     // A job that waits in the queue (a row of `queue`): it can go a place up, or down.
@@ -220,22 +236,22 @@ export component JobPanel inherits Rectangle {
                         alignment: center;
 
                         Rectangle {
-                            width: 124px;
-                            height: 34px;
-                            border-radius: 6px;
+                            width: JobGraph.width * 1px + 2 * JobGraph.pad-x;
+                            height: JobGraph.height * 1px + 2 * JobGraph.pad-y;
+                            border-radius: Theme.radius;
                             background: Theme.raised;
                             accessible-role: AccessibleRole.image;
                             accessible-label: "속도 그래프";
 
                             Path {
-                                x: 2px;
-                                y: 3px;
-                                width: 120px;
-                                height: 28px;
+                                x: JobGraph.pad-x;
+                                y: JobGraph.pad-y;
+                                width: JobGraph.width * 1px;
+                                height: JobGraph.height * 1px;
                                 viewbox-x: 0;
                                 viewbox-y: 0;
-                                viewbox-width: 120;
-                                viewbox-height: 28;
+                                viewbox-width: JobGraph.width;
+                                viewbox-height: JobGraph.height;
                                 fill: transparent;
                                 stroke: row.paused ? Theme.muted : Theme.accent;
                                 stroke-width: 1.5px;
@@ -376,6 +392,7 @@ export component JobPanel inherits Rectangle {
                             button-height: 30px;
                             text: "위로";
                             spoken: "작업 순서 위로";
+                            keys: Shortcuts.move-job-up;
                             enabled: row.can-up;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 2;
                             clicked => {
@@ -391,6 +408,7 @@ export component JobPanel inherits Rectangle {
                             button-height: 30px;
                             text: "아래로";
                             spoken: "작업 순서 아래로";
+                            keys: Shortcuts.move-job-down;
                             enabled: row.can-down;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 3;
                             clicked => {

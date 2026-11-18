@@ -68,6 +68,11 @@ export global Shortcuts {
     // The system's own menu of items (Windows' Shift+F10, OPS-05); none where the system has no
     // such menu, whose 더 많은 옵션 표시 the app's menus then leave out.
     in property <string> system-menu;
+    // The job panel's own keys, which move the job that waits a place up or down the queue
+    // (XFER-01). Each window that shows the panel has them: the main window and the panel's own
+    // (`ui_bridge::show_panel_shortcuts`).
+    in property <string> move-job-up;
+    in property <string> move-job-down;
 
     // A menu item's title with its key after it, or the title alone for a command without
     // one. A menu of a window (not of the menu bar) has no column for keys.

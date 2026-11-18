@@ -1741,6 +1741,105 @@ fn a_waiting_job_moved_along_the_queue_runs_in_its_new_place() {
 }
 
 #[test]
+fn a_move_is_one_place_when_a_worker_has_just_taken_the_job_ahead() {
+    let (_dir, left, right) = folders();
+    let names = ["h.txt", "x.txt", "b.txt", "j.txt", "c.txt"];
+    for name in names {
+        write(&left.join(name), name);
+    }
+    // The first two copies each ask about a name that is taken, and each holds the lane until
+    // it is answered.
+    write(&right.join("h.txt"), "there");
+    write(&right.join("x.txt"), "there");
+    let mut harness = Harness::new();
+    let mut state = harness.open(&left, &right);
+    for name in names {
+        let submit = Effect::Job(JobEffect::Submit {
+            spec: copy(&left.join(name), &right),
+            origin: None,
+        });
+        harness.carry_out(&mut state, vec![submit]);
+    }
+    // What the rows of the jobs that wait say, in their order.
+    let waiting = |state: &AppState| -> Vec<String> {
+        state
+            .job_rows()
+            .iter()
+            .filter(|row| row.queued.is_some())
+            .map(|row| row.detail.clone())
+            .collect()
+    };
+    let queued = |names: &[&str]| -> Vec<String> {
+        names
+            .iter()
+            .map(|name| format!("복사 · {name}.txt → right"))
+            .collect()
+    };
+    harness.until(
+        &mut state,
+        "the first copy to ask before its queue",
+        |state| {
+            matches!(state.modal(), Some(Modal::Conflict(_)))
+                && state.job_rows().len() == 5
+                && state.job_rows()[4].queued.is_some_and(|moves| moves.up)
+        },
+    );
+    assert_eq!(waiting(&state), queued(&["x", "b", "j", "c"]));
+
+    // The first copy is answered and ends, and a worker takes `x` up, which asks in its turn.
+    // The engine tells that `x` has started and then the queue `x` left: the window stops
+    // between the two, as it does when a click comes in that moment.
+    harness.feed_questions = false;
+    let effects = state.conflict_answered(ConflictChoice::Skip, false);
+    harness.carry_out(&mut state, effects);
+    harness.until(&mut state, "a worker to take the second copy", |state| {
+        state
+            .job_rows()
+            .iter()
+            .any(|row| row.detail == "x.txt → right")
+    });
+    assert_eq!(waiting(&state), queued(&["b", "j", "c"]));
+
+    // 아래로 of `b`: one place down among those that wait, which is behind `j` in the engine's
+    // queue b, j, c, and not behind `c`, where the place `j` had in the queue of four would
+    // put it.
+    let row = state
+        .job_rows()
+        .iter()
+        .position(|row| row.detail == "복사 · b.txt → right")
+        .expect("the row of b");
+    let effects = state.job_move(row, false);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Job(JobEffect::MoveTo { position: 1, .. })]
+        ),
+        "{effects:?}"
+    );
+    harness.carry_out(&mut state, effects);
+    let wanted = queued(&["j", "b", "c"]);
+    harness.until(&mut state, "the queue's new order", |state| {
+        waiting(state) == wanted
+    });
+
+    // `x` is answered, and the others run in that order.
+    harness.feed_questions = true;
+    harness.until(&mut state, "the second copy's question", |state| {
+        matches!(state.modal(), Some(Modal::Conflict(_)))
+    });
+    let effects = state.conflict_answered(ConflictChoice::Skip, false);
+    harness.run(&mut state, effects);
+    let ended: Vec<String> = state
+        .recent_rows()
+        .iter()
+        .rev()
+        .map(|row| row.detail.clone())
+        .collect();
+    let ran = ["h", "x", "j", "b", "c"].map(|name| format!("{name}.txt → right"));
+    assert_eq!(ended, ran);
+}
+
+#[test]
 fn a_running_copy_names_the_file_it_is_at_in_its_row() {
     let (_dir, left, right) = folders();
     write(&left.join("보고서.txt"), "new");

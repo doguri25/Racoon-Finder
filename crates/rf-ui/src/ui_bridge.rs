@@ -38,7 +38,7 @@ use crate::format::{
 use crate::hashing::Algorithm;
 use crate::history::Way;
 use crate::jobs::{JobRow, RecentRow, speed_points};
-use crate::keys::{self, Command};
+use crate::keys::{self, Command, PanelKey};
 use crate::pane::{LoadStatus, Pane, ancestors};
 use crate::pick::{POLICIES, PickPurpose, PickRequest, Picker, overwrites, validate};
 use crate::places::{Place, PlaceKind, recent_slot};
@@ -56,9 +56,9 @@ use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
     ErrorView, FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView,
-    ItemMenu, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView, PatternView,
-    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView,
-    RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow, VisitEntry,
+    ItemMenu, JobGraph, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView,
+    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
+    RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow, VisitEntry,
 };
 
 /// What separates the parts of a pane's status line in `PaneView.status`:
@@ -1489,6 +1489,22 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_properties(key(Command::Properties));
     shown.set_open_terminal(key(Command::OpenTerminal));
     shown.set_system_menu(key(Command::SystemMenu));
+    show_panel_shortcuts(window, os);
+}
+
+/// Gives a window that shows the job panel, the main one or the panel's own (LAY-09), the keys
+/// on `os` of the panel's 위로 and 아래로 (KEY-03), from the panel's table
+/// ([`keys::panel_shortcut`]). Each window has its own `Shortcuts`: the main window's are set
+/// with the rest of its keys ([`show_shortcuts`]), and the panel's own window gets these.
+pub fn show_panel_shortcuts<'a, W>(window: &'a W, os: Os)
+where
+    W: ComponentHandle,
+    Shortcuts<'a>: slint::Global<'a, W>,
+{
+    let shown = window.global::<Shortcuts<'a>>();
+    let key = |key: PanelKey| SharedString::from(keys::panel_shortcut(key, os).unwrap_or_default());
+    shown.set_move_job_up(key(PanelKey::MoveUp));
+    shown.set_move_job_down(key(PanelKey::MoveDown));
 }
 
 /// The app's window as the owner of a dialog of the system and of the window's drop target: its
@@ -1623,11 +1639,14 @@ impl PreviewModels {
     }
 }
 
-/// The box the line of a job's speed graph is drawn in, in logical pixels: the `Path` of the
-/// job panel's row has this size, and this viewbox (`job-panel.slint`). A sample is 120 / 59,
-/// about 2px, wide, so a minute of them fills the box.
-pub const GRAPH_WIDTH: f32 = 120.0;
-pub const GRAPH_HEIGHT: f32 = 28.0;
+/// The box the line of a job's speed graph is drawn in, its width and its height: what the job
+/// panel says it is (`JobGraph` in `job-panel.slint`, the one place the size is written). The
+/// `Path` of the panel's row has this viewbox, in the main window and in the panel's own alike,
+/// so the points made for it ([`job_row_view`]) fit the box the row shows.
+pub fn graph_box(window: &MainWindow) -> (f32, f32) {
+    let graph = window.global::<JobGraph<'_>>();
+    (graph.get_width(), graph.get_height())
+}
 
 /// The line through `points` as the commands of an SVG path (`M x y L x y …`), to a tenth of a
 /// pixel. Empty for fewer than two points, which make no line.
@@ -1648,11 +1667,11 @@ pub fn graph_path(points: &[(f32, f32)]) -> String {
 }
 
 /// A row of the job panel: of a job a worker has taken up, with the file it works on and the
-/// line of its speed graph ([`speed_points`] in a box of [`GRAPH_WIDTH`] by [`GRAPH_HEIGHT`]),
-/// or of a job that waits, with whether it can go up and down the queue.
-pub fn job_row_view(row: &JobRow) -> JobRowView {
+/// line of its speed graph ([`speed_points`] in the box `graph`, its width and its height:
+/// [`graph_box`]), or of a job that waits, with whether it can go up and down the queue.
+pub fn job_row_view(row: &JobRow, (width, height): (f32, f32)) -> JobRowView {
     let graph = row.speeds.as_deref().map_or_else(String::new, |speeds| {
-        graph_path(&speed_points(speeds, GRAPH_WIDTH, GRAPH_HEIGHT))
+        graph_path(&speed_points(speeds, width, height))
     });
     JobRowView {
         title: row.title.as_str().into(),
@@ -2356,11 +2375,11 @@ mod tests {
             "M115.9 28.0 L118.0 14.0 L120.0 0.0"
         );
         // Samples of zero draw a line along the bottom of the box.
-        let flat = graph_path(&speed_points(&[0, 0], GRAPH_WIDTH, GRAPH_HEIGHT));
+        let flat = graph_path(&speed_points(&[0, 0], 120.0, 28.0));
         assert_eq!(flat, "M118.0 28.0 L120.0 28.0");
         // A full minute spans the box.
         let full: Vec<u64> = (0..60).collect();
-        let line = graph_path(&speed_points(&full, GRAPH_WIDTH, GRAPH_HEIGHT));
+        let line = graph_path(&speed_points(&full, 120.0, 28.0));
         assert!(line.starts_with("M0.0 28.0 L"), "{line}");
         assert!(line.ends_with(" L120.0 0.0"), "{line}");
         assert_eq!(line.matches('L').count(), 59);
@@ -2382,32 +2401,45 @@ mod tests {
             speeds: Some(vec![10, 20]),
             queued: None,
         };
-        let view = job_row_view(&row);
+        let graph = (120.0, 28.0);
+        let view = job_row_view(&row, graph);
         assert_eq!(view.current, "로고.png");
         assert!(view.graphed);
         assert_eq!(view.graph, "M118.0 14.0 L120.0 0.0");
         assert!(!view.can_up && !view.can_down);
+        // The line is made for the box it is given: in one half as large, it is half as large.
+        assert_eq!(
+            job_row_view(&row, (60.0, 14.0)).graph,
+            "M59.0 7.0 L60.0 0.0"
+        );
         // A copy that has no sample yet has its box, and no line in it.
-        let fresh = job_row_view(&JobRow {
-            speeds: Some(Vec::new()),
-            ..row.clone()
-        });
+        let fresh = job_row_view(
+            &JobRow {
+                speeds: Some(Vec::new()),
+                ..row.clone()
+            },
+            graph,
+        );
         assert!(fresh.graphed);
         assert_eq!(fresh.graph, "");
         // A job that moves no bytes has neither.
-        let trash = job_row_view(&JobRow {
-            speeds: None,
-            ..row.clone()
-        });
+        let trash = job_row_view(
+            &JobRow {
+                speeds: None,
+                ..row.clone()
+            },
+            graph,
+        );
         assert!(!trash.graphed);
         assert_eq!(trash.graph, "");
         // A job that waits: its buttons are on for the ways it can go.
         for (up, down) in [(false, false), (false, true), (true, true), (true, false)] {
-            let view = job_row_view(&JobRow {
+            let waits = JobRow {
                 speeds: None,
                 queued: Some(QueueMoves { up, down }),
                 ..row.clone()
-            });
+            };
+            let view = job_row_view(&waits, graph);
             assert_eq!((view.can_up, view.can_down), (up, down));
             assert!(!view.graphed);
         }

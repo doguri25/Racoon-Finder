@@ -9,6 +9,7 @@ use i_slint_core::input::{InternalKeyEvent, KeyEventType};
 use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_platform::shell::WindowPoint;
 use rf_platform::{DiskSpace, KnownFolder};
+use rf_ui::keys::PanelKey;
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
@@ -20,10 +21,10 @@ use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow,
-    FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobRowView, JobTray,
-    JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView, PickTarget,
-    PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
-    StatusFit, Theme, VisitEntry,
+    FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, ItemMenu, JobGraph, JobRowView,
+    JobTray, JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView, PatternView,
+    PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView,
+    RecoveryView, StatusFit, Theme, VisitEntry,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -5866,13 +5867,38 @@ fn a_running_job_shows_the_file_it_works_on_and_the_graph_of_its_speed() {
     });
     let graph = graphs();
     assert_eq!(graph.len(), 1);
+    // The box on screen is the box the panel says the line has (`JobGraph`), a pixel a unit,
+    // with the room around it: the one size, which Rust makes the line's points for.
+    let (width, height) = ui_bridge::graph_box(&window);
+    assert!(width > 0.0 && height > 0.0, "{width} {height}");
+    let said = window.global::<JobGraph<'_>>();
+    let wanted = (
+        width + 2.0 * said.get_pad_x(),
+        height + 2.0 * said.get_pad_y(),
+    );
     let size = graph[0].size();
     assert!(
-        (size.width - 124.0).abs() < 0.5 && (size.height - 34.0).abs() < 0.5,
-        "{size:?}"
+        (size.width - wanted.0).abs() < 0.5 && (size.height - wanted.1).abs() < 0.5,
+        "{size:?} for {wanted:?}"
     );
+    // A minute of samples that rise: the line Rust makes spans that box from corner to corner.
+    let minute = rf_ui::jobs::JobRow {
+        id: rf_jobs::JobId(1),
+        title: "복사 중".to_owned(),
+        detail: "assets → 백업".to_owned(),
+        fraction: 0.25,
+        progress: "3 / 12 항목".to_owned(),
+        paused: false,
+        waiting: false,
+        current: "보고서-2026-최종.pdf".to_owned(),
+        speeds: Some((0..60).collect()),
+        queued: None,
+    };
+    let line = ui_bridge::job_row_view(&minute, (width, height)).graph;
+    assert!(line.starts_with(&format!("M0.0 {height:.1} L")), "{line}");
+    assert!(line.ends_with(&format!(" L{width:.1} 0.0")), "{line}");
     first(&|row| JobRowView {
-        graph: "M0.0 28.0 L60.0 14.0 L120.0 0.0".into(),
+        graph: line.clone(),
         ..row
     });
     assert_eq!(graphs().len(), 1);
@@ -5889,6 +5915,64 @@ fn a_running_job_shows_the_file_it_works_on_and_the_graph_of_its_speed() {
         assert!((top_of("이름 바꾸는 중") - next).abs() < 0.5, "{name:?}");
     }
     assert!(labelled(&window, "다음-파일.txt", AccessibleRole::Text).is_empty());
+}
+
+#[test]
+fn the_buttons_that_move_a_job_show_their_keys_in_both_windows() {
+    let window = window();
+    let own = JobWindow::new().expect("JobWindow builds");
+    own.show().expect("the window shows");
+    // One job runs and two wait, in the panel under the panes and in the panel's own window.
+    let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
+    let queue = Rc::new(slint::VecModel::from(vec![
+        waiting_row("복사 · a → 백업", false, true),
+        waiting_row("이동 · b → 백업", true, false),
+    ]));
+    window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    window.set_job_queue(ModelRc::from(Rc::clone(&queue)));
+    own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
+    own.set_job_queue(ModelRc::from(Rc::clone(&queue)));
+    // The keys the buttons named `label` say, under the panes and in the window of its own.
+    let keys_of = |buttons: Vec<ElementHandle>| -> Vec<String> {
+        buttons
+            .iter()
+            .map(|button| button.accessible_description().unwrap_or_default().into())
+            .collect()
+    };
+    let said = |label: &str| {
+        (
+            keys_of(labelled(&window, label, AccessibleRole::Button)),
+            keys_of(labelled_in(&own, label, AccessibleRole::Button)),
+        )
+    };
+    // Each window has its own keys to show: none until it is given them.
+    let both = |keys: &str| (vec![keys.to_owned(); 2], vec![keys.to_owned(); 2]);
+    assert_eq!(said("작업 순서 위로"), both(""));
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    assert_eq!(
+        said("작업 순서 위로"),
+        (vec!["Ctrl+Shift+↑".to_owned(); 2], vec![String::new(); 2]),
+        "the main window's keys are not the other window's"
+    );
+    // As each system writes them, on the buttons of every row that waits, in both places; a
+    // button that is off (the first row's 위로) says its key too.
+    for (os, up, down) in [
+        (Os::Windows, "Ctrl+Shift+↑", "Ctrl+Shift+↓"),
+        (Os::MacOs, "⇧⌘↑", "⇧⌘↓"),
+        (Os::Other, "Ctrl+Shift+↑", "Ctrl+Shift+↓"),
+    ] {
+        ui_bridge::show_shortcuts(&window, os);
+        ui_bridge::show_panel_shortcuts(&own, os);
+        assert_eq!(said("작업 순서 위로"), both(up), "{os:?}");
+        assert_eq!(said("작업 순서 아래로"), both(down), "{os:?}");
+        // The keys are the ones the panel's table has for the system.
+        let table = |key| rf_ui::keys::panel_shortcut(key, os);
+        assert_eq!(table(PanelKey::MoveUp).as_deref(), Some(up), "{os:?}");
+        assert_eq!(table(PanelKey::MoveDown).as_deref(), Some(down), "{os:?}");
+    }
+    // The other buttons of a row have no key of their own.
+    let (docked, floating) = said("취소");
+    assert!(docked.iter().chain(&floating).all(String::is_empty));
 }
 
 #[test]

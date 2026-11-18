@@ -887,6 +887,12 @@ impl JobRows {
     /// that cannot move: a job a worker has taken up (running, paused or asking: it has left
     /// the queue), the first one going up, the last one going down, a row that is not there,
     /// and a job the engine has not told the place of yet.
+    ///
+    /// The position is the job's place among the rows that wait, one up or one down. Those
+    /// rows are the engine's queue: the jobs it named, in its order, less the ones a worker is
+    /// known to have taken since. So the move is one place also in the moment when a worker
+    /// has taken a job up and the queue it left is not told yet: the place the job beside had
+    /// in the queue as it was told would be one too far down, or no move at all going up.
     pub fn move_target(&self, row: usize, up: bool) -> Option<(JobId, usize)> {
         let waiting = self.waiting();
         let at = row.checked_sub(self.jobs.len() - waiting.len())?;
@@ -897,15 +903,16 @@ impl JobRows {
     /// order ([`JobRows::waiting`]).
     fn target(&self, waiting: &[&Tracked], at: usize, up: bool) -> Option<(JobId, usize)> {
         let job = waiting.get(at)?;
-        let beside = if up {
-            waiting.get(at.checked_sub(1)?)?
+        let to = if up {
+            at.checked_sub(1)?
         } else {
-            waiting.get(at.checked_add(1)?)?
+            at.checked_add(1)?
         };
-        // Both have a place in the queue the engine told.
-        let place = |id: JobId| self.queue.iter().position(|queued| *queued == id);
-        place(job.id)?;
-        Some((job.id, place(beside.id)?))
+        let beside = waiting.get(to)?;
+        // Both are in the queue the engine told: those it has not told of yet come last among
+        // the jobs that wait, so the places before them are the queue's.
+        let told = |id: JobId| self.queue.contains(&id);
+        (told(job.id) && told(beside.id)).then_some((job.id, to))
     }
 
     /// The row of the job `id` while it waits in the queue.
@@ -1311,7 +1318,7 @@ mod tests {
         // The first one that waits cannot go up, the last one cannot go down.
         assert_eq!(rows.move_target(1, true), None);
         assert_eq!(rows.move_target(3, false), None);
-        // The others go to the place of the job beside them.
+        // The others go a place up or down among the jobs that wait.
         assert_eq!(rows.move_target(1, false), Some((JobId(2), 1)));
         assert_eq!(rows.move_target(2, true), Some((JobId(3), 0)));
         assert_eq!(rows.move_target(2, false), Some((JobId(3), 2)));
@@ -1328,13 +1335,14 @@ mod tests {
         assert_eq!(rows.move_target(2, true), Some((JobId(3), 0)));
 
         // A worker takes job 2 up; the queue's news has not come yet. Job 3 is first of those
-        // that wait now and cannot go up, and going down it goes behind job 4, by the place
-        // job 4 has in the queue as it was told.
+        // that wait now and cannot go up, and going down it goes behind job 4: a place down
+        // among the jobs that wait, which is its place in the queue the engine has now, and
+        // not the place job 4 has in the queue as it was told.
         rows.apply(state(2, JobState::Planning));
         assert_eq!(ids(&rows), [1, 2, 3, 4]);
         assert_eq!(rows.move_target(1, false), None, "job 2 runs now");
         assert_eq!(rows.move_target(2, true), None);
-        assert_eq!(rows.move_target(2, false), Some((JobId(3), 2)));
+        assert_eq!(rows.move_target(2, false), Some((JobId(3), 1)));
         rows.apply(JobEvent::Queue {
             order: vec![JobId(3), JobId(4)],
         });
@@ -1359,6 +1367,61 @@ mod tests {
         assert_eq!(ids(&rows), [1, 2, 3, 9]);
         assert_eq!(rows.move_target(3, true), None);
         assert_eq!(rows.move_target(2, false), None);
+    }
+
+    /// The queue `queue` after `JobEngine::move_to` moves a job in it: the job leaves the
+    /// queue and goes in again at the position, or at the end for a position past it.
+    fn moved(mut queue: Vec<u64>, (id, position): (JobId, usize)) -> Vec<u64> {
+        let at = queue
+            .iter()
+            .position(|queued| *queued == id.0)
+            .expect("the job is in the queue");
+        let job = queue.remove(at);
+        queue.insert(position.min(queue.len()), job);
+        queue
+    }
+
+    #[test]
+    fn a_move_is_one_place_when_a_worker_took_a_job_the_queue_has_not_told_of() {
+        // Job 1 runs on its lane; jobs 2, 3, 4 and 5 wait.
+        let mut rows = JobRows::default();
+        for id in 1..=5 {
+            rows.track(started(id, copy_spec()));
+            rows.apply(state(id, JobState::Queued));
+        }
+        rows.apply(state(1, JobState::Running));
+        rows.apply(JobEvent::Queue {
+            order: (2..=5).map(JobId).collect(),
+        });
+        // A worker takes job 2 up. The window has heard of that, and not yet of the queue it
+        // left, which is 3, 4, 5 in the engine now.
+        rows.apply(state(2, JobState::Planning));
+        assert_eq!(ids(&rows), [1, 2, 3, 4, 5]);
+        let engine = vec![3, 4, 5];
+
+        // 아래로 of job 3 puts it behind job 4 and no further.
+        let down = rows.move_target(2, false).expect("job 3 goes down");
+        assert_eq!(moved(engine.clone(), down), [4, 3, 5]);
+        // 위로 of job 4 puts it before job 3: it does not stay where it is.
+        let up = rows.move_target(3, true).expect("job 4 goes up");
+        assert_eq!(moved(engine.clone(), up), [4, 3, 5]);
+        // The last one goes up a place as well, and the ends stay ends.
+        let last = rows.move_target(4, true).expect("job 5 goes up");
+        assert_eq!(moved(engine, last), [3, 5, 4]);
+        assert_eq!(rows.move_target(2, true), None);
+        assert_eq!(rows.move_target(4, false), None);
+
+        // The queue's news then says what the rows went by: the moves are the same ones.
+        rows.apply(JobEvent::Queue {
+            order: (3..=5).map(JobId).collect(),
+        });
+        assert_eq!(
+            (down, up, last),
+            ((JobId(3), 1), (JobId(4), 0), (JobId(5), 1))
+        );
+        assert_eq!(rows.move_target(2, false), Some(down));
+        assert_eq!(rows.move_target(3, true), Some(up));
+        assert_eq!(rows.move_target(4, true), Some(last));
     }
 
     /// A progress report of job `id` with `bytes` of `total` bytes done, at the file `current`.

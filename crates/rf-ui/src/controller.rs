@@ -3806,14 +3806,11 @@ impl Controller {
         let rows = state.job_rows();
         let (waiting, started): (Vec<_>, Vec<_>) =
             rows.iter().partition(|row| row.queued.is_some());
-        ui_bridge::set_rows(
-            &self.panel.rows,
-            started.into_iter().map(ui_bridge::job_row_view).collect(),
-        );
-        ui_bridge::set_rows(
-            &self.panel.queue,
-            waiting.into_iter().map(ui_bridge::job_row_view).collect(),
-        );
+        // The box the panel draws a job's speed graph in, as the panel says it is.
+        let graph = ui_bridge::graph_box(window);
+        let view = |row: &jobs::JobRow| ui_bridge::job_row_view(row, graph);
+        ui_bridge::set_rows(&self.panel.rows, started.into_iter().map(view).collect());
+        ui_bridge::set_rows(&self.panel.queue, waiting.into_iter().map(view).collect());
         let menu = window.global::<ItemMenu<'_>>();
         menu.set_can_undo(state.can_undo());
         menu.set_can_redo(state.can_redo());
@@ -3917,7 +3914,8 @@ impl Controller {
     /// Puts the job panel where the layout says (LAY-09): its own window shows while the panel
     /// is not under the panes, and hides when it is, while the main window is hidden behind
     /// the tray icon, and as the app ends. Called after a redraw with no borrow of the state
-    /// held: the window is made, shown and hidden here, and may call back as it is.
+    /// held: the window is made, shown and hidden here, and may call back as it is. The window
+    /// that shows does not keep the keyboard: the main window takes it back.
     fn place_job_panel(&self) {
         let wanted = self.state.borrow().as_ref().is_some_and(|state| {
             state.layout().jobs_window && !state.background() && !state.quitting()
@@ -3942,7 +3940,12 @@ impl Controller {
             Some(own) => own.show(),
             None => self.open_job_window(),
         };
-        if opened.is_err() {
+        if opened.is_ok() {
+            // The system gives the keyboard to a window that shows. It stays in the main
+            // window, at the start of the app and when the menu puts the panel in its window:
+            // the panel takes the keys when it is asked to (F6, `Controller::give_keys`).
+            self.show_main_window();
+        } else {
             // The panel goes back under the panes, and a notice says why.
             self.update(|state| {
                 state.set_jobs_window(false);
@@ -3959,6 +3962,8 @@ impl Controller {
         let own = JobWindow::new()?;
         own.set_window_title(words::job_window_title().into());
         own.set_theme_choice(theme_number(self.theme.get()));
+        // The keys of 위로 and 아래로, which each window that shows the panel has for itself.
+        ui_bridge::show_panel_shortcuts(&own, Os::CURRENT);
         own.take_models(&self.panel);
         own.show_panel(&self.panel.shown.borrow());
         // Under a dialog of the main window the panel waits, wherever it shows.
@@ -3999,8 +4004,9 @@ impl Controller {
     }
 
     /// The main window comes to the front, with the keyboard: for the dialog that shows over
-    /// it, from the job panel's own window. Nothing for a window of another backend than
-    /// winit's (the tests').
+    /// it, from the job panel's own window, and as that window shows, which the system would
+    /// give the keyboard to ([`Controller::place_job_panel`]). Nothing for a window of another
+    /// backend than winit's (the tests'), and nothing while the main window is hidden.
     fn show_main_window(&self) {
         if let Some(window) = self.window.upgrade() {
             window
@@ -5104,6 +5110,34 @@ mod tests {
         d.window.invoke_command("toggle-jobs-window".into());
         assert_eq!(floating(c), (false, false));
         assert_eq!(in_main("복사 중"), 1);
+        drop(own);
+        d.end();
+    }
+
+    #[test]
+    fn the_job_panel_s_own_window_shows_the_keys_that_move_a_job() {
+        use crate::keys::{PanelKey, panel_shortcut};
+        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+
+        let d = Dragging::new();
+        let c = &d.controller;
+        one_copy_runs_and_one_waits(&d);
+        d.window.invoke_command("toggle-jobs-window".into());
+        assert_eq!(floating(c), (true, true));
+        let own = job_window(c);
+        // The window was given the keys of this system's table as it was made: the buttons of
+        // the job that waits say them (KEY-03).
+        for (label, key) in [
+            ("작업 순서 위로", PanelKey::MoveUp),
+            ("작업 순서 아래로", PanelKey::MoveDown),
+        ] {
+            let said: Vec<String> = ElementHandle::find_by_accessible_label(&own, label)
+                .filter(|found| found.accessible_role() == Some(AccessibleRole::Button))
+                .map(|found| found.accessible_description().unwrap_or_default().into())
+                .collect();
+            let keys = panel_shortcut(key, Os::CURRENT).expect("the panel's table has the key");
+            assert_eq!(said, [keys], "{label}");
+        }
         drop(own);
         d.end();
     }
