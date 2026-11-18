@@ -802,7 +802,9 @@ impl AppState {
             .collect();
         let mut requests: Vec<LoadRequest> = Vec::new();
         for folder in folders.iter().filter(|folder| !shown.contains(folder)) {
-            requests.extend(self.tree.relist_folder(folder));
+            for tree in &mut self.trees {
+                requests.extend(tree.relist_folder(folder));
+            }
             requests.extend(self.pick_tree.relist_folder(folder));
         }
         requests.into_iter().map(Effect::LoadChildren).collect()

@@ -229,14 +229,15 @@ impl AppState {
         self.kept.edited = true;
         self.kept.favorites = list;
         let mut effects = self.favorites_changed();
+        let tree = self.tree_keys;
         if cursor
             && let Some(focus) = focus
-            && let Some(row) = self.tree.rows().iter().position(|row| {
+            && let Some(row) = self.trees[tree].rows().iter().position(|row| {
                 row.root.is_some() && self.favorite_of_row_index(row.root) == Some(focus)
             })
         {
-            self.tree_cursor = self.tree.node_at(row);
-            effects.push(Effect::ScrollTree(row));
+            self.tree_cursor = self.trees[tree].node_at(row);
+            effects.push(Effect::ScrollTree { tree, row });
         }
         effects
     }
@@ -252,16 +253,17 @@ impl AppState {
         self.reroot_places()
     }
 
-    /// Starts the sidebar's tree again from the places as roots, and the picker's when one is
+    /// Starts the sidebar's trees again from the places as roots, and the picker's when one is
     /// open.
     pub(super) fn reroot_places(&mut self) -> Vec<Effect> {
-        // The new tree's nodes are other ones.
+        // The new trees' nodes are other ones.
         self.tree_cursor = None;
         if matches!(self.kept.cursor, Some(RecentAt::Item(_))) {
             self.kept.cursor = Some(RecentAt::Head);
         }
         let roots = super::pick::tree_roots(&self.places);
-        let mut effects = self.with_tree(|tree| tree.set_roots(roots.clone()));
+        let mut effects = self.with_tree(super::LEFT, |tree| tree.set_roots(roots.clone()));
+        effects.extend(self.with_tree(super::RIGHT, |tree| tree.set_roots(roots.clone())));
         if self.shown_picker().is_some() {
             effects.extend(self.with_pick_tree(|tree| tree.set_roots(roots)));
         }
@@ -365,13 +367,14 @@ impl AppState {
     }
 
     /// 이 폴더를 즐겨찾기에 추가 in the menu of a row of the sidebar that is no favorite: the
-    /// folder of row `row` of the tree joins the favorites.
-    pub fn favorite_add_tree_row(&mut self, row: usize) -> Vec<Effect> {
-        let folder = self
-            .tree
-            .node_at(row)
-            .and_then(|id| self.tree.node(id))
-            .map(|node| node.path.clone());
+    /// folder of row `row` of tree `tree` joins the favorites.
+    pub fn favorite_add_tree_row(&mut self, tree: usize, row: usize) -> Vec<Effect> {
+        let folder = self.trees.get(tree).and_then(|shown| {
+            shown
+                .node_at(row)
+                .and_then(|id| shown.node(id))
+                .map(|node| node.path.clone())
+        });
         folder.map_or_else(Vec::new, |folder| self.favorite_add(&folder))
     }
 
@@ -419,10 +422,10 @@ impl AppState {
         (to != from).then_some(to)
     }
 
-    /// The favorite a row of the folder tree is, as its place's position among the favorites;
-    /// `None` for a folder below a place, and for a drive.
+    /// The favorite row `row` of the tree with the keys is, as its place's position among the
+    /// favorites; `None` for a folder below a place, and for a drive.
     pub(super) fn favorite_of_row(&self, row: usize) -> Option<usize> {
-        self.favorite_of_row_index(self.tree.rows().get(row)?.root)
+        self.favorite_of_row_index(self.trees[self.tree_keys].rows().get(row)?.root)
     }
 
     /// The favorite a root place of the tree is (its position among the roots), if it is one.
@@ -653,15 +656,17 @@ impl AppState {
         }
     }
 
-    /// A click on the recent folder `index`: the active pane shows it, unless a worker found it
-    /// gone, which a notice says.
-    pub fn open_recent(&mut self, index: usize) -> Vec<Effect> {
+    /// A click on the recent folder `index` in the sidebar of tree `tree`: the pane the tree
+    /// follows shows it (the active one, or the tree's own, which gets the keyboard), unless a
+    /// worker found it gone, which a notice says.
+    pub fn open_recent(&mut self, tree: usize, index: usize) -> Vec<Effect> {
         let Some(folder) = self.kept.recent.get(index).cloned() else {
             return Vec::new();
         };
         if self.kept.missing.contains(&folder) {
             return vec![Effect::Notice(words::start_folder_gone(&folder))];
         }
+        self.activate_tree_pane(tree);
         self.go_to(folder)
     }
 
@@ -688,10 +693,11 @@ impl AppState {
         self.kept.cursor
     }
 
-    /// Where the group of recent folders shows among the rows of the folder tree (see
+    /// Where the group of recent folders shows among the rows of the tree with the keys (see
     /// [`recent_slot`]); `None` while there is no recent folder, and no group.
     pub fn recent_slot(&self) -> Option<usize> {
-        (!self.kept.recent.is_empty()).then(|| recent_slot(&self.tree.rows(), &self.places))
+        (!self.kept.recent.is_empty())
+            .then(|| recent_slot(&self.trees[self.tree_keys].rows(), &self.places))
     }
 }
 

@@ -111,8 +111,8 @@ use crate::settings::{OnError, PickStart, Saver, Session, Settings, ThemeChoice,
 use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
-    MenuShown, Paging, PathForm, RIGHT, ShellWork, Subfolders, Unkept, dropped_effect,
-    preview_width, start_folders,
+    MenuShown, Paging, PathForm, RIGHT, SavedPlace, Screen, ShellWork, Subfolders, TreeMode,
+    Unkept, dropped_effect, preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, RecentBlock, RecentFolder,
@@ -197,6 +197,35 @@ pub fn show_requested() {
 /// question about running jobs, for which the window comes back from behind the tray icon.
 pub fn quit_requested() {
     post(|c| c.update(AppState::quit_asked));
+}
+
+/// The event loop starts (winit's `resumed`), before it makes the windows shown before it:
+/// the window goes where the settings say it was, on the screens `event_loop` tells of, the
+/// system's main one first ([`crate::state::placement`], LAY-07). Once; nothing before the
+/// controller is there.
+pub fn place_window(event_loop: &slint::winit_030::winit::event_loop::ActiveEventLoop) {
+    let main = event_loop.primary_monitor();
+    let screens: Vec<Screen> = main
+        .iter()
+        .cloned()
+        .chain(
+            event_loop
+                .available_monitors()
+                .filter(|monitor| Some(monitor) != main.as_ref()),
+        )
+        .map(|monitor| {
+            let at = monitor.position();
+            let size = monitor.size();
+            Screen {
+                x: at.x,
+                y: at.y,
+                width: size.width,
+                height: size.height,
+                scale: monitor.scale_factor(),
+            }
+        })
+        .collect();
+    with(|c| c.place_window(&screens));
 }
 
 /// The window shows (its first show, its return from the tray): once its winit window is
@@ -573,14 +602,14 @@ fn connect(window: &MainWindow) {
         }
         with(|c| c.command(&name));
     });
-    window.on_tree_key(|text, ctrl, shift, alt, meta| {
+    window.on_tree_key(|tree, text, ctrl, shift, alt, meta| {
         let mods = Mods {
             ctrl,
             shift,
             alt,
             meta,
         };
-        with(|c| c.tree_key(&text, mods)).unwrap_or(false)
+        with(|c| c.tree_key(tree_index(tree), &text, mods)).unwrap_or(false)
     });
     window.connect_panel();
     connect_quick_look(window);
@@ -690,23 +719,33 @@ fn connect_checkboxes(window: &MainWindow) {
 /// The callbacks of the sidebar: a click on a row or its chevron, and the favorites (the press
 /// that readies a drag of one, the items of the menus).
 fn connect_sidebar(window: &MainWindow) {
-    window.on_tree_clicked(|i| {
-        with(|c| c.tree_clicked(i));
+    window.on_tree_clicked(|tree, i| {
+        with(|c| c.tree_clicked(tree_index(tree), i));
     });
-    window.on_tree_toggled(|i| {
-        with(|c| c.tree_toggled(i));
+    window.on_tree_toggled(|tree, i| {
+        with(|c| c.tree_toggled(tree_index(tree), i));
     });
     window.on_favorite_pressed(|i| {
         with(|c| c.favorite_pressed(i));
     });
-    window.on_favorite_command(|i, name| {
-        with(|c| c.update_at(i, |state, i| state.favorite_command(i, &name)));
+    window.on_favorite_command(|tree, i, name| {
+        with(|c| {
+            c.update_at(i, |state, i| {
+                state.activate_tree_pane(tree_index(tree));
+                state.favorite_command(i, &name)
+            });
+        });
     });
-    window.on_row_command(|i, name| {
-        with(|c| c.row_command(i, &name));
+    window.on_row_command(|tree, i, name| {
+        with(|c| c.row_command(tree_index(tree), i, &name));
     });
-    window.on_favorites_blank_command(|name| {
-        with(|c| c.update(|state| state.favorites_blank_command(&name)));
+    window.on_favorites_blank_command(|tree, name| {
+        with(|c| {
+            c.update(|state| {
+                state.activate_tree_pane(tree_index(tree));
+                state.favorites_blank_command(&name)
+            });
+        });
     });
 }
 
@@ -1006,11 +1045,11 @@ fn is_folder(path: &VPath) -> bool {
         .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()))
 }
 
-/// The group of recent folders as the sidebar shows it: each folder by its name, with the
-/// name of the folder it is in beside it, dim when a worker found it gone, and marked when the active pane
-/// shows it.
-fn recent_block(state: &AppState) -> RecentBlock {
-    let shown = state.panes()[state.active()].active_tab().location();
+/// The group of recent folders as the sidebar of tree `tree` shows it: each folder by its name,
+/// with the name of the folder it is in beside it, dim when a worker found it gone, and marked
+/// when the pane the tree follows shows it.
+fn recent_block(state: &AppState, tree: usize) -> RecentBlock {
+    let shown = state.panes()[state.tree_pane(tree)].active_tab().location();
     RecentBlock {
         folded: state.recent_folded(),
         folders: state
@@ -1260,6 +1299,10 @@ fn watch_winit_events(window: &MainWindow) {
             }
             WinitEvent::Focused(false) => {
                 with(Controller::press_focus_lost);
+            }
+            // The settings keep the window's place (LAY-07).
+            WinitEvent::Moved(_) => {
+                with(Controller::plan_save);
             }
             WinitEvent::Touch(touch) => {
                 if winit_touch(window, touch) {
@@ -1659,7 +1702,9 @@ pub struct Controller {
     tickets: RefCell<HashMap<u64, LoadTicket>>,
     /// The sidebar's places, the roots of the tree, once found.
     places: RefCell<Vec<Place>>,
-    tree_rows: Rc<TreeRows>,
+    /// The rows of the sidebar's two trees: the shared one (or the left pane's), then the
+    /// right pane's.
+    tree_rows: [Rc<TreeRows>; 2],
     /// The rows of the list of folders under a `›` of a path row.
     subfolder_rows: Rc<VecModel<FolderMenuRow>>,
     panes: [PaneModels; 2],
@@ -1708,6 +1753,14 @@ pub struct Controller {
     leaving: Cell<bool>,
     /// The theme chosen in the 보기 menu.
     theme: Cell<ThemeChoice>,
+    /// Where the settings say the window was (LAY-07), until it is put there once, as the
+    /// window system is about to make it ([`place_window`]).
+    saved_place: Cell<Option<SavedPlace>>,
+    /// The window's place and whether it is maximized, as last told (module `persist`): what
+    /// the settings keep of them once the window no longer tells (hidden at the end, or a
+    /// window system that never tells its place).
+    window_at: Cell<Option<(i32, i32)>>,
+    maximized: Cell<bool>,
     /// Stops a worker's look at copies and their originals once a newer look replaces it, and
     /// every look as the app ends.
     checks: RefCell<CopyChecks>,
@@ -1757,6 +1810,14 @@ impl fmt::Debug for Controller {
     }
 }
 
+/// The models of the rows of the sidebar's two trees, which `window` shows from now on.
+fn tree_models(window: &MainWindow) -> [Rc<TreeRows>; 2] {
+    let rows = [Rc::new(TreeRows::default()), Rc::new(TreeRows::default())];
+    window.set_tree(ModelRc::from(Rc::clone(&rows[LEFT])));
+    window.set_right_tree(ModelRc::from(Rc::clone(&rows[RIGHT])));
+    rows
+}
+
 /// What the job engine told before the state was there.
 #[derive(Debug)]
 enum Early {
@@ -1766,8 +1827,7 @@ enum Early {
 
 impl Controller {
     fn new(window: &MainWindow, jobs: Jobs, settings: Settings, saver: Saver) -> Controller {
-        let tree_rows = Rc::new(TreeRows::default());
-        window.set_tree(ModelRc::from(Rc::clone(&tree_rows)));
+        let tree_rows = tree_models(window);
         let panel = PanelPlace::default();
         window.take_models(&panel);
         let open_with_apps = Rc::new(VecModel::default());
@@ -1795,6 +1855,9 @@ impl Controller {
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
             theme: Cell::new(settings.theme),
+            saved_place: Cell::new(Some(settings.saved_place())),
+            window_at: Cell::new(settings.window_at),
+            maximized: Cell::new(settings.maximized),
             ledger: RefCell::new(SaveLedger::new(
                 settings.to_text().unwrap_or_default(),
                 saver.writable(),
@@ -2076,7 +2139,9 @@ impl Controller {
                 place.space = Some(space);
             }
         }
-        self.tree_rows.invalidate();
+        for rows in &self.tree_rows {
+            rows.invalidate();
+        }
         self.update(|state| {
             state.drive_space(path, space);
             Vec::new()
@@ -2143,16 +2208,22 @@ impl Controller {
         used
     }
 
-    /// A key while the sidebar's tree has the keys; `true` when it is used there. While the left
+    /// A key while tree `tree` has the keys; `true` when it is used there. While the left
     /// button is down, as from the panes ([`Controller::held_key`]). A key of the tree moves in
     /// it; one of the panes' rows is used, and does nothing; any other goes on to the window's
     /// keys (`false`), as from the panes.
-    fn tree_key(&self, text: &str, mods: Mods) -> bool {
+    fn tree_key(&self, tree: usize, text: &str, mods: Mods) -> bool {
         if let Some(used) = self.held_key(text, mods) {
             return used;
         }
         if let Some(key) = keys::tree_key(text, mods, Os::CURRENT) {
-            self.update(|state| state.tree_key(key));
+            self.update(|state| {
+                let mut effects = state.tree_has_keys(tree);
+                if effects.is_empty() {
+                    effects = state.tree_key(key);
+                }
+                effects
+            });
             return true;
         }
         keys::command_for(text, mods, Os::CURRENT).is_some_and(|command| command.acts_on_rows())
@@ -2205,43 +2276,44 @@ impl Controller {
         }
     }
 
-    /// A click on row `i` of the sidebar's list: a folder of the tree shows in the active pane,
-    /// the head of the group of recent folders folds it or opens it, a recent folder shows in the
-    /// active pane (a notice says so when it is gone).
-    fn tree_clicked(&self, i: i32) {
+    /// A click on row `i` of tree `tree`'s list: a folder of the tree shows in the pane the tree
+    /// follows, the head of the group of recent folders folds it or opens it, a recent folder
+    /// shows in that pane (a notice says so when it is gone).
+    fn tree_clicked(&self, tree: usize, i: i32) {
         let Some(i) = index(i) else {
             return;
         };
-        match self.tree_rows.slot_at(i) {
-            RowSlot::Tree(row) => self.update(|state| state.open_tree_row(row)),
+        match self.tree_rows[tree].slot_at(i) {
+            RowSlot::Tree(row) => self.update(|state| state.open_tree_row(tree, row)),
             RowSlot::RecentHead => self.update(AppState::toggle_recent_fold),
-            RowSlot::Recent(n) => self.update(|state| state.open_recent(n)),
+            RowSlot::Recent(n) => self.update(|state| state.open_recent(tree, n)),
         }
     }
 
-    /// An item of the menu of row `i` of the sidebar's list, which is no favorite
+    /// An item of the menu of row `i` of tree `tree`'s list, which is no favorite
     /// (`add-this`: its folder joins the favorites).
-    fn row_command(&self, i: i32, name: &str) {
+    fn row_command(&self, tree: usize, i: i32, name: &str) {
         let Some(i) = index(i) else {
             return;
         };
         if name != "add-this" {
             return;
         }
-        match self.tree_rows.slot_at(i) {
-            RowSlot::Tree(row) => self.update(|state| state.favorite_add_tree_row(row)),
+        match self.tree_rows[tree].slot_at(i) {
+            RowSlot::Tree(row) => self.update(|state| state.favorite_add_tree_row(tree, row)),
             RowSlot::Recent(n) => self.update(|state| state.favorite_add_recent(n)),
             RowSlot::RecentHead => {}
         }
     }
 
-    /// A click on the chevron of row `i` of the sidebar's list.
-    fn tree_toggled(&self, i: i32) {
+    /// A click on the chevron of row `i` of tree `tree`'s list: that tree alone opens or
+    /// closes it.
+    fn tree_toggled(&self, tree: usize, i: i32) {
         let Some(i) = index(i) else {
             return;
         };
-        if let RowSlot::Tree(row) = self.tree_rows.slot_at(i) {
-            self.update(|state| state.toggle_tree_row(row));
+        if let RowSlot::Tree(row) = self.tree_rows[tree].slot_at(i) {
+            self.update(|state| state.toggle_tree_row(tree, row));
         }
     }
 
@@ -3023,6 +3095,10 @@ impl Controller {
                     Vec::new()
                 });
             }
+            "toggle-toolbar" => self.update(AppState::toggle_toolbar),
+            "tree-shared" => self.update(|state| state.set_tree_mode(TreeMode::Shared)),
+            "tree-per-pane" => self.update(|state| state.set_tree_mode(TreeMode::PerPane)),
+            "tree-hidden" => self.update(|state| state.set_tree_mode(TreeMode::Hidden)),
             _ => return false,
         }
         true
@@ -3211,14 +3287,14 @@ impl Controller {
                 | Effect::FillPickPath(_)
                 | Effect::FocusFilter
                 | Effect::ShowViewMenu
-                | Effect::FocusTree
+                | Effect::FocusTree(_)
                 | Effect::FocusPanes
                 | Effect::FocusPanel
                 | Effect::ScrollTo { .. }
                 | Effect::ScrollSideways { .. }
                 | Effect::FitColumns(_)
-                | Effect::ScrollTree(_)
-                | Effect::ScrollRecent(_)
+                | Effect::ScrollTree { .. }
+                | Effect::ScrollRecent { .. }
                 | Effect::ScrollPickTree(_)
                 | Effect::ShowMenu(_)
                 | Effect::SystemMenu(_)
@@ -3400,14 +3476,14 @@ impl Controller {
             | Effect::FillPickPath(_)
             | Effect::FocusFilter
             | Effect::ShowViewMenu
-            | Effect::FocusTree
+            | Effect::FocusTree(_)
             | Effect::FocusPanes
             | Effect::FocusPanel
             | Effect::ScrollTo { .. }
             | Effect::ScrollSideways { .. }
             | Effect::FitColumns(_)
-            | Effect::ScrollTree(_)
-            | Effect::ScrollRecent(_)
+            | Effect::ScrollTree { .. }
+            | Effect::ScrollRecent { .. }
             | Effect::ScrollPickTree(_)
             | Effect::Job(_)
             | Effect::Toast { .. }
@@ -3430,7 +3506,7 @@ impl Controller {
         };
         match effect {
             Effect::FocusFilter => window.invoke_focus_filter(),
-            Effect::FocusTree => window.invoke_focus_tree(),
+            Effect::FocusTree(tree) => window.invoke_focus_tree(tree_number(*tree)),
             // The panel is under the panes, or in its own window, which comes to the front.
             Effect::FocusPanel => match self.shown_job_window() {
                 Some(own) => {
@@ -3476,7 +3552,10 @@ impl Controller {
             }
             Effect::FillPath { side, text } => self.fill_path(Some(side), text),
             Effect::FillPickPath(text) => self.fill_path(None, text),
-            Effect::FocusFilter | Effect::FocusTree | Effect::FocusPanes | Effect::FocusPanel => {
+            Effect::FocusFilter
+            | Effect::FocusTree(_)
+            | Effect::FocusPanes
+            | Effect::FocusPanel => {
                 self.give_keys(&effect);
             }
             Effect::ShowViewMenu => {
@@ -3495,8 +3574,7 @@ impl Controller {
                     window.invoke_fit_columns(side_number(side));
                 }
             }
-            Effect::ScrollTree(row) => self.scroll_sidebar(self.tree_rows.display_of(row)),
-            Effect::ScrollRecent(at) => self.scroll_sidebar(self.tree_rows.recent_display(at)),
+            Effect::ScrollTree { .. } | Effect::ScrollRecent { .. } => self.scroll_sidebar(&effect),
             Effect::ScrollPickTree(row) => {
                 if let Some(window) = self.window.upgrade() {
                     window.invoke_pick_tree_scroll_to(i32::try_from(row).unwrap_or(i32::MAX));
@@ -3590,15 +3668,20 @@ impl Controller {
                 links,
             } => window.invoke_show_drop_menu(moves, copies, links),
             MenuShown::Favorite { index } => {
-                let row = self
+                let (tree, row) = self.state.borrow().as_ref().map_or((LEFT, None), |state| {
+                    (state.tree_with_keys(), state.tree_cursor_row())
+                });
+                let row = row.map_or(0, |row| self.tree_rows[tree].display_of(row));
+                window.invoke_show_favorite_menu(tree_number(tree), number(index), number(row));
+            }
+            MenuShown::FavoritesBlank => {
+                let tree = self
                     .state
                     .borrow()
                     .as_ref()
-                    .and_then(AppState::tree_cursor_row)
-                    .map_or(0, |row| self.tree_rows.display_of(row));
-                window.invoke_show_favorite_menu(number(index), number(row));
+                    .map_or(LEFT, AppState::tree_with_keys);
+                window.invoke_show_favorites_blank_menu(tree_number(tree));
             }
-            MenuShown::FavoritesBlank => window.invoke_show_favorites_blank_menu(),
             // Both ways around the current folder; the window asks for the lines.
             MenuShown::History => window.invoke_show_visits_menu(-1),
         }
@@ -3631,10 +3714,17 @@ impl Controller {
         }
     }
 
-    /// Scrolls the sidebar so that its row `display` (its place in the list) shows.
-    fn scroll_sidebar(&self, display: usize) {
+    /// Scrolls the sidebar of a tree so that the row `scroll` names shows: a row of the tree
+    /// ([`Effect::ScrollTree`]), or the keyboard cursor in its group of recent folders
+    /// ([`Effect::ScrollRecent`]), at their places in its list.
+    fn scroll_sidebar(&self, scroll: &Effect) {
+        let (tree, display) = match *scroll {
+            Effect::ScrollTree { tree, row } => (tree, self.tree_rows[tree].display_of(row)),
+            Effect::ScrollRecent { tree, at } => (tree, self.tree_rows[tree].recent_display(at)),
+            _ => return,
+        };
         if let Some(window) = self.window.upgrade() {
-            window.invoke_tree_scroll_to(number(display));
+            window.invoke_tree_scroll_to(tree_number(tree), number(display));
         }
     }
 
@@ -3709,8 +3799,10 @@ impl Controller {
             if self.shown_drag.replace(drag) != drag {
                 window.set_drag_data(ui_bridge::drag_payload(drag));
             }
-            self.tree_rows.set_recent(recent_block(state));
-            self.tree_rows.sync(state.tree(), state.places());
+            for (tree, rows) in self.tree_rows.iter().enumerate() {
+                rows.set_recent(recent_block(state, tree));
+                rows.sync(&state.trees()[tree], state.places());
+            }
             window.set_tree_cursor(self.sidebar_cursor(state));
             window.set_preview(self.preview.view(
                 state.preview(),
@@ -3735,14 +3827,14 @@ impl Controller {
         self.schedule_thumbs();
     }
 
-    /// The place in the sidebar's list of the keyboard cursor, while it lies on a row of the
-    /// tree or in the group of recent folders; -1 for none.
+    /// The place in the list of the tree with the keys of the keyboard cursor, while it lies on
+    /// a row of that tree or in the group of recent folders; -1 for none. Only the tree that
+    /// has the keys shows it.
     fn sidebar_cursor(&self, state: &AppState) -> i32 {
+        let rows = &self.tree_rows[state.tree_with_keys()];
         let display = match (state.tree_cursor_row(), state.recent_cursor()) {
-            (Some(row), _) => self.tree_rows.display_of(row),
-            (None, Some(at)) if !state.recent_folders().is_empty() => {
-                self.tree_rows.recent_display(at)
-            }
+            (Some(row), _) => rows.display_of(row),
+            (None, Some(at)) if !state.recent_folders().is_empty() => rows.recent_display(at),
             _ => return -1,
         };
         i32::try_from(display).unwrap_or(-1)
@@ -4307,15 +4399,28 @@ fn show_layout(window: &MainWindow, layout: Layout, sync: bool) {
     window.set_dual_pane(layout.dual);
     window.set_stacked(layout.stacked);
     window.set_split_share(layout.share());
-    window.set_show_tree(layout.tree);
+    window.set_show_tree(layout.tree != TreeMode::Hidden);
+    window.set_tree_per_pane(layout.tree == TreeMode::PerPane);
     window.set_show_preview(layout.preview);
     window.set_jobs_window(layout.jobs_window);
+    window.set_show_toolbar(layout.toolbar);
     window.set_sync_navigation(sync);
 }
 
 /// The number Slint uses for pane `side`.
 fn side_number(side: usize) -> i32 {
     i32::from(side == RIGHT)
+}
+
+/// The number Slint uses for tree `tree`: 0 the shared one or the left pane's, 1 the right
+/// pane's.
+fn tree_number(tree: usize) -> i32 {
+    i32::from(tree == RIGHT)
+}
+
+/// The tree Slint's number `tree` names ([`tree_number`]).
+fn tree_index(tree: i32) -> usize {
+    if tree == 1 { RIGHT } else { LEFT }
 }
 
 #[cfg(test)]

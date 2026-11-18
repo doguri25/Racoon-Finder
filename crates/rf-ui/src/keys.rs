@@ -163,9 +163,10 @@ pub enum Command {
     QuickLook,
     /// Show or hide the preview panel.
     TogglePreview,
-    /// Show or hide the folder tree.
+    /// Hide the folder tree, or show it again in the mode it showed in last (LAY-03).
     ToggleTree,
-    /// The sidebar's folder tree takes the keys ([`tree_key`]); shown first if it is hidden.
+    /// The first folder tree that shows takes the keys ([`tree_key`]): the shared one, or the
+    /// left pane's with a tree for each pane. A hidden tree is passed by.
     FocusTree,
     /// One pane or two.
     ToggleDualPane,
@@ -267,12 +268,14 @@ pub enum TreeKey {
     Expand,
     /// ←: closes an open row, or goes to the folder above.
     Collapse,
-    /// Enter (and the system's key to open): the active pane shows the row's folder.
+    /// Enter (and the system's key to open): the pane the tree follows shows the row's folder
+    /// (the active one for the shared tree, the tree's own for a pane's tree).
     Open,
     /// Esc, Tab, Shift+Tab: back to the active pane.
     Leave,
-    /// The key that gave the tree the keys (F6): on to the next part of the window, the job
-    /// panel while it shows ([`PanelKey`]), else back to the active pane.
+    /// The key that gave the tree the keys (F6): on to the next part of the window, the right
+    /// pane's tree from the left pane's, else the job panel while it shows ([`PanelKey`]), else
+    /// back to the active pane.
     Next,
     /// The menu key, Shift+F10 (macOS ⌃↩): the menu of the favorite the cursor is on; on any
     /// other row, the menu of the sidebar's empty part.

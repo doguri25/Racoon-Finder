@@ -1,10 +1,15 @@
 //! The layout of the main window, and the commands between its two panes. A child of
 //! [`state`](super), so these methods see the fields of [`AppState`].
 //!
-//! The [`Layout`] (LAY-01~03, LAY-06, LAY-09): one pane or two, side by side or one above the
-//! other, how the divider shares the room between them, whether the sidebar with the folder
-//! tree shows (LAY-03 a and c), the preview panel's place (LAY-06), and whether the job panel
-//! shows under the panes or in a window of its own (LAY-09). The settings keep it.
+//! The [`Layout`] (LAY-01~03, LAY-06, LAY-09, LAY-10): one pane or two, side by side or one
+//! above the other, how the divider shares the room between them, how the sidebar with the
+//! folder tree shows ([`TreeMode`], LAY-03: one tree for the active pane, a tree beside each
+//! pane, or none), the preview panel's place (LAY-06), whether the job panel shows under the
+//! panes or in a window of its own (LAY-09), and whether the toolbar shows (LAY-10). The
+//! settings keep it.
+//!
+//! Where the window opens (LAY-07): [`placement`] puts the place the settings kept for it on the
+//! screens there are now.
 //!
 //! The commands between the panes (LAY-05): swapping their tab sets, opening the active
 //! pane's folder in the other one, and navigation sync. The last two act on the other pane, so
@@ -50,6 +55,32 @@ pub const MAX_SHARE: f64 = 0.9;
 /// An even split: a double click on the divider, and the 보기 menu, go back to it.
 pub const EVEN_SHARE: f64 = 0.5;
 
+/// How the folder tree shows (LAY-03), with the sidebar it is in: the places (the favorites,
+/// the recent folders, the drives) and the folders open below them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TreeMode {
+    /// One tree, at the window's left, that follows the pane with the keyboard (LAY-03 a).
+    #[default]
+    Shared,
+    /// A tree beside each pane that follows that pane alone (LAY-03 b): the left pane's is
+    /// tree 0, the right pane's tree 1, each opened and closed on its own. With one pane, the
+    /// tree of the pane that shows.
+    PerPane,
+    /// No tree, and no sidebar (LAY-03 c).
+    Hidden,
+}
+
+impl TreeMode {
+    /// This mode, where it shows a tree; the shared tree for none.
+    #[must_use]
+    pub fn shown(self) -> TreeMode {
+        match self {
+            TreeMode::Hidden => TreeMode::Shared,
+            shown => shown,
+        }
+    }
+}
+
 /// How the main window lays out its panes and side panels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[expect(
@@ -63,27 +94,30 @@ pub struct Layout {
     /// The two panes one above the other, the left one on top, rather than side by side
     /// (LAY-02).
     pub stacked: bool,
-    /// The sidebar, with the places and the folder tree that follows the active pane, shows
-    /// (LAY-03 a); or not (LAY-03 c).
-    pub tree: bool,
+    /// How the folder tree shows (LAY-03).
+    pub tree: TreeMode,
     /// The preview panel's place shows, at the right end (LAY-06).
     pub preview: bool,
     /// The job panel shows in a window of its own rather than under the panes (LAY-09).
     pub jobs_window: bool,
+    /// The toolbar shows, the row of buttons over the panes (LAY-10). Hidden, the panes' own
+    /// path rows (the address bars) stay.
+    pub toolbar: bool,
     /// The first pane's share of the room both have, in thousandths: from 100 to 900.
     thousandths: u16,
 }
 
 impl Default for Layout {
-    /// Two panes side by side, split evenly, the tree shown, the preview panel not, and the
-    /// job panel under the panes.
+    /// Two panes side by side, split evenly, the shared tree shown, the preview panel not, the
+    /// job panel under the panes, and the toolbar.
     fn default() -> Layout {
         Layout {
             dual: true,
             stacked: false,
-            tree: true,
+            tree: TreeMode::Shared,
             preview: false,
             jobs_window: false,
+            toolbar: true,
             thousandths: 500,
         }
     }
@@ -121,6 +155,34 @@ impl Layout {
     /// the active one alone with one.
     pub fn shows(&self, side: usize, active: usize) -> bool {
         self.dual || side == active
+    }
+
+    /// Whether tree `tree` shows while pane `active` has the keyboard: tree 0 alone as the
+    /// shared one, the tree of each pane that shows with a tree for each, none while hidden.
+    pub fn tree_shows(&self, tree: usize, active: usize) -> bool {
+        match self.tree {
+            TreeMode::Shared => tree == LEFT,
+            TreeMode::PerPane => self.shows(tree, active),
+            TreeMode::Hidden => false,
+        }
+    }
+
+    /// The pane tree `tree` follows while pane `active` has the keyboard: the active one for
+    /// the shared tree, its own pane for a tree of each pane.
+    pub fn tree_pane(&self, tree: usize, active: usize) -> usize {
+        match self.tree {
+            TreeMode::PerPane => tree.min(RIGHT),
+            TreeMode::Shared | TreeMode::Hidden => active,
+        }
+    }
+
+    /// The trees that show while pane `active` has the keyboard, in the order F6 visits them:
+    /// the left one first.
+    pub fn shown_trees(&self, active: usize) -> Vec<usize> {
+        [LEFT, RIGHT]
+            .into_iter()
+            .filter(|&tree| self.tree_shows(tree, active))
+            .collect()
     }
 }
 
@@ -163,16 +225,44 @@ impl AppState {
         Vec::new()
     }
 
-    /// Shows or hides the sidebar. Hidden, its tree stops following the active pane
-    /// ([`AppState::follow_active`]), and gives the keys back to the panes if it had them;
-    /// shown again, it finds the active pane's folder.
+    /// Ctrl+B (macOS ⌃⌘S): hides the sidebar, or shows it again in the mode it showed in last
+    /// (the shared tree when it has not shown since the start). See [`AppState::set_tree_mode`].
     pub(super) fn toggle_tree(&mut self) -> Vec<Effect> {
-        self.layout.tree = !self.layout.tree;
-        if self.layout.tree {
-            Vec::new()
-        } else {
-            vec![Effect::FocusPanes]
+        let mode = match self.layout.tree {
+            TreeMode::Hidden => self.tree_back,
+            TreeMode::Shared | TreeMode::PerPane => TreeMode::Hidden,
+        };
+        self.set_tree_mode(mode)
+    }
+
+    /// 보기 ▸ 폴더 트리 ▸ 공유 트리, 패널별 트리 or 트리 숨김 (LAY-03): the sidebar shows in
+    /// `mode`. A tree that no longer shows stops following its pane
+    /// ([`AppState::follow_active`]); hidden, the sidebar gives the keys back to the panes if
+    /// one of its trees had them (the window does the same for a tree of a pane that goes,
+    /// `TreeBox.gone`). Each tree that shows from now on finds its pane's folder, and keeps
+    /// what is open in it: the left pane's tree is the shared one.
+    pub fn set_tree_mode(&mut self, mode: TreeMode) -> Vec<Effect> {
+        self.layout.tree = mode;
+        if mode == TreeMode::Hidden {
+            return vec![Effect::FocusPanes];
         }
+        self.tree_back = mode;
+        Vec::new()
+    }
+
+    /// 보기 ▸ 툴바 (LAY-10): the toolbar shows, or not. The panes keep their path rows (the
+    /// address bars) either way, and every button of the toolbar has its key.
+    pub fn toggle_toolbar(&mut self) -> Vec<Effect> {
+        self.layout.toolbar = !self.layout.toolbar;
+        Vec::new()
+    }
+
+    /// Ctrl+F (macOS ⌘F), F3, Ctrl+E: the toolbar's filter box (이 폴더에서 거르기) takes the
+    /// keys. A hidden toolbar shows again for it, as Finder's toolbar does for its search field:
+    /// the box is in it.
+    pub(super) fn focus_filter(&mut self) -> Vec<Effect> {
+        self.layout.toolbar = true;
+        vec![Effect::FocusFilter]
     }
 
     /// Shows or hides the preview panel. Turned on in a window too narrow for it, a notice says
@@ -445,6 +535,172 @@ pub(super) struct SyncWait {
 /// The notice for a command for the other pane while one pane shows.
 fn one_pane_only() -> Vec<Effect> {
     vec![Effect::Notice(words::one_pane_only().to_owned())]
+}
+
+/// A screen of the desktop as the window system tells it (LAY-07): its top left corner on the
+/// desktop and its size, in physical pixels, and how many physical pixels a logical one takes
+/// there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Screen {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+}
+
+/// Where the window was when the app last ended, as the settings keep it (LAY-07): its outer
+/// top left corner on the desktop in physical pixels (`None` before the first save, and where
+/// the window system does not tell it, as on Wayland), its size in logical pixels (the last
+/// one it had while neither maximized nor full screen, kept between `settings::MIN_WINDOW` and
+/// `settings::MAX_WINDOW`), and whether it was maximized.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SavedPlace {
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
+    pub maximized: bool,
+}
+
+/// Where the window opens ([`placement`]): its outer top left corner (`None`: where the window
+/// system puts a new window), its size in logical pixels (`None`: the window's own), and
+/// whether it opens maximized, on the screen of that corner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Placement {
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
+    pub maximized: bool,
+}
+
+/// The size the main window opens at without a saved one, in logical pixels (its
+/// `start-width` and `start-height`).
+pub const DEFAULT_WINDOW: (u32, u32) = (1280, 800);
+
+/// How much of the window, in logical pixels across and down, has to be on a screen for the
+/// window to count as on it: enough of its title bar to take hold of and drag.
+pub const ON_SCREEN: (u32, u32) = (64, 32);
+
+/// Where the window opens on `screens` (the first one the system's main screen), from where it
+/// was (`saved`), as LAY-07 has it:
+///
+/// - on a screen, it opens where it was; partly off it (by more than all but [`ON_SCREEN`] of
+///   it), it is moved onto the screen that holds most of it, as little as it takes to be whole
+///   there;
+/// - off every screen (the screen it was on is gone), or nowhere known, it opens where the
+///   window system puts a new window;
+/// - larger than the screen it opens on, it is made as large as that screen, but never smaller
+///   than `settings::MIN_WINDOW`;
+/// - maximized, it opens maximized on that screen (its size the one it goes back to).
+///
+/// Without a screen the system tells of, the place is as saved: nothing to check it against.
+/// Pure: it asks the system nothing.
+pub fn placement(saved: SavedPlace, screens: &[Screen]) -> Placement {
+    let Some(main) = screens.first() else {
+        return Placement {
+            position: saved.position,
+            size: saved.size,
+            maximized: saved.maximized,
+        };
+    };
+    let wanted = saved.size.unwrap_or(DEFAULT_WINDOW);
+    let on = saved.position.and_then(|corner| {
+        screens
+            .iter()
+            .filter_map(|screen| {
+                let (across, down) = overlap(corner, physical(wanted, screen.scale), screen);
+                let least = physical(ON_SCREEN, screen.scale);
+                (across >= least.0 && down >= least.1)
+                    .then(|| (u64::from(across) * u64::from(down), screen))
+            })
+            .max_by_key(|&(area, _)| area)
+            .map(|(_, screen)| screen)
+    });
+    let (position, screen) = match (saved.position, on) {
+        (Some(corner), Some(screen)) => {
+            let size = physical(fit(wanted, screen), screen.scale);
+            (Some(inside(corner, size, screen)), screen)
+        }
+        _ => (None, main),
+    };
+    Placement {
+        position,
+        size: Some(fit(wanted, screen)),
+        maximized: saved.maximized,
+    }
+}
+
+/// `size` (logical) made no larger than `screen`, and no smaller than the window's least.
+fn fit(size: (u32, u32), screen: &Screen) -> (u32, u32) {
+    let least = crate::settings::MIN_WINDOW;
+    let room = logical((screen.width, screen.height), screen.scale);
+    (
+        size.0.min(room.0).max(least.0),
+        size.1.min(room.1).max(least.1),
+    )
+}
+
+/// The top left corner `corner` of a window of `size` (physical) moved as little as it takes
+/// for the window to be whole on `screen`; at the screen's corner when it is larger.
+fn inside(corner: (i32, i32), size: (u32, u32), screen: &Screen) -> (i32, i32) {
+    let along = |at: i32, length: u32, start: i32, room: u32| {
+        let end = i64::from(start) + i64::from(room) - i64::from(length);
+        let end = i32::try_from(end.max(i64::from(start))).unwrap_or(start);
+        at.clamp(start, end)
+    };
+    (
+        along(corner.0, size.0, screen.x, screen.width),
+        along(corner.1, size.1, screen.y, screen.height),
+    )
+}
+
+/// How much of a window at `corner` of `size` (physical) is on `screen`, across and down.
+fn overlap(corner: (i32, i32), size: (u32, u32), screen: &Screen) -> (u32, u32) {
+    let span = |at: i32, length: u32, start: i32, room: u32| {
+        let low = i64::from(at).max(i64::from(start));
+        let high = (i64::from(at) + i64::from(length)).min(i64::from(start) + i64::from(room));
+        u32::try_from((high - low).max(0)).unwrap_or(u32::MAX)
+    };
+    (
+        span(corner.0, size.0, screen.x, screen.width),
+        span(corner.1, size.1, screen.y, screen.height),
+    )
+}
+
+/// `size` in logical pixels as physical ones on a screen of `scale`.
+fn physical(size: (u32, u32), scale: f64) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let one = |length: u32| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a length of a window on a screen, kept in u32 by the min"
+        )]
+        let pixels = (f64::from(length) * scale).round().min(f64::from(u32::MAX)) as u32;
+        pixels
+    };
+    (one(size.0), one(size.1))
+}
+
+/// `size` in physical pixels as logical ones on a screen of `scale`.
+fn logical(size: (u32, u32), scale: f64) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let one = |length: u32| {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a screen's length over a scale above 0, kept in u32 by the min"
+        )]
+        let pixels = (f64::from(length) / scale).floor().min(f64::from(u32::MAX)) as u32;
+        pixels
+    };
+    (one(size.0), one(size.1))
 }
 
 /// The folder among `entries` that navigation sync takes for `name` on `os`: the one of that

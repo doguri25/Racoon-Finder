@@ -95,7 +95,10 @@ pub use drag::{
 };
 pub use favorites::{RECENT_FOLDERS, RecentAt, Unkept};
 use layout::Step;
-pub use layout::{EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE};
+pub use layout::{
+    DEFAULT_WINDOW, EVEN_SHARE, Layout, MAX_SHARE, MIN_SHARE, ON_SCREEN, Placement, SavedPlace,
+    Screen, TreeMode, placement,
+};
 pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
 pub use panel::PanelButton;
 pub use pointer::{DOUBLE_CLICK, RowPress, SWIPE_DISTANCE, SlowClick, SlowTarget};
@@ -200,8 +203,9 @@ pub enum Effect {
     FocusFilter,
     /// Open the 보기 menu.
     ShowViewMenu,
-    /// Give the sidebar's folder tree the keys (module `state::sidebar`).
-    FocusTree,
+    /// Give folder tree `n` the keys (module `state::sidebar`): 0 the shared one or the left
+    /// pane's, 1 the right pane's.
+    FocusTree(usize),
     /// Give the keys back to the panes (from the tree, or from a part of the window that is
     /// gone).
     FocusPanes,
@@ -220,11 +224,12 @@ pub enum Effect {
     /// ([`Loader::list_folders`](crate::loader::Loader::list_folders)); the listing comes
     /// back to [`AppState::loaded`].
     LoadChildren(LoadRequest),
-    /// Scroll the folder tree so that row `row`, the active pane's folder just found there,
-    /// shows.
-    ScrollTree(usize),
-    /// Scroll the sidebar so that the keyboard cursor in the group of recent folders shows.
-    ScrollRecent(RecentAt),
+    /// Scroll folder tree `tree` so that its row `row` shows: its pane's folder just found
+    /// there, or its keyboard cursor.
+    ScrollTree { tree: usize, row: usize },
+    /// Scroll the sidebar of tree `tree` so that the keyboard cursor in the group of recent
+    /// folders, at `at`, shows.
+    ScrollRecent { tree: usize, at: RecentAt },
     /// Find out on a worker thread which of these folders (the recent ones and the favorites)
     /// are folders still (`std::fs::metadata`), then call [`AppState::folders_checked`].
     CheckFolders(Vec<VPath>),
@@ -353,10 +358,18 @@ pub struct AppState {
     sync: bool,
     /// What navigation sync waits for the other pane's listing to decide.
     sync_wait: Option<layout::SyncWait>,
-    /// The sidebar's folder tree, whose roots are the places.
-    tree: Tree,
-    /// The node of the tree's keyboard cursor ([`sidebar`]), once the tree had the keys.
+    /// The sidebar's folder trees, whose roots are the places: tree 0 is the shared one, and
+    /// the left pane's while each pane has its own; tree 1 the right pane's then
+    /// ([`Layout::tree_shows`]).
+    trees: [Tree; 2],
+    /// The node of the keyboard cursor ([`sidebar`]) in tree [`tree_keys`](Self::tree_keys),
+    /// once that tree had the keys.
     tree_cursor: Option<NodeId>,
+    /// The tree that had the keys last, whose keyboard cursor `tree_cursor` is.
+    tree_keys: usize,
+    /// The mode the sidebar shows in again after it was hidden (Ctrl+B): the last one it
+    /// showed in.
+    tree_back: TreeMode,
     /// The folder tree of the destination picker, whose roots are the places too: made anew
     /// for each picker, and dropped when it closes.
     pick_tree: Tree,
@@ -551,8 +564,10 @@ impl AppState {
             layout: session.layout,
             sync: false,
             sync_wait: None,
-            tree: Tree::new(filter),
+            trees: [Tree::new(filter), Tree::new(filter)],
             tree_cursor: None,
+            tree_keys: LEFT,
+            tree_back: session.layout.tree.shown(),
             pick_tree: Tree::new(filter),
             places: Vec::new(),
             kept: favorites::Kept::default(),
@@ -672,9 +687,21 @@ impl AppState {
         self.show_hidden
     }
 
-    /// The sidebar's folder tree.
+    /// The sidebar's first folder tree: the shared one, or the left pane's.
     pub fn tree(&self) -> &Tree {
-        &self.tree
+        &self.trees[LEFT]
+    }
+
+    /// Both folder trees of the sidebar: the shared one (or the left pane's), then the right
+    /// pane's ([`Layout::tree_shows`] says which show).
+    pub fn trees(&self) -> &[Tree; 2] {
+        &self.trees
+    }
+
+    /// The pane tree `tree` follows: the active one for the shared tree, its own pane for a
+    /// tree of each pane.
+    pub fn tree_pane(&self, tree: usize) -> usize {
+        self.layout.tree_pane(tree, self.active)
     }
 
     /// The generation of every tab's last request, of every listing the trees wait for and of
@@ -684,7 +711,7 @@ impl AppState {
             .iter()
             .flat_map(Pane::tabs)
             .map(Tab::generation)
-            .chain(self.tree.generations())
+            .chain(self.trees.iter().flat_map(Tree::generations))
             .chain(self.pick_tree.generations())
             .chain(self.address_generations())
             .collect()
@@ -740,7 +767,7 @@ impl AppState {
             Command::ReopenTab => self.reopen_tab(side),
             Command::MoveTabLeft => self.shift_tab(side, self.panes[side].active(), -1),
             Command::MoveTabRight => self.shift_tab(side, self.panes[side].active(), 1),
-            Command::FocusFilter => vec![Effect::FocusFilter],
+            Command::FocusFilter => self.focus_filter(),
             Command::ViewMenu => vec![Effect::ShowViewMenu],
             Command::Open => self.open_cursor(side),
             Command::Up => self.go(side, Step::Up),
@@ -1051,44 +1078,55 @@ impl AppState {
         Effect::ReadSpace { tabs, drives }
     }
 
-    /// Shows the folder of row `row` of the tree in the active pane (a click on the row). The
-    /// row is the tree's selection from then on, even when another row shows the same folder.
-    pub fn open_tree_row(&mut self, row: usize) -> Vec<Effect> {
-        let Some(id) = self.tree.node_at(row) else {
+    /// Shows the folder of row `row` of tree `tree` in the pane the tree follows (a click on
+    /// the row): the active pane for the shared tree, the tree's own pane, which gets the
+    /// keyboard, for a tree of each pane. The row is the tree's selection from then on, even
+    /// when another row shows the same folder.
+    pub fn open_tree_row(&mut self, tree: usize, row: usize) -> Vec<Effect> {
+        if tree > RIGHT {
+            return Vec::new();
+        }
+        let Some(id) = self.trees[tree].node_at(row) else {
             return Vec::new();
         };
-        let Some(folder) = self.tree.node(id).map(|node| node.path.clone()) else {
+        let Some(folder) = self.trees[tree].node(id).map(|node| node.path.clone()) else {
             return Vec::new();
         };
         if self.kept.missing.contains(&folder) {
             return vec![Effect::Notice(words::start_folder_gone(&folder))];
         }
-        self.tree.select(id);
+        self.trees[tree].select(id);
+        self.activate_tree_pane(tree);
         self.go_to(folder)
     }
 
-    /// Opens or closes row `row` of the tree (a click on its chevron); the first opening
-    /// lists the folder.
-    pub fn toggle_tree_row(&mut self, row: usize) -> Vec<Effect> {
-        match self.tree.node_at(row) {
-            Some(id) => self.with_tree(|tree| tree.toggle(id).into_iter().collect()),
+    /// Opens or closes row `row` of tree `tree` (a click on its chevron); the first opening
+    /// lists the folder. The other tree stays as it is.
+    pub fn toggle_tree_row(&mut self, tree: usize, row: usize) -> Vec<Effect> {
+        match self.trees.get(tree).and_then(|shown| shown.node_at(row)) {
+            Some(id) => self.with_tree(tree, |shown| shown.toggle(id).into_iter().collect()),
             None => Vec::new(),
         }
     }
 
-    /// Makes the tree follow the active pane (LAY-03 a): when the folder the active pane
-    /// shows is not the one the tree follows (the pane, its tab or its folder changed), the
-    /// tree opens the folders on the way to it and selects it. The controller calls this
-    /// after every change; it does nothing while the folder stays the same, so a folder the
-    /// user closed in the tree stays closed, and nothing while the tree is hidden, which finds
-    /// the folder once it shows again.
+    /// Makes each tree that shows follow its pane (LAY-03): the shared tree the active pane,
+    /// a tree of each pane that pane. When the folder its pane shows is not the one the tree
+    /// follows (the pane, its tab or its folder changed), the tree opens the folders on the
+    /// way to it and selects it. The controller calls this after every change; it does nothing
+    /// while the folder stays the same, so a folder the user closed in a tree stays closed, and
+    /// nothing to a tree that does not show, which finds its pane's folder once it shows again.
+    /// The trees list their folders on the loader's workers, as the panes do.
     pub fn follow_active(&mut self) -> Vec<Effect> {
-        let location = self.tab(self.active).location();
-        if !self.layout.tree || self.tree.target() == Some(location) {
-            return Vec::new();
+        let mut effects = Vec::new();
+        for tree in self.layout.shown_trees(self.active) {
+            let location = self.tab(self.tree_pane(tree)).location();
+            if self.trees[tree].target() == Some(location) {
+                continue;
+            }
+            let location = location.clone();
+            effects.extend(self.with_tree(tree, |shown| shown.reveal(&location)));
         }
-        let location = location.clone();
-        self.with_tree(|tree| tree.reveal(&location))
+        effects
     }
 
     /// Takes an event of the loader. A rescan lists the folder again; a vanished folder is
@@ -1129,11 +1167,19 @@ impl AppState {
                 let listed = &self.panes[side].tabs()[tab];
                 if new_rows && listed.status() == LoadStatus::Ready {
                     let (folder, entries) = (listed.location(), listed.all());
-                    let before = (self.tree.selected(), self.pick_tree.selected());
-                    let tree = self.tree.sync_folder(folder, entries);
+                    let before = [LEFT, RIGHT].map(|tree| self.trees[tree].selected());
+                    let picked = self.pick_tree.selected();
+                    let synced =
+                        [LEFT, RIGHT].map(|tree| self.trees[tree].sync_folder(folder, entries));
                     let pick = self.pick_tree.sync_folder(folder, entries);
-                    effects.extend(self.tree_effects(before.0, tree.unwrap_or_default()));
-                    effects.extend(self.pick_tree_effects(before.1, pick.unwrap_or_default()));
+                    for (tree, requests) in synced.into_iter().enumerate() {
+                        effects.extend(self.tree_effects(
+                            tree,
+                            before[tree],
+                            requests.unwrap_or_default(),
+                        ));
+                    }
+                    effects.extend(self.pick_tree_effects(picked, pick.unwrap_or_default()));
                 }
                 let shows = tab == self.panes[side].active();
                 effects.extend(
@@ -1277,7 +1323,8 @@ impl AppState {
     }
 
     /// Takes an event of a listing of a folder tree: the picker's, when it waits for it, or
-    /// else the sidebar's. One that no node waits for is dropped. A listing that failed leaves
+    /// else the sidebar's tree that does (the second one when it does, else the first). One
+    /// that no node waits for is dropped. A listing that failed leaves
     /// the node empty, with no notice. Then a tab that shows the folder, whole, gives the node
     /// its folders as they are now when the tree's listing failed, or when the tab's watch
     /// told of a change while that listing was on its way ([`Tree::listing_is_behind`]),
@@ -1288,10 +1335,15 @@ impl AppState {
             .pick_tree
             .generations()
             .any(|waited| waited == generation);
+        let side = usize::from(
+            self.trees[RIGHT]
+                .generations()
+                .any(|waited| waited == generation),
+        );
         let tree = if in_picker {
             &self.pick_tree
         } else {
-            &self.tree
+            &self.trees[side]
         };
         let failed = matches!(event, LoadEvent::Failed { .. });
         let folder = tree
@@ -1317,7 +1369,7 @@ impl AppState {
         let mut effects = if in_picker {
             self.with_pick_tree(take)
         } else {
-            self.with_tree(take)
+            self.with_tree(side, take)
         };
         let Some(folder) = folder else {
             return effects;
@@ -1335,30 +1387,39 @@ impl AppState {
             let requests = self.pick_tree.sync_folder(&folder, shown.all());
             effects.extend(self.pick_tree_effects(before, requests.unwrap_or_default()));
         } else {
-            let before = self.tree.selected();
-            let requests = self.tree.sync_folder(&folder, shown.all());
-            effects.extend(self.tree_effects(before, requests.unwrap_or_default()));
+            let before = self.trees[side].selected();
+            let requests = self.trees[side].sync_folder(&folder, shown.all());
+            effects.extend(self.tree_effects(side, before, requests.unwrap_or_default()));
         }
         effects
     }
 
-    /// Changes the tree with `f` and turns what it asks for into effects
+    /// Changes tree `tree` with `f` and turns what it asks for into effects
     /// ([`AppState::tree_effects`]).
-    fn with_tree(&mut self, f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>) -> Vec<Effect> {
-        let before = self.tree.selected();
-        let requests = f(&mut self.tree);
-        self.tree_effects(before, requests)
+    fn with_tree(
+        &mut self,
+        tree: usize,
+        f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>,
+    ) -> Vec<Effect> {
+        let before = self.trees[tree].selected();
+        let requests = f(&mut self.trees[tree]);
+        self.tree_effects(tree, before, requests)
     }
 
-    /// The effects of `requests`, the listings the tree asked for in a change: those listings,
-    /// and a scroll to the row of the active pane's folder when the tree has just found it
+    /// The effects of `requests`, the listings tree `tree` asked for in a change: those
+    /// listings, and a scroll to the row of its pane's folder when the tree has just found it
     /// (its selection was `before` the change).
-    fn tree_effects(&self, before: Option<NodeId>, requests: Vec<LoadRequest>) -> Vec<Effect> {
+    fn tree_effects(
+        &self,
+        tree: usize,
+        before: Option<NodeId>,
+        requests: Vec<LoadRequest>,
+    ) -> Vec<Effect> {
         let mut effects: Vec<Effect> = requests.into_iter().map(Effect::LoadChildren).collect();
-        if self.tree.selected() != before
-            && let Some(row) = self.tree.selected_row()
+        if self.trees[tree].selected() != before
+            && let Some(row) = self.trees[tree].selected_row()
         {
-            effects.push(Effect::ScrollTree(row));
+            effects.push(Effect::ScrollTree { tree, row });
         }
         effects
     }
@@ -1429,7 +1490,8 @@ impl AppState {
             }
         }
         let show = self.show_hidden;
-        let mut effects = self.with_tree(|tree| tree.set_show_hidden(show));
+        let mut effects = self.with_tree(LEFT, |tree| tree.set_show_hidden(show));
+        effects.extend(self.with_tree(RIGHT, |tree| tree.set_show_hidden(show)));
         effects.extend(self.with_pick_tree(|tree| tree.set_show_hidden(show)));
         effects
     }

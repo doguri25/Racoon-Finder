@@ -655,7 +655,7 @@ fn the_tree_follows_the_active_pane() {
         generation: request.generation,
         entries: vec![dir("a"), dir("b"), dir("c"), file("x.txt")],
     });
-    assert_eq!(effects, [Effect::ScrollTree(1)]);
+    assert_eq!(effects, [Effect::ScrollTree { tree: 0, row: 1 }]);
     assert_eq!(tree_labels(&state), ["임시", "a", "b", "c"]);
     assert!(!state.generations().contains(&request.generation));
     // Nothing to do while the pane stays where it is.
@@ -663,9 +663,12 @@ fn the_tree_follows_the_active_pane() {
 
     // The right pane gets the keyboard: the tree selects its folder.
     press(&mut state, &special(Key::Tab), NONE);
-    assert_eq!(state.follow_active(), [Effect::ScrollTree(2)]);
+    assert_eq!(
+        state.follow_active(),
+        [Effect::ScrollTree { tree: 0, row: 2 }]
+    );
     // A click on a row shows its folder in the active pane; the row is selected already.
-    let effects = state.open_tree_row(3);
+    let effects = state.open_tree_row(0, 3);
     assert_eq!(the_load(&effects).path, folder("c"));
     assert_eq!(state.active(), RIGHT);
     assert_eq!(state.tree().selected_row(), Some(3));
@@ -676,19 +679,19 @@ fn the_tree_follows_the_active_pane() {
     state.go_to(elsewhere);
     assert_eq!(state.follow_active(), []);
     assert_eq!(state.tree().selected(), None);
-    assert_eq!(state.open_tree_row(99), []);
+    assert_eq!(state.open_tree_row(0, 99), []);
 }
 
 #[test]
 fn tree_rows_open_once_and_follow_the_hidden_setting() {
     let mut state = ready(vec![], vec![]);
     assert_eq!(state.set_places(&[drive("임시", &temp())]), []);
-    let request = the_tree_load(&state.toggle_tree_row(0));
+    let request = the_tree_load(&state.toggle_tree_row(0, 0));
     assert_eq!(request.path, temp());
     // Closing and opening again asks for nothing more.
-    assert_eq!(state.toggle_tree_row(0), []);
-    assert_eq!(state.toggle_tree_row(0), []);
-    assert_eq!(state.toggle_tree_row(99), []);
+    assert_eq!(state.toggle_tree_row(0, 0), []);
+    assert_eq!(state.toggle_tree_row(0, 0), []);
+    assert_eq!(state.toggle_tree_row(0, 99), []);
     state.loaded(LoadEvent::Listed {
         generation: request.generation,
         entries: vec![
@@ -708,7 +711,7 @@ fn tree_rows_open_once_and_follow_the_hidden_setting() {
     assert_eq!(hidden, [false, true, false]);
 
     // A listing that failed leaves the row empty, without a notice.
-    let a = the_tree_load(&state.toggle_tree_row(2));
+    let a = the_tree_load(&state.toggle_tree_row(0, 2));
     let effects = state.loaded(LoadEvent::Failed {
         generation: a.generation,
         kind: ErrorKind::PermissionDenied,
@@ -778,7 +781,7 @@ fn right_at_temp(right: Vec<Entry>) -> (AppState, u64) {
 #[test]
 fn a_change_the_tree_misses_while_it_lists_a_folder_comes_from_the_pane() {
     let (mut state, right) = right_at_temp(vec![dir("x")]);
-    let request = the_tree_load(&state.toggle_tree_row(0));
+    let request = the_tree_load(&state.toggle_tree_row(0, 0));
     // The right pane's watch tells of a new folder while the tree's listing is on its way, and
     // that listing was read before the folder was made.
     state.loaded(LoadEvent::Changes {
@@ -811,7 +814,7 @@ fn the_tree_goes_on_when_a_pane_lists_the_folder_it_lacked() {
         generation: right,
         changes: vec![rf_vfs::Change::Upsert(dir("a"))],
     });
-    assert_eq!(effects, [Effect::ScrollTree(1)]);
+    assert_eq!(effects, [Effect::ScrollTree { tree: 0, row: 1 }]);
     assert_eq!(tree_labels(&state), ["임시", "a", "x"]);
     assert_eq!(state.tree().selected_row(), Some(1));
 }

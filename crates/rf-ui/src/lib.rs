@@ -101,7 +101,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     // the Dock's 종료), from the loop's `exiting`. A backend that cannot start this way is left
     // to the window, which then tells why it cannot open.
     let _ = slint::BackendSelector::new()
-        .with_winit_custom_application_handler(EndAtExit)
+        .with_winit_custom_application_handler(LoopHooks)
         .select();
     let paths = rf_core::AppPaths::detect()?;
     paths.ensure_dirs()?;
@@ -187,11 +187,22 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Runs the app's end when the event loop ends ([`controller::end_at_exit`]): on macOS the
-/// system may end the process right after the loop's `exiting`, before [`run`] goes on.
-struct EndAtExit;
+/// What the app does at two turns of the event loop: as it starts (`resumed`, before Slint
+/// makes the window the app showed before the loop), the window goes where it was when the app
+/// last ended, on the screens there are now ([`controller::place_window`], LAY-07); and as it
+/// ends, the app's end runs ([`controller::end_at_exit`]): on macOS the system may end the
+/// process right after the loop's `exiting`, before [`run`] goes on.
+struct LoopHooks;
 
-impl slint::winit_030::CustomApplicationHandler for EndAtExit {
+impl slint::winit_030::CustomApplicationHandler for LoopHooks {
+    fn resumed(
+        &mut self,
+        event_loop: &slint::winit_030::winit::event_loop::ActiveEventLoop,
+    ) -> slint::winit_030::EventResult {
+        controller::place_window(event_loop);
+        slint::winit_030::EventResult::Propagate
+    }
+
     fn exiting(
         &mut self,
         _event_loop: &slint::winit_030::winit::event_loop::ActiveEventLoop,

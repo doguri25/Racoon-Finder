@@ -1144,8 +1144,9 @@ pub fn sort_key(column: i32) -> Option<SortKey> {
     Column::from_number(column)?.sort_key()
 }
 
-/// The place of the state that a drag over `place` names, with the pane `side` and the row or
-/// tab `index` of the window (`drop-check`, `spot-at`); `None` for a negative tab or tree row.
+/// The place of the state that a drag over `place` names, with the pane or tree `side` and the
+/// row or tab `index` of the window (`drop-check`, `spot-at`); `None` for a negative tab or tree
+/// row. The favorites are one list, whichever tree shows it.
 pub fn spot_of(place: DropPlace, side: i32, index: i32) -> Option<DropSpot> {
     let side = if side == 1 { RIGHT } else { LEFT };
     let index = usize::try_from(index).ok();
@@ -1155,7 +1156,10 @@ pub fn spot_of(place: DropPlace, side: i32, index: i32) -> Option<DropSpot> {
             side,
             index: index?,
         },
-        DropPlace::Tree => DropSpot::Tree(index?),
+        DropPlace::Tree => DropSpot::Tree {
+            tree: side,
+            row: index?,
+        },
         DropPlace::Favorites => DropSpot::Favorites { index },
     })
 }
@@ -1242,7 +1246,7 @@ pub fn drop_at(spot: Option<DropSpot>) -> DropAt {
         None => return DropAt::default(),
         Some(DropSpot::Pane { side, row }) => (DropPlace::List, side, row.map_or(-1, number)),
         Some(DropSpot::Tab { side, index }) => (DropPlace::Tab, side, number(index)),
-        Some(DropSpot::Tree(row)) => (DropPlace::Tree, LEFT, number(row)),
+        Some(DropSpot::Tree { tree, row }) => (DropPlace::Tree, tree, number(row)),
         Some(DropSpot::Favorites { index }) => {
             (DropPlace::Favorites, LEFT, index.map_or(-1, number))
         }
@@ -3495,7 +3499,11 @@ mod tests {
                 side: RIGHT,
                 index: 2,
             },
-            DropSpot::Tree(5),
+            DropSpot::Tree { tree: LEFT, row: 5 },
+            DropSpot::Tree {
+                tree: RIGHT,
+                row: 0,
+            },
         ];
         for spot in spots {
             let at = drop_at(Some(spot));

@@ -370,10 +370,10 @@ fn a_favorite_takes_a_drop_onto_it_as_a_folder_does() {
     let id = state.drag_id();
     // Onto the row of a favorite: the existing rule, the items go into its folder.
     let offer = state
-        .drop_offer(id, DropSpot::Tree(2))
+        .drop_offer(id, DropSpot::Tree { tree: 0, row: 2 })
         .expect("the favorite takes the items");
     assert_eq!(offer.folder, folder("work"));
-    let effects = state.drop_items(id, DropSpot::Tree(2));
+    let effects = state.drop_items(id, DropSpot::Tree { tree: 0, row: 2 });
     let (spec, _) = the_submit(&effects);
     assert!(matches!(spec, JobSpec::Transfer(_)));
 }
@@ -618,14 +618,14 @@ fn a_missing_recent_folder_dims_and_a_click_says_it_is_gone() {
         .active_tab()
         .location()
         .clone();
-    let effects = state.open_recent(0);
+    let effects = state.open_recent(0, 0);
     assert_eq!(effects, [Effect::Notice(words::start_folder_gone(&gone))]);
     assert_eq!(
         state.panes()[state.active()].active_tab().location(),
         &location
     );
     // The other one opens in the active pane.
-    let effects = state.open_recent(1);
+    let effects = state.open_recent(0, 1);
     assert_eq!(the_load(&effects).path, here);
     // Visiting a folder again finds it there.
     state.go_to(gone.clone());
@@ -662,7 +662,7 @@ fn a_missing_favorite_dims_and_a_click_says_it_is_gone_and_the_look_repeats() {
         .position(|row| row.label == "kept")
         .expect("the favorite's row");
     assert_eq!(
-        state.open_tree_row(row),
+        state.open_tree_row(0, row),
         [Effect::Notice(words::start_folder_gone(&folder("kept")))]
     );
     let index = state
@@ -689,7 +689,7 @@ fn a_missing_favorite_dims_and_a_click_says_it_is_gone_and_the_look_repeats() {
     ));
     state.folders_checked(&[(folder("kept"), true)]);
     assert!(!state.is_missing(&folder("kept")));
-    assert_eq!(the_load(&state.open_tree_row(row)).path, folder("kept"));
+    assert_eq!(the_load(&state.open_tree_row(0, row)).path, folder("kept"));
 }
 
 #[test]
@@ -758,7 +758,10 @@ fn the_arrows_walk_through_the_group_of_recent_folders_and_fold_it() {
     // ↓ from the last favorite goes into the group: its head, then its folders, then the drive.
     assert_eq!(
         state.tree_key(TreeKey::Down),
-        [Effect::ScrollRecent(RecentAt::Head)]
+        [Effect::ScrollRecent {
+            tree: 0,
+            at: RecentAt::Head
+        }]
     );
     assert_eq!(
         (state.tree_cursor_row(), state.recent_cursor()),
@@ -768,7 +771,10 @@ fn the_arrows_walk_through_the_group_of_recent_folders_and_fold_it() {
     assert_eq!(state.recent_cursor(), Some(RecentAt::Item(0)));
     state.tree_key(TreeKey::Down);
     assert_eq!(state.recent_cursor(), Some(RecentAt::Item(1)));
-    assert_eq!(state.tree_key(TreeKey::Down), [Effect::ScrollTree(2)]);
+    assert_eq!(
+        state.tree_key(TreeKey::Down),
+        [Effect::ScrollTree { tree: 0, row: 2 }]
+    );
     assert_eq!(
         (state.tree_cursor_row(), state.recent_cursor()),
         (Some(2), None)

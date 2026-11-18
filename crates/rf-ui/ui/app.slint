@@ -1,9 +1,11 @@
-// Main window: toolbar on top, the sidebar, the panes and the preview panel's place below (one
-// pane or two, side by side or one above the other, with a divider to drag between them), the
+// Main window: toolbar on top (unless it is hidden, LAY-10: the panes keep their path rows),
+// the sidebar, the panes and the preview panel's place below (one pane or two, side by side or
+// one above the other, with a divider to drag between them; the sidebar's tree is one at the
+// left that follows the active pane, or one beside each pane that follows it, LAY-03), the
 // job panel under them while a job runs (unless it shows in a window of its own, `JobWindow`,
 // LAY-09), notices in the lower right corner, and a dialog over
-// all of it when one is open. Every key goes to Rust first (`key`, or `tree-key` while the
-// sidebar's tree has the keys), except while a text field or a dialog has focus; Rust's
+// all of it when one is open. Every key goes to Rust first (`key`, or `tree-key` while a
+// tree has the keys), except while a text field or a dialog has focus; Rust's
 // shortcut table (`keys.rs`) decides what it does, and gives the keys the toolbar's tooltips
 // and the menus show (`Shortcuts`). Rows dragged from a pane drop on the
 // other pane, a tab or the tree (DND): Rust says at every move of the pointer whether the place
@@ -25,7 +27,7 @@ import {
     Pane, PaneView, TabItem, TabDrop, Crumb, PaneDivider, FolderMenu, FolderMenuView, FolderMenuRow,
     MenuRoom, StatusFit
 } from "pane.slint";
-import { Sidebar, TreeRow, SectionHead, RowKind } from "sidebar.slint";
+import { TreeBox, TreeRow, SectionHead, RowKind } from "sidebar.slint";
 import { JobPanel, JobGraph, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
 import { JobWindow } from "job-window.slint";
 import { JobTray } from "tray.slint";
@@ -86,9 +88,11 @@ export component MainWindow inherits Window {
     // The two panes; side 0 is the left one, 1 the right one.
     in property <PaneView> left-pane;
     in property <PaneView> right-pane;
-    // The sidebar's folder tree: the places (the favorites, then the drives) and the folders
-    // open below them.
+    // The sidebar's folder trees: the places (the favorites, then the drives) and the folders
+    // open below them. `tree` is the shared one, and the left pane's while each pane has its
+    // own; `right-tree` the right pane's then.
     in property <[TreeRow]> tree;
+    in property <[TreeRow]> right-tree;
     // Whether the active pane can go back, forward and up.
     in property <bool> can-back;
     in property <bool> can-forward;
@@ -190,15 +194,19 @@ export component MainWindow inherits Window {
     in property <data-transfer> tab-drag-data;
     // The layout (Rust sets it from its state; the 보기 menu's marks are bound to it): two panes
     // or one, one above the other or side by side, the first pane's share of the room (0.1 to
-    // 0.9), the sidebar, the preview panel's place; and whether navigation sync is on.
+    // 0.9), the sidebar (`show-tree`) and whether each pane has a tree of its own beside it
+    // rather than one at the left (`tree-per-pane`, LAY-03), the preview panel's place, the
+    // toolbar (LAY-10); and whether navigation sync is on.
     in-out property <bool> dual-pane: true;
     in-out property <bool> stacked;
     in property <float> split-share: 0.5;
     in-out property <bool> show-tree: true;
+    in property <bool> tree-per-pane;
     in-out property <bool> show-preview;
+    in-out property <bool> show-toolbar: true;
     in-out property <bool> sync-navigation;
-    // The row of the tree's keyboard cursor (its place in the list, the recent folders among
-    // the rows), which shows while the tree has the keys; -1 for none.
+    // The row of the keyboard cursor of the tree with the keys (its place in the list, the
+    // recent folders among the rows), which shows while that tree has the keys; -1 for none.
     in property <int> tree-cursor: -1;
     // What dragging a favorite by its row carries: Rust readies it as the press on the row
     // shows it.
@@ -265,14 +273,15 @@ export component MainWindow inherits Window {
     // Control), and whether the system repeats a held key. `true` when Rust used it.
     callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool, repeat: bool) -> bool;
     // A toolbar button or a menu item: back, forward, up, new-folder, copy, move, delete,
-    // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, focus-tree,
+    // rename, undo, open, delete-permanently, toggle-hidden, toggle-tree, tree-shared,
+    // tree-per-pane, tree-hidden, focus-tree, toggle-toolbar,
     // toggle-preview, toggle-dual, toggle-split, swap-panes, same-folder, toggle-sync,
     // view-details, view-list, view-small-icons, view-medium-icons, view-large-icons,
     // quick-look, properties, folder-properties (the properties of the pane's folder, whatever
     // is chosen).
     callback command(name: string);
-    // A key while the sidebar's tree has the keys, as `key`; `true` when the tree used it.
-    callback tree-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // A key while tree `tree` has the keys, as `key`; `true` when the tree used it.
+    callback tree-key(tree: int, text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     // A key while the job panel has the keys, as `key`; `true` when the panel used it.
     callback panel-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
     // A key while quick look shows, as `key`: it goes nowhere else. Then a click on its close
@@ -438,20 +447,21 @@ export component MainWindow inherits Window {
     // The button of the toast `token`, and its end (closed, or its time ran out).
     callback notice-action(token: int);
     callback notice-closed(token: int);
-    // A click on row `index` of the tree, or on its chevron.
-    callback tree-clicked(index: int);
-    callback tree-toggled(index: int);
+    // A click on row `index` of tree `tree`'s list, or on its chevron.
+    callback tree-clicked(tree: int, index: int);
+    callback tree-toggled(tree: int, index: int);
     // The left button went down on favorite `index` of the sidebar, which a drag of it may
-    // follow; an item of the menu of favorite `index` (open, open-other, rename, remove, up,
-    // down); an item of the menu of the sidebar's empty part (add-current).
+    // follow; an item of the menu of favorite `index` in tree `tree`'s sidebar (open,
+    // open-other, rename, remove, up, down); an item of the menu of the empty part of tree
+    // `tree`'s sidebar (add-current).
     callback favorite-pressed(index: int);
-    callback favorite-command(index: int, name: string);
-    callback favorites-blank-command(name: string);
-    // An item of the menu of row `index` of the sidebar's list that is no favorite (add-this).
-    callback row-command(index: int, name: string);
+    callback favorite-command(tree: int, index: int, name: string);
+    callback favorites-blank-command(tree: int, name: string);
+    // An item of the menu of row `index` of tree `tree`'s list that is no favorite (add-this).
+    callback row-command(tree: int, index: int, name: string);
     // A drag with the payload `data` is over `place`: row `index` of pane `side`'s list (-1
-    // below the rows), tab `index` of pane `side`, row `index` of the tree (`side` 0), or the
-    // gap `index` of the list of favorites (`side` 0; -1 for its empty part). Rust
+    // below the rows), tab `index` of pane `side`, row `index` of tree `side`, or the gap
+    // `index` of the list of favorites in tree `side` (-1 for its empty part). Rust
     // gives what a drop there does, by the keys held and 보기 ▸ 설정 (Slint's own rule, which
     // knows only Ctrl and Shift, has no say), or `none`. Then the drop itself, the same way.
     callback drop-check(data: data-transfer, place: DropPlace, side: int, index: int) -> DragAction;
@@ -480,9 +490,17 @@ export component MainWindow inherits Window {
             return { found: false, place: DropPlace.list, side: 0, index: -1 };
         }
         if (root.show-tree) {
-            let at = sidebar.spot-at(x, y);
-            if (at.found) {
-                return at;
+            let shared = shared-tree.spot-at(x, y);
+            if (shared.found) {
+                return shared;
+            }
+            let first = pane-tree-left.spot-at(x, y);
+            if (first.found) {
+                return first;
+            }
+            let second = pane-tree-right.spot-at(x, y);
+            if (second.found) {
+                return second;
             }
         }
         if (left.visible) {
@@ -513,10 +531,11 @@ export component MainWindow inherits Window {
     // folder row (its index), the list itself for the pane's folder (-1), or nothing (-2).
     out property <int> outside-target: root.outside-drop.side == 1 ? right.outside-target : left.outside-target;
 
-    // The tree's rows forget which one the pointer moved over last (`spot-at`).
+    // The trees' rows forget which one the pointer moved over last (`spot-at`).
     public function forget-tree-pointer() {
-        sidebar.pointed-row = -1;
-        sidebar.pointed-gap = -2;
+        shared-tree.forget-pointer();
+        pane-tree-left.forget-pointer();
+        pane-tree-right.forget-pointer();
     }
     // A drag moved where nothing takes drops (the toolbar, the gap between the panes), or a
     // place refused it: nothing it rested on opens (DND-08).
@@ -529,10 +548,24 @@ export component MainWindow inherits Window {
         filter-box.take-focus-all();
     }
 
-    // The sidebar's tree takes the keys.
-    public function focus-tree() {
-        tree-keys.focus();
+    // Tree `tree` takes the keys (0 the shared one or the left pane's, 1 the right pane's),
+    // while it shows.
+    public function focus-tree(tree: int) {
+        if (tree == 0 && shared-tree.shows) {
+            shared-tree.focus();
+        } else if (tree == 0 && pane-tree-left.shows) {
+            pane-tree-left.focus();
+        } else if (tree == 1 && pane-tree-right.shows) {
+            pane-tree-right.focus();
+        }
     }
+
+    // Whether tree `tree` shows.
+    pure function tree-shows(tree: int) -> bool {
+        return tree == 0 ? shared-tree.shows || pane-tree-left.shows : pane-tree-right.shows;
+    }
+    // A tree has the keys.
+    private property <bool> trees-have-keys: shared-tree.has-focus || pane-tree-left.has-focus || pane-tree-right.has-focus;
 
     // The panes take the keys again.
     public function focus-panes() {
@@ -547,9 +580,10 @@ export component MainWindow inherits Window {
     }
 
     // The part of the window that had the keys last: 0 the panes (their list, the path field
-    // or the filter box), 1 the tree, 2 the job panel. A window, a menu or quick look over the
-    // main window takes the keys for a while and leaves this as it was.
+    // or the filter box), 1 a tree (`keys-tree`), 2 the job panel. A window, a menu or quick
+    // look over the main window takes the keys for a while and leaves this as it was.
     private property <int> keys-region;
+    private property <int> keys-tree;
     private property <bool> in-pane-fields: left.editing || right.editing || filter-box.has-focus;
     // A text field of the panes has the keys (the path field, the filter box): the mouse's
     // fourth and fifth buttons leave the history alone then (NAV-04).
@@ -562,8 +596,8 @@ export component MainWindow inherits Window {
     // The keys go back to the part that had them, as a window or a sub-menu of the 보기 menu
     // closes: the tree or the job panel while it still shows, otherwise the panes.
     function give-keys-back() {
-        if (root.keys-region == 1 && root.show-tree) {
-            tree-keys.focus();
+        if (root.keys-region == 1 && root.tree-shows(root.keys-tree)) {
+            root.focus-tree(root.keys-tree);
         } else if (root.keys-region == 2 && root.panel-shows) {
             panel-keys.focus();
         } else {
@@ -660,9 +694,14 @@ export component MainWindow inherits Window {
 
     // The visit history's menu under 뒤로 (`way` 0, and -1 for both ways from its key) or 앞으로
     // (1), once Rust has filled it; nothing when it has no line.
+    // Without the toolbar, at the window's top left corner.
     public function show-visits-menu(way: int) {
         root.visits-asked(way);
         if (root.visit-entries.length == 0) {
+            return;
+        }
+        if (!root.show-toolbar) {
+            visits-menu.show({ x: Theme.gap-m, y: Theme.gap-m });
             return;
         }
         let x = way == 1 ? forward-button.absolute-position.x : back-button.absolute-position.x;
@@ -673,7 +712,7 @@ export component MainWindow inherits Window {
     // on, while it has a folder to list (NAV-04); -1 elsewhere, and while a dialog, quick look or
     // a list of the window shows over the panes.
     public pure function visits-button-at(x: length, y: length) -> int {
-        if (root.drops-blocked()) {
+        if (root.drops-blocked() || !root.show-toolbar) {
             return -1;
         }
         let bx = x - back-button.absolute-position.x;
@@ -704,9 +743,14 @@ export component MainWindow inherits Window {
     }
 
     // A sub-menu's choice gives the keys back where they were as the menu opened
-    // (`give-keys-back`).
+    // (`give-keys-back`). Without the toolbar (its key, F10, opens it then), at the top of the
+    // window, near where its button was (the menus are about 260px wide).
     function open-view-menu() {
-        view-menu.open(0, view-button.height + 4px);
+        if (root.show-toolbar) {
+            view-menu.open(view-button.absolute-position.x, view-button.absolute-position.y + view-button.height + 4px);
+        } else {
+            view-menu.open(root.width - 260px - Theme.gap-l, Theme.gap-m);
+        }
     }
 
     // The filter box shows `text`, the filter of the active pane, when it does not already.
@@ -814,18 +858,36 @@ export component MainWindow inherits Window {
     // A place has refused the drag in the move that is under way, and said why.
     private property <bool> hint-told;
 
-    // Scrolls the tree so that row `index` shows.
-    public function tree-scroll-to(index: int) {
-        sidebar.scroll-to(index);
+    // Scrolls tree `tree` so that row `index` of its list shows.
+    public function tree-scroll-to(tree: int, index: int) {
+        if (tree == 1) {
+            pane-tree-right.scroll-to(index);
+        } else if (shared-tree.shows) {
+            shared-tree.scroll-to(index);
+        } else {
+            pane-tree-left.scroll-to(index);
+        }
     }
 
-    // Shows the menu of favorite `index`, which lies at row `row` of the sidebar's list (the menu
-    // key on it), or the menu of the sidebar's empty part.
-    public function show-favorite-menu(index: int, row: int) {
-        sidebar.show-favorite-menu(index, row);
+    // Shows the menu of favorite `index`, which lies at row `row` of tree `tree`'s list (the
+    // menu key on it), or the menu of the empty part of that tree's sidebar.
+    public function show-favorite-menu(tree: int, index: int, row: int) {
+        if (tree == 1) {
+            pane-tree-right.show-favorite-menu(index, row);
+        } else if (shared-tree.shows) {
+            shared-tree.show-favorite-menu(index, row);
+        } else {
+            pane-tree-left.show-favorite-menu(index, row);
+        }
     }
-    public function show-favorites-blank-menu() {
-        sidebar.show-blank-menu();
+    public function show-favorites-blank-menu(tree: int) {
+        if (tree == 1) {
+            pane-tree-right.show-blank-menu();
+        } else if (shared-tree.shows) {
+            shared-tree.show-blank-menu();
+        } else {
+            pane-tree-left.show-blank-menu();
+        }
     }
 
     // Scrolls the picker's tree so that row `index` shows.
@@ -1012,7 +1074,10 @@ export component MainWindow inherits Window {
         }
 
         VerticalLayout {
-            Rectangle {
+            // The toolbar (LAY-10), which 보기 ▸ 툴바 hides; the panes' path rows stay.
+            toolbar := Rectangle {
+                visible: root.show-toolbar;
+                height: root.show-toolbar ? self.preferred-height : 0px;
                 background: Theme.panel;
 
                 HorizontalLayout {
@@ -1178,75 +1243,8 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // The 보기 menu (`view-menu.slint`), under its button.
+                    // The 보기 menu's button; the menu (`view-menu.slint`) shows under it.
                     Rectangle {
-                        view-menu := ViewMenu {
-                            view: root.active-view;
-                            theme-choice: root.theme-choice;
-                            show-hidden <=> root.show-hidden;
-                            show-extensions <=> root.show-extensions;
-                            show-tree <=> root.show-tree;
-                            show-preview <=> root.show-preview;
-                            dual-pane <=> root.dual-pane;
-                            stacked <=> root.stacked;
-                            sync-navigation <=> root.sync-navigation;
-                            drag-default: root.drag-default;
-                            move-undo-toast <=> root.move-undo-toast;
-                            ask-on-error <=> root.ask-on-error;
-                            pick-from-last <=> root.pick-from-last;
-                            show-thumbnails <=> root.show-thumbnails;
-                            system-menu-first <=> root.system-menu-first;
-                            system-menu-offered: root.system-menu-offered;
-                            removal-offer: root.removal-offer;
-                            remove-app-title: root.remove-app-title;
-                            long-press <=> root.long-press;
-                            long-press-ms: root.long-press-ms;
-                            checkbox-select <=> root.checkbox-select;
-                            jobs-window <=> root.jobs-window;
-                            long-press-ms-chosen(ms) => {
-                                root.long-press-ms-chosen(ms);
-                            }
-                            command(name) => {
-                                root.command(name);
-                                if (name == "focus-tree") {
-                                    tree-focus-later.running = true;
-                                }
-                            }
-                            theme-chosen(choice) => {
-                                root.theme-chosen(choice);
-                            }
-                            drag-default-chosen(choice) => {
-                                root.drag-default-chosen(choice);
-                            }
-                            even-split => {
-                                root.split-changed(0.5);
-                            }
-                            divider-moved(step) => {
-                                root.move-divider(step);
-                            }
-                            sort(column, then) => {
-                                root.sort(root.active-side, column, then);
-                            }
-                            sort-then(column) => {
-                                root.sort-then(root.active-side, column);
-                            }
-                            column-toggled(column) => {
-                                root.column-toggled(root.active-side, column);
-                            }
-                            column-moved(from, slot) => {
-                                root.column-moved(root.active-side, from, slot);
-                            }
-                            view-command(name) => {
-                                root.view-command(root.active-side, name);
-                            }
-                            tab-command(name) => {
-                                root.tab-command(root.active-side, root.active-view.active-tab, name);
-                            }
-                            sub-menu-done => {
-                                panes-focus-later.running = true;
-                            }
-                        }
-
                         view-button := TextButton {
                             compact: root.compact;
                             icon: "list-view";
@@ -1307,100 +1305,203 @@ export component MainWindow inherits Window {
                 padding: Theme.gap-m;
                 vertical-stretch: 1;
 
-                // The sidebar, while it shows. It takes the keys of its tree while it has them
-                // (F6), and passes the others on to the window's.
-                tree-keys := FocusScope {
-                    visible: root.show-tree;
-                    min-width: root.show-tree ? 220px : 0px;
-                    preferred-width: root.show-tree ? 220px : 0px;
-                    max-width: root.show-tree ? 280px : 0px;
-                    horizontal-stretch: root.show-tree ? 0.1 : 0;
-                    focus-on-click: false;
-                    focus-on-tab-navigation: false;
-                    focus-gained => {
+                // The shared tree, while it shows (LAY-03 a). It takes the keys of its tree while
+                // it has them (F6), and passes the others on to the window's.
+                shared-tree := TreeBox {
+                    number: 0;
+                    shows: root.show-tree && !root.tree-per-pane;
+                    min-width: self.shows ? 220px : 0px;
+                    preferred-width: self.shows ? 220px : 0px;
+                    max-width: self.shows ? 280px : 0px;
+                    horizontal-stretch: self.shows ? 0.1 : 0;
+                    rows: root.tree;
+                    cursor-row: root.tree-cursor;
+                    blocked: root.dialog != DialogKind.none;
+                    outside-drop: root.outside-drop;
+                    outside-over: root.outside-over;
+                    favorite-drag-data: root.favorite-drag-data;
+                    key(text, ctrl, shift, alt, meta) => {
+                        return root.tree-key(0, text, ctrl, shift, alt, meta);
+                    }
+                    keys-taken => {
                         root.keys-region = 1;
+                        root.keys-tree = 0;
                     }
-                    key-pressed(event) => {
-                        if (root.dialog != DialogKind.none) {
-                            return reject;
-                        }
-                        if (root.tree-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
-                            return accept;
-                        }
-                        reject
+                    gone => {
+                        part-gone-later.running = true;
                     }
+                    row-clicked(index) => {
+                        root.tree-clicked(0, index);
+                        keys.focus();
+                    }
+                    row-toggled(index) => {
+                        root.tree-toggled(0, index);
+                        keys.focus();
+                    }
+                    drop-check(data, place, index) => {
+                        return root.drop-check(data, place, 0, index);
+                    }
+                    dropped(data, place, index) => {
+                        return root.drop-items(data, place, 0, index);
+                    }
+                    favorite-pressed(index) => {
+                        root.favorite-pressed(index);
+                    }
+                    favorite-command(index, name) => {
+                        root.favorite-command(0, index, name);
+                    }
+                    blank-command(name) => {
+                        root.favorites-blank-command(0, name);
+                    }
+                    row-command(index, name) => {
+                        root.row-command(0, index, name);
+                    }
+                }
 
-                    sidebar := Sidebar {
-                        width: parent.width;
-                        height: parent.height;
+                Rectangle {
+                    width: shared-tree.shows ? Theme.gap-m : 0px;
+                }
+
+                // The panes: one, or two side by side or one above the other with the divider
+                // between them, the first one taking its share of the room. With one, both take
+                // the whole room and only the active one shows. With a tree for each pane
+                // (LAY-03 b), each pane's place holds its tree at its left, then the pane.
+                split := Rectangle {
+                    property <bool> two: root.dual-pane;
+                    property <bool> stacked: root.stacked;
+                    property <bool> trees: root.show-tree && root.tree-per-pane;
+                    property <length> gap: Theme.gap-m;
+                    property <length> room: (self.stacked ? self.height : self.width) - self.gap;
+                    property <float> share: divider.dragging ? divider.live-share : root.split-share;
+                    // The least room either pane keeps: a tenth of it, and 200px while there is
+                    // room for two of those; beside each other, the pane's own tree's least
+                    // (140px) more.
+                    property <length> least: max(self.room * 0.1, min(200px + (self.trees && !self.stacked ? 140px + self.gap : 0px), self.room / 2));
+                    property <length> first: clamp(self.room * self.share, self.least, self.room - self.least);
+                    // The place of each pane with its own tree.
+                    property <length> left-width: !self.two || self.stacked ? self.width : self.first;
+                    property <length> left-height: !self.two ? self.height : self.stacked ? self.first : self.height;
+                    property <length> right-x: !self.two || self.stacked ? 0px : self.first + self.gap;
+                    property <length> right-y: self.two && self.stacked ? self.first + self.gap : 0px;
+                    property <length> right-width: !self.two || self.stacked ? self.width : self.room - self.first;
+                    property <length> right-height: self.two && self.stacked ? self.room - self.first : self.height;
+                    // A pane's own tree: a third of its place or so, from 140px to 220px.
+                    property <length> left-tree: self.trees ? clamp(self.left-width * 0.35, 140px, 220px) : 0px;
+                    property <length> right-tree: self.trees ? clamp(self.right-width * 0.35, 140px, 220px) : 0px;
+                    property <length> left-shift: self.trees ? self.left-tree + self.gap : 0px;
+                    property <length> right-shift: self.trees ? self.right-tree + self.gap : 0px;
+
+                    horizontal-stretch: 1;
+                    min-width: 300px;
+
+                    // The left pane's own tree, and the right pane's, beside them (LAY-03 b):
+                    // each follows its pane, and opens and closes on its own.
+                    pane-tree-left := TreeBox {
+                        number: 0;
+                        x: 0px;
+                        y: 0px;
+                        width: split.left-tree;
+                        height: split.left-height;
+                        shows: split.trees && left.visible;
                         rows: root.tree;
-                        cursor-row: tree-keys.has-focus ? root.tree-cursor : -1;
-                        accepts-drops: true;
-                        outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.tree ? root.outside-drop.index : -1;
-                        outside-gap: root.outside-drop.found && root.outside-drop.place == DropPlace.favorites ? root.outside-drop.index : -2;
-                        outside-over: root.outside-over.found && (root.outside-over.place == DropPlace.tree || root.outside-over.place == DropPlace.favorites);
+                        cursor-row: root.tree-cursor;
+                        blocked: root.dialog != DialogKind.none;
+                        outside-drop: root.outside-drop;
+                        outside-over: root.outside-over;
                         favorite-drag-data: root.favorite-drag-data;
+                        key(text, ctrl, shift, alt, meta) => {
+                            return root.tree-key(0, text, ctrl, shift, alt, meta);
+                        }
+                        keys-taken => {
+                            root.keys-region = 1;
+                            root.keys-tree = 0;
+                        }
+                        gone => {
+                            part-gone-later.running = true;
+                        }
                         row-clicked(index) => {
-                            root.tree-clicked(index);
+                            root.tree-clicked(0, index);
                             keys.focus();
                         }
-                        drop-check(data, index) => {
-                            return root.drop-check(data, DropPlace.tree, 0, index);
+                        row-toggled(index) => {
+                            root.tree-toggled(0, index);
+                            keys.focus();
                         }
-                        dropped(data, index) => {
-                            return root.drop-items(data, DropPlace.tree, 0, index);
+                        drop-check(data, place, index) => {
+                            return root.drop-check(data, place, 0, index);
                         }
-                        favorites-check(data, gap) => {
-                            return root.drop-check(data, DropPlace.favorites, 0, gap);
-                        }
-                        favorites-dropped(data, gap) => {
-                            return root.drop-items(data, DropPlace.favorites, 0, gap);
+                        dropped(data, place, index) => {
+                            return root.drop-items(data, place, 0, index);
                         }
                         favorite-pressed(index) => {
                             root.favorite-pressed(index);
                         }
                         favorite-command(index, name) => {
-                            root.favorite-command(index, name);
+                            root.favorite-command(0, index, name);
                         }
                         blank-command(name) => {
-                            root.favorites-blank-command(name);
+                            root.favorites-blank-command(0, name);
                         }
                         row-command(index, name) => {
-                            root.row-command(index, name);
-                        }
-                        row-toggled(index) => {
-                            root.tree-toggled(index);
-                            keys.focus();
+                            root.row-command(0, index, name);
                         }
                     }
-                }
-
-                Rectangle {
-                    width: root.show-tree ? Theme.gap-m : 0px;
-                }
-
-                // The panes: one, or two side by side or one above the other with the divider
-                // between them, the first one taking its share of the room. With one, both take
-                // the whole room and only the active one shows.
-                split := Rectangle {
-                    property <bool> two: root.dual-pane;
-                    property <bool> stacked: root.stacked;
-                    property <length> gap: Theme.gap-m;
-                    property <length> room: (self.stacked ? self.height : self.width) - self.gap;
-                    property <float> share: divider.dragging ? divider.live-share : root.split-share;
-                    // The least room either pane keeps: a tenth of it, and 200px while there is
-                    // room for two of those.
-                    property <length> least: max(self.room * 0.1, min(200px, self.room / 2));
-                    property <length> first: clamp(self.room * self.share, self.least, self.room - self.least);
-
-                    horizontal-stretch: 1;
-                    min-width: 300px;
+                    pane-tree-right := TreeBox {
+                        number: 1;
+                        x: split.right-x;
+                        y: split.right-y;
+                        width: split.right-tree;
+                        height: split.right-height;
+                        shows: split.trees && right.visible;
+                        rows: root.right-tree;
+                        cursor-row: root.tree-cursor;
+                        blocked: root.dialog != DialogKind.none;
+                        outside-drop: root.outside-drop;
+                        outside-over: root.outside-over;
+                        favorite-drag-data: root.favorite-drag-data;
+                        key(text, ctrl, shift, alt, meta) => {
+                            return root.tree-key(1, text, ctrl, shift, alt, meta);
+                        }
+                        keys-taken => {
+                            root.keys-region = 1;
+                            root.keys-tree = 1;
+                        }
+                        gone => {
+                            part-gone-later.running = true;
+                        }
+                        row-clicked(index) => {
+                            root.tree-clicked(1, index);
+                            keys.focus();
+                        }
+                        row-toggled(index) => {
+                            root.tree-toggled(1, index);
+                            keys.focus();
+                        }
+                        drop-check(data, place, index) => {
+                            return root.drop-check(data, place, 1, index);
+                        }
+                        dropped(data, place, index) => {
+                            return root.drop-items(data, place, 1, index);
+                        }
+                        favorite-pressed(index) => {
+                            root.favorite-pressed(index);
+                        }
+                        favorite-command(index, name) => {
+                            root.favorite-command(1, index, name);
+                        }
+                        blank-command(name) => {
+                            root.favorites-blank-command(1, name);
+                        }
+                        row-command(index, name) => {
+                            root.row-command(1, index, name);
+                        }
+                    }
 
                     left := Pane {
-                        x: 0px;
+                        x: split.left-shift;
                         y: 0px;
-                        width: !split.two ? parent.width : split.stacked ? parent.width : split.first;
-                        height: !split.two ? parent.height : split.stacked ? split.first : parent.height;
+                        width: split.left-width - split.left-shift;
+                        height: split.left-height;
                         visible: split.two || root.active-side == 0;
                         label: "왼쪽 패널";
                         view: root.left-pane;
@@ -1553,10 +1654,10 @@ export component MainWindow inherits Window {
                     }
 
                     right := Pane {
-                        x: !split.two || split.stacked ? 0px : split.first + split.gap;
-                        y: split.two && split.stacked ? split.first + split.gap : 0px;
-                        width: !split.two || split.stacked ? parent.width : split.room - split.first;
-                        height: split.two && split.stacked ? split.room - split.first : parent.height;
+                        x: split.right-x + split.right-shift;
+                        y: split.right-y;
+                        width: split.right-width - split.right-shift;
+                        height: split.right-height;
                         visible: split.two || root.active-side == 1;
                         label: "오른쪽 패널";
                         view: root.right-pane;
@@ -1720,7 +1821,7 @@ export component MainWindow inherits Window {
                 // away: the panes take them, once the window has done so.
                 focus-lost(reason) => {
                     if (!root.panel-shows) {
-                        panel-gone-later.running = true;
+                        part-gone-later.running = true;
                     }
                 }
                 key-pressed(event) => {
@@ -1972,14 +2073,14 @@ export component MainWindow inherits Window {
         }
     }
 
-    // The job panel had the keys as it went: the panes take them, unless another part of the
-    // window has meanwhile.
-    panel-gone-later := Timer {
+    // The job panel or a tree had the keys as it went: the panes take them, unless another
+    // part of the window has meanwhile.
+    part-gone-later := Timer {
         interval: 1ms;
         running: false;
         triggered => {
             self.running = false;
-            if (root.dialog == DialogKind.none && !root.quick-look && !panel-keys.has-focus && !tree-keys.has-focus && !left.editing && !right.editing && !filter-box.has-focus) {
+            if (root.dialog == DialogKind.none && !root.quick-look && !panel-keys.has-focus && !root.trees-have-keys && !left.editing && !right.editing && !filter-box.has-focus) {
                 keys.focus();
             }
         }
@@ -2016,14 +2117,19 @@ export component MainWindow inherits Window {
     }
 
     // A menu gives the keys back, as it closes, to what had them when it opened: after the
-    // 보기 menu's 폴더 트리로 가기, the tree takes them once the menu has closed.
+    // 보기 menu's 폴더 트리 ▸ 폴더 트리로 가기, the first tree that shows (the one Rust gave them
+    // to, as F6 does) takes them once the menus have closed.
     tree-focus-later := Timer {
         interval: 1ms;
         running: false;
         triggered => {
             self.running = false;
-            if (root.show-tree) {
-                tree-keys.focus();
+            if (shared-tree.shows) {
+                shared-tree.focus();
+            } else if (pane-tree-left.shows) {
+                pane-tree-left.focus();
+            } else if (pane-tree-right.shows) {
+                pane-tree-right.focus();
             }
         }
     }
@@ -2257,8 +2363,8 @@ export component MainWindow inherits Window {
     }
 
     // At the window's top left corner and without room, so that they show at the window's
-    // coordinates of the item menu that showed last and of the drop, and take no click
-    // themselves.
+    // coordinates of the item menu that showed last, of the drop and of the 보기 menu's place,
+    // and take no click themselves.
     Rectangle {
         x: 0px;
         y: 0px;
@@ -2276,6 +2382,77 @@ export component MainWindow inherits Window {
             lines: root.visit-entries;
             chosen(way, index) => {
                 root.visit-chosen(way, index);
+            }
+        }
+
+        // The 보기 menu, under its button in the toolbar, or at the window's top while the
+        // toolbar is hidden (`open-view-menu`): from here it opens either way.
+        view-menu := ViewMenu {
+            view: root.active-view;
+            theme-choice: root.theme-choice;
+            show-hidden <=> root.show-hidden;
+            show-extensions <=> root.show-extensions;
+            show-tree <=> root.show-tree;
+            tree-per-pane: root.tree-per-pane;
+            show-toolbar <=> root.show-toolbar;
+            show-preview <=> root.show-preview;
+            dual-pane <=> root.dual-pane;
+            stacked <=> root.stacked;
+            sync-navigation <=> root.sync-navigation;
+            drag-default: root.drag-default;
+            move-undo-toast <=> root.move-undo-toast;
+            ask-on-error <=> root.ask-on-error;
+            pick-from-last <=> root.pick-from-last;
+            show-thumbnails <=> root.show-thumbnails;
+            system-menu-first <=> root.system-menu-first;
+            system-menu-offered: root.system-menu-offered;
+            removal-offer: root.removal-offer;
+            remove-app-title: root.remove-app-title;
+            long-press <=> root.long-press;
+            long-press-ms: root.long-press-ms;
+            checkbox-select <=> root.checkbox-select;
+            jobs-window <=> root.jobs-window;
+            long-press-ms-chosen(ms) => {
+                root.long-press-ms-chosen(ms);
+            }
+            command(name) => {
+                root.command(name);
+                if (name == "focus-tree") {
+                    tree-focus-later.running = true;
+                }
+            }
+            theme-chosen(choice) => {
+                root.theme-chosen(choice);
+            }
+            drag-default-chosen(choice) => {
+                root.drag-default-chosen(choice);
+            }
+            even-split => {
+                root.split-changed(0.5);
+            }
+            divider-moved(step) => {
+                root.move-divider(step);
+            }
+            sort(column, then) => {
+                root.sort(root.active-side, column, then);
+            }
+            sort-then(column) => {
+                root.sort-then(root.active-side, column);
+            }
+            column-toggled(column) => {
+                root.column-toggled(root.active-side, column);
+            }
+            column-moved(from, slot) => {
+                root.column-moved(root.active-side, from, slot);
+            }
+            view-command(name) => {
+                root.view-command(root.active-side, name);
+            }
+            tab-command(name) => {
+                root.tab-command(root.active-side, root.active-view.active-tab, name);
+            }
+            sub-menu-done => {
+                panes-focus-later.running = true;
             }
         }
 

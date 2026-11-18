@@ -68,7 +68,7 @@ fn f6_goes_from_the_tree_to_the_job_panel_while_it_shows() {
     assert_eq!(state.tree_key(TreeKey::Leave), [Effect::FocusPanes]);
     // F6 from the panes still goes to the tree first.
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
-    assert!(effects.contains(&Effect::FocusTree), "{effects:?}");
+    assert!(effects.contains(&Effect::FocusTree(0)), "{effects:?}");
 }
 
 #[test]

@@ -1,8 +1,10 @@
 //! The settings kept between runs, in `settings.toml` in the app's config folder
 //! (`AppPaths::config_dir`): the theme, whether hidden items show and whether the names show
-//! their extensions (`hide_extensions`, NAV-11), the window's size and layout
-//! (`[layout]`, with the job panel's place, `jobs_window`, LAY-09), the tabs of both panes (in
-//! their order, pinned or not) and which one has the
+//! their extensions (`hide_extensions`, NAV-11), the window's size, place and maximized state
+//! (`window`, `window_at`, `maximized`, LAY-07) and layout (`[layout]`, with the folder tree's
+//! mode, `tree`, LAY-03, the job panel's place, `jobs_window`, LAY-09, and the toolbar,
+//! `hide_toolbar`, LAY-10), the tabs of both panes (in their order, pinned or not) and which one
+//! has the
 //! keyboard, the destination picker's recent targets, the views remembered per folder
 //! (`[[folder_views]]`, NAV-10: at most `state::MAX_FOLDER_VIEWS`, the one used longest ago
 //! first), and the choices of 보기 ▸ 설정: what a drop does without a modifier key
@@ -67,8 +69,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::state::{
-    Column, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, ShownColumn, StoredView,
-    UnknownParts, ViewMode, ViewStore,
+    Column, FolderView, Layout, MAX_COLUMN_WIDTH, MIN_COLUMN_WIDTH, SavedPlace, ShownColumn,
+    StoredView, TreeMode, UnknownParts, ViewMode, ViewStore,
 };
 
 /// The name of the settings file in the config folder.
@@ -77,8 +79,9 @@ pub const FILE_NAME: &str = "settings.toml";
 /// follows ([`backup_name`]).
 pub const BACKUP_PREFIX: &str = "settings.toml.bak-";
 /// The version of the settings file this build writes (INST-08). Version 0 is a file without the
-/// key; 1 added the key.
-pub const SETTINGS_VERSION: u32 = 1;
+/// key; 1 added the key; 2 replaced `[layout] hide_tree` (a flag) with `tree`, the folder tree's
+/// mode (LAY-03).
+pub const SETTINGS_VERSION: u32 = 2;
 /// The file a save writes before it takes the place of the settings file.
 pub const TEMP_FILE_NAME: &str = "settings.toml.tmp";
 /// A settings file larger than this is no file this app wrote; it is treated as broken. The
@@ -160,6 +163,40 @@ pub enum PickStart {
     Last,
 }
 
+/// The folder tree's mode as stored (`[layout] tree`, LAY-03): `"shared"`, `"per-pane"` or
+/// `"hidden"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TreeSetting {
+    /// One tree that follows the active pane.
+    #[default]
+    Shared,
+    /// A tree beside each pane.
+    PerPane,
+    /// No tree, no sidebar.
+    Hidden,
+}
+
+impl TreeSetting {
+    /// The mode of the layout these settings keep.
+    pub fn mode(self) -> TreeMode {
+        match self {
+            TreeSetting::Shared => TreeMode::Shared,
+            TreeSetting::PerPane => TreeMode::PerPane,
+            TreeSetting::Hidden => TreeMode::Hidden,
+        }
+    }
+
+    /// The setting that keeps `mode`.
+    pub fn of(mode: TreeMode) -> TreeSetting {
+        match mode {
+            TreeMode::Shared => TreeSetting::Shared,
+            TreeMode::PerPane => TreeSetting::PerPane,
+            TreeMode::Hidden => TreeSetting::Hidden,
+        }
+    }
+}
+
 /// The tabs of one pane, as stored.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -195,9 +232,9 @@ pub fn pinned_flags(flags: impl IntoIterator<Item = bool>) -> Vec<bool> {
 }
 
 /// The window's layout, as stored (`[layout]`). Each key the file lacks, or whose value this
-/// version cannot read, takes its default: two panes side by side, split evenly, the tree shown,
-/// the preview panel not, and the job panel under the panes. So the names say what differs from
-/// that default.
+/// version cannot read, takes its default: two panes side by side, split evenly, the shared tree
+/// shown, the preview panel not, the job panel under the panes, and the toolbar. So the names
+/// say what differs from that default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[expect(
@@ -218,9 +255,11 @@ pub struct LayoutSettings {
         deserialize_with = "or_default"
     )]
     pub split: Option<f64>,
-    /// No sidebar with the folder tree.
+    /// The folder tree (LAY-03): `"shared"`, `"per-pane"` or `"hidden"`. A file of version 1
+    /// or older says `hide_tree` instead, which [`migrate`] turns into this; one that has
+    /// neither, or a value this version cannot read, shows the shared tree.
     #[serde(deserialize_with = "or_default")]
-    pub hide_tree: bool,
+    pub tree: TreeSetting,
     /// The preview panel shows.
     #[serde(deserialize_with = "or_default")]
     pub preview: bool,
@@ -229,6 +268,10 @@ pub struct LayoutSettings {
     /// there.
     #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
     pub jobs_window: bool,
+    /// No toolbar (LAY-10); the panes keep their path rows. A file without the key (0.4.0 and
+    /// before) shows it; not written while it shows.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub hide_toolbar: bool,
     /// The keys of a newer version.
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -240,9 +283,10 @@ impl LayoutSettings {
         let mut layout = Layout::default();
         layout.dual = !self.single_pane;
         layout.stacked = self.stacked;
-        layout.tree = !self.hide_tree;
+        layout.tree = self.tree.mode();
         layout.preview = self.preview;
         layout.jobs_window = self.jobs_window;
+        layout.toolbar = !self.hide_toolbar;
         if let Some(split) = self.split {
             layout.set_share(split);
         }
@@ -254,9 +298,10 @@ impl LayoutSettings {
         self.single_pane = !layout.dual;
         self.stacked = layout.stacked;
         self.split = Some(f64::from(layout.thousandths()) / 1000.0);
-        self.hide_tree = !layout.tree;
+        self.tree = TreeSetting::of(layout.tree);
         self.preview = layout.preview;
         self.jobs_window = layout.jobs_window;
+        self.hide_toolbar = !layout.toolbar;
     }
 }
 
@@ -289,6 +334,19 @@ pub struct Settings {
         deserialize_with = "or_default"
     )]
     pub window: Option<(u32, u32)>,
+    /// The window's last place (LAY-07): its outer top left corner on the desktop in physical
+    /// pixels, when it was neither maximized, full screen nor minimized; `None` until the first
+    /// save, and where the window system does not tell it (Wayland), which then keeps the one
+    /// before. A file without the key (0.4.0 and before) opens where the system puts a window.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "or_default"
+    )]
+    pub window_at: Option<(i32, i32)>,
+    /// The window was maximized when the app last ended (LAY-07); `window` and `window_at`
+    /// are where it goes back to. Not written while it is not.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "or_default")]
+    pub maximized: bool,
     /// The pane with the keyboard: 0 left, 1 right.
     #[serde(deserialize_with = "or_default")]
     pub active_pane: usize,
@@ -379,6 +437,8 @@ impl Default for Settings {
             show_hidden: false,
             hide_extensions: false,
             window: None,
+            window_at: None,
+            maximized: false,
             active_pane: 0,
             recent_targets: Vec::new(),
             drag_default: DragDefault::default(),
@@ -687,6 +747,10 @@ pub enum MigrateError {
 /// a time. Pure: it reads and writes no file.
 ///
 /// - 0 → 1: the file gets `version = 1`. Nothing else changes.
+/// - 1 → 2: `[layout] hide_tree` (LAY-03 a or c) becomes the tree's mode, `tree`: `true` is
+///   `"hidden"`, and `false`, any other value or no key at all the shared tree, `"shared"`
+///   (the same screen as before). The flag goes; a `tree` the table has already (a newer
+///   version wrote it, and an older one kept it) stays. The file gets `version = 2`.
 ///
 /// A file already at the current version comes back as it is; a newer one is
 /// [`MigrateError::Newer`].
@@ -696,12 +760,25 @@ pub fn migrate(mut doc: toml::Table, from: u32) -> Result<toml::Table, MigrateEr
     }
     let mut at = from;
     while at < SETTINGS_VERSION {
-        if at == 0 {
-            doc.insert("version".to_owned(), toml::Value::Integer(1));
+        if at == 1 {
+            tree_flag_to_mode(&mut doc);
         }
         at += 1;
+        doc.insert("version".to_owned(), toml::Value::Integer(i64::from(at)));
     }
     Ok(doc)
+}
+
+/// The step 1 → 2 of [`migrate`]: `[layout] hide_tree` becomes `tree`.
+fn tree_flag_to_mode(doc: &mut toml::Table) {
+    let Some(toml::Value::Table(layout)) = doc.get_mut("layout") else {
+        return;
+    };
+    let hidden = layout.remove("hide_tree").and_then(|flag| flag.as_bool()) == Some(true);
+    if !layout.contains_key("tree") {
+        let mode = if hidden { "hidden" } else { "shared" };
+        layout.insert("tree".to_owned(), toml::Value::String(mode.to_owned()));
+    }
 }
 
 /// How long a long press is held by default, in milliseconds.
@@ -1035,6 +1112,17 @@ impl Settings {
         self.folder_views = store.entries().map(FolderViewSettings::of).collect();
     }
 
+    /// Where the window was when the app last ended ([`crate::state::placement`] puts it on
+    /// the screens there are now): its size as [`Settings::window_size`] gives it, its place
+    /// and whether it was maximized.
+    pub fn saved_place(&self) -> SavedPlace {
+        SavedPlace {
+            position: self.window_at,
+            size: self.window_size(),
+            maximized: self.maximized,
+        }
+    }
+
     /// The size the window opens at, in logical pixels: the stored one, kept between
     /// [`MIN_WINDOW`] and [`MAX_WINDOW`]; `None` without one.
     pub fn window_size(&self) -> Option<(u32, u32)> {
@@ -1059,6 +1147,8 @@ impl Settings {
             show_hidden: self.show_hidden,
             hide_extensions: self.hide_extensions,
             window: self.window,
+            window_at: self.window_at,
+            maximized: self.maximized,
             active_pane: self.active_pane,
             recent_targets: self.recent_targets.clone(),
             drag_default: self.drag_default,
@@ -1401,7 +1491,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::state::{Column, FolderView, Layout, ViewMode, ViewStore};
+    use crate::state::{Column, FolderView, Layout, TreeMode, ViewMode, ViewStore};
 
     fn folder(dir: &Path, name: &str) -> VPath {
         VPath::local(dir.join(name)).expect("a local path")
@@ -1413,6 +1503,8 @@ mod tests {
             theme: ThemeChoice::Dark,
             show_hidden: true,
             window: Some((1500, 900)),
+            window_at: Some((-1200, 40)),
+            maximized: true,
             drag_default: DragDefault::Ask,
             move_undo_toast: false,
             system_menu_first: true,
@@ -1496,9 +1588,10 @@ mod tests {
         let mut layout = Layout::default();
         layout.dual = false;
         layout.stacked = true;
-        layout.tree = false;
+        layout.tree = TreeMode::PerPane;
         layout.preview = true;
         layout.jobs_window = true;
+        layout.toolbar = false;
         layout.set_share(0.3);
         layout
     }
@@ -1713,8 +1806,9 @@ mod tests {
             );
             assert_eq!(load(dir.path()), writable(settings));
         }
-        assert_eq!(SETTINGS_VERSION, 1);
-        // A 0.4.0 file, which has its version and no such key, loads as it is and carries on.
+        assert_eq!(SETTINGS_VERSION, 2);
+        // A 0.4.0 file, which has its version and no such key, loads as it is (brought to
+        // version 2) and carries on.
         std::fs::write(
             &file,
             "version = 1\ntheme = \"dark\"\ndrag_default = \"copy\"\nmove_undo_toast = false\n\
@@ -1724,11 +1818,11 @@ mod tests {
         let loaded = load(dir.path());
         assert!(loaded.backup.is_none() && loaded.writable);
         assert_eq!(loaded.settings.on_error, OnError::Continue);
-        assert_eq!(loaded.settings.version, 1);
+        assert_eq!(loaded.settings.version, 2);
         assert_eq!(loaded.settings.theme, ThemeChoice::Dark);
         assert_eq!(loaded.settings.drag_default, DragDefault::Copy);
         assert!(!loaded.settings.move_undo_toast);
-        assert!(loaded.settings.layout.hide_tree);
+        assert_eq!(loaded.settings.layout.tree, TreeSetting::Hidden);
         // A value this version cannot read carries on too, and costs no other key.
         std::fs::write(&file, "on_error = \"panic\"\ntheme = \"dark\"\n").expect("written");
         let loaded = load(dir.path()).settings;
@@ -1767,7 +1861,7 @@ mod tests {
         assert!(loaded.backup.is_none() && loaded.writable);
         assert_eq!(loaded.settings.pick_start, PickStart::Opposite);
         assert_eq!(loaded.settings.on_error, OnError::Ask);
-        assert!(loaded.settings.layout.hide_tree);
+        assert_eq!(loaded.settings.layout.tree, TreeSetting::Hidden);
         // A value this version cannot read starts there too, and costs no other key.
         std::fs::write(&file, "pick_start = 3\ntheme = \"dark\"\n").expect("written");
         let loaded = load(dir.path()).settings;
@@ -1802,7 +1896,7 @@ mod tests {
             text.contains(&format!("version = {SETTINGS_VERSION}")),
             "{text}"
         );
-        assert_eq!(SETTINGS_VERSION, 1);
+        assert_eq!(SETTINGS_VERSION, 2);
         let loaded = load(dir.path());
         assert_eq!(loaded, writable(settings));
         assert!(loaded.settings.session().layout.jobs_window);
@@ -1820,9 +1914,10 @@ mod tests {
         .expect("written");
         let loaded = load(dir.path());
         assert!(loaded.backup.is_none() && loaded.writable);
-        assert_eq!(loaded.settings.version, 1);
+        assert_eq!(loaded.settings.version, 2);
         let layout = loaded.settings.session().layout;
-        assert!(!layout.jobs_window && !layout.tree && layout.preview);
+        assert!(!layout.jobs_window && layout.preview);
+        assert_eq!(layout.tree, TreeMode::Hidden);
         // A value this version cannot read is the panel under the panes, and costs no other
         // key of the layout.
         std::fs::write(&file, "[layout]\njobs_window = \"left\"\nstacked = true\n")
@@ -2201,7 +2296,7 @@ mod tests {
         assert!(layout.dual, "a value it cannot read keeps two panes");
         assert!(layout.stacked);
         assert!((layout.share() - 0.9).abs() < 1e-6, "{}", layout.share());
-        assert!(layout.tree);
+        assert_eq!(layout.tree, TreeMode::Shared, "a flag that is no flag");
         assert!(layout.preview);
         // The key of a newer version stays, and is written back.
         let text = settings.to_text().expect("text");
@@ -2425,7 +2520,7 @@ mod tests {
         // The next save writes the version, first, and nothing else is lost.
         loaded.settings.save(dir.path()).expect("saved");
         let text = std::fs::read_to_string(&file).expect("saved");
-        assert!(text.starts_with("version = 1\n"), "{text}");
+        assert!(text.starts_with("version = 2\n"), "{text}");
         assert_eq!(load(dir.path()), writable(loaded.settings));
         assert_eq!(backups(dir.path()), Vec::<String>::new());
         // A fresh start writes it too.
@@ -2433,29 +2528,369 @@ mod tests {
             Settings::default()
                 .to_text()
                 .expect("text")
-                .starts_with("version = 1\n")
+                .starts_with("version = 2\n")
         );
     }
 
     #[test]
-    fn migrating_from_zero_adds_the_version_and_changes_nothing_else() {
+    fn migrating_adds_the_version_and_changes_nothing_else_of_a_file_with_the_tree_s_mode() {
         let dir = tempfile::tempdir().expect("a temp dir");
+        // Settings of this version, which say the tree's mode already: no step changes them
+        // but for the version.
         let mut zero: toml::Table =
             toml::from_str(&full(dir.path()).to_text().expect("text")).expect("a table");
         zero.remove("version").expect("written with a version");
-        let mut one = zero.clone();
-        one.insert("version".to_owned(), toml::Value::Integer(1));
+        let with_version = |version: i64| {
+            let mut doc = zero.clone();
+            doc.insert("version".to_owned(), toml::Value::Integer(version));
+            doc
+        };
+        let two = with_version(2);
 
-        assert_eq!(migrate(zero.clone(), 0), Ok(one.clone()));
+        assert_eq!(migrate(zero.clone(), 0), Ok(two.clone()));
+        assert_eq!(migrate(with_version(1), 1), Ok(two.clone()));
         // A file at the current version stays as it is; a newer one is not migrated.
-        assert_eq!(migrate(one.clone(), 1), Ok(one.clone()));
-        assert_eq!(migrate(one, 2), Err(MigrateError::Newer { found: 2 }));
+        assert_eq!(migrate(two.clone(), 2), Ok(two.clone()));
+        assert_eq!(
+            migrate(with_version(3), 3),
+            Err(MigrateError::Newer { found: 3 })
+        );
         // A version that says nothing readable counts as 0.
         for odd in ["version = \"one\"\n", "version = -3\n", "version = 1.5\n"] {
             let doc: toml::Table = toml::from_str(odd).expect("a table");
             let from = version_of_value(doc.get("version"));
             assert_eq!(from, 0, "{odd}");
-            assert_eq!(parse(odd).expect("read").version, 1, "{odd}");
+            assert_eq!(parse(odd).expect("read").version, 2, "{odd}");
+        }
+    }
+
+    /// The `[layout]` table of `doc`.
+    fn layout_of(doc: &toml::Table) -> &toml::Table {
+        doc.get("layout")
+            .and_then(toml::Value::as_table)
+            .expect("a layout table")
+    }
+
+    #[test]
+    fn migrating_from_one_turns_the_tree_s_flag_into_its_mode() {
+        let doc = |text: &str| -> toml::Table { toml::from_str(text).expect("a table") };
+        let tree = |doc: &toml::Table| layout_of(doc).get("tree").cloned();
+        let mode = |name: &str| Some(toml::Value::String(name.to_owned()));
+        for (flag, wanted) in [
+            ("hide_tree = true\n", "hidden"),
+            ("hide_tree = false\n", "shared"),
+            // A value of no flag showed the tree, as the shared one.
+            ("hide_tree = 1\n", "shared"),
+            ("hide_tree = \"yes\"\n", "shared"),
+            ("", "shared"),
+        ] {
+            let text = format!("version = 1\n\n[layout]\nstacked = true\n{flag}");
+            let migrated = migrate(doc(&text), 1).expect("migrated");
+            assert_eq!(tree(&migrated), mode(wanted), "{flag}");
+            assert!(!layout_of(&migrated).contains_key("hide_tree"), "{flag}");
+            // The rest of the table stays.
+            assert_eq!(
+                layout_of(&migrated).get("stacked"),
+                Some(&toml::Value::Boolean(true))
+            );
+            assert_eq!(migrated.get("version"), Some(&toml::Value::Integer(2)));
+        }
+        // A version 0 file (the first demos) goes the same way, through 1.
+        let migrated = migrate(doc("[layout]\nhide_tree = true\n"), 0).expect("migrated");
+        assert_eq!(tree(&migrated), mode("hidden"));
+        // A `tree` the table has already (a newer version wrote it, an older one kept it) stays;
+        // the flag goes.
+        let migrated = migrate(
+            doc("version = 1\n[layout]\nhide_tree = true\ntree = \"per-pane\"\n"),
+            1,
+        )
+        .expect("migrated");
+        assert_eq!(tree(&migrated), mode("per-pane"));
+        assert!(!layout_of(&migrated).contains_key("hide_tree"));
+        // A file without a layout table gets none.
+        let migrated = migrate(doc("version = 1\ntheme = \"dark\"\n"), 1).expect("migrated");
+        assert!(!migrated.contains_key("layout"));
+        // A layout that is no table is left as it is (the read takes its default).
+        let migrated = migrate(doc("version = 1\nlayout = 5\n"), 1).expect("migrated");
+        assert_eq!(migrated.get("layout"), Some(&toml::Value::Integer(5)));
+    }
+
+    /// A settings file as 0.4.0 wrote it: version 1, the layout with `hide_tree`, and the keys
+    /// of that version (`layout` is the text of the `[layout]` table's keys, or none).
+    fn file_of_0_4_0(layout: Option<&str>, a: &str) -> String {
+        let mut text = format!(
+            "version = 1\ntheme = \"dark\"\nshow_hidden = true\nwindow = [1500, 900]\n\
+             active_pane = 1\nrecent_targets = []\ndrag_default = \"copy\"\n\
+             move_undo_toast = true\nsystem_menu_first = false\nshow_thumbnails = true\n\
+             long_press = true\nlong_press_ms = 500\ncheckbox_select = false\n\
+             recent_folders = []\n\n[[panes]]\ntabs = [{a}]\nactive = 0\n\n[[panes]]\n\
+             tabs = [{a}]\nactive = 0\n"
+        );
+        if let Some(layout) = layout {
+            text = format!(
+                "{text}\n[layout]\nsingle_pane = false\nstacked = false\nsplit = 0.5\n{layout}\
+                 preview = false\n"
+            );
+        }
+        text
+    }
+
+    /// A settings file as the 0.5.0 builds before this version wrote it: version 1, with the keys
+    /// those builds added (`on_error`, `pick_start`, `jobs_window`) and `hide_tree`.
+    fn file_of_0_5_0_pre(hide_tree: &str, a: &str) -> String {
+        format!(
+            "version = 1\ntheme = \"light\"\nshow_hidden = false\nwindow = [1400, 860]\n\
+             active_pane = 0\nrecent_targets = [{a}]\ndrag_default = \"move\"\n\
+             move_undo_toast = true\nsystem_menu_first = false\nshow_thumbnails = true\n\
+             long_press = true\nlong_press_ms = 800\ncheckbox_select = false\n\
+             on_error = \"ask\"\npick_start = \"last\"\nrecent_folders = [{a}]\n\n\
+             [layout]\nsingle_pane = false\nstacked = true\nsplit = 0.4\n{hide_tree}\
+             preview = true\njobs_window = true\n\n[[panes]]\ntabs = [{a}]\nactive = 0\n"
+        )
+    }
+
+    #[test]
+    fn a_0_4_0_file_opens_with_the_tree_it_showed_and_is_written_back_as_version_2() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let a = toml_string(&folder(dir.path(), "a").to_uri());
+        for (layout, wanted) in [
+            (Some("hide_tree = true\n"), TreeMode::Hidden),
+            (Some("hide_tree = false\n"), TreeMode::Shared),
+            (Some(""), TreeMode::Shared),
+            (None, TreeMode::Shared),
+        ] {
+            let text = file_of_0_4_0(layout, &a);
+            std::fs::write(&file, &text).expect("written");
+
+            let loaded = load_at(dir.path());
+
+            // Read in memory, not backed up, the file as it was.
+            assert!(loaded.writable && loaded.backup.is_none(), "{layout:?}");
+            assert_eq!(backups(dir.path()), Vec::<String>::new(), "{layout:?}");
+            assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
+            let settings = loaded.settings;
+            assert_eq!(settings.version, 2, "{layout:?}");
+            let session = settings.session();
+            // The same screen as 0.4.0 showed: the tree as it was, the rest of the layout too.
+            assert_eq!(session.layout.tree, wanted, "{layout:?}");
+            assert!(session.layout.dual && !session.layout.stacked && !session.layout.preview);
+            assert!(session.layout.toolbar && !session.layout.jobs_window);
+            assert_eq!(session.active_pane, 1);
+            assert!(session.show_hidden);
+            assert_eq!(settings.theme, ThemeChoice::Dark);
+            assert_eq!(settings.drag_default, DragDefault::Copy);
+            assert_eq!(settings.window_size(), Some((1500, 900)));
+            // Where it was is not known: the system places it.
+            assert_eq!(settings.saved_place().position, None);
+            assert!(!settings.saved_place().maximized);
+            assert!(settings.layout.extra.is_empty(), "no flag left behind");
+            // The next save writes version 2, with the mode in place of the flag.
+            settings.save(dir.path()).expect("saved");
+            let written = std::fs::read_to_string(&file).expect("saved");
+            assert!(written.starts_with("version = 2\n"), "{written}");
+            assert!(!written.contains("hide_tree"), "{written}");
+            let name = match wanted {
+                TreeMode::Hidden => "hidden",
+                TreeMode::Shared | TreeMode::PerPane => "shared",
+            };
+            assert!(written.contains(&format!("tree = \"{name}\"")), "{written}");
+            assert_eq!(load(dir.path()), writable(settings), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn a_0_5_0_pre_file_opens_with_the_tree_it_showed() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let a = toml_string(&folder(dir.path(), "a").to_uri());
+        for (hide_tree, wanted) in [
+            ("hide_tree = true\n", TreeMode::Hidden),
+            ("hide_tree = false\n", TreeMode::Shared),
+            ("", TreeMode::Shared),
+        ] {
+            std::fs::write(&file, file_of_0_5_0_pre(hide_tree, &a)).expect("written");
+
+            let loaded = load_at(dir.path());
+
+            assert!(loaded.writable && loaded.backup.is_none(), "{hide_tree:?}");
+            assert_eq!(backups(dir.path()), Vec::<String>::new());
+            let settings = loaded.settings;
+            assert_eq!(settings.version, 2);
+            let layout = settings.session().layout;
+            assert_eq!(layout.tree, wanted, "{hide_tree:?}");
+            // The keys of those builds stay as they were.
+            assert!(layout.stacked && layout.preview && layout.jobs_window && layout.toolbar);
+            assert!((layout.share() - 0.4).abs() < 1e-6);
+            assert_eq!(settings.on_error, OnError::Ask);
+            assert_eq!(settings.pick_start, PickStart::Last);
+            assert_eq!(settings.long_press_ms, 800);
+            assert_eq!(settings.theme, ThemeChoice::Light);
+            assert_eq!(settings.recent_visits(), [folder(dir.path(), "a")]);
+            assert!(settings.layout.extra.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_version_2_file_round_trips_with_each_tree_mode_the_toolbar_and_the_window_s_place() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let text = "version = 2\ntheme = \"dark\"\nwindow = [1400, 900]\n\
+                    window_at = [-1600, 120]\nmaximized = true\n\n[layout]\n\
+                    tree = \"per-pane\"\nhide_toolbar = true\nstacked = true\n";
+        std::fs::write(&file, text).expect("written");
+
+        let loaded = load_at(dir.path());
+
+        assert!(loaded.writable && loaded.backup.is_none());
+        let settings = loaded.settings;
+        assert_eq!(settings.version, 2);
+        let layout = settings.session().layout;
+        assert_eq!(layout.tree, TreeMode::PerPane);
+        assert!(!layout.toolbar && layout.stacked);
+        assert_eq!(
+            settings.saved_place(),
+            SavedPlace {
+                position: Some((-1600, 120)),
+                size: Some((1400, 900)),
+                maximized: true,
+            }
+        );
+        // Written back and read again, the same; each mode by its own name.
+        settings.save(dir.path()).expect("saved");
+        let written = std::fs::read_to_string(&file).expect("saved");
+        for part in [
+            "version = 2\n",
+            "tree = \"per-pane\"",
+            "hide_toolbar = true",
+            "window_at = [-1600, 120]",
+            "maximized = true",
+        ] {
+            assert!(written.contains(part), "{part} in {written}");
+        }
+        assert_eq!(load(dir.path()), writable(settings.clone()));
+        for (mode, name) in [
+            (TreeMode::Shared, "shared"),
+            (TreeMode::PerPane, "per-pane"),
+            (TreeMode::Hidden, "hidden"),
+        ] {
+            let mut session = settings.session();
+            session.layout.tree = mode;
+            let mut changed = settings.clone();
+            changed.set_session(&session);
+            changed.save(dir.path()).expect("saved");
+            let written = std::fs::read_to_string(&file).expect("saved");
+            assert!(written.contains(&format!("tree = \"{name}\"")), "{written}");
+            assert_eq!(load(dir.path()).settings.session().layout.tree, mode);
+        }
+        // Shown, the toolbar is not written; nor is a window that is not maximized.
+        let mut session = settings.session();
+        session.layout.toolbar = true;
+        let mut shown = settings;
+        shown.set_session(&session);
+        shown.maximized = false;
+        let text = shown.to_text().expect("text");
+        assert!(
+            !text.contains("hide_toolbar") && !text.contains("maximized"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_tree_mode_this_version_does_not_know_is_the_shared_tree_and_no_reason_for_a_backup() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        for odd in ["\"floating\"", "5", "true", "[\"per-pane\"]"] {
+            let text = format!(
+                "version = 2\ntheme = \"dark\"\n\n[layout]\ntree = {odd}\nstacked = true\n"
+            );
+            std::fs::write(&file, &text).expect("written");
+
+            let loaded = load_at(dir.path());
+
+            assert!(loaded.writable, "{odd}");
+            assert_eq!(loaded.backup, None, "{odd}");
+            assert_eq!(backups(dir.path()), Vec::<String>::new(), "{odd}");
+            assert_eq!(std::fs::read_to_string(&file).expect("kept"), text);
+            let layout = loaded.settings.session().layout;
+            assert_eq!(layout.tree, TreeMode::Shared, "{odd}");
+            // One odd value costs no other key.
+            assert!(layout.stacked, "{odd}");
+            assert_eq!(loaded.settings.theme, ThemeChoice::Dark);
+        }
+    }
+
+    #[test]
+    fn a_file_of_version_3_is_read_as_far_as_it_goes_and_not_migrated() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        let text = "version = 3\ntheme = \"dark\"\nwindow_at = [10, 20]\nmaximized = \"maybe\"\n\
+                    halo = 4\n\n[layout]\ntree = \"per-pane\"\nhide_tree = true\n\
+                    hide_toolbar = true\ntabs_below = true\n";
+        std::fs::write(&file, text).expect("written");
+
+        let loaded = load_at(dir.path());
+
+        // Not backed up, not moved, not migrated: what this version knows, and the rest kept.
+        assert!(loaded.writable && loaded.backup.is_none());
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
+        let settings = loaded.settings;
+        assert_eq!(settings.version, 3);
+        let layout = settings.session().layout;
+        assert_eq!(layout.tree, TreeMode::PerPane);
+        assert!(!layout.toolbar);
+        assert_eq!(settings.window_at, Some((10, 20)));
+        assert!(!settings.maximized, "a value it cannot read");
+        assert_eq!(settings.theme, ThemeChoice::Dark);
+        // A version 3's `hide_tree` is none of this version's: it stays as it was, with the keys
+        // this version does not know, and the version too.
+        assert_eq!(
+            settings.layout.extra.get("hide_tree"),
+            Some(&toml::Value::Boolean(true))
+        );
+        let written = settings.to_text().expect("text");
+        for part in [
+            "version = 3\n",
+            "halo = 4",
+            "tabs_below = true",
+            "hide_tree = true",
+            "tree = \"per-pane\"",
+        ] {
+            assert!(written.contains(part), "{part} in {written}");
+        }
+        // A version 3 file with a mode this version does not know shows the shared tree.
+        std::fs::write(&file, "version = 3\n[layout]\ntree = \"floating\"\n").expect("written");
+        let loaded = load_at(dir.path());
+        assert!(loaded.backup.is_none());
+        assert_eq!(loaded.settings.session().layout.tree, TreeMode::Shared);
+    }
+
+    #[test]
+    fn the_window_s_place_reads_back_and_odd_values_cost_nothing_else() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        // None of it until the first save.
+        let defaults = Settings::default();
+        assert_eq!(defaults.saved_place(), SavedPlace::default());
+        let text = defaults.to_text().expect("text");
+        assert!(
+            !text.contains("window_at") && !text.contains("maximized"),
+            "{text}"
+        );
+        // Values this version cannot read: none of them, and the rest stays.
+        for odd in [
+            "window_at = \"left\"\n",
+            "window_at = [1]\n",
+            "window_at = [1.5, 2]\n",
+            "window_at = [5000000000, 0]\n",
+        ] {
+            std::fs::write(&file, format!("{odd}theme = \"dark\"\nmaximized = true\n"))
+                .expect("written");
+            let loaded = load(dir.path());
+            assert!(loaded.backup.is_none(), "{odd}");
+            assert_eq!(loaded.settings.window_at, None, "{odd}");
+            assert!(loaded.settings.maximized, "{odd}");
+            assert_eq!(loaded.settings.theme, ThemeChoice::Dark);
         }
     }
 

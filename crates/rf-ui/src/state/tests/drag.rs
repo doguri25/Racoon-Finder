@@ -221,8 +221,11 @@ fn tabs_and_tree_rows_take_their_folders() {
     assert_eq!(offer(&mut state, tab(0)), Some(folder("b")));
     assert_eq!(offer(&mut state, tab(1)), None);
     assert_eq!(offer(&mut state, tab(2)), None);
-    assert_eq!(offer(&mut state, DropSpot::Tree(0)), Some(folder("b")));
-    assert_eq!(offer(&mut state, DropSpot::Tree(9)), None);
+    assert_eq!(
+        offer(&mut state, DropSpot::Tree { tree: 0, row: 0 }),
+        Some(folder("b"))
+    );
+    assert_eq!(offer(&mut state, DropSpot::Tree { tree: 0, row: 9 }), None);
 }
 
 #[test]
@@ -676,16 +679,16 @@ fn a_drag_resting_on_a_tab_shows_it_and_on_a_closed_tree_folder_opens_it() {
     let expanded = |state: &AppState, row: usize| state.tree().rows()[row].expanded;
     assert_eq!(state.tree().rows()[2].label, "b");
     assert!(!expanded(&state, 2));
-    let request = nav::the_tree_load(&rest(&mut state, DropSpot::Tree(2)));
+    let request = nav::the_tree_load(&rest(&mut state, DropSpot::Tree { tree: 0, row: 2 }));
     assert_eq!(request.path, folder("b"));
     assert!(expanded(&state, 2));
     // An open folder stays open.
     assert!(expanded(&state, 0));
-    assert_eq!(rest(&mut state, DropSpot::Tree(0)), []);
+    assert_eq!(rest(&mut state, DropSpot::Tree { tree: 0, row: 0 }), []);
     assert!(expanded(&state, 0));
     // `a`, where the items are, takes nothing, and does not open.
     assert_eq!(state.tree().rows()[1].label, "a");
-    assert_eq!(rest(&mut state, DropSpot::Tree(1)), []);
+    assert_eq!(rest(&mut state, DropSpot::Tree { tree: 0, row: 1 }), []);
     assert!(!expanded(&state, 1));
 }
 

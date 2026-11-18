@@ -199,7 +199,8 @@ impl AppState {
         };
         let side = match spot {
             DropSpot::Pane { side, .. } | DropSpot::Tab { side, .. } => side,
-            DropSpot::Tree(_) | DropSpot::Favorites { .. } => self.active,
+            DropSpot::Tree { tree, .. } => self.tree_pane(tree),
+            DropSpot::Favorites { .. } => self.active,
         };
         let DropOffer { folder, .. } = offer;
         // The items already there stay where they are (DND-09).

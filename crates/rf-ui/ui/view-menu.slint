@@ -1,15 +1,18 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme, the hidden items and the extensions of
-// the names, the sidebar and the preview panel, the layout and the commands between the panes,
+// the names, the toolbar itself (LAY-10), the folder tree (폴더 트리 ▸, LAY-03: one shared tree,
+// a tree for each pane, or none, and F6 to it) and the preview panel, the layout and the commands
+// between the panes,
 // the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
 // the icon views, the undo of a dragged move, whether a copy or a move asks about each item that
 // fails, where the destination picker starts, and on Windows the menu of a right click), and where
 // the job panel shows (작업 패널 ▸
 // 별도 창, LAY-09). It is short enough for a 560px window,
-// with room to spare below its button: the themes, the panes (배치) and 설정 are sub-menus of
-// their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸ 2차 정렬 and
-// 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach every item:
-// F10 (macOS ⌘J) opens it, ↑↓ → Enter choose.
+// with room to spare below its button: the themes, the folder tree, the panes (배치) and 설정 are
+// sub-menus of their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸
+// 2차 정렬 and 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach
+// every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose; also while the toolbar, with its
+// button, is hidden (the window opens it at its top then).
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
 // items are two-way bound to properties set from the state: the view's marks as the menu opens and
@@ -24,10 +27,13 @@ export component ViewMenu inherits ContextMenuArea {
     in property <PaneView> view;
     // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게).
     in property <int> theme-choice;
-    // The layout, the hidden items and the extensions, two-way with the window's.
+    // The layout, the hidden items and the extensions, two-way with the window's. The folder
+    // tree shows (`show-tree`) with a tree for each pane (`tree-per-pane`) or one shared tree.
     in-out property <bool> show-hidden;
     in-out property <bool> show-extensions;
     in-out property <bool> show-tree;
+    in property <bool> tree-per-pane;
+    in-out property <bool> show-toolbar;
     in-out property <bool> show-preview;
     in-out property <bool> dual-pane;
     in-out property <bool> stacked;
@@ -89,6 +95,7 @@ export component ViewMenu inherits ContextMenuArea {
     // does.
     public function open(x: length, y: length) {
         root.mark();
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
         root.mark-drag-default(root.drag-default);
         root.mark-long-press-ms(root.long-press-ms);
         root.show({ x: x, y: y });
@@ -169,9 +176,32 @@ export component ViewMenu inherits ContextMenuArea {
     }
     init => {
         root.mark-theme(root.theme-choice);
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
     }
     changed theme-choice => {
         root.mark-theme(root.theme-choice);
+    }
+
+    // The marks of 폴더 트리 ▸'s three modes (0 공유 트리, 1 패널별 트리, 2 트리 숨김), one at a time.
+    private property <bool> shared-tree-mark: true;
+    private property <bool> per-pane-tree-mark;
+    private property <bool> hidden-tree-mark;
+    function mark-tree(mode: int) {
+        root.shared-tree-mark = mode == 0;
+        root.per-pane-tree-mark = mode == 1;
+        root.hidden-tree-mark = mode == 2;
+    }
+    changed show-tree => {
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+    }
+    changed tree-per-pane => {
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+    }
+    // An item of 폴더 트리 ▸: its mark alone shows, and Rust keeps the mode (`command`).
+    function choose-tree(mode: int, name: string) {
+        root.mark-tree(mode);
+        root.command(name);
+        root.done();
     }
 
     private property <bool> drag-move-mark;
@@ -636,20 +666,55 @@ export component ViewMenu inherits ContextMenuArea {
                 root.command("toggle-extensions");
             }
         }
+        // The toolbar (LAY-10); hidden, the panes keep their path rows and F10 still opens this
+        // menu. No key: File Explorer has none for its command bar.
         MenuItem {
-            title: Shortcuts.titled("폴더 트리", Shortcuts.toggle-tree);
+            title: "툴바";
             checkable: true;
-            checked <=> root.show-tree;
+            checked <=> root.show-toolbar;
             activated => {
-                root.command("toggle-tree");
+                root.command("toggle-toolbar");
             }
         }
-        // Only to a tree that shows: F6 passes a hidden one by.
-        MenuItem {
-            title: Shortcuts.titled("폴더 트리로 가기", Shortcuts.focus-tree);
-            enabled: root.show-tree;
-            activated => {
-                root.command("focus-tree");
+        // The folder tree (LAY-03): one tree at the left that follows the active pane, a tree
+        // beside each pane that follows it, or none; the key of 트리 숨김 (Ctrl+B) also brings
+        // the tree back as it showed last. Then F6 to it, only to a tree that shows: F6 passes a
+        // hidden one by.
+        Menu {
+            title: "폴더 트리";
+
+            MenuItem {
+                title: "공유 트리";
+                checkable: true;
+                checked <=> root.shared-tree-mark;
+                activated => {
+                    root.choose-tree(0, "tree-shared");
+                }
+            }
+            MenuItem {
+                title: "패널별 트리";
+                checkable: true;
+                checked <=> root.per-pane-tree-mark;
+                activated => {
+                    root.choose-tree(1, "tree-per-pane");
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled("트리 숨김", Shortcuts.toggle-tree);
+                checkable: true;
+                checked <=> root.hidden-tree-mark;
+                activated => {
+                    root.choose-tree(2, "tree-hidden");
+                }
+            }
+            MenuSeparator { }
+            // The window gives the tree the keys once the menus have closed.
+            MenuItem {
+                title: Shortcuts.titled("폴더 트리로 가기", Shortcuts.focus-tree);
+                enabled: root.show-tree;
+                activated => {
+                    root.command("focus-tree");
+                }
             }
         }
         MenuItem {

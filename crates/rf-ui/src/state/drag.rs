@@ -106,8 +106,9 @@ pub enum DropSpot {
     Pane { side: usize, row: Option<usize> },
     /// Tab `index` of pane `side`: into its folder.
     Tab { side: usize, index: usize },
-    /// Row `row` of the folder tree: into its folder.
-    Tree(usize),
+    /// Row `row` of folder tree `tree` (0 the shared one or the left pane's, 1 the right
+    /// pane's): into its folder.
+    Tree { tree: usize, row: usize },
     /// The list of favorites, between its items: the gap `index` (before favorite `index`;
     /// `None`: after the last one, which is also where the empty part of the list drops). A drop
     /// there keeps the folders as favorites and moves nothing (DND-01); a favorite dragged
@@ -637,14 +638,17 @@ impl AppState {
                 }
                 Vec::new()
             }
-            DropSpot::Tree(row) => {
+            DropSpot::Tree { tree, row } => {
+                let Some(shown) = self.trees.get(tree) else {
+                    return Vec::new();
+                };
                 // A closed row with a chevron, as the sidebar shows it.
-                let opens = self.tree.rows().get(row).is_some_and(|row| {
+                let opens = shown.rows().get(row).is_some_and(|row| {
                     !row.expanded && (row.has_children_unknown || row.has_children)
                 });
-                match self.tree.node_at(row) {
+                match shown.node_at(row) {
                     Some(node) if opens => {
-                        self.with_tree(|tree| tree.toggle(node).into_iter().collect())
+                        self.with_tree(tree, |shown| shown.toggle(node).into_iter().collect())
                     }
                     _ => Vec::new(),
                 }
@@ -722,9 +726,10 @@ impl AppState {
                 .tabs()
                 .get(index)
                 .map(|tab| tab.location().clone()),
-            DropSpot::Tree(row) => {
-                let id = self.tree.node_at(row)?;
-                self.tree.node(id).map(|node| node.path.clone())
+            DropSpot::Tree { tree, row } => {
+                let shown = self.trees.get(tree)?;
+                let id = shown.node_at(row)?;
+                shown.node(id).map(|node| node.path.clone())
             }
             // Not a folder the items go into: they are kept as favorites.
             DropSpot::Favorites { .. } => None,

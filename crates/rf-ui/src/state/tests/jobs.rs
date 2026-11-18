@@ -1101,7 +1101,7 @@ fn a_copy_into_a_folder_of_the_same_name_lists_that_folder_again() {
     }]);
     // The tree lists the temporary folder, `b` and `b/docs`.
     let list = |state: &mut AppState, row: usize, entries: Vec<Entry>| {
-        let effects = state.toggle_tree_row(row);
+        let effects = state.toggle_tree_row(0, row);
         let [Effect::LoadChildren(request)] = effects.as_slice() else {
             panic!("one tree listing in {effects:?}");
         };

@@ -54,7 +54,9 @@ fn the_window_starts_with_two_panes_side_by_side_split_evenly_and_the_tree() {
     let state = ready(vec![], vec![]);
     let layout = state.layout();
     assert_eq!(layout, Layout::default());
-    assert!(layout.dual && !layout.stacked && layout.tree && !layout.preview);
+    assert!(layout.dual && !layout.stacked && !layout.preview);
+    assert_eq!(layout.tree, TreeMode::Shared);
+    assert!(layout.toolbar);
     assert!(share_is(&state, 0.5));
     assert!(!state.syncing());
 }
@@ -145,15 +147,18 @@ fn a_hidden_tree_stops_following_and_catches_up_when_it_shows() {
 
     // Hidden, the tree no longer follows the active pane (and has no keys to keep).
     assert_eq!(press(&mut state, "b", CTRL), Some(vec![Effect::FocusPanes]));
-    assert!(!state.layout().tree);
+    assert_eq!(state.layout().tree, TreeMode::Hidden);
     press(&mut state, &special(Key::Tab), NONE);
     assert_eq!(state.follow_active(), []);
     assert_eq!(state.tree().selected_row(), Some(1));
 
     // Shown again, it selects the folder the active pane shows.
     press(&mut state, "b", CTRL);
-    assert!(state.layout().tree);
-    assert_eq!(state.follow_active(), [Effect::ScrollTree(2)]);
+    assert_eq!(state.layout().tree, TreeMode::Shared);
+    assert_eq!(
+        state.follow_active(),
+        [Effect::ScrollTree { tree: 0, row: 2 }]
+    );
 }
 
 #[test]
@@ -333,7 +338,7 @@ fn the_layout_comes_from_the_session_and_goes_back_into_it() {
     let mut layout = Layout::default();
     layout.dual = false;
     layout.stacked = true;
-    layout.tree = false;
+    layout.tree = TreeMode::Hidden;
     layout.preview = true;
     layout.set_share(0.3);
     let session = Session {
@@ -842,4 +847,183 @@ fn swapping_the_panes_while_sync_waits_turns_it_off() {
     let _ = state.open_crumb(RIGHT, 0);
     assert_eq!(press(&mut state, "u", CTRL), Some(vec![]));
     assert!(state.syncing());
+}
+
+/// A screen at `x`, `y` of `width` × `height` physical pixels, at `scale`.
+fn screen(x: i32, y: i32, width: u32, height: u32, scale: f64) -> Screen {
+    Screen {
+        x,
+        y,
+        width,
+        height,
+        scale,
+    }
+}
+
+/// A window last at `position`, of `size`, maximized or not.
+fn saved(position: Option<(i32, i32)>, size: (u32, u32), maximized: bool) -> SavedPlace {
+    SavedPlace {
+        position,
+        size: Some(size),
+        maximized,
+    }
+}
+
+/// One full HD screen, the system's main one, at the desktop's origin.
+const MAIN: Screen = Screen {
+    x: 0,
+    y: 0,
+    width: 1920,
+    height: 1080,
+    scale: 1.0,
+};
+
+#[test]
+fn a_window_on_a_screen_opens_where_it_was() {
+    let place = placement(saved(Some((100, 80)), (1200, 800), false), &[MAIN]);
+    assert_eq!(
+        place,
+        Placement {
+            position: Some((100, 80)),
+            size: Some((1200, 800)),
+            maximized: false,
+        }
+    );
+    // On the second screen, left of the main one (negative x) or below it.
+    let left = screen(-2560, 0, 2560, 1440, 1.0);
+    let place = placement(saved(Some((-2000, 300)), (1200, 800), false), &[MAIN, left]);
+    assert_eq!(place.position, Some((-2000, 300)));
+    // At a scale of 2, a size in logical pixels takes twice as many physical ones.
+    let sharp = screen(0, 0, 3840, 2160, 2.0);
+    let place = placement(saved(Some((1000, 500)), (1200, 800), false), &[sharp]);
+    assert_eq!(place.position, Some((1000, 500)));
+    assert_eq!(place.size, Some((1200, 800)));
+}
+
+#[test]
+fn a_window_partly_off_its_screen_is_moved_onto_it_as_little_as_it_takes() {
+    // Off the right and the bottom: whole on the screen, at its right and bottom edges.
+    let place = placement(saved(Some((1500, 900)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, Some((720, 280)));
+    assert_eq!(place.size, Some((1200, 800)));
+    // Off the left and the top.
+    let place = placement(saved(Some((-300, -50)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, Some((0, 0)));
+    // Across two screens, onto the one that holds most of it.
+    let right = screen(1920, 0, 1920, 1080, 1.0);
+    let place = placement(saved(Some((1700, 100)), (1200, 800), false), &[MAIN, right]);
+    assert_eq!(place.position, Some((1920, 100)));
+    let place = placement(saved(Some((1000, 100)), (1200, 800), false), &[MAIN, right]);
+    assert_eq!(place.position, Some((720, 100)));
+    // At a scale of 2, by the window's physical size there.
+    let sharp = screen(0, 0, 3840, 2160, 2.0);
+    let place = placement(saved(Some((3000, 1000)), (1200, 800), false), &[sharp]);
+    assert_eq!(place.position, Some((1440, 560)));
+}
+
+#[test]
+fn a_window_off_every_screen_opens_where_the_system_puts_a_window() {
+    // Its screen, right of the main one, was taken away.
+    let place = placement(saved(Some((2400, 200)), (1200, 800), false), &[MAIN]);
+    assert_eq!(
+        place,
+        Placement {
+            position: None,
+            size: Some((1200, 800)),
+            maximized: false,
+        }
+    );
+    // A sliver of it on a screen, less than a title bar to hold: off it too.
+    let edge = 1920 - i32::try_from(ON_SCREEN.0).expect("small") + 1;
+    let place = placement(saved(Some((edge, 100)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, None);
+    let place = placement(saved(Some((edge - 1, 100)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, Some((720, 100)), "enough of it to hold");
+    let below = 1080 - i32::try_from(ON_SCREEN.1).expect("small") + 1;
+    let place = placement(saved(Some((100, below)), (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, None);
+    // Far away, or with no place known (Wayland tells none): the system places it.
+    let place = placement(
+        saved(Some((i32::MIN, i32::MAX)), (1200, 800), false),
+        &[MAIN],
+    );
+    assert_eq!(place.position, None);
+    let place = placement(saved(None, (1200, 800), false), &[MAIN]);
+    assert_eq!(place.position, None);
+    assert_eq!(place.size, Some((1200, 800)));
+}
+
+#[test]
+fn a_window_larger_than_its_screen_is_made_as_large_as_the_screen() {
+    // Saved on a large screen, opened on a laptop's.
+    let laptop = screen(0, 0, 1366, 768, 1.0);
+    let place = placement(saved(Some((40, 30)), (2400, 1300), false), &[laptop]);
+    assert_eq!(
+        place,
+        Placement {
+            position: Some((0, 0)),
+            size: Some((1366, 768)),
+            maximized: false,
+        }
+    );
+    // At a scale of 2 the screen holds half as many logical pixels.
+    let sharp = screen(0, 0, 2560, 1600, 2.0);
+    let place = placement(saved(Some((0, 0)), (1600, 1000), false), &[sharp]);
+    assert_eq!(place.size, Some((1280, 800)));
+    // Never smaller than the window's least, at the screen's corner then.
+    let tiny = screen(100, 100, 800, 500, 1.0);
+    let place = placement(saved(Some((150, 150)), (1200, 800), false), &[tiny]);
+    assert_eq!(place.size, Some(crate::settings::MIN_WINDOW));
+    assert_eq!(place.position, Some((100, 100)));
+    // Off every screen, it fits the system's main one, where it will open.
+    let place = placement(saved(Some((5000, 0)), (2400, 1300), false), &[laptop]);
+    assert_eq!(place.position, None);
+    assert_eq!(place.size, Some((1366, 768)));
+    // Without a size of its own, the window's default, fitted.
+    let place = placement(
+        SavedPlace {
+            position: Some((10, 10)),
+            size: None,
+            maximized: false,
+        },
+        &[laptop],
+    );
+    assert_eq!(place.size, Some((1280, 768)));
+}
+
+#[test]
+fn a_maximized_window_opens_maximized_on_the_screen_it_was_on() {
+    let right = screen(1920, 0, 2560, 1440, 1.0);
+    let place = placement(saved(Some((2000, 60)), (1200, 800), true), &[MAIN, right]);
+    assert_eq!(
+        place,
+        Placement {
+            position: Some((2000, 60)),
+            size: Some((1200, 800)),
+            maximized: true,
+        }
+    );
+    // That screen gone: maximized where the system puts the window.
+    let place = placement(saved(Some((2000, 60)), (1200, 800), true), &[MAIN]);
+    assert_eq!(place.position, None);
+    assert!(place.maximized);
+}
+
+#[test]
+fn without_screens_the_place_is_as_saved() {
+    // A window system that tells of no screen: nothing to check against, nothing changed.
+    let kept = saved(Some((-5000, 7000)), (1200, 800), true);
+    assert_eq!(
+        placement(kept, &[]),
+        Placement {
+            position: Some((-5000, 7000)),
+            size: Some((1200, 800)),
+            maximized: true,
+        }
+    );
+    assert_eq!(placement(SavedPlace::default(), &[]), Placement::default());
+    // A screen whose scale says nothing counts as one of 1.
+    let odd = screen(0, 0, 1920, 1080, f64::NAN);
+    let place = placement(saved(Some((100, 80)), (1200, 800), false), &[odd]);
+    assert_eq!(place.position, Some((100, 80)));
 }

@@ -37,7 +37,10 @@ fn f6_gives_the_tree_the_keys_on_the_active_pane_s_folder() {
 
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
 
-    assert_eq!(effects, [Effect::FocusTree, Effect::ScrollTree(1)]);
+    assert_eq!(
+        effects,
+        [Effect::FocusTree(0), Effect::ScrollTree { tree: 0, row: 1 }]
+    );
     assert_eq!(state.tree_cursor_row(), Some(1));
     // From the right pane, on its folder.
     assert_eq!(state.tree_key(TreeKey::Leave), [Effect::FocusPanes]);
@@ -53,7 +56,10 @@ fn the_arrows_move_open_and_close_in_the_tree() {
     press(&mut state, &special(Key::F6), NONE);
 
     // ↓ goes down to c, and no further.
-    assert_eq!(state.tree_key(TreeKey::Down), [Effect::ScrollTree(2)]);
+    assert_eq!(
+        state.tree_key(TreeKey::Down),
+        [Effect::ScrollTree { tree: 0, row: 2 }]
+    );
     state.tree_key(TreeKey::Down);
     state.tree_key(TreeKey::Down);
     assert_eq!(state.tree_cursor_row(), Some(3));
@@ -67,7 +73,10 @@ fn the_arrows_move_open_and_close_in_the_tree() {
     state.tree_key(TreeKey::Collapse);
     assert_eq!(labels(&state), ["임시"]);
     assert_eq!(state.tree_cursor_row(), Some(0));
-    assert_eq!(state.tree_key(TreeKey::Expand), [Effect::ScrollTree(0)]);
+    assert_eq!(
+        state.tree_key(TreeKey::Expand),
+        [Effect::ScrollTree { tree: 0, row: 0 }]
+    );
     assert_eq!(labels(&state), ["임시", "a", "b", "c"]);
     // → on an open row goes to its first folder.
     state.tree_key(TreeKey::Expand);
@@ -118,23 +127,23 @@ fn a_hidden_tree_gives_the_keys_back_and_f6_passes_it_by() {
     press(&mut state, &special(Key::F6), NONE);
 
     assert_eq!(press(&mut state, "b", CTRL), Some(vec![Effect::FocusPanes]));
-    assert!(!state.layout().tree);
+    assert_eq!(state.layout().tree, TreeMode::Hidden);
 
     // F6 goes round the parts that show, as File Explorer's does: without the tree and the job
     // panel the keys stay with the panes, and the layout is left as the user chose it.
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
-    assert!(!state.layout().tree);
+    assert_eq!(state.layout().tree, TreeMode::Hidden);
     assert_eq!(effects, [Effect::FocusPanes]);
     // With a job, the panel takes them.
     running(&mut state, 1, "x");
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
-    assert!(!state.layout().tree);
+    assert_eq!(state.layout().tree, TreeMode::Hidden);
     assert_eq!(effects, [Effect::FocusPanel]);
     assert_eq!(state.panel_cursor(), Some((0, 0)));
     // Shown again, the tree is next after the panes.
     assert_eq!(press(&mut state, "b", CTRL), Some(vec![]));
     let effects = press(&mut state, &special(Key::F6), NONE).expect("a shortcut");
-    assert!(effects.contains(&Effect::FocusTree), "{effects:?}");
+    assert!(effects.contains(&Effect::FocusTree(0)), "{effects:?}");
     assert_eq!(state.tree_cursor_row(), Some(1));
 }
 
@@ -143,7 +152,7 @@ fn keys_in_an_empty_tree_do_nothing() {
     let mut state = ready(vec![], vec![]);
     assert_eq!(
         press(&mut state, &special(Key::F6), NONE),
-        Some(vec![Effect::FocusTree])
+        Some(vec![Effect::FocusTree(0)])
     );
     for key in [
         TreeKey::Up,

@@ -1,4 +1,5 @@
-// The sidebar: the shared folder tree. Its roots are the places, the user's folders under
+// The sidebar: a folder tree, the shared one or a pane's own (LAY-03; `TreeBox`, at the end,
+// is one with the keys it takes). Its roots are the places, the user's folders under
 // "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
 // it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
 // scrolls as freely as one with a few. The main window's tree takes dragged rows into the
@@ -551,6 +552,9 @@ component TreeItem inherits Rectangle {
 }
 
 export component Sidebar inherits Rectangle {
+    // The tree's number in the window: 0 the shared one or the left pane's, 1 the right pane's
+    // (the places a drag over it names carry it as their `side`).
+    in property <int> number;
     // The places and the folders open below them, in order; the group of recent folders lies
     // between the favorites and the drives.
     in property <[TreeRow]> rows;
@@ -610,15 +614,15 @@ export component Sidebar inherits Rectangle {
         let dy = y - list.absolute-position.y;
         let inside = root.accepts-drops && dx >= 0 && dy >= 0 && dx < list.width && dy < list.height;
         if (root.pointed-gap >= 0) {
-            return { found: inside, place: DropPlace.favorites, side: 0, index: root.pointed-gap };
+            return { found: inside, place: DropPlace.favorites, side: root.number, index: root.pointed-gap };
         }
         if (root.pointed-row == -1) {
-            return { found: inside, place: DropPlace.favorites, side: 0, index: -1 };
+            return { found: inside, place: DropPlace.favorites, side: root.number, index: -1 };
         }
         return {
             found: inside && root.pointed-row >= 0,
             place: DropPlace.tree,
-            side: 0,
+            side: root.number,
             index: root.pointed-row,
         };
     }
@@ -844,6 +848,132 @@ export component Sidebar inherits Rectangle {
         triggered => {
             root.scroll-target = -1;
             self.stop();
+        }
+    }
+}
+
+// A folder tree of the main window with the keys it takes while it has them (F6): the shared
+// one at the window's left (LAY-03 a), or a pane's own beside it (LAY-03 b). Its keys go to
+// Rust (`key`), which passes on what the tree does not use to the window's keys. Its rows tell
+// of their clicks, drags and menus with the tree's `number`, as the window's callbacks do.
+export component TreeBox inherits FocusScope {
+    // 0 the shared tree or the left pane's, 1 the right pane's.
+    in property <int> number;
+    in property <[TreeRow]> rows;
+    // Whether the tree shows: as it goes while it has the keys, it says so (`gone`).
+    in property <bool> shows: true;
+    // The row of the keyboard cursor (its place in the list), which shows while the tree has
+    // the keys; -1 for none.
+    in property <int> cursor-row: -1;
+    // A dialog shows over the window: the keys are not the tree's.
+    in property <bool> blocked;
+    // The place a drag of another app takes, and the one it is over, as the window has them.
+    in property <DropAt> outside-drop;
+    in property <DropAt> outside-over;
+    in property <data-transfer> favorite-drag-data;
+
+    // A key while the tree has the keys; `true` when Rust used it.
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    // The tree took the keys; it went while it had them (the window gives them to the panes).
+    callback keys-taken();
+    callback gone();
+    // The callbacks of `Sidebar`, for this tree.
+    callback row-clicked(index: int);
+    callback row-toggled(index: int);
+    callback drop-check(data: data-transfer, place: DropPlace, index: int) -> DragAction;
+    callback dropped(data: data-transfer, place: DropPlace, index: int) -> DragAction;
+    callback favorite-pressed(index: int);
+    callback favorite-command(index: int, name: string);
+    callback blank-command(name: string);
+    callback row-command(index: int, name: string);
+
+    public function scroll-to(index: int) {
+        sidebar.scroll-to(index);
+    }
+    public function show-favorite-menu(index: int, row: int) {
+        sidebar.show-favorite-menu(index, row);
+    }
+    public function show-blank-menu() {
+        sidebar.show-blank-menu();
+    }
+    // The place under the point (`x`, `y`) of the window, as `Sidebar.spot-at`; not `found`
+    // while the tree does not show.
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        if (!root.shows) {
+            return { found: false, place: DropPlace.list, side: 0, index: -1 };
+        }
+        return sidebar.spot-at(x, y);
+    }
+    // The rows forget which one the pointer moved over last.
+    public function forget-pointer() {
+        sidebar.pointed-row = -1;
+        sidebar.pointed-gap = -2;
+    }
+
+    visible: root.shows;
+    focus-on-click: false;
+    focus-on-tab-navigation: false;
+    focus-gained => {
+        root.keys-taken();
+    }
+    // Slint takes the keys from an element that stops showing: the panes take them then.
+    focus-lost => {
+        if (!root.shows) {
+            root.gone();
+        }
+    }
+    key-pressed(event) => {
+        if (root.blocked) {
+            return reject;
+        }
+        if (root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+            return accept;
+        }
+        reject
+    }
+
+    sidebar := Sidebar {
+        width: parent.width;
+        height: parent.height;
+        number: root.number;
+        rows: root.rows;
+        cursor-row: root.has-focus ? root.cursor-row : -1;
+        accepts-drops: true;
+        outside-row: root.outside-drop.found && root.outside-drop.place == DropPlace.tree && root.outside-drop.side == root.number ? root.outside-drop.index : -1;
+        // The favorites are one list, which each tree shows: the place a drop would put a
+        // folder at shows in both.
+        outside-gap: root.outside-drop.found && root.outside-drop.place == DropPlace.favorites ? root.outside-drop.index : -2;
+        outside-over: root.outside-over.found && root.outside-over.side == root.number && (root.outside-over.place == DropPlace.tree || root.outside-over.place == DropPlace.favorites);
+        favorite-drag-data: root.favorite-drag-data;
+        row-clicked(index) => {
+            root.row-clicked(index);
+        }
+        row-toggled(index) => {
+            root.row-toggled(index);
+        }
+        drop-check(data, index) => {
+            return root.drop-check(data, DropPlace.tree, index);
+        }
+        dropped(data, index) => {
+            return root.dropped(data, DropPlace.tree, index);
+        }
+        favorites-check(data, gap) => {
+            return root.drop-check(data, DropPlace.favorites, gap);
+        }
+        favorites-dropped(data, gap) => {
+            return root.dropped(data, DropPlace.favorites, gap);
+        }
+        favorite-pressed(index) => {
+            root.favorite-pressed(index);
+        }
+        favorite-command(index, name) => {
+            root.favorite-command(index, name);
+        }
+        blank-command(name) => {
+            root.blank-command(name);
+        }
+        row-command(index, name) => {
+            root.row-command(index, name);
         }
     }
 }

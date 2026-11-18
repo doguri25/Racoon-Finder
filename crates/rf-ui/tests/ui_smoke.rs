@@ -15,7 +15,8 @@ use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
 use rf_ui::state::{
-    AppState, Column, DropSpot, Effect, FolderView, Hover, MenuFacts, ShownColumn, ViewMode,
+    AppState, Column, DropSpot, Effect, FolderView, Hover, MenuFacts, ShownColumn, TreeMode,
+    ViewMode,
 };
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
@@ -1433,9 +1434,9 @@ fn the_tree_shows_places_and_folders() {
     let window = window();
     let calls = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&calls);
-    window.on_tree_clicked(move |i| record.borrow_mut().push(("clicked", i)));
+    window.on_tree_clicked(move |_, i| record.borrow_mut().push(("clicked", i)));
     let record = Rc::clone(&calls);
-    window.on_tree_toggled(move |i| record.borrow_mut().push(("toggled", i)));
+    window.on_tree_toggled(move |_, i| record.borrow_mut().push(("toggled", i)));
 
     let home = VPath::local(std::env::temp_dir().join("home")).expect("a local path");
     let (disk, disk_label) = system_drive();
@@ -2873,7 +2874,8 @@ fn the_theme_follows_the_view_menu() {
     assert_eq!(chosen.borrow().as_slice(), [2]);
 
     // The marks of the menus: the theme chosen, and 숨김 파일 보기 as `show-hidden` says (with
-    // the marks of the layout's 폴더 트리 and 듀얼 패널, which are on).
+    // the marks of the layout's 툴바, 폴더 트리 and 듀얼 패널, which are on: the toolbar's
+    // stays, its button is in it).
     window.set_show_tree(false);
     window.set_dual_pane(false);
     window.set_show_extensions(false);
@@ -2885,14 +2887,14 @@ fn the_theme_follows_the_view_menu() {
         click("테마");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
     };
-    assert_eq!(open_themes(), 1);
+    assert_eq!(open_themes(), 2);
     // Choosing the theme that is chosen keeps its mark.
     click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2, 2]);
-    assert_eq!(open_themes(), 1);
+    assert_eq!(open_themes(), 2);
     click("어둡게");
     window.set_show_hidden(true);
-    assert_eq!(open_themes(), 2);
+    assert_eq!(open_themes(), 3);
     click("어둡게");
     button[0].invoke_accessible_default_action();
     click("숨김 파일 보기");
@@ -4227,8 +4229,9 @@ fn the_tab(window: &MainWindow, title: &str) -> ElementHandle {
 
 /// Clicks the item `title` of the menu that shows.
 fn choose_item(window: &MainWindow, title: &str) {
+    // The tree's lists are named as the 보기 menu's 폴더 트리 is.
     ElementHandle::find_by_accessible_label(window, title)
-        .next()
+        .find(|element| element.accessible_role() != Some(AccessibleRole::List))
         .unwrap_or_else(|| panic!("the menu shows {title}"))
         .mock_single_click(slint::platform::PointerEventButton::Left);
 }
@@ -5364,7 +5367,9 @@ fn the_tree_and_the_preview_panel_come_and_go() {
 /// The default layout, as Rust sets it back after a checkable item of the 보기 menu flipped
 /// its own mark.
 fn default_layout(window: &MainWindow) {
+    window.set_show_toolbar(true);
     window.set_show_tree(true);
+    window.set_tree_per_pane(false);
     window.set_show_preview(false);
     window.set_dual_pane(true);
     window.set_stacked(false);
@@ -5394,8 +5399,11 @@ fn the_view_menu_switches_the_layout() {
         default_layout(&window);
     };
     for (sub, item, call) in [
-        ("", "폴더 트리", "toggle-tree"),
-        ("", "폴더 트리로 가기", "focus-tree"),
+        ("", "툴바", "toggle-toolbar"),
+        ("폴더 트리", "공유 트리", "tree-shared"),
+        ("폴더 트리", "패널별 트리", "tree-per-pane"),
+        ("폴더 트리", "트리 숨김", "tree-hidden"),
+        ("폴더 트리", "폴더 트리로 가기", "focus-tree"),
         ("", "미리 보기 패널", "toggle-preview"),
         ("배치", "듀얼 패널", "toggle-dual"),
         ("배치", "위아래로 나누기", "toggle-split"),
@@ -5453,9 +5461,9 @@ fn the_view_menu_switches_the_layout() {
         }
     }
     default_layout(&window);
-    // The marks show the layout as Rust sets it back after each toggle: 폴더 트리 and 미리 보기
+    // The marks show the layout as Rust sets it back after each toggle: 툴바 and 미리 보기
     // 패널 in the menu, 듀얼 패널, 위아래로 나누기 and 탐색 동기화 in its 배치 menu (and no
-    // other: the extensions are not shown).
+    // other: the extensions are not shown; the tree's are in its own menu, below).
     window.set_show_extensions(false);
     let marks = || {
         open("배치");
@@ -5463,7 +5471,7 @@ fn the_view_menu_switches_the_layout() {
     };
     for (tree, preview, dual, stacked, sync, count) in [
         (true, false, true, false, false, 2),
-        (false, false, false, false, false, 0),
+        (false, false, false, false, false, 1),
         (true, true, true, true, true, 5),
     ] {
         window.set_show_tree(tree);
@@ -5475,6 +5483,65 @@ fn the_view_menu_switches_the_layout() {
         press(&window, Key::Escape);
         press(&window, Key::Escape);
     }
+}
+
+#[test]
+fn the_view_menu_s_folder_tree_menu_marks_the_mode_the_window_has() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let open = |sub: &str| {
+        button.invoke_accessible_default_action();
+        choose_item(&window, sub);
+    };
+    // 폴더 트리 ▸ marks the one mode the window has: shared, each pane's own, or hidden; and
+    // only a tree that shows can be gone to.
+    let middle_y =
+        |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
+    let marked = |item: &str| {
+        let shown = ElementHandle::find_by_accessible_label(&window, item)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {item}"));
+        ElementHandle::find_by_accessible_label(&window, "✓")
+            .any(|mark| (middle_y(&mark) - middle_y(&shown)).abs() < 4.0)
+    };
+    for (shown, per_pane, mode) in [
+        (true, false, "공유 트리"),
+        (true, true, "패널별 트리"),
+        (false, false, "트리 숨김"),
+        (false, true, "트리 숨김"),
+    ] {
+        window.set_show_tree(shown);
+        window.set_tree_per_pane(per_pane);
+        open("폴더 트리");
+        for item in ["공유 트리", "패널별 트리", "트리 숨김"] {
+            assert_eq!(marked(item), item == mode, "{item} for {mode}");
+        }
+        // Choosing it again keeps it the only mark.
+        choose_item(&window, mode);
+        open("폴더 트리");
+        assert!(marked(mode), "{mode} again");
+        if !shown {
+            choose_item(&window, "폴더 트리로 가기");
+            assert!(!calls.take().contains(&"focus-tree".to_owned()));
+            press(&window, Key::Escape);
+        }
+        press(&window, Key::Escape);
+        press(&window, Key::Escape);
+        calls.take();
+    }
+    // The tree's own menu shows the key of 트리 숨김 (KEY-03).
+    ui_bridge::show_shortcuts(&window, Os::Windows);
+    open("폴더 트리");
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, "트리 숨김  (Ctrl+B)")
+            .next()
+            .is_some()
+    );
+    press(&window, Key::Escape);
+    press(&window, Key::Escape);
 }
 
 #[test]
@@ -5546,7 +5613,8 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
         choose_item(&window, item);
         assert_eq!(calls.take(), [format!("drag-default {choice}")], "{item}");
     }
-    // The default Rust sets has the one mark of the menus (the others' marks are off).
+    // The default Rust sets has the one mark of 설정, beside the 툴바's in the menu behind it
+    // (the others' marks are off).
     window.set_show_tree(false);
     window.set_dual_pane(false);
     window.set_show_extensions(false);
@@ -5567,7 +5635,7 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
         window.set_drag_default(choice);
         open(&["설정"]);
         let marks = ElementHandle::find_by_accessible_label(&window, "✓").count();
-        assert_eq!(marks, 1, "{item}");
+        assert_eq!(marks, 2, "{item}");
         assert!(marked_by(item), "the mark is by {item}");
         for _ in 0..2 {
             press(&window, Key::Escape);
@@ -5578,7 +5646,7 @@ fn the_view_menu_s_settings_choose_what_a_drop_does() {
     open(&["설정"]);
     assert_eq!(
         ElementHandle::find_by_accessible_label(&window, "✓").count(),
-        2
+        3
     );
     assert!(marked_by("끌어서 옮긴 뒤 되돌리기 알림"));
     for _ in 0..2 {
@@ -5770,7 +5838,7 @@ fn the_tree_takes_the_keys_until_it_gives_them_back() {
     let record = calls.clone();
     // The tree uses ↓ (as its arrows and Esc); F12 is the window's.
     let down = special(Key::DownArrow);
-    window.on_tree_key(move |text, _, _, _, _| {
+    window.on_tree_key(move |_, text, _, _, _, _| {
         let used = text == down.as_str();
         record.note(if used { "tree ↓" } else { "tree other" });
         used
@@ -5783,7 +5851,7 @@ fn the_tree_takes_the_keys_until_it_gives_them_back() {
     press(&window, Key::DownArrow);
     assert_eq!(calls.take(), ["key"]);
 
-    window.invoke_focus_tree();
+    window.invoke_focus_tree(0);
     press(&window, Key::DownArrow);
     assert_eq!(calls.take(), ["tree ↓"]);
     // A key the tree does not use goes on to the window's keys.
@@ -6342,11 +6410,11 @@ fn the_view_menu_gives_the_tree_the_keys() {
         if name == "focus-tree"
             && let Some(window) = weak.upgrade()
         {
-            window.invoke_focus_tree();
+            window.invoke_focus_tree(0);
         }
     });
     let record = calls.clone();
-    window.on_tree_key(move |_, _, _, _, _| {
+    window.on_tree_key(move |_, _, _, _, _, _| {
         record.note("tree");
         true
     });
@@ -6358,11 +6426,12 @@ fn the_view_menu_gives_the_tree_the_keys() {
 
     let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
     button.invoke_accessible_default_action();
+    choose_item(&window, "폴더 트리");
     ElementHandle::find_by_accessible_label(&window, "폴더 트리로 가기")
         .next()
         .expect("the menu shows it")
         .mock_single_click(slint::platform::PointerEventButton::Left);
-    // The menu has closed, giving the keys back to what had them; the tree takes them then.
+    // The menus have closed, giving the keys back to what had them; the tree takes them then.
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
     slint::platform::update_timers_and_animations();
 
@@ -6409,7 +6478,7 @@ fn a_window_or_a_sub_menu_gives_the_keys_back_to_the_part_that_had_them() {
     let window = window();
     let calls = Calls::default();
     let record = calls.clone();
-    window.on_tree_key(move |_, _, _, _, _| {
+    window.on_tree_key(move |_, _, _, _, _, _| {
         record.note("tree");
         true
     });
@@ -6426,7 +6495,7 @@ fn a_window_or_a_sub_menu_gives_the_keys_back_to_the_part_that_had_them() {
     let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
     window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     let parts: [(GiveKeys, &str); 3] = [
-        (MainWindow::invoke_focus_tree, "tree"),
+        (|window: &MainWindow| window.invoke_focus_tree(0), "tree"),
         (MainWindow::invoke_focus_panel, "panel"),
         (MainWindow::invoke_focus_panes, "key"),
     ];
@@ -6453,7 +6522,7 @@ fn a_window_or_a_sub_menu_gives_the_keys_back_to_the_part_that_had_them() {
         assert_eq!(calls.take(), [owner], "after a sub-menu");
     }
     // A part that has gone meanwhile leaves the keys to the panes.
-    window.invoke_focus_tree();
+    window.invoke_focus_tree(0);
     window.set_dialog(DialogKind::Message);
     settle();
     window.set_show_tree(false);
@@ -7179,7 +7248,7 @@ fn the_panes_take_the_keys_once_windows_own_menu_has_closed() {
     ui_bridge::show_shortcuts(&window, Os::Windows);
     let calls = Calls::default();
     let record = calls.clone();
-    window.on_tree_key(move |_, _, _, _, _| {
+    window.on_tree_key(move |_, _, _, _, _, _| {
         record.note("tree");
         true
     });
@@ -7188,7 +7257,7 @@ fn the_panes_take_the_keys_once_windows_own_menu_has_closed() {
         record.note("key");
         true
     });
-    window.invoke_focus_tree();
+    window.invoke_focus_tree(0);
     press(&window, Key::DownArrow);
     assert_eq!(calls.take(), ["tree"]);
     window.invoke_menu_closed();
@@ -7439,7 +7508,7 @@ fn a_choice_in_a_pane_s_menu_gives_the_keys_to_the_panes() {
     ui_bridge::show_shortcuts(&window, Os::Windows);
     let calls = Calls::default();
     let record = calls.clone();
-    window.on_tree_key(move |_, _, _, _, _| {
+    window.on_tree_key(move |_, _, _, _, _, _| {
         record.note("tree");
         true
     });
@@ -7452,7 +7521,7 @@ fn a_choice_in_a_pane_s_menu_gives_the_keys_to_the_panes() {
     let models = PaneModels::default();
     window.set_left_pane(models.view(&pane, true));
     // The tree has the keys; a right click on the left list's empty part, and its 새로 고침.
-    window.invoke_focus_tree();
+    window.invoke_focus_tree(0);
     let item = labelled(&window, "a.txt", AccessibleRole::ListItem).remove(0);
     let at = item.absolute_position();
     let position = LogicalPosition::new(at.x + 4.0, at.y + 300.0);
@@ -8068,8 +8137,8 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
         Some(DropSpot::Pane { side: 1, row: None })
     );
     assert_eq!(spot(tabs[1]), Some(DropSpot::Tab { side: 1, index: 0 }));
-    assert_eq!(spot(tree[0]), Some(DropSpot::Tree(0)));
-    assert_eq!(spot(tree[3]), Some(DropSpot::Tree(3)));
+    assert_eq!(spot(tree[0]), Some(DropSpot::Tree { tree: 0, row: 0 }));
+    assert_eq!(spot(tree[3]), Some(DropSpot::Tree { tree: 0, row: 3 }));
     assert_eq!(spot(toolbar), None);
     // One pane: the hidden one takes nothing, the one that shows takes its whole room. The tree
     // put away: its room is the panes'.
@@ -8077,10 +8146,10 @@ fn spot_at_finds_where_a_drag_of_rows_would_drop() {
     compare("one pane");
     window.set_show_tree(false);
     compare("one pane, no tree");
-    assert_ne!(spot(tree[0]), Some(DropSpot::Tree(0)));
+    assert_ne!(spot(tree[0]), Some(DropSpot::Tree { tree: 0, row: 0 }));
     window.set_dual_pane(true);
     window.set_show_tree(true);
-    assert_eq!(spot(tree[1]), Some(DropSpot::Tree(1)));
+    assert_eq!(spot(tree[1]), Some(DropSpot::Tree { tree: 0, row: 1 }));
 
     // Nothing takes a drop while a dialog, quick look or a menu of the window shows over it.
     window.set_dialog(DialogKind::Confirm);
@@ -8311,7 +8380,7 @@ fn the_group_of_recent_folders_lies_between_the_favorites_and_the_drives() {
     tree_rows.sync(state.tree(), state.places());
     let clicked = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&clicked);
-    window.on_tree_clicked(move |index| record.borrow_mut().push(index));
+    window.on_tree_clicked(move |_, index| record.borrow_mut().push(index));
 
     let y = |label: &str| centre_of(&window, label, AccessibleRole::ListItem).y;
     let order = ["홈", "문서", "최근 폴더", "r1", "r2", "디스크", "USB"];
@@ -8383,7 +8452,7 @@ fn spot_at_finds_the_gaps_between_the_favorites_and_the_empty_part_of_their_list
             LogicalPosition::new(tree[2].x, tree[2].y - 40.0),
             DropSpot::Favorites { index: None },
         ),
-        (tree[1], DropSpot::Tree(1)),
+        (tree[1], DropSpot::Tree { tree: 0, row: 1 }),
     ];
     for (at, wanted) in cases {
         assert_eq!(spot(at), Some(wanted), "{at:?}");
@@ -8476,7 +8545,11 @@ fn a_list_frames_the_place_a_drag_of_another_app_takes_as_a_drag_of_rows_does() 
             -2,
             "{mode:?}"
         );
-        assert_eq!(target(Some(DropSpot::Tree(0))), -2, "{mode:?}");
+        assert_eq!(
+            target(Some(DropSpot::Tree { tree: 0, row: 0 })),
+            -2,
+            "{mode:?}"
+        );
         assert_eq!(target(None), -2, "{mode:?}");
         target(pane(1, Some(0)));
         window.invoke_drag_gone();
@@ -8597,7 +8670,10 @@ fn the_tree_is_not_looked_at_while_a_drag_of_the_window_is_under_way() {
     let x_txt = centre_of(&window, "x.txt", AccessibleRole::ListItem);
     let backup = centre_of(&window, "백업", AccessibleRole::ListItem);
     let documents = centre_of(&window, "문서", AccessibleRole::ListItem);
-    assert_eq!(found_at(&window, documents), Some(DropSpot::Tree(1)));
+    assert_eq!(
+        found_at(&window, documents),
+        Some(DropSpot::Tree { tree: 0, row: 1 })
+    );
     // While a drag of rows is under way, the pointer move that finds the tree's row would be a
     // step of that drag (a hover over the tree): none goes to the window, and the tree's rows
     // give nothing. The lists are found as ever.
@@ -8616,7 +8692,10 @@ fn the_tree_is_not_looked_at_while_a_drag_of_the_window_is_under_way() {
     pointer(&window, "release", backup);
     calls.drops.borrow_mut().clear();
     assert!(!window.global::<DragPointer<'_>>().get_over());
-    assert_eq!(found_at(&window, documents), Some(DropSpot::Tree(1)));
+    assert_eq!(
+        found_at(&window, documents),
+        Some(DropSpot::Tree { tree: 0, row: 1 })
+    );
 }
 
 /// A main window of the size the demo is judged at, with the left pane listing `names`.
@@ -9177,13 +9256,13 @@ fn the_favorites_menu_and_the_view_menu_say_their_keys_and_settings() {
     let window = window();
     let calls = Calls::default();
     let record = calls.clone();
-    window.on_favorite_command(move |i, name| record.note(format!("{i} {name}")));
+    window.on_favorite_command(move |_, i, name| record.note(format!("{i} {name}")));
     let record = calls.clone();
     window.on_command(move |name| record.note(name.to_string()));
     // KEY-03: 열기 of a favorite says the key the tree opens it with.
     for (os, title) in [(Os::Windows, "열기  (Enter)"), (Os::MacOs, "열기  (⌘↓)")] {
         ui_bridge::show_shortcuts(&window, os);
-        window.invoke_show_favorite_menu(0, 0);
+        window.invoke_show_favorite_menu(0, 0, 0);
         choose_item(&window, title);
     }
     assert_eq!(calls.take(), ["0 open", "0 open"]);
@@ -9337,4 +9416,265 @@ fn the_visit_history_s_menus_fit_the_smallest_window() {
     }
     window.invoke_show_visits_menu(-1);
     whole("앞 6 — /home/me", "뒤 6 — /home/me");
+}
+
+/// A window state whose panes show `a` and `b` of the temporary folder, the place 임시 (that
+/// folder) in the sidebar, the trees in `mode`, each tree that shows listed (a, b and c) and on
+/// its pane's folder; and a window that shows it as the controller does.
+fn trees_window(mode: TreeMode) -> (MainWindow, AppState, [Rc<TreeRows>; 2]) {
+    let window = window();
+    let base = std::env::temp_dir();
+    let at = |name: &str| VPath::local(base.join(name)).expect("a local path");
+    let temp = VPath::local(&base).expect("a local path");
+    let (mut state, effects) = AppState::new(at("a"), at("b"), None);
+    for effect in effects {
+        let Effect::Load(request) = effect else {
+            panic!("a listing: {effect:?}");
+        };
+        state.loaded(LoadEvent::Listed {
+            generation: request.generation,
+            entries: Vec::new(),
+        });
+    }
+    let mut effects = state.set_places(&[Place {
+        label: "임시".to_owned(),
+        path: temp,
+        kind: PlaceKind::Drive,
+        space: None,
+    }]);
+    effects.extend(state.set_tree_mode(mode));
+    effects.extend(state.follow_active());
+    list_trees(&mut state, &effects);
+    let rows = [Rc::new(TreeRows::default()), Rc::new(TreeRows::default())];
+    window.set_tree(ModelRc::from(Rc::clone(&rows[0])));
+    window.set_right_tree(ModelRc::from(Rc::clone(&rows[1])));
+    window.set_show_tree(mode != TreeMode::Hidden);
+    window.set_tree_per_pane(mode == TreeMode::PerPane);
+    show_trees(&state, &rows);
+    (window, state, rows)
+}
+
+/// Lists, with a, b and c, the folders the trees ask for in `effects`.
+fn list_trees(state: &mut AppState, effects: &[Effect]) {
+    for effect in effects {
+        if let Effect::LoadChildren(request) = effect {
+            state.loaded(LoadEvent::Listed {
+                generation: request.generation,
+                entries: ["a", "b", "c"]
+                    .map(|name| entry(name, EntryKind::Dir, 0))
+                    .to_vec(),
+            });
+        }
+    }
+}
+
+/// The rows of both trees, as the controller's redraw makes them.
+fn show_trees(state: &AppState, rows: &[Rc<TreeRows>; 2]) {
+    for (tree, rows) in rows.iter().enumerate() {
+        rows.sync(&state.trees()[tree], state.places());
+    }
+}
+
+/// The lists of the folder trees that show, from left to right: where each is across, the
+/// label of its row that is selected (its pane's folder), and how many rows of folders it has.
+fn shown_trees(window: &MainWindow) -> Vec<(f32, String, usize)> {
+    let mut lists: Vec<(f32, f32)> = labelled(window, "폴더 트리", AccessibleRole::List)
+        .iter()
+        .map(|list| (list.absolute_position().x, list.size().width))
+        .collect();
+    lists.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let rows = window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all();
+    lists
+        .iter()
+        .map(|&(x, width)| {
+            let inside: Vec<&ElementHandle> = rows
+                .iter()
+                .filter(|row| {
+                    let at = row.absolute_position().x;
+                    at >= x && at < x + width && row.accessible_expandable().is_some()
+                })
+                .collect();
+            let selected = inside
+                .iter()
+                .find(|row| row.accessible_item_selected() == Some(true))
+                .and_then(|row| row.accessible_label())
+                .map(|label| label.to_string())
+                .unwrap_or_default();
+            (x, selected, inside.len())
+        })
+        .collect()
+}
+
+#[test]
+fn each_pane_s_own_tree_shows_beside_it_and_follows_it() {
+    let (window, mut state, rows) = trees_window(TreeMode::PerPane);
+    let (left_at, left) = shown_pane(&window, "왼쪽 패널");
+    let (right_at, _) = shown_pane(&window, "오른쪽 패널");
+
+    // Two trees, each at the left of its pane, each on its pane's folder.
+    let trees = shown_trees(&window);
+    assert_eq!(trees.len(), 2, "{trees:?}");
+    assert!(trees[0].0 < left_at.x, "{trees:?}");
+    assert!(
+        trees[1].0 > left_at.x + left.width && trees[1].0 < right_at.x,
+        "{trees:?}"
+    );
+    assert_eq!((trees[0].1.as_str(), trees[0].2), ("a", 4));
+    assert_eq!((trees[1].1.as_str(), trees[1].2), ("b", 4));
+    // The panes keep room for their lists: about as wide as each other, their trees beside.
+    let (_, right) = shown_pane(&window, "오른쪽 패널");
+    assert!((left.width - right.width).abs() < 2.0, "{left:?} {right:?}");
+    assert!(left.width >= 200.0);
+
+    // The right pane goes to c: its tree follows, the left one stays on a, though the right
+    // pane has the keys now.
+    state.activate(1);
+    let c = VPath::local(std::env::temp_dir().join("c")).expect("a local path");
+    let mut effects = state.go_to(c);
+    effects.extend(state.follow_active());
+    list_trees(&mut state, &effects);
+    show_trees(&state, &rows);
+    let trees = shown_trees(&window);
+    assert_eq!(trees[0].1, "a");
+    assert_eq!(trees[1].1, "c");
+    // The left tree closes its place: the right one stays open.
+    state.toggle_tree_row(0, 0);
+    show_trees(&state, &rows);
+    let trees = shown_trees(&window);
+    assert_eq!((trees[0].2, trees[1].2), (1, 4), "{trees:?}");
+
+    // A click on a row of the right pane's tree names that tree.
+    let clicks = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&clicks);
+    window.on_tree_clicked(move |tree, index| record.borrow_mut().push((tree, index)));
+    let row = window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all()
+        .into_iter()
+        .filter(|row| row.accessible_label().as_deref() == Some("b"))
+        .max_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x))
+        .expect("the right tree's b");
+    row.invoke_accessible_default_action();
+    assert_eq!(clicks.borrow().as_slice(), [(1, 2)]);
+
+    // One pane, the right one: its own tree with it, at the left of the room.
+    window.set_dual_pane(false);
+    window.set_right_pane(PaneView {
+        active: true,
+        ..PaneView::default()
+    });
+    let trees = shown_trees(&window);
+    assert_eq!(trees.len(), 1, "{trees:?}");
+    assert_eq!(trees[0].1, "c");
+    let (alone_at, _) = shown_pane(&window, "오른쪽 패널");
+    assert!(trees[0].0 < alone_at.x);
+    assert!(trees[0].0 < left_at.x);
+}
+
+#[test]
+fn the_shared_tree_shows_at_the_left_on_the_active_pane_s_folder_and_none_while_hidden() {
+    let (window, mut state, rows) = trees_window(TreeMode::Shared);
+    let (left_at, _) = shown_pane(&window, "왼쪽 패널");
+    let trees = shown_trees(&window);
+    assert_eq!(trees.len(), 1, "{trees:?}");
+    assert!(trees[0].0 < left_at.x);
+    assert_eq!(trees[0].1, "a");
+    // It follows the pane with the keys.
+    state.activate(1);
+    let effects = state.follow_active();
+    list_trees(&mut state, &effects);
+    show_trees(&state, &rows);
+    assert_eq!(shown_trees(&window)[0].1, "b");
+    // Each pane's own, then none: the window follows the mode it is told.
+    window.set_tree_per_pane(true);
+    assert_eq!(shown_trees(&window).len(), 2);
+    window.set_show_tree(false);
+    assert_eq!(shown_trees(&window), Vec::new());
+    let (wide_at, _) = shown_pane(&window, "왼쪽 패널");
+    assert!(wide_at.x < left_at.x - 200.0, "{wide_at:?} {left_at:?}");
+}
+
+#[test]
+fn f6_takes_the_keys_to_the_tree_rust_names_and_one_that_goes_gives_them_to_the_panes() {
+    let (window, _state, _rows) = trees_window(TreeMode::PerPane);
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_tree_key(move |tree, _, _, _, _, _| {
+        record.note(format!("tree {tree}"));
+        true
+    });
+    let record = calls.clone();
+    window.on_key(move |_, _, _, _, _, _| {
+        record.note("key");
+        true
+    });
+    for tree in [0, 1] {
+        window.invoke_focus_tree(tree);
+        press(&window, Key::DownArrow);
+        assert_eq!(calls.take(), [format!("tree {tree}")]);
+    }
+    // The right pane's tree goes (one pane, the left one) while it has the keys: the panes
+    // take them.
+    window.set_dual_pane(false);
+    settle();
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+    // A tree that does not show takes none.
+    window.invoke_focus_tree(1);
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["key"]);
+    // The shared tree is tree 0 too.
+    window.set_tree_per_pane(false);
+    window.invoke_focus_tree(0);
+    press(&window, Key::DownArrow);
+    assert_eq!(calls.take(), ["tree 0"]);
+}
+
+#[test]
+fn a_hidden_toolbar_leaves_the_panes_their_path_rows_and_the_view_menu_its_key() {
+    let window = window();
+    let calls = Calls::default();
+    let record = calls.clone();
+    window.on_command(move |name| record.note(name.to_string()));
+    let (shown_at, shown) = shown_pane(&window, "왼쪽 패널");
+    assert!(!labelled(&window, "뒤로", AccessibleRole::Button).is_empty());
+    let paths = || labelled(&window, "경로", AccessibleRole::Groupbox).len();
+    assert_eq!(paths(), 2);
+
+    window.set_show_toolbar(false);
+
+    // Its buttons go, the filter box too; the panes take the room, their path rows stay.
+    for button in ["뒤로", "앞으로", "위로", "새 폴더", "보기", "선택"] {
+        assert!(
+            labelled(&window, button, AccessibleRole::Button).is_empty(),
+            "{button}"
+        );
+    }
+    assert!(labelled(&window, "이 폴더에서 거르기", AccessibleRole::TextInput).is_empty());
+    let (hidden_at, hidden) = shown_pane(&window, "왼쪽 패널");
+    assert!(
+        hidden_at.y < shown_at.y - 40.0,
+        "{hidden_at:?} {shown_at:?}"
+    );
+    assert!(hidden.height > shown.height + 40.0);
+    assert_eq!(paths(), 2);
+    // F10 opens the 보기 menu all the same (at the top of the window), where 툴바 brings the
+    // toolbar back.
+    window.invoke_show_view_menu();
+    choose_item(&window, "툴바");
+    assert_eq!(calls.take(), ["toggle-toolbar"]);
+    // Rust sets it back from its state; shown, everything is where it was.
+    window.set_show_toolbar(true);
+    assert!(!labelled(&window, "뒤로", AccessibleRole::Button).is_empty());
+    assert_eq!(shown_pane(&window, "왼쪽 패널"), (shown_at, shown));
+    // A long press where 뒤로 was, while hidden, is no press of it.
+    window.set_show_toolbar(false);
+    let back = shown_at.x.min(40.0);
+    assert_eq!(window.invoke_visits_button_at(back, 30.0), -1);
 }

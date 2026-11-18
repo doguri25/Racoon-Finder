@@ -4,7 +4,8 @@
 //! tree from the keyboard ([`sidebar`]),
 //! the tabs ([`tabs`]), the selection tools and listing again ([`select`]), the system clipboard
 //! ([`clipboard`]), the properties window ([`properties`]), the item menu and the system's ways
-//! to open an item ([`shell`]), with the helpers they share.
+//! to open an item ([`shell`]), the folder tree's modes and the toolbar ([`trees`]), with the
+//! helpers they share.
 
 use super::*;
 use crate::keys;
@@ -41,6 +42,7 @@ mod shell;
 mod sidebar;
 mod tabs;
 mod tray;
+mod trees;
 mod undo_list;
 mod view;
 

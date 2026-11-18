@@ -1,6 +1,7 @@
 //! How the [`Controller`] keeps the [`Settings`] while the app runs: the look at the folders of
-//! the last run's tabs at the start, the theme of the 보기 menu, the window's size, and the
-//! saves after a change and as the app ends ([`SaveLedger`] decides when).
+//! the last run's tabs at the start, the theme of the 보기 menu, the window's size, place and
+//! maximized state (LAY-07: put back at the start with [`placement`]), and the saves after a
+//! change and as the app ends ([`SaveLedger`] decides when).
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
@@ -10,11 +11,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use rf_core::VPath;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
 use crate::pane::ancestors;
 use crate::settings::{Found, Settings, ThemeChoice};
+use crate::state::{Screen, placement};
 use crate::ui_bridge::post;
 use crate::words;
 
@@ -338,9 +341,9 @@ impl Controller {
     }
 
     /// The settings with what the window shows now, and their text: the tabs, the active pane,
-    /// the hidden items, the recent targets, the choices of 보기 ▸ 설정, the theme and the
-    /// window's size (kept as it was while the window is maximized, full screen or minimized).
-    /// `None` before the panes show.
+    /// the hidden items, the recent targets, the choices of 보기 ▸ 설정, the theme, the
+    /// window's size and place (both kept as they were while the window is maximized, full
+    /// screen or minimized) and whether it is maximized. `None` before the panes show.
     fn snapshot(&self) -> Option<(Settings, String)> {
         let mut settings = self.settings.borrow().clone();
         {
@@ -364,8 +367,74 @@ impl Controller {
         if let Some(size) = self.window_size() {
             settings.window = Some(size);
         }
+        settings.window_at = self.window_position();
+        settings.maximized = self.window_maximized();
         let text = settings.to_text().ok()?;
         Some((settings, text))
+    }
+
+    /// Puts the window where the settings say it was (LAY-07), checked against `screens`
+    /// ([`placement`]: off every screen, where the system puts a new window; partly off, moved
+    /// onto the screen; larger than it, made to fit), before the window system makes it: its
+    /// size, its place and whether it is maximized. Once; the window keeps whatever place it
+    /// takes from then on.
+    pub(super) fn place_window(&self, screens: &[Screen]) {
+        let Some(saved) = self.saved_place.take() else {
+            return;
+        };
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let placed = placement(saved, screens);
+        if let Some((width, height)) = placed.size {
+            window.set_start_width(logical(width));
+            window.set_start_height(logical(height));
+        }
+        if let Some((x, y)) = placed.position {
+            window
+                .window()
+                .set_position(slint::PhysicalPosition::new(x, y));
+        }
+        window.window().set_maximized(placed.maximized);
+    }
+
+    /// The window's place, its outer top left corner on the desktop in physical pixels, as the
+    /// window system last told it while the window showed with a place of its own (neither
+    /// maximized, full screen nor minimized); the settings' until it tells one. Wayland tells
+    /// none.
+    fn window_position(&self) -> Option<(i32, i32)> {
+        if let Some(window) = self.window.upgrade() {
+            let shown = window.window();
+            let own = shown.is_visible()
+                && !shown.is_maximized()
+                && !shown.is_fullscreen()
+                && !shown.is_minimized();
+            let told = shown
+                .with_winit_window(|winit| {
+                    // The system's own word: a window being maximized may not have told Slint
+                    // yet, and a maximized window's corner is no place of its own.
+                    (!winit.is_maximized())
+                        .then(|| winit.outer_position().ok())
+                        .flatten()
+                })
+                .flatten()
+                .filter(|_| own);
+            if let Some(corner) = told {
+                self.window_at.set(Some((corner.x, corner.y)));
+            }
+        }
+        self.window_at.get()
+    }
+
+    /// Whether the window is maximized, as it was when it last showed (not full screen).
+    fn window_maximized(&self) -> bool {
+        if let Some(window) = self.window.upgrade() {
+            let shown = window.window();
+            if shown.is_visible() && !shown.is_fullscreen() {
+                self.maximized.set(shown.is_maximized());
+            }
+        }
+        self.maximized.get()
     }
 
     /// The window's size in logical pixels, while it has one of its own.
@@ -379,8 +448,8 @@ impl Controller {
         Some((whole_pixels(size.width)?, whole_pixels(size.height)?))
     }
 
-    /// After a change: a save [`SAVE_DELAY`] from now, when the settings differ from those
-    /// last written and none is planned yet.
+    /// After a change (the window moved, too): a save [`SAVE_DELAY`] from now, when the
+    /// settings differ from those last written and none is planned yet.
     pub(super) fn plan_save(&self) {
         if !self.ledger.borrow().takes_changes() {
             return;
