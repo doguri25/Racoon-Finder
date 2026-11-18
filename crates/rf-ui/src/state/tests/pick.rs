@@ -842,3 +842,91 @@ fn a_last_place_that_is_gone_gives_way_to_the_other_pane() {
     assert_eq!(state.target_inspected(look, &folder("c"), gone), []);
     assert_eq!(picker(&state).target, Some(typed));
 }
+
+/// The picker of `with_items` opened by F7 with the last place `c` chosen by the setting, and
+/// the generation of the look at `c`, still out.
+fn starting_at_a_gone_place() -> (AppState, u64) {
+    let mut state = with_items();
+    state.set_recent_targets(vec![folder("c")]);
+    state.set_pick_start(PickStart::Last);
+    let effects = press(&mut state, &special(Key::F7), NONE).expect("used");
+    let (look, path) = the_look(&effects);
+    assert_eq!(path, folder("c"));
+    assert!(picker(&state).from_last);
+    (state, look)
+}
+
+fn gone() -> TargetFacts {
+    TargetFacts {
+        folder: Err(ErrorKind::NotFound),
+        ..folder_facts()
+    }
+}
+
+/// Whether `effects` ask a worker to look at any path.
+fn looks(effects: &[Effect]) -> bool {
+    effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::InspectTarget { .. }))
+}
+
+#[test]
+fn a_path_typed_before_the_gone_place_is_found_gone_stays() {
+    let (mut state, look) = starting_at_a_gone_place();
+    // The user types in the path field while the look at c is still out (a share offline).
+    let typed = folder("백업").to_string();
+    state.pick_path_edited(&typed);
+    assert!(!picker(&state).from_last);
+    // The look comes back: nothing is chosen in the place of what the field holds.
+    let effects = state.target_inspected(look, &folder("c"), gone());
+    assert!(!looks(&effects), "{effects:?}");
+    assert!(picker(&state).path_edited);
+    assert_eq!(picker(&state).target, Some(folder("c")));
+    // Nothing is confirmed until the path typed is entered.
+    assert_eq!(state.pick_confirmed(), []);
+    assert_eq!(state.pick_enter(), []);
+}
+
+#[test]
+fn a_path_entered_before_the_gone_place_is_found_gone_has_its_own_look() {
+    let (mut state, look) = starting_at_a_gone_place();
+    let entered = folder("백업");
+    let (typing, path) = the_look(&state.pick_path_entered(&entered.to_string()));
+    assert_eq!(path, entered);
+    assert!(!picker(&state).from_last);
+    // The look at c comes back first: the entered path's look is still the one waited for.
+    let effects = state.target_inspected(look, &folder("c"), gone());
+    assert!(!looks(&effects), "{effects:?}");
+    assert_eq!(picker(&state).typed, Some(entered.clone()));
+    // Then its own: it becomes the target, and Enter copies there.
+    state.target_inspected(typing, &entered, folder_facts());
+    assert_eq!(picker(&state).target, Some(entered.clone()));
+    let (JobSpec::Transfer(transfer), _) = the_submit(&state.pick_enter()) else {
+        panic!("a transfer");
+    };
+    assert_eq!(
+        transfer.items[0].target,
+        entered.join("docs").expect("a name")
+    );
+}
+
+#[test]
+fn a_filter_typed_before_the_gone_place_is_found_gone_keeps_enter_to_itself() {
+    let (mut state, look) = starting_at_a_gone_place();
+    state.pick_filter("백");
+    assert!(!picker(&state).from_last);
+    let effects = state.target_inspected(look, &folder("c"), gone());
+    assert!(!looks(&effects), "{effects:?}");
+    assert!(picker(&state).filter_fresh);
+    assert_eq!(picker(&state).target, Some(folder("c")));
+    // A single Enter takes what the filter finds (nothing here), and copies nowhere: not into
+    // the other pane.
+    let effects = state.pick_enter();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Job(_))),
+        "{effects:?}"
+    );
+    assert!(matches!(state.modal(), Some(Modal::Pick(_))));
+}

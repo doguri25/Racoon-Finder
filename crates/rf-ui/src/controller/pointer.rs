@@ -250,10 +250,18 @@ impl Controller {
         }
     }
 
-    /// A left press on row `row` of pane `side`, with Ctrl or Shift held (`modified`) and on the
-    /// text of its name or not, before the state takes it: whether it may be a slow second click
-    /// ([`AppState::row_press`](crate::state::AppState::row_press)).
-    pub(super) fn slow_press(&self, side: usize, row: usize, modified: bool, on_name: bool) {
+    /// A left press at `now` on row `row` of pane `side`, with Ctrl or Shift held (`modified`)
+    /// and on the text of its name or not, before the state takes it: whether it may be a slow
+    /// second click ([`AppState::row_press`](crate::state::AppState::row_press)). The window
+    /// gives the time of its event; a test chooses it.
+    pub(super) fn slow_press(
+        &self,
+        side: usize,
+        row: usize,
+        modified: bool,
+        on_name: bool,
+        now: Instant,
+    ) {
         self.press.slow_timer.stop();
         let press = self
             .state
@@ -266,15 +274,15 @@ impl Controller {
             .map_or(Spot::new(0.0, 0.0), |at| Spot::new(at.x, at.y));
         let mut slow = self.press.slow.borrow_mut();
         match press {
-            Some(press) => slow.press(press, at, Instant::now()),
+            Some(press) => slow.press(press, at, now),
             None => slow.cancel(),
         }
     }
 
-    /// A press on a row was let go as a click (Slint's, after no drag): the rename of a slow
-    /// second click, now or once the double-click time has passed.
-    pub(super) fn slow_release(&self) {
-        let due = self.press.slow.borrow_mut().release(Instant::now());
+    /// A press on a row was let go as a click at `now` (Slint's, after no drag): the rename of
+    /// a slow second click, now or once the double-click time has passed.
+    pub(super) fn slow_release(&self, now: Instant) {
+        let due = self.press.slow.borrow_mut().release(now);
         match due {
             Some(target) => self.slow_due(&target),
             None => self.slow_wait(),
@@ -313,14 +321,6 @@ impl Controller {
     #[cfg(test)]
     pub(super) fn slow_waits_until(&self) -> Option<Instant> {
         self.press.slow.borrow().waiting_until()
-    }
-
-    /// The slow second click starts again, as after a long pause: no press came before. For
-    /// the tests, whose presses come within the double-click time of each other.
-    #[cfg(test)]
-    pub(super) fn slow_forget(&self) {
-        *self.press.slow.borrow_mut() = SlowClick::new(DOUBLE_CLICK, THRESHOLD_PX);
-        self.press.slow_timer.stop();
     }
 
     /// The slow second click came due on `target`: its name window opens.

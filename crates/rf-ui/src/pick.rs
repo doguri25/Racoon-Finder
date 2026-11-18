@@ -366,8 +366,9 @@ pub struct Picker {
     pub making: Option<(VPath, OsString)>,
     /// The target is the last place a copy or a move went to, which 보기 ▸ 설정 has the picker
     /// start at (PICK-05), and no choice of the user's: when a worker finds that it can take
-    /// nothing (it is gone), the picker goes to its first quick target. Any target chosen or
-    /// typed since clears it.
+    /// nothing (it is gone), the picker goes to its first quick target. Any input of the user's
+    /// since clears it (a target chosen, a path typed or entered, the filter changed), even while
+    /// the look at that place is still out: what the user does is never replaced.
     pub from_last: bool,
 }
 
@@ -550,6 +551,7 @@ impl Picker {
     /// The path typed into the path field: a worker looks at it before it is chosen. Gives
     /// the generation of that look; the target's own look goes on.
     pub fn type_path(&mut self, path: VPath) -> u64 {
+        self.from_last = false;
         self.typed = Some(path);
         self.path_error.clear();
         self.typing = next_generation();
@@ -560,6 +562,7 @@ impl Picker {
     /// nothing is confirmed until it is. A path entered before and still being looked at is
     /// forgotten, and so is why the last one was refused.
     pub fn edit_path(&mut self, text: &str) {
+        self.from_last = false;
         self.path_edited = self
             .target
             .as_ref()
@@ -572,6 +575,7 @@ impl Picker {
     /// The filter of the tree now holds `text`.
     pub fn set_filter(&mut self, text: &str) {
         if self.filter != text {
+            self.from_last = false;
             text.clone_into(&mut self.filter);
             self.filter_fresh = !text.trim().is_empty();
         }

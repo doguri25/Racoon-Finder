@@ -652,7 +652,7 @@ fn connect(window: &MainWindow) {
         with(|c| {
             // Before the press changes the selection: whether it may be a slow second click.
             if let Some(row) = index(i) {
-                c.slow_press(side(s), row, ctrl || shift, on_name);
+                c.slow_press(side(s), row, ctrl || shift, on_name, Instant::now());
             }
             c.update_at(i, |state, i| state.press_row(side(s), i, ctrl, shift));
         });
@@ -667,7 +667,7 @@ fn connect(window: &MainWindow) {
         }
         with(|c| {
             c.update_at(i, |state, i| state.release_row(side(s), i));
-            c.slow_release();
+            c.slow_release(Instant::now());
         });
     });
     connect_checkboxes(window);
@@ -4638,8 +4638,6 @@ mod tests {
 
     #[test]
     fn a_slow_second_click_on_the_name_renames_once_its_wait_is_over() {
-        use i_slint_backend_testing::{AccessibleRole, ElementHandle};
-
         let d = Dragging::new();
         let c = &d.controller;
         // x.txt is the only selection already (the keys chose it, say).
@@ -4647,59 +4645,55 @@ mod tests {
             state.click_row(LEFT, 0, false, false);
         }
         c.redraw();
-        let name = ElementHandle::find_by_accessible_label(&d.window, "x.txt")
-            .find(|found| found.accessible_role() == Some(AccessibleRole::Text))
-            .expect("the name of x.txt");
-        let at = name.absolute_position();
-        let middle = at.y + name.size().height / 2.0;
-        // Two places on the name farther apart than Slint's double click allows (10 px), so
-        // that no press pair here opens the file.
-        let first = slint::LogicalPosition::new(at.x + 3.0, middle);
-        let second = slint::LogicalPosition::new(at.x + 14.0, middle);
-        let click = |place: slint::LogicalPosition| {
-            d.left(true, place);
-            d.left(false, place);
+        // Every time below is given, as the window gives the times of its events: the test
+        // reads no clock to time a press. The base lies an hour ahead of the real clock, so
+        // that the controller's own timer of the wait, which runs on that clock, never comes
+        // due while the test runs; the cases lie seconds apart, past the double-click time.
+        let ms = Duration::from_millis;
+        let base = Instant::now() + Duration::from_secs(3600);
+        let case = |n: u32| base + Duration::from_secs(10) * n;
+        let click = |at: Instant| {
+            c.slow_press(LEFT, 0, false, true, at);
+            c.slow_release(at + ms(80));
         };
-        // Each case starts a second (of Slint's clock) after the last: Slint takes no press of
-        // one case and the next for a double click, which would open the file.
-        let next_case = || {
-            c.slow_forget();
-            i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(1));
-        };
-        // A click on the name: the rename waits out the double-click time, timed by the
-        // machine's own clock.
-        next_case();
-        click(first);
+        // A click on the name: the rename waits out the double-click time from its press.
+        click(case(0));
         let due = c.slow_waits_until().expect("the rename waits");
-        c.slow_tick_at(
-            due.checked_sub(Duration::from_millis(1))
-                .expect("an instant"),
-        );
+        assert_eq!(due, case(0) + crate::state::DOUBLE_CLICK);
+        c.slow_tick_at(due.checked_sub(ms(1)).expect("an instant"));
         assert_eq!(renaming(c), None);
         c.slow_tick_at(due);
         assert_eq!(renaming(c).as_deref(), Some("x.txt"));
         assert_eq!(c.slow_waits_until(), None);
         c.update(AppState::dialog_cancelled);
+        // Held past the double-click time, it renames as it is let go.
+        c.slow_press(LEFT, 0, false, true, case(1));
+        c.slow_release(case(1) + ms(600));
+        assert_eq!(renaming(c).as_deref(), Some("x.txt"));
+        c.update(AppState::dialog_cancelled);
 
         // A second press within the time (a double click's): nothing waits, nothing opens.
-        next_case();
-        click(first);
+        click(case(2));
         assert!(c.slow_waits_until().is_some());
-        click(second);
+        click(case(2) + ms(200));
         assert_eq!(c.slow_waits_until(), None);
-        c.slow_tick_at(due + Duration::from_secs(10));
+        c.slow_tick_at(case(3));
         assert_eq!(renaming(c), None);
+        // Off the name, or with Ctrl or Shift: nothing waits.
+        c.slow_press(LEFT, 0, false, false, case(4));
+        c.slow_release(case(4) + ms(80));
+        c.slow_press(LEFT, 0, true, true, case(5));
+        c.slow_release(case(5) + ms(80));
+        assert_eq!(c.slow_waits_until(), None);
         // A row's activation (a double click), or a key (the hook cancels the press), in the
         // meantime: nothing opens either.
-        next_case();
-        click(first);
+        click(case(6));
         d.window.invoke_row_activated(0, 99);
         assert_eq!(c.slow_waits_until(), None);
-        next_case();
-        click(first);
+        click(case(7));
         c.press_cancel();
         assert_eq!(c.slow_waits_until(), None);
-        c.slow_tick_at(due + Duration::from_secs(10));
+        c.slow_tick_at(case(8));
         assert_eq!(renaming(c), None);
     }
 
