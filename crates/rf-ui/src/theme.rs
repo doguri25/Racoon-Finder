@@ -1130,6 +1130,8 @@ mod tests {
                 7.0,
             ),
             ("muted text on a hovered segment", c.muted, c.pressed, 7.0),
+            ("a pressed row's hint", c.faint, c.pressed, 7.0),
+            ("a hint under the pointer", c.faint, c.raised, 7.0),
             (
                 "the selected text in a field",
                 c.on_text_selection,
@@ -1164,20 +1166,75 @@ mod tests {
             step >= 3.0 && step >= dark_step,
             "{step:.2}:1, dark {dark_step:.2}:1"
         );
-        // A cut and a hidden item stay readable at their strength, on the pane and selected.
-        for (what, dim) in [("cut", tokens.dim_cut), ("hidden", tokens.dim_hidden)] {
-            for (name, front) in [("name", c.text), ("columns", c.muted)] {
-                for (on, back) in [("pane", c.panel), ("selection", c.selection)] {
-                    let ratio = contrast(faded(front, back, dim), back);
-                    assert!(ratio >= 7.0, "{what} {name} on the {on}: {ratio:.2}:1");
-                }
-            }
-            let ratio = contrast(faded(c.faint, c.panel, dim), c.panel);
-            assert!(ratio >= 4.5, "{what} hint: {ratio:.2}:1");
-        }
         assert!(tokens.dark, "the system's widgets are drawn dark on it");
         assert!(tokens.marks, "shapes mark what the colors tell");
         assert_eq!(tokens.icon_style, IconStyle::Bold);
+    }
+
+    /// In high contrast a cut and a hidden item stay readable at their strength wherever they
+    /// show: in the list and the grid their name and columns, on the pane, selected and under
+    /// the pointer; in the sidebar a hidden folder's name, a drive's note and the faint name and
+    /// note of one a filter dims, pressed too. One pair stays under 7:1, only while the pointer
+    /// presses the row; it is named here with its ratio.
+    #[test]
+    fn high_contrast_keeps_cut_and_hidden_items_readable_wherever_they_show() {
+        const PRESSED_ONLY: &[(&str, f64)] = &[("hidden folder's faint text on pressed", 6.05)];
+        let tokens = Builtin::HighContrast.tokens();
+        let c = &tokens.color;
+        let list = [
+            ("pane", c.panel),
+            ("selection", c.selection),
+            ("raised", c.raised),
+        ];
+        let sidebar = [
+            ("pane", c.panel),
+            ("selection", c.selection),
+            ("raised", c.raised),
+            ("pressed", c.pressed),
+        ];
+        let item = [("name", c.text), ("columns", c.muted)];
+        let folder = [
+            ("name", c.text),
+            ("muted text", c.muted),
+            ("faint text", c.faint),
+        ];
+        let mut under = Vec::new();
+        for (what, dim, fronts, backs) in [
+            ("cut item's", tokens.dim_cut, &item[..], &list[..]),
+            ("hidden item's", tokens.dim_hidden, &item[..], &list[..]),
+            (
+                "hidden folder's",
+                tokens.dim_hidden,
+                &folder[..],
+                &sidebar[..],
+            ),
+        ] {
+            for (name, front) in fronts {
+                for (on, back) in backs {
+                    let ratio = contrast(faded(*front, *back, dim), *back);
+                    if ratio < 7.0 {
+                        under.push((format!("{what} {name} on {on}"), ratio));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            under
+                .iter()
+                .map(|(what, _)| what.as_str())
+                .collect::<Vec<_>>(),
+            PRESSED_ONLY
+                .iter()
+                .map(|(what, _)| *what)
+                .collect::<Vec<_>>(),
+            "{under:?}"
+        );
+        for ((what, ratio), (_, listed)) in under.iter().zip(PRESSED_ONLY) {
+            assert!(
+                *ratio >= 4.5 && (ratio - listed).abs() < 0.01,
+                "{what}: {ratio:.2}:1"
+            );
+        }
     }
 
     /// `front` drawn at `opacity` over `back`, as the screens blend a dimmed item.

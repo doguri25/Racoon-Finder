@@ -17,7 +17,9 @@ panel = "#000000"
 raised = "#262626"
 text = "#FFFFFF"
 muted = "#E0E0E0"
-faint = "#BDBDBD"
+# Light enough that a hidden folder's faint text, dimmed, stays at 7:1 selected and under the
+# pointer, and a hint at 7:1 on a pressed row.
+faint = "#CCCCCC"
 # A clear step down from the white of what can be used (3.5:1), still 6:1 on black; a dashed
 # frame marks the control too.
 disabled = "#8A8A8A"
@@ -30,8 +32,9 @@ folder = "#FFB347"
 warning = "#FFB347"
 accent = "#FFE500"
 on-accent = "#000000"
-# Dark olive: the text (14:1), the muted text (11:1) and the faint text (7.5:1) of a selected item
-# stay readable on it, dimmed too; the bar beside a selected item tells it.
+# Dark olive: the text (14:1), the muted text (11:1) and the faint text (8.8:1) of a selected item
+# stay readable on it, dimmed too; the bar beside a selected item tells it. A fill that told it
+# alone (3:1 on black) would leave the muted text at 5.3:1.
 selection = "#332B00"
 # The selected text in a field is black on the accent (16.5:1), a highlight no one misses on the
 # black field; the selection's dark olive would be 1.5:1 against it.
