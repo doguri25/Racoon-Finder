@@ -6992,6 +6992,96 @@ fn the_job_window_at_its_smallest_holds_the_panel_with_every_list_open() {
     assert!(down.absolute_position().x + down.size().width <= 520.0);
 }
 
+/// The rule of the floating job window (LAY-09, THEME-07): what its panel does not hold at the
+/// largest look is reached by scrolling, by the wheel and by the keys, which bring their line into
+/// view. (A coarse guard of the rule, not of a size: the testing backend's text is not a real
+/// font's, so the panel is made taller than the window by its rows, whose buttons and padding
+/// have fixed heights.)
+#[test]
+fn the_job_window_scrolls_to_what_the_largest_look_does_not_hold() {
+    i_slint_backend_testing::init_no_event_loop();
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
+    own.window().set_size(LogicalSize::new(520.0, 460.0));
+    own.set_density(2);
+    own.set_font_scale(130);
+    // Four jobs run, two wait, and both lists are open with three lines each.
+    let running: Vec<JobRowView> = ["복사 중", "이동 중", "삭제 중", "이름 바꾸는 중"]
+        .into_iter()
+        .map(job_row)
+        .collect();
+    own.set_job_rows(ModelRc::from(Rc::new(slint::VecModel::from(running))));
+    own.set_job_queue(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        waiting_row("복사 · b → 백업", false, true),
+        waiting_row("복사 · c → 백업", true, false),
+    ]))));
+    own.set_recent_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        recent_row("복사했습니다", false),
+        recent_row("이동했습니다", false),
+        recent_row("삭제했습니다", false),
+    ]))));
+    own.set_recent_title(rf_ui::words::recent_head(3).into());
+    own.set_recent_open(true);
+    own.set_history_title("되돌리기 기록 3개".into());
+    own.set_history_open(true);
+    own.set_history_heads(1);
+    own.set_history_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+        history_head("되돌릴 수 있음 3개", 0),
+        history_row("이름 바꾸기: a.txt → b.txt", "", 0, 0, 1),
+        history_row("새 폴더: c", "", 1, 1, 1),
+        history_row("복사: d", "마지막", 2, 2, 1),
+    ]))));
+    own.show().expect("the window shows");
+    slint::platform::update_timers_and_animations();
+    let (width, height) = (520.0, 460.0);
+    let panel = || labelled_in(&own, "작업", AccessibleRole::Groupbox).remove(0);
+    let in_view = |element: &ElementHandle| {
+        let (at, size) = (element.absolute_position(), element.size());
+        at.y >= 0.0 && at.y + size.height <= height && at.x + size.width <= width
+    };
+    // Whether the last button of the panel shows whole: that of a line of 되돌리기 기록 (the
+    // window, as a list, shows the elements in its view only), and the first job's name.
+    let last_shows = || {
+        labelled_in(&own, "되돌리기", AccessibleRole::Button)
+            .iter()
+            .any(in_view)
+    };
+    let first_shows = || {
+        labelled_in(&own, "복사 중", AccessibleRole::Text)
+            .iter()
+            .any(in_view)
+    };
+    // The panel is taller than the window (four rows with 44px buttons and 24px of padding each,
+    // and the lists' lines): its last button is below the window at first.
+    assert!(panel().size().height > height);
+    assert!(first_shows());
+    assert!(!last_shows());
+    // The keys on the last line of 되돌리기 기록 (after the four jobs, the two that wait, the head
+    // of 최근 완료 and its three lines, and the head of 되돌리기 기록): the window scrolls to it.
+    own.set_panel_line(4 + 2 + 1 + 3 + 1 + 2);
+    own.set_panel_button(0);
+    slint::platform::update_timers_and_animations();
+    assert!(last_shows(), "the keys' line comes into view");
+    assert!(!first_shows());
+    // Back on the first job: it comes back into view.
+    own.set_panel_line(0);
+    slint::platform::update_timers_and_animations();
+    assert!(first_shows());
+    assert!(!last_shows());
+    // The wheel over the jobs' rows (left of their buttons) scrolls the window as far as the last
+    // button, whole.
+    let name = labelled_in(&own, "복사 중", AccessibleRole::Text).remove(0);
+    let point = name.absolute_position();
+    for _ in 0..20 {
+        own.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: LogicalPosition::new(point.x + 4.0, point.y + 4.0),
+            delta_x: 0.0,
+            delta_y: -120.0,
+        });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
+    }
+    assert!(last_shows(), "the wheel reaches the last button");
+}
+
 #[test]
 fn the_job_panel_takes_the_keys_while_it_shows() {
     let window = window();

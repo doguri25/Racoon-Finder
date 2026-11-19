@@ -15,8 +15,13 @@
 //
 // It shows the theme of the settings, as `NoticeWindow` does: the globals of a window are its
 // own, so Rust gives it `theme-choice` as it gives the main window.
+//
+// The panel scrolls in the window (THEME-07): the lines of its lists are counted for 보통 at
+// 100 %, where it fits, and with a larger look (or a smaller window) the part it does not hold is
+// reached by the wheel, and by the keys, which bring their line into view (`reveal`). Its scroll
+// bar shows only while there is something to scroll to.
 
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { JobPanel, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
 import { Tr } from "tr.slint";
@@ -65,6 +70,18 @@ export component JobWindow inherits Window {
     // The panel takes the keys (F6 from the main window's tree).
     public function take-keys() {
         keys.focus();
+    }
+
+    // The part of the panel from `top` (from the panel's top) and `height` tall shows: the page
+    // scrolls as little as it can to it, to its top when it is taller than the window.
+    function reveal(top: length, height: length) {
+        let shown = -page.content-y;
+        let lowest = min(0px, page.visible-height - page.content-height);
+        if (top < shown || height > page.visible-height) {
+            page.content-y = max(lowest, -top);
+        } else if (top + height > shown + page.visible-height) {
+            page.content-y = max(lowest, page.visible-height - top - height);
+        }
     }
 
     // How many lines each of the panel's three lists shows at once: one in the smallest window,
@@ -136,57 +153,67 @@ export component JobWindow inherits Window {
             vertical-alignment: center;
         }
 
-        JobPanel {
-            x: 0;
-            y: 0;
+        page := ScrollView {
             width: parent.width;
-            height: self.preferred-height;
-            rows: root.job-rows;
-            queue: root.job-queue;
-            queue-lines: root.lines;
-            recent: root.recent-rows;
-            recent-title: root.recent-title;
-            recent-open: root.recent-open;
-            recent-lines: root.lines;
-            history-title: root.history-title;
-            history-open: root.history-open;
-            history: root.history-rows;
-            history-heads: root.history-heads;
-            history-lines: root.lines;
-            focus-line: keys.has-focus && !root.blocked ? root.panel-line : -1;
-            focus-button: keys.has-focus && !root.blocked ? root.panel-button : -1;
-            pause(index) => {
-                root.job-pause(index);
-            }
-            resume(index) => {
-                root.job-resume(index);
-            }
-            cancel(index) => {
-                root.job-cancel(index);
-            }
-            move-up(index) => {
-                root.job-move-up(index);
-            }
-            move-down(index) => {
-                root.job-move-down(index);
-            }
-            recent-toggled => {
-                root.recent-toggled();
-            }
-            recent-cleared => {
-                root.recent-cleared();
-            }
-            recent-details(index) => {
-                root.recent-details(index);
-            }
-            recent-save(index) => {
-                root.recent-save(index);
-            }
-            history-toggled => {
-                root.history-toggled();
-            }
-            history-run(redo, index) => {
-                root.history-run(redo, index);
+            height: parent.height;
+            content-width: self.visible-width;
+            content-height: panel.preferred-height;
+
+            panel := JobPanel {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: self.preferred-height;
+                rows: root.job-rows;
+                queue: root.job-queue;
+                queue-lines: root.lines;
+                recent: root.recent-rows;
+                recent-title: root.recent-title;
+                recent-open: root.recent-open;
+                recent-lines: root.lines;
+                history-title: root.history-title;
+                history-open: root.history-open;
+                history: root.history-rows;
+                history-heads: root.history-heads;
+                history-lines: root.lines;
+                focus-line: keys.has-focus && !root.blocked ? root.panel-line : -1;
+                focus-button: keys.has-focus && !root.blocked ? root.panel-button : -1;
+                pause(index) => {
+                    root.job-pause(index);
+                }
+                resume(index) => {
+                    root.job-resume(index);
+                }
+                cancel(index) => {
+                    root.job-cancel(index);
+                }
+                move-up(index) => {
+                    root.job-move-up(index);
+                }
+                move-down(index) => {
+                    root.job-move-down(index);
+                }
+                recent-toggled => {
+                    root.recent-toggled();
+                }
+                recent-cleared => {
+                    root.recent-cleared();
+                }
+                recent-details(index) => {
+                    root.recent-details(index);
+                }
+                recent-save(index) => {
+                    root.recent-save(index);
+                }
+                history-toggled => {
+                    root.history-toggled();
+                }
+                history-run(redo, index) => {
+                    root.history-run(redo, index);
+                }
+                reveal(top, height) => {
+                    root.reveal(top, height);
+                }
             }
         }
 

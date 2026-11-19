@@ -145,6 +145,10 @@ export component JobPanel inherits Rectangle {
     callback history-toggled();
     // The button of row `index` of the list of what can be undone (or, with `redo`, done again).
     callback history-run(redo: bool, index: int);
+    // The keys moved to another line: the part of the panel that line is in, from the panel's
+    // top (the jobs' rows together, a list of lines, or a head), for a window that scrolls the
+    // panel to show it (`job-window.slint`).
+    callback reveal(top: length, height: length);
 
     // The line of the head of 최근 완료: after the rows of the jobs, running and waiting.
     private property <int> head-line: root.rows.length + root.queue.length;
@@ -165,9 +169,33 @@ export component JobPanel inherits Rectangle {
     accessible-role: groupbox;
     accessible-label: Tr.job-panel-title;
 
+    // The part of the panel the keys' line is in ([`reveal`]). The lists keep their place in the
+    // panel while their lines scroll, so it holds before and after a list scrolls to its line.
+    function reveal-keys() {
+        let line = root.focus-line;
+        let queue-end = queue-list.y + queue-list.height;
+        let recent-end = recent-list.y + recent-list.height;
+        if (line < 0) {
+            return;
+        } else if (line < root.rows.length) {
+            root.reveal(0px, queue-list.y);
+        } else if (line < root.head-line) {
+            root.reveal(queue-list.y, queue-list.height);
+        } else if (line == root.head-line && root.recent.length > 0) {
+            root.reveal(queue-end, recent-list.y - queue-end);
+        } else if (line < root.history-head-line) {
+            root.reveal(recent-list.y, recent-list.height);
+        } else if (line == root.history-head-line) {
+            root.reveal(recent-end, history-list.y - recent-end);
+        } else {
+            root.reveal(history-list.y, history-list.height);
+        }
+    }
+
     // The keys on a job that waits, or on a line of 최근 완료, that does not show: its list
     // scrolls to it.
     changed focus-line => {
+        root.reveal-keys();
         let waiting = root.focus-line - root.rows.length;
         if (waiting >= 0 && waiting < root.queue.length) {
             let top = waiting * root.queue-height;
