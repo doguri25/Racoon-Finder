@@ -2396,7 +2396,9 @@ export component MainWindow inherits Window {
             }
         }
         if root.dialog == DialogKind.properties: PropertiesDialog {
-            width: min(640px, parent.width - 48px);
+            // 640px at 14px text, wider with a larger size of text, for its row of algorithms
+            // (THEME-07).
+            width: min(max(640px, 640px * Theme.font-body / 14px), parent.width - 48px);
             room: parent.height - 40px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
