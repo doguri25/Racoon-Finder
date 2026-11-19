@@ -678,7 +678,10 @@ fn a_failed_empty_is_tried_again_for_exactly_its_items_and_asks_first() {
     assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
     assert_eq!(
         confirm(&state).purpose,
-        ConfirmPurpose::DeleteFromTrash(vec![left])
+        ConfirmPurpose::RetryDeleteFromTrash {
+            job: JobId(1),
+            items: vec![left]
+        }
     );
 }
 
@@ -916,7 +919,68 @@ fn the_retry_of_a_partly_failed_empty_deletes_only_what_failed_after_asking() {
     assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
     assert_eq!(
         confirm(&state).purpose,
-        ConfirmPurpose::DeleteFromTrash(vec![b])
+        ConfirmPurpose::RetryDeleteFromTrash {
+            job: JobId(1),
+            items: vec![b]
+        }
+    );
+}
+
+/// The failed item `b` of a delete from the trash, job 1, that deleted `a`.
+fn a_trash_delete_that_failed_for(state: &mut AppState, a: &TrashItem, b: &TrashItem) {
+    let spec = JobSpec::DeleteFromTrash {
+        items: vec![a.clone(), b.clone()],
+    };
+    finish(state, 1, &spec, JobWork::Delete, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(ItemFailure {
+            source: VPath::local(&b.location).ok(),
+            target: None,
+            stage: Stage::Delete,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        });
+    });
+}
+
+/// Whether the window of failed items that shows offers 다시 시도.
+fn offers_retry(state: &AppState) -> bool {
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items show: {:?}", state.modal());
+    };
+    failures.retry.is_some()
+}
+
+#[test]
+fn cancelling_the_question_of_a_trash_retry_keeps_the_retry() {
+    let (a, b) = (
+        item("a.txt", Some("docs"), Some(5)),
+        item("b.txt", Some("docs"), Some(5)),
+    );
+    let mut state = in_trash(&[a.clone(), b.clone()]);
+    a_trash_delete_that_failed_for(&mut state, &a, &b);
+    assert_eq!(state.recent_details(0), []);
+    assert!(offers_retry(&state));
+    // 다시 시도 asks first; cancelling that question (to look first) keeps the retry.
+    assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
+    assert!(confirm(&state).danger);
+    assert_eq!(state.dialog_cancelled(), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(state.recent_details(0), []);
+    assert!(offers_retry(&state), "the retry is not used up by a cancel");
+    // Asked again and answered yes: the failed item alone is deleted, and the retry is used up.
+    assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
+    assert_eq!(
+        submitted(&state.confirm_accepted()),
+        [&JobSpec::DeleteFromTrash {
+            items: vec![b.clone()]
+        }]
+    );
+    assert_eq!(state.recent_details(0), []);
+    assert!(
+        !offers_retry(&state),
+        "a retry that ran is offered no second time"
     );
 }
 

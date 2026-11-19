@@ -450,6 +450,10 @@ pub enum ConfirmPurpose {
     /// Delete these items of the trash for good (휴지통 ▸ 영구 삭제…), as the trash's list showed
     /// them: each is deleted only while the trash holds that very item.
     DeleteFromTrash(Vec<TrashItem>),
+    /// 다시 시도 of the delete from the trash `job`: delete its failed `items` for good, as
+    /// [`ConfirmPurpose::DeleteFromTrash`] does. The retry of `job` is used up only once this is
+    /// accepted; a cancel keeps it for its window of failed items.
+    RetryDeleteFromTrash { job: JobId, items: Vec<TrashItem> },
     /// Empty the trash (휴지통 비우기…) of exactly these items, the stamped records of the
     /// listing the question counted: what came into the trash since stays there, and an item that
     /// changed since is not deleted (`TrashItemChanged`).
@@ -614,6 +618,24 @@ impl Confirm {
     /// NAV-16): how many, their size when the trash knows it for each, their names, and that it
     /// cannot be undone. Only its button deletes them, never Enter alone (`danger`).
     pub fn delete_from_trash(items: Vec<TrashItem>) -> Confirm {
+        Confirm::trash_delete(ConfirmPurpose::DeleteFromTrash, items)
+    }
+
+    /// The question before 다시 시도 of the delete from the trash `job` deletes its failed
+    /// `items` for good: the same window as [`Confirm::delete_from_trash`]'s, which uses the
+    /// retry up only when it is accepted ([`ConfirmPurpose::RetryDeleteFromTrash`]).
+    pub fn retry_delete_from_trash(job: JobId, items: Vec<TrashItem>) -> Confirm {
+        Confirm::trash_delete(
+            |items| ConfirmPurpose::RetryDeleteFromTrash { job, items },
+            items,
+        )
+    }
+
+    /// The question before `items` of the trash are deleted for good, for `purpose`.
+    fn trash_delete(
+        purpose: impl FnOnce(Vec<TrashItem>) -> ConfirmPurpose,
+        items: Vec<TrashItem>,
+    ) -> Confirm {
         let names: Vec<String> = items
             .iter()
             .map(|item| item.name.to_string_lossy().into_owned())
@@ -629,7 +651,7 @@ impl Confirm {
             alt: String::new(),
             check: String::new(),
             checked: false,
-            purpose: ConfirmPurpose::DeleteFromTrash(items),
+            purpose: purpose(items),
         }
     }
 
@@ -664,11 +686,11 @@ impl Confirm {
             // On every system, the items the question counted, each while it is that very item:
             // never the whole trash as the job finds it (`JobSpec::EmptyTrash`, which would take
             // what came in since, by this app's own jobs queued before it too).
-            ConfirmPurpose::DeleteFromTrash(items) | ConfirmPurpose::EmptyTrash(items) => {
-                Some(JobSpec::DeleteFromTrash {
-                    items: items.clone(),
-                })
-            }
+            ConfirmPurpose::DeleteFromTrash(items)
+            | ConfirmPurpose::RetryDeleteFromTrash { items, .. }
+            | ConfirmPurpose::EmptyTrash(items) => Some(JobSpec::DeleteFromTrash {
+                items: items.clone(),
+            }),
             ConfirmPurpose::Quit
             | ConfirmPurpose::ApplyViewBelow { .. }
             | ConfirmPurpose::RemoveApp

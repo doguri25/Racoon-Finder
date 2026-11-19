@@ -521,6 +521,15 @@ impl AppState {
                 self.close();
                 spec.map(|spec| submit(spec, None)).into_iter().collect()
             }
+            // The retry is used up now that its question was answered yes, once for its job.
+            ConfirmPurpose::RetryDeleteFromTrash { job, .. } => {
+                let (job, spec) = (*job, confirm.job());
+                self.close();
+                if !self.retried_jobs.insert(job) {
+                    return Vec::new();
+                }
+                spec.map(|spec| submit(spec, None)).into_iter().collect()
+            }
             ConfirmPurpose::ApplyViewBelow { folder, view } => {
                 let (folder, view) = (folder.clone(), view.clone());
                 self.close();
@@ -568,8 +577,9 @@ impl AppState {
 
     /// 다시 시도 of the window of failed items (XFER-09): the job of the failed items alone is
     /// submitted ([`Retry`]), the window closes, and the job they come from offers them no
-    /// second time (its retry tells of its own failures). Nothing for a window without the
-    /// button.
+    /// second time (its retry tells of its own failures). A delete from the trash asks first,
+    /// and its retry is used up only when that question is answered yes: a cancel keeps it.
+    /// Nothing for a window without the button.
     pub fn failures_retried(&mut self) -> Vec<Effect> {
         let Some(Modal::Failures(failures)) = &self.modal else {
             return Vec::new();
@@ -579,14 +589,15 @@ impl AppState {
         };
         self.close();
         // Once for each job, whichever window of it the press came from.
-        if !self.retried_jobs.insert(job) {
+        if self.retried_jobs.contains(&job) {
             return Vec::new();
         }
         // What deletes for good is asked about again, the items named: it cannot be undone.
         if let JobSpec::DeleteFromTrash { items } = spec {
-            self.open(Modal::Confirm(Confirm::delete_from_trash(items)));
+            self.open(Modal::Confirm(Confirm::retry_delete_from_trash(job, items)));
             return Vec::new();
         }
+        self.retried_jobs.insert(job);
         vec![submit(spec, None)]
     }
 
