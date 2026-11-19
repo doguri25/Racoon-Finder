@@ -2332,6 +2332,7 @@ export component MainWindow inherits Window {
             }
         }
         if root.dialog == DialogKind.recovery: RecoveryDialog {
+            room: parent.height - 40px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             view: root.recovery-view;

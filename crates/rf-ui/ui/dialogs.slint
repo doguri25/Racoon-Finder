@@ -1093,11 +1093,14 @@ export component ErrorDialog inherits DialogFrame {
 // Each answer takes its job off the list, and the keys go back to 닫기.
 export component RecoveryDialog inherits DialogFrame {
     in property <RecoveryView> view;
+    // The most height the window may take: the room the main window has for it. With a larger
+    // density or size of text (THEME-07) the list of jobs gives up rows to stay within it.
+    in property <length> room: 100000px;
     callback chosen(index: int, run-again: bool);
     callback closed();
 
     width: 760px;
-    height: layout.preferred-height;
+    height: min(layout.preferred-height, root.room);
     accessible-label: root.view.title;
 
     // The button the keys are on: 2 × job for its 버리기, one more for its 다시 실행, and the
@@ -1161,8 +1164,13 @@ export component RecoveryDialog inherits DialogFrame {
             Body {
                 text: root.view.note;
             }
+            // Up to five jobs and a half in sight; fewer where the window has no room for them
+            // (one at least), and the list scrolls.
             Rectangle {
-                height: min(320px, root.view.rows.length * 57px);
+                preferred-height: min(320px, root.view.rows.length * 57px);
+                min-height: min(57px, root.view.rows.length * 57px);
+                max-height: self.preferred-height;
+                vertical-stretch: 1;
                 border-width: 1px;
                 border-color: Theme.border;
                 border-radius: Theme.radius;
