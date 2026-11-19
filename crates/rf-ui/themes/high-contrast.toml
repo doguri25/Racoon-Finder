@@ -1,0 +1,57 @@
+# 고대비: white on black with a yellow accent. Text, the text on the accent and the text of a
+# selected item are at least 7:1 against what they sit on (WCAG AAA); `marks` also marks with a
+# shape what the colors tell (docs/ux/themes.md).
+
+[theme]
+scheme = "dark"
+icon-style = "bold"
+marks = true
+
+[color]
+bg = "#000000"
+panel = "#000000"
+raised = "#262626"
+text = "#FFFFFF"
+muted = "#E0E0E0"
+faint = "#BDBDBD"
+# 3.7:1 on black, enough for a line; dark enough that the faint text of a disabled button reads on
+# it (3:1).
+border = "#666666"
+folder = "#FFB347"
+warning = "#FFB347"
+accent = "#FFE500"
+on-accent = "#000000"
+# Dark olive: the text (10:1) and the muted text (7.8:1) of a selected item stay readable on it.
+selection = "#4D4000"
+# The notices are white, so that they stand out of the black window.
+toast-bg = "#FFFFFF"
+toast-text = "#000000"
+toast-link = "#0000CC"
+toast-hover = "#0000001F"
+toast-pressed = "#00000033"
+shadow = "#00000033"
+shadow-small = "#00000029"
+shadow-toast = "#0000003D"
+shadow-dialog = "#00000052"
+scrim = "#00000059"
+scrim-light = "#00000033"
+
+[font]
+ui = ""
+list = ""
+mono = ""
+small = 12
+note = 13
+body = 14
+app-name = 15
+heading = 16
+title = 20
+
+[size]
+gap-xs = 4
+gap-s = 8
+gap-m = 12
+gap-l = 16
+row-height = 32
+radius = 8
+radius-large = 12

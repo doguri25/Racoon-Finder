@@ -27,6 +27,7 @@ pub mod resolver;
 pub mod selection;
 pub mod settings;
 pub mod state;
+pub mod theme;
 pub mod thumbs;
 pub mod tree;
 pub mod ui_bridge;

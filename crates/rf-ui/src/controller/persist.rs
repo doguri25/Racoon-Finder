@@ -226,15 +226,17 @@ pub(crate) fn theme_number(theme: ThemeChoice) -> i32 {
         ThemeChoice::System => 0,
         ThemeChoice::Light => 1,
         ThemeChoice::Dark => 2,
+        ThemeChoice::HighContrast => 3,
     }
 }
 
 /// The theme of the 보기 menu's number `choice`.
-pub(super) fn theme_of(choice: i32) -> Option<ThemeChoice> {
+pub(crate) fn theme_of(choice: i32) -> Option<ThemeChoice> {
     match choice {
         0 => Some(ThemeChoice::System),
         1 => Some(ThemeChoice::Light),
         2 => Some(ThemeChoice::Dark),
+        3 => Some(ThemeChoice::HighContrast),
         _ => None,
     }
 }
@@ -1016,9 +1018,15 @@ mod tests {
         assert_eq!(whole_pixels(1e9), None);
         assert!((logical(900) - 900.0).abs() < f32::EPSILON);
         assert!((logical(u32::MAX) - 65535.0).abs() < f32::EPSILON);
-        for theme in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
+        for theme in [
+            ThemeChoice::System,
+            ThemeChoice::Light,
+            ThemeChoice::Dark,
+            ThemeChoice::HighContrast,
+        ] {
             assert_eq!(theme_of(theme_number(theme)), Some(theme));
         }
-        assert_eq!(theme_of(3), None);
+        assert_eq!(theme_of(4), None);
+        assert_eq!(theme_of(-1), None);
     }
 }

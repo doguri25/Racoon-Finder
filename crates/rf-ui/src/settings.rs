@@ -101,15 +101,20 @@ pub const MIN_WINDOW: (u32, u32) = (900, 560);
 /// would ask the window system for a window it cannot make.
 pub const MAX_WINDOW: (u32, u32) = (16_384, 16_384);
 
-/// The colors the window shows (the main window's `theme-choice` turns it into colors).
+/// The theme the windows show (`theme::builtin` gives its tokens): `theme = "system"`,
+/// `"light"`, `"dark"` or `"high-contrast"`. A build before 고대비 reads `"high-contrast"` as
+/// `"system"`, as it reads any value it does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
-    /// Light or dark as the system is set.
+    /// As the system is set: high contrast while it asks for it, else light or dark.
     #[default]
     System,
     Light,
     Dark,
+    /// White on black with a yellow accent (THEME-01).
+    #[serde(rename = "high-contrast")]
+    HighContrast,
 }
 
 /// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기: …, DND-02).
@@ -2458,7 +2463,7 @@ mod tests {
         let a = folder(dir.path(), "a").to_uri();
         let quoted = toml_string(&a);
         let text = format!(
-            "theme = \"high-contrast\"\nshow_hidden = 3\nwindow = \"big\"\nactive_pane = 1\n\
+            "theme = \"sepia\"\nshow_hidden = 3\nwindow = \"big\"\nactive_pane = 1\n\
              recent_targets = [{quoted}]\npanes = [{{ tabs = [{quoted}], active = \"x\" }}, 5, \
              {{ tabs = [{quoted}], layout = \"grid\" }}]\n"
         );
@@ -3367,6 +3372,46 @@ mod tests {
         assert_eq!(sized((300, 200)).window_size(), Some(MIN_WINDOW));
         assert_eq!(sized((1000, 100)).window_size(), Some((1000, 560)));
         assert_eq!(sized((u32::MAX, u32::MAX)).window_size(), Some(MAX_WINDOW));
+    }
+
+    /// 고대비 is saved as `"high-contrast"` and read back; a build before it (0.4.0 had only
+    /// the first three, read with the same `or_default`) reads that as `"system"`.
+    #[test]
+    fn the_high_contrast_theme_round_trips_and_an_older_build_reads_it_as_system() {
+        #[derive(Debug, Default, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Before {
+            #[default]
+            System,
+            Light,
+            Dark,
+        }
+        #[derive(Deserialize)]
+        struct Older {
+            #[serde(deserialize_with = "or_default")]
+            theme: Before,
+        }
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let settings = Settings {
+            theme: ThemeChoice::HighContrast,
+            ..Settings::default()
+        };
+        settings.save(dir.path()).expect("saved");
+        let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).expect("read");
+        assert!(text.contains("theme = \"high-contrast\"\n"), "{text}");
+        assert_eq!(load(dir.path()), writable(settings));
+        assert_eq!(peek_theme(dir.path()), ThemeChoice::HighContrast);
+        // An added value: the file keeps the version it had.
+        assert_eq!(SETTINGS_VERSION, 2);
+        assert!(text.contains("version = 2\n"), "{text}");
+
+        let older: Older = toml::from_str(&text).expect("an older build reads it");
+        assert_eq!(older.theme, Before::System);
+        for (theme, before) in [("light", Before::Light), ("dark", Before::Dark)] {
+            let older: Older = toml::from_str(&format!("theme = \"{theme}\"\n")).expect("read");
+            assert_eq!(older.theme, before);
+        }
     }
 
     #[test]
