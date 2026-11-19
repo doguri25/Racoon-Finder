@@ -10,6 +10,7 @@ pub mod dialogs;
 pub mod format;
 pub mod hashing;
 pub mod history;
+pub mod i18n;
 pub mod instance;
 pub mod jobs;
 pub mod keys;

@@ -15,6 +15,10 @@ use std::process::ExitCode;
 )]
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // The language of everything the app says, the clean removal's lines too: chosen once,
+    // before any window and before `--cleanup` runs, from the settings (only read here) and the
+    // system's language.
+    rf_ui::i18n::init(rf_ui::i18n::start_language());
     // Before any window or lock of the app: the clean removal ends a running app itself.
     match cleanup::parse(&args) {
         Ok(Some(command)) => {

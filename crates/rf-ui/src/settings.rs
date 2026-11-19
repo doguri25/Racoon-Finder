@@ -13,7 +13,8 @@
 //! icon views show thumbnails (`show_thumbnails`, VIEW-09), whether a long press opens the menu
 //! (`long_press`, with its delay `long_press_ms`, PICK-02), whether the rows show checkboxes
 //! (`checkbox_select`, NAV-15), what a copy or a move does about an item that fails
-//! (`on_error`, XFER-09) and where the destination picker starts (`pick_start`, PICK-05); and
+//! (`on_error`, XFER-09) and where the destination picker starts (`pick_start`, PICK-05); the
+//! language the app speaks (`language`, I18N-01), which takes effect at the next start; and
 //! the sidebar's favorites the user
 //! keeps (`[[favorites]]`, NAV-05: none until the user first edits the list, then the whole list),
 //! the last ten folders visited (`recent_folders`) and whether their group is folded
@@ -195,6 +196,21 @@ impl<'de> Deserialize<'de> for FontScale {
             serde::de::Error::custom(format!("{percent} is not 90, 100, 115 or 130"))
         })
     }
+}
+
+/// The language the app speaks (I18N-01): `language = "system"`, `"ko"` or `"en"`. The app reads
+/// it as it starts (`i18n::start_language`), so a change shows at the next start. A value this
+/// version does not know reads as `"system"`, and is no reason to set the file aside.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LanguageChoice {
+    /// The system's language: Korean on a Korean system, else English.
+    #[default]
+    System,
+    /// 한국어.
+    Ko,
+    /// English.
+    En,
 }
 
 /// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기: …, DND-02).
@@ -415,6 +431,11 @@ pub struct Settings {
     /// not offer, is 100 %; not written while it is.
     #[serde(skip_serializing_if = "is_default", deserialize_with = "or_default")]
     pub font_scale: FontScale,
+    /// The language the app speaks from its next start (I18N-01). A file without the key
+    /// (0.4.0 and before), or with a value this version cannot read, follows the system's; not
+    /// written while it does.
+    #[serde(skip_serializing_if = "is_default", deserialize_with = "or_default")]
+    pub language: LanguageChoice,
     #[serde(deserialize_with = "or_default")]
     pub show_hidden: bool,
     /// The names of files show no extensions (NAV-11); a file without the key shows them.
@@ -529,6 +550,7 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             density: Density::default(),
             font_scale: FontScale::default(),
+            language: LanguageChoice::default(),
             show_hidden: false,
             hide_extensions: false,
             window: None,
@@ -1292,6 +1314,7 @@ impl Settings {
             theme: self.theme,
             density: self.density,
             font_scale: self.font_scale,
+            language: self.language,
             show_hidden: self.show_hidden,
             hide_extensions: self.hide_extensions,
             window: self.window,
@@ -1517,11 +1540,28 @@ pub struct Look {
 /// (it says so): the file is only read. Without a file, or with one [`load`] would not take, it
 /// is the default look. A small local file; the UI thread may call it.
 pub fn peek_look(config_dir: &Path) -> Look {
+    peek(config_dir)
+        .map(|settings| settings.look())
+        .unwrap_or_default()
+}
+
+/// The language `settings.toml` in `config_dir` names, for the start of the app, before it
+/// knows whether another instance runs and before `--cleanup` (`i18n::start_language`): the
+/// file is only read, never moved, and [`load`] sets a file that cannot be used aside later, as
+/// it always has. Without a file, or with one [`load`] would not take, it is the system's. A
+/// small local file, read once before any window shows.
+pub fn peek_language(config_dir: &Path) -> LanguageChoice {
+    peek(config_dir)
+        .map(|settings| settings.language)
+        .unwrap_or_default()
+}
+
+/// The settings of `settings.toml` in `config_dir`, read and left as it is: `None` without a
+/// file or for one [`load`] would not take.
+fn peek(config_dir: &Path) -> Option<Settings> {
     read_small(&config_dir.join(FILE_NAME))
         .ok()
         .and_then(|text| parse(&text))
-        .map(|settings| settings.look())
-        .unwrap_or_default()
 }
 
 /// The text of the file at `path`; `InvalidData` for one larger than [`MAX_FILE_SIZE`] or not
@@ -3650,6 +3690,61 @@ mod tests {
                 "{odd}"
             );
         }
+    }
+
+    /// The language (I18N-01): `system`, `ko` or `en`; a file without the key (0.4.0) follows
+    /// the system, and a value this version does not know does too, without a backup.
+    #[test]
+    fn the_language_is_read_leniently_and_written_only_when_chosen() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let file = dir.path().join(FILE_NAME);
+        assert_eq!(peek_language(dir.path()), LanguageChoice::System);
+        assert!(!file.exists());
+        for (text, language) in [
+            ("theme = \"dark\"\n", LanguageChoice::System),
+            ("language = \"system\"\n", LanguageChoice::System),
+            ("language = \"ko\"\n", LanguageChoice::Ko),
+            ("language = \"en\"\n", LanguageChoice::En),
+            ("language = \"fr\"\n", LanguageChoice::System),
+            ("language = \"EN\"\n", LanguageChoice::System),
+            ("language = 1\n", LanguageChoice::System),
+        ] {
+            std::fs::write(&file, text).expect("written");
+            assert_eq!(peek_language(dir.path()), language, "{text}");
+            let loaded = load(dir.path());
+            assert!(loaded.writable && loaded.backup.is_none(), "{text}");
+            assert_eq!(backups(dir.path()), Vec::<String>::new(), "{text}");
+            assert_eq!(loaded.settings.language, language, "{text}");
+        }
+        // The peek leaves a broken file where it is: the instance that holds the lock sets it
+        // aside, once.
+        let broken = "language = \"en\"\npanes = [[[[\n";
+        std::fs::write(&file, broken).expect("written");
+        assert_eq!(peek_language(dir.path()), LanguageChoice::System);
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), broken);
+        assert_eq!(backups(dir.path()), Vec::<String>::new());
+        // Written only when a language is chosen, and read back as it was.
+        let system = Settings::default().to_text().expect("text");
+        assert!(!system.contains("language"), "{system}");
+        for language in [LanguageChoice::Ko, LanguageChoice::En] {
+            let text = Settings {
+                language,
+                ..Settings::default()
+            }
+            .to_text()
+            .expect("text");
+            std::fs::write(&file, &text).expect("written");
+            assert_eq!(load(dir.path()).settings.language, language, "{text}");
+        }
+        assert!(
+            Settings {
+                language: LanguageChoice::En,
+                ..Settings::default()
+            }
+            .to_text()
+            .expect("text")
+            .contains("language = \"en\"")
+        );
     }
 
     #[test]

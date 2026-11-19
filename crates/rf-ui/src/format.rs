@@ -8,10 +8,13 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use rf_core::{Attributes, Entry, EntryKind, VPath};
 
-/// The units above bytes, each 1024 times the one before.
-const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+use crate::i18n::{number, t, t_static};
 
-/// A byte count for the size column and the status line: `"{n} 바이트"` below 1 KB, else the
+/// The messages of the units above bytes, each 1024 times the one before: KB, MB, GB, TB.
+const UNITS: [&str; 4] = ["size-kb", "size-mb", "size-gb", "size-tb"];
+
+/// A byte count for the size column and the status line: `"{n} 바이트"` below 1 KB (in the
+/// language of the run, `i18n`, as the units are), else the
 /// largest unit (KB, MB, GB, TB, 1024 apart) that keeps the number below 1024. A number below
 /// 10 keeps one decimal (`1.4 MB`, but `1 KB` rather than `1.0 KB`); a larger one is rounded to
 /// a whole number (`214 KB`). It rounds to the nearest; see [`format_size_rounded`].
@@ -46,23 +49,25 @@ impl Rounding {
 /// number when the need is the larger: `4 GB, 최대 3.9 GB` for a 4 GiB file on FAT32.
 pub fn format_size_rounded(bytes: u64, rounding: Rounding) -> String {
     if bytes < 1024 {
-        return format!("{bytes} 바이트");
+        return t("size-bytes", &[("bytes", number(bytes))]);
     }
     let bytes = u128::from(bytes);
     let mut unit: u128 = 1024;
     let mut index = 0;
+    // The number goes to the message as the text it shows (`1.4`, `214`).
+    let in_unit = |key: &str, size: String| t(key, &[("size", size.into())]);
     loop {
-        let name = UNITS[index];
+        let key = UNITS[index];
         let tenths = rounding.divide(bytes * 10, unit);
         if tenths < 100 {
             return match tenths % 10 {
-                0 => format!("{} {name}", tenths / 10),
-                frac => format!("{}.{frac} {name}", tenths / 10),
+                0 => in_unit(key, (tenths / 10).to_string()),
+                frac => in_unit(key, format!("{}.{frac}", tenths / 10)),
             };
         }
         let whole = rounding.divide(bytes, unit);
         if whole < 1024 || index == UNITS.len() - 1 {
-            return format!("{whole} {name}");
+            return in_unit(key, whole.to_string());
         }
         unit *= 1024;
         index += 1;
@@ -194,34 +199,33 @@ pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
 /// the kind its extension names (`PDF 문서`, `PNG 이미지`, `CSV 파일`), or `파일` without one.
 /// A folder named `….app` is a macOS app bundle and reads `응용 프로그램`.
 pub fn kind_label(entry: &Entry) -> String {
+    let named = |key| t_static(key).to_owned();
     match entry.kind {
-        EntryKind::Dir if is_app_bundle(entry.shown_name()) => return "응용 프로그램".to_owned(),
-        EntryKind::Dir => return "파일 폴더".to_owned(),
-        EntryKind::Symlink => return "바로 가기".to_owned(),
-        EntryKind::Other => return "특수 파일".to_owned(),
+        EntryKind::Dir if is_app_bundle(entry.shown_name()) => return named("kind-app"),
+        EntryKind::Dir => return named("kind-folder"),
+        EntryKind::Symlink => return named("kind-link"),
+        EntryKind::Other => return named("kind-special"),
         EntryKind::File => {}
     }
     let Some(ext) = entry.extension() else {
-        return "파일".to_owned();
+        return named("kind-file");
     };
     let ext = ext.to_string_lossy();
-    let upper = ext.to_uppercase();
+    let of_kind = |key: &str| t(key, &[("ext", ext.to_uppercase().into())]);
     match ext.to_lowercase().as_str() {
-        "pdf" => "PDF 문서".to_owned(),
-        "txt" => "텍스트 문서".to_owned(),
-        "md" => "Markdown 문서".to_owned(),
-        "doc" | "docx" => "Word 문서".to_owned(),
-        "xls" | "xlsx" => "Excel 통합 문서".to_owned(),
-        "ppt" | "pptx" => "PowerPoint 프레젠테이션".to_owned(),
-        "hwp" | "hwpx" => "한글 문서".to_owned(),
-        "exe" | "app" => "응용 프로그램".to_owned(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "bmp" | "tiff" => {
-            format!("{upper} 이미지")
-        }
-        "mp3" | "wav" | "flac" | "m4a" => format!("{upper} 오디오"),
-        "mp4" | "mov" | "mkv" | "avi" => format!("{upper} 동영상"),
-        "zip" | "7z" | "rar" | "tar" | "gz" => format!("{upper} 압축 파일"),
-        _ => format!("{upper} 파일"),
+        "pdf" => named("kind-pdf"),
+        "txt" => named("kind-text"),
+        "md" => named("kind-markdown"),
+        "doc" | "docx" => named("kind-word"),
+        "xls" | "xlsx" => named("kind-excel"),
+        "ppt" | "pptx" => named("kind-powerpoint"),
+        "hwp" | "hwpx" => named("kind-hwp"),
+        "exe" | "app" => named("kind-app"),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "bmp" | "tiff" => of_kind("kind-image"),
+        "mp3" | "wav" | "flac" | "m4a" => of_kind("kind-audio"),
+        "mp4" | "mov" | "mkv" | "avi" => of_kind("kind-video"),
+        "zip" | "7z" | "rar" | "tar" | "gz" => of_kind("kind-archive"),
+        _ => of_kind("kind-other"),
     }
 }
 

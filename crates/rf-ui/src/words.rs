@@ -1,5 +1,7 @@
-//! The Korean words the app shows for errors, refusals, jobs, the status bar and the sidebar
-//! (I18N-02).
+//! The words the app shows for errors, refusals, jobs, the status bar and the sidebar
+//! (I18N-02), in the language of the run: each function asks [`crate::i18n`] for its message
+//! (`crates/rf-ui/i18n/<language>/*.ftl`), and the tests, which never choose a language, read
+//! them in Korean.
 //!
 //! The `Display` text of `rf_core::Error` and of the job types is English and for the log; the
 //! screens show these words instead. They say what happened to the user's item, not how the
@@ -8,6 +10,7 @@
 use std::fmt::Write as _;
 use std::time::{Duration, SystemTime};
 
+use fluent_bundle::FluentValue;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use rf_core::{EntryKind, ErrorKind, Os, VPath};
@@ -22,6 +25,7 @@ use rf_vfs::ShellPlace;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
+use crate::i18n::{Arg, OS_ARG, count, number, os_arg, t, t_static};
 use crate::jobs::JobRow;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
@@ -86,304 +90,299 @@ impl JobWork {
         }
     }
 
-    /// The pieces the job sentences are made of.
-    fn phrases(self) -> Phrases {
-        let (doing, done, object, noun) = match self {
-            JobWork::Copy => ("복사 중", "복사했", "복사를", "복사"),
-            JobWork::Move => ("이동 중", "이동했", "이동을", "이동"),
-            JobWork::Trash => (
-                "휴지통으로 보내는 중",
-                "휴지통으로 보냈",
-                "휴지통으로 보내기를",
-                "휴지통으로 보내기",
-            ),
-            JobWork::Delete => ("삭제 중", "삭제했", "삭제를", "영구 삭제"),
-            JobWork::Rename => (
-                "이름 바꾸는 중",
-                "이름을 바꿨",
-                "이름 바꾸기를",
-                "이름 바꾸기",
-            ),
-            JobWork::Create => ("만드는 중", "만들었", "만들기를", "새로 만들기"),
-            JobWork::Link => (
-                "링크 만드는 중",
-                "링크를 만들었",
-                "링크 만들기를",
-                "링크 만들기",
-            ),
-            JobWork::Restore => ("복원하는 중", "복원했", "복원을", "복원"),
-            JobWork::Undo => ("되돌리는 중", "되돌렸", "되돌리기를", "되돌리기"),
-            JobWork::Redo => (
-                "다시 실행하는 중",
-                "다시 실행했",
-                "다시 실행을",
-                "다시 실행",
-            ),
-            JobWork::Other => ("작업 중", "작업을 마쳤", "작업을", "작업"),
-        };
-        Phrases {
-            doing,
-            done,
-            object,
-            noun,
-        }
+    /// The work as the messages' `$work` selects it: `copy`, `move`, `trash`, `delete`,
+    /// `rename`, `create`, `link`, `restore`, `undo`, `redo`, `other`.
+    fn arg(self) -> FluentValue<'static> {
+        FluentValue::from(match self {
+            JobWork::Copy => "copy",
+            JobWork::Move => "move",
+            JobWork::Trash => "trash",
+            JobWork::Delete => "delete",
+            JobWork::Rename => "rename",
+            JobWork::Create => "create",
+            JobWork::Link => "link",
+            JobWork::Restore => "restore",
+            JobWork::Undo => "undo",
+            JobWork::Redo => "redo",
+            JobWork::Other => "other",
+        })
+    }
+
+    /// The message `key` about this work, with `args`: a sentence the message makes whole in
+    /// each language from `$work`.
+    fn says(self, key: &str, args: &[Arg<'_>]) -> String {
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push(("work", self.arg()));
+        all.extend(args.iter().cloned());
+        t(key, &all)
     }
 
     /// The name of the work on its own, as a recovered job's line starts: `복사`, `이동`.
     pub fn noun(self) -> &'static str {
-        self.phrases().noun
+        t_static(match self {
+            JobWork::Copy => "job-noun-copy",
+            JobWork::Move => "job-noun-move",
+            JobWork::Trash => "job-noun-trash",
+            JobWork::Delete => "job-noun-delete",
+            JobWork::Rename => "job-noun-rename",
+            JobWork::Create => "job-noun-create",
+            JobWork::Link => "job-noun-link",
+            JobWork::Restore => "job-noun-restore",
+            JobWork::Undo => "job-noun-undo",
+            JobWork::Redo => "job-noun-redo",
+            JobWork::Other => "job-noun-other",
+        })
     }
-}
-
-/// How one [`JobWork`] reads in a sentence.
-struct Phrases {
-    /// The title while it runs: `복사 중`.
-    doing: &'static str,
-    /// The past form without its ending, for `…습니다` and `…지만`: `복사했`.
-    done: &'static str,
-    /// The work as the object of a verb, with its particle: `복사를`.
-    object: &'static str,
-    /// The work on its own: `복사`.
-    noun: &'static str,
 }
 
 /// What went wrong, for an error of the system or of a provider (an item with no
 /// [`FailureReason`]).
 pub fn error_kind(kind: ErrorKind) -> &'static str {
-    match kind {
-        ErrorKind::NotFound => "찾을 수 없습니다",
-        ErrorKind::PermissionDenied => "권한이 없습니다",
-        ErrorKind::AlreadyExists => "같은 이름의 항목이 이미 있습니다",
-        ErrorKind::InvalidPath => "쓸 수 없는 이름이나 경로입니다",
-        ErrorKind::NotADirectory => "경로에 폴더가 아닌 항목이 있습니다",
-        ErrorKind::IsADirectory => "파일이 아니라 폴더입니다",
-        ErrorKind::DirectoryNotEmpty => "폴더가 비어 있지 않습니다",
-        ErrorKind::StorageFull => "디스크 공간이 부족합니다",
-        ErrorKind::ReadOnly => "읽기 전용 위치입니다",
-        ErrorKind::CrossesDevices => "다른 드라이브로는 한 번에 옮길 수 없습니다",
-        ErrorKind::Busy => "다른 프로그램이 사용 중입니다",
-        ErrorKind::TimedOut => "응답이 너무 늦어 중단했습니다",
-        ErrorKind::Interrupted => "작업이 중간에 끊겼으니 다시 해 보세요",
-        ErrorKind::FileTooLarge => "파일이 너무 커서 이 위치에 둘 수 없습니다",
-        ErrorKind::Unsupported => "이 항목이나 위치에서는 할 수 없는 작업입니다",
-        ErrorKind::Cancelled => "취소되었습니다",
+    t_static(match kind {
+        ErrorKind::NotFound => "error-not-found",
+        ErrorKind::PermissionDenied => "error-permission-denied",
+        ErrorKind::AlreadyExists => "error-already-exists",
+        ErrorKind::InvalidPath => "error-invalid-path",
+        ErrorKind::NotADirectory => "error-not-a-directory",
+        ErrorKind::IsADirectory => "error-is-a-directory",
+        ErrorKind::DirectoryNotEmpty => "error-directory-not-empty",
+        ErrorKind::StorageFull => "error-storage-full",
+        ErrorKind::ReadOnly => "error-read-only",
+        ErrorKind::CrossesDevices => "error-crosses-devices",
+        ErrorKind::Busy => "error-busy",
+        ErrorKind::TimedOut => "error-timed-out",
+        ErrorKind::Interrupted => "error-interrupted",
+        ErrorKind::FileTooLarge => "error-file-too-large",
+        ErrorKind::Unsupported => "error-unsupported",
+        ErrorKind::Cancelled => "error-cancelled",
         // `Other`, and any kind added after this was written.
-        _ => "알 수 없는 오류가 났습니다",
-    }
+        _ => "error-other",
+    })
+}
+
+/// The message `key` with the [`error_kind`] of `kind` as its `$reason`.
+fn with_reason(key: &str, kind: ErrorKind) -> String {
+    t(key, &[("reason", error_kind(kind).into())])
 }
 
 /// The notice for an item that could not be opened or a folder that could not be shown:
 /// `열 수 없습니다: 권한이 없습니다`.
 pub fn cannot_open(kind: ErrorKind) -> String {
-    format!("열 수 없습니다: {}", error_kind(kind))
+    with_reason("error-cannot-open", kind)
 }
 
 /// The notice for the address of a remote place typed into a path field (`sftp://…`): the app
 /// opens local folders alone for now.
 pub fn remote_location() -> &'static str {
-    "아직 지원하지 않는 위치입니다"
+    t_static("notice-remote-location")
 }
 
 /// What the list of a folder's subfolders under a `›` says while a worker lists the folder.
 pub fn listing_folders() -> &'static str {
-    "불러오는 중…"
+    t_static("tree-loading")
 }
 
 /// What the list of a folder's subfolders says when the folder has none (that the panes show).
 pub fn no_subfolders() -> &'static str {
-    "하위 폴더가 없습니다"
+    t_static("tree-no-subfolders")
 }
 
 /// Under the folders of a `›`'s list when the listing left links unexamined (past the most it
 /// follows) that may lead to more folders, and no folder was left out otherwise.
 pub fn links_unexamined() -> &'static str {
-    "바로 가기 일부는 확인하지 않았습니다"
+    t_static("tree-links-unexamined")
 }
 
 /// Under the names a list of the address bar shows: how many more folders there are.
-pub fn more_folders(count: usize) -> String {
-    format!("외 {count}개")
+pub fn more_folders(n: usize) -> String {
+    t("tree-more-folders", &[("count", count(n))])
 }
 
 /// The notice of a drop the window did not make: the rows changed under the pointer (a
 /// folder's watch) since it showed where the items would go, so they would go elsewhere.
 pub fn drop_moved() -> &'static str {
-    "목록이 바뀌어 놓을 곳이 달라졌습니다. 다시 끌어다 놓으세요"
+    t_static("drop-moved")
 }
 
 /// The notice of a command chosen in Windows' own menu that the app did not do: the items a
 /// command acts on (or the folder of the pane) are no longer the ones the menu was for.
 pub fn system_menu_moved() -> &'static str {
-    "목록이 바뀌어 Windows 메뉴에서 고른 명령을 하지 않았습니다. 메뉴를 다시 띄워 고르세요"
+    t_static("notice-system-menu-moved")
+}
+
+/// Where a pane went when its folder was gone, as the messages' `$to` selects it: `parent` for
+/// the nearest folder above it that is left, `home` for the home folder.
+fn went_to(to_parent: bool) -> FluentValue<'static> {
+    FluentValue::from(if to_parent { "parent" } else { "home" })
 }
 
 /// The notice when the folder `name` a pane showed is gone and the pane went to the nearest
 /// folder above it that is left (`to_parent`), or home when none is.
 pub fn folder_vanished(name: &str, to_parent: bool) -> String {
-    let to = if to_parent {
-        "상위 폴더"
-    } else {
-        "홈 폴더"
-    };
-    format!("‘{name}’ 폴더가 없어져 {to}로 옮겼습니다")
+    t(
+        "notice-folder-gone",
+        &[("name", name.into()), ("to", went_to(to_parent))],
+    )
 }
 
 /// What the head of `column` of 자세히 says (the 보기 menu's 열 and 정렬 say it too).
 pub fn column_title(column: Column) -> &'static str {
-    match column {
-        Column::Name => "이름",
-        Column::Size => "크기",
-        Column::Modified => "수정한 날짜",
-        Column::Created => "만든 날짜",
-        Column::Kind => "종류",
-        Column::Extension => "확장자",
-        Column::Attributes => "속성",
-        Column::Accessed => "접근한 날짜",
-        Column::Path => "경로",
-        Column::Original => "원래 위치",
-        Column::Deleted => "삭제한 날짜",
-    }
+    t_static(match column {
+        Column::Name => "column-name",
+        Column::Size => "column-size",
+        Column::Modified => "column-modified",
+        Column::Created => "column-created",
+        Column::Kind => "column-kind",
+        Column::Extension => "column-extension",
+        Column::Attributes => "column-attributes",
+        Column::Accessed => "column-accessed",
+        Column::Path => "column-path",
+        Column::Original => "column-original",
+        Column::Deleted => "column-deleted",
+    })
 }
 
 /// The notice when a view of 내 PC is asked for that it does not have: it shows its drives as
 /// tiles only.
 pub fn computer_view_fixed() -> &'static str {
-    "내 PC는 드라이브를 타일로만 보여 줍니다"
+    t_static("notice-computer-view-fixed")
 }
 
 /// The notice after 하위 폴더에 적용 in the folder `name`.
 pub fn view_applied_below(name: &str) -> String {
-    format!("‘{name}’ 폴더와 그 하위 폴더를 이 보기로 표시합니다")
+    t("view-applied-below", &[("name", name.into())])
 }
 
 /// The title of the question before 하위 폴더에 적용 makes folders below forget their views.
 pub fn view_apply_title() -> &'static str {
-    "하위 폴더에 적용"
+    t_static("view-apply-title")
 }
 
-/// The question before 하위 폴더에 적용 in the folder `name`, of whose subfolders `count` have
+/// The question before 하위 폴더에 적용 in the folder `name`, of whose subfolders `n` have
 /// views of their own.
-pub fn view_apply_below(name: &str, count: usize) -> String {
-    format!(
-        "‘{name}’ 폴더의 보기를 하위 폴더에도 적용할까요?\n하위 폴더 {count}개에 따로 정한 보기가 지워집니다."
+pub fn view_apply_below(name: &str, n: usize) -> String {
+    t(
+        "view-apply-below",
+        &[("name", name.into()), ("count", count(n))],
     )
 }
 
 /// The label of the button that applies a view below.
 pub fn view_apply_button() -> &'static str {
-    "적용"
+    t_static("view-apply-button")
 }
 
 /// The notice after 기본값으로 되돌리기 in the folder `name`.
 pub fn view_reset(name: &str) -> String {
-    format!("‘{name}’ 폴더의 보기를 되돌렸습니다")
+    t("view-reset", &[("name", name.into())])
 }
 
 /// The notice when a folder's view cannot be remembered (its path is too long to keep).
 pub fn view_not_kept() -> &'static str {
-    "경로가 너무 길어 이 폴더의 보기를 기억할 수 없습니다"
+    t_static("view-not-kept")
 }
 
 /// The notice when the folder `name` a pane showed is gone, the pane went to the nearest folder
 /// above it that is left (`to_parent`) or home, and navigation sync, which waited to open
 /// folders there, turned off: one notice for both, as the window shows one at a time.
 pub fn folder_vanished_sync_off(name: &str, to_parent: bool) -> String {
-    let to = if to_parent {
-        "상위 폴더"
-    } else {
-        "홈 폴더"
-    };
-    format!("‘{name}’ 폴더가 없어져 {to}로 옮겼고 탐색 동기화를 껐습니다")
+    t(
+        "notice-folder-gone-sync-off",
+        &[("name", name.into()), ("to", went_to(to_parent))],
+    )
 }
 
 /// The notice of 같은 확장자 선택 on a row whose name has no extension (a folder, `README`).
 pub fn no_extension(name: &str) -> String {
-    format!("‘{name}’에는 확장자가 없습니다")
+    t("select-no-extension", &[("name", name.into())])
 }
 
 /// The notice when a long folder could not be put in its new order: the rows keep the one they
 /// had.
 pub fn sort_failed() -> &'static str {
-    "이 폴더를 정렬하지 못해 이전 순서로 둡니다"
+    t_static("notice-sort-failed")
 }
 
 /// What the pattern window shows when its worker could not count the rows: 선택 matches them
 /// when it is pressed.
 pub fn pattern_uncounted() -> &'static str {
-    "항목 수를 세지 못했습니다. 선택을 누르면 바로 맞춰 고릅니다"
+    t_static("pattern-uncounted")
 }
 
 /// How many rows the pattern window's pattern matches.
-pub fn pattern_count(count: usize) -> String {
-    format!("맞는 항목 {count}개")
+pub fn pattern_count(n: usize) -> String {
+    t("pattern-count", &[("count", count(n))])
 }
 
 /// What the pattern window shows while a worker matches the names, before its first count.
 pub fn pattern_counting() -> &'static str {
-    "세는 중…"
+    t_static("pattern-counting")
 }
 
 /// Why the pattern window's text is no pattern.
 pub fn pattern_problem(problem: PatternError) -> String {
     match problem {
-        PatternError::TooLong => format!("패턴이 너무 깁니다 ({MAX_PATTERN_CHARS}자까지)"),
-        PatternError::Invalid => "올바른 정규식이 아닙니다".to_owned(),
-        PatternError::TooComplex => "패턴이 너무 복잡합니다. 더 짧게 써 주세요".to_owned(),
+        PatternError::TooLong => t("pattern-too-long", &[("max", count(MAX_PATTERN_CHARS))]),
+        PatternError::Invalid => t_static("pattern-invalid").to_owned(),
+        PatternError::TooComplex => t_static("pattern-too-complex").to_owned(),
     }
 }
 
 /// The notice when navigation sync is turned on: a move into a folder, up, back or forward in
 /// one pane is made in the other one too.
 pub fn sync_on() -> &'static str {
-    "탐색 동기화를 켰습니다"
+    t_static("sync-on")
 }
 
 /// The notice when navigation sync is turned off.
 pub fn sync_off() -> &'static str {
-    "탐색 동기화를 껐습니다"
+    t_static("sync-off")
 }
 
 /// The notice when one pane went into its folder `name` and the other has no folder of that
 /// name: sync is off.
 pub fn sync_no_folder(name: &str) -> String {
-    format!("반대편 패널에 ‘{name}’ 폴더가 없어 탐색 동기화를 껐습니다")
+    t("sync-no-folder", &[("name", name.into())])
 }
 
 /// The notice when one pane went up, back or forward and the other cannot (it is at a root,
 /// or has nothing to go back or forward to): sync is off.
 pub fn sync_cannot_follow() -> &'static str {
-    "반대편 패널이 따라갈 수 없어 탐색 동기화를 껐습니다"
+    t_static("sync-cannot-follow")
 }
 
 /// The notice when the panes were swapped while sync waited for the other pane's listing to
 /// follow a move: what it would follow now is the pane with the keys, so sync is off.
 pub fn sync_off_by_swap() -> &'static str {
-    "패널을 맞바꿔 탐색 동기화를 껐습니다"
+    t_static("sync-off-by-swap")
 }
 
 /// The notice when a command for the other pane (the same folder there, navigation sync) is
 /// asked for while one pane shows.
 pub fn one_pane_only() -> &'static str {
-    "한 패널 보기에서는 쓸 수 없습니다"
+    t_static("pane-one-only")
 }
 
 /// The notice when a pane's last tab is to go to the other pane: a pane keeps one tab.
 pub fn last_tab_stays() -> &'static str {
-    "패널의 마지막 탭은 옮길 수 없습니다"
+    t_static("tab-last-stays")
 }
 
 /// The notice when a tab went to the other pane while one pane shows: it is in the hidden
 /// pane, which the 보기 menu's 배치 ▸ 듀얼 패널 (F12) shows.
 pub fn tab_moved_to_hidden() -> &'static str {
-    "탭을 숨은 반대편 패널로 옮겼습니다. 보기 ▸ 배치 ▸ 듀얼 패널(F12)로 볼 수 있습니다"
+    t_static("tab-moved-to-hidden")
 }
 
 /// The notice when the folder the app was asked to open at its start is gone: the tabs of
 /// the last run show instead. A long path loses its middle ([`short_path`]).
 pub fn start_folder_gone(folder: &VPath) -> String {
-    format!(
-        "열려던 폴더를 찾을 수 없습니다: {}",
-        short_path(&folder.to_string(), NOTICE_PLACE_CHARS)
+    t(
+        "notice-start-folder-gone",
+        &[(
+            "path",
+            short_path(&folder.to_string(), NOTICE_PLACE_CHARS).into(),
+        )],
     )
 }
 
@@ -391,28 +390,33 @@ pub fn start_folder_gone(folder: &VPath) -> String {
 /// of threads or memory): a listing, a preview, a look at the clipboard, a worker of the app's
 /// start. Each of them can be asked for again. "일", not "작업": no file job failed.
 pub fn background_failed() -> &'static str {
-    "시스템 자원이 부족해 일을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요"
+    t_static("notice-background-failed")
 }
 
 /// The notice when the settings (tabs, theme, window size) could not be written: the next
 /// start may not show them.
 pub fn settings_not_saved() -> &'static str {
-    "설정을 저장하지 못했습니다. 다음 실행 때 탭과 보기 설정이 돌아오지 않을 수 있습니다"
+    t_static("settings-not-saved")
 }
 
 /// The notice at the start when the settings file is there but could not be read (or set
 /// aside): the app starts with the defaults and leaves the file alone.
 pub fn settings_unreadable() -> &'static str {
-    "설정 파일을 읽지 못해 기본 설정으로 시작했습니다. 이번에 바꾼 설정은 저장하지 않습니다"
+    t_static("settings-unreadable")
 }
 
 /// The space line of a drive in the sidebar: `128 GB 남음 / 512 GB`. The free space is
 /// rounded down, so a full drive never reads as having room.
 pub fn drive_space(available: u64, total: u64) -> String {
-    format!(
-        "{} 남음 / {}",
-        format_size_rounded(available, Rounding::Down),
-        format_size(total)
+    t(
+        "sidebar-drive-space",
+        &[
+            (
+                "free",
+                format_size_rounded(available, Rounding::Down).into(),
+            ),
+            ("total", format_size(total).into()),
+        ],
     )
 }
 
@@ -453,32 +457,34 @@ pub struct StatusFilter<'a> {
 pub fn status_parts(facts: &StatusFacts<'_>) -> Vec<String> {
     let mut parts = Vec::new();
     if facts.selected > 0 {
-        parts.push(format!("{}개 선택", facts.selected));
+        parts.push(t("status-selected", &[("count", count(facts.selected))]));
         if let Some(bytes) = facts.selected_bytes {
-            parts.push(format!("크기 {}", format_size(bytes)));
+            parts.push(t("status-size", &[("size", format_size(bytes).into())]));
         }
         if facts.selected_folders > 0 {
-            let plus = if facts.selected_bytes.is_some() {
-                "+"
+            let key = if facts.selected_bytes.is_some() {
+                "status-plus-folders"
             } else {
-                ""
+                "status-folders"
             };
-            parts.push(format!("{plus}폴더 {}개", facts.selected_folders));
+            parts.push(t(key, &[("count", count(facts.selected_folders))]));
         }
     }
-    parts.push(format!("항목 {}개", facts.items));
+    parts.push(t("status-items", &[("count", count(facts.items))]));
     if let Some(filter) = facts.filter {
-        parts.push(format!(
-            "거르기: {} · {}/{}",
-            clip_end(filter.text, STATUS_FILTER_CELLS),
-            filter.shown,
-            filter.of
+        parts.push(t(
+            "status-filter",
+            &[
+                ("filter", clip_end(filter.text, STATUS_FILTER_CELLS).into()),
+                ("shown", count(filter.shown)),
+                ("of", count(filter.of)),
+            ],
         ));
     }
     if let Some(free) = facts.free {
-        parts.push(format!(
-            "남은 공간 {}",
-            format_size_rounded(free, Rounding::Down)
+        parts.push(t(
+            "status-free",
+            &[("free", format_size_rounded(free, Rounding::Down).into())],
         ));
     }
     parts
@@ -536,113 +542,105 @@ pub fn fit_status<S: AsRef<str>>(parts: &[S], cells: usize) -> String {
 
 /// The sidebar name of one of the user's well-known folders.
 pub fn favorite(folder: KnownFolder) -> &'static str {
-    match folder {
-        KnownFolder::Home => "홈",
-        KnownFolder::Desktop => "바탕 화면",
-        KnownFolder::Documents => "문서",
-        KnownFolder::Downloads => "다운로드",
-        KnownFolder::Pictures => "사진",
-        KnownFolder::Music => "음악",
-        KnownFolder::Videos => "동영상",
-    }
+    t_static(match folder {
+        KnownFolder::Home => "place-home",
+        KnownFolder::Desktop => "place-desktop",
+        KnownFolder::Documents => "place-documents",
+        KnownFolder::Downloads => "place-downloads",
+        KnownFolder::Pictures => "place-pictures",
+        KnownFolder::Music => "place-music",
+        KnownFolder::Videos => "place-videos",
+    })
 }
 
 /// The sidebar name of the Windows drive `letter`: `로컬 디스크 (C:)` for the system's usual
 /// drive, `드라이브 (D:)` for the others.
 pub fn drive_letter(letter: char) -> String {
-    if letter == 'C' {
-        "로컬 디스크 (C:)".to_owned()
+    let key = if letter == 'C' {
+        "place-local-disk"
     } else {
-        format!("드라이브 ({letter}:)")
-    }
+        "place-drive"
+    };
+    t(key, &[("letter", letter.to_string().into())])
 }
 
 /// The sidebar name of the volume that holds `/` on macOS and Linux.
 pub fn system_disk() -> &'static str {
-    "시스템 디스크"
+    t_static("place-system-disk")
 }
 
 /// The name of a place of the shell, in the sidebar, a tab, the path row and the path field,
 /// which takes it typed back: `휴지통`, `내 PC`.
 pub fn shell_place(place: ShellPlace) -> &'static str {
-    match place {
-        ShellPlace::Trash => "휴지통",
-        ShellPlace::Computer => "내 PC",
-    }
+    t_static(match place {
+        ShellPlace::Trash => "place-trash",
+        ShellPlace::Computer => "place-computer",
+    })
 }
 
 /// Why a job refused an item, or part of one: one sentence for each rule of the jobs, or for
 /// a name or size the target cannot hold, the [`issue_kind`] fact and what it meant for the
 /// item (a rename or a create refuses every name with an issue, warnings too).
 pub fn failure_reason(reason: &FailureReason) -> String {
-    let words = match reason {
-        FailureReason::IntoItself => "폴더를 자기 안으로 복사하거나 옮길 수 없습니다",
-        FailureReason::NoTargetFolder => "대상이 드라이브 자체라 그 자리에 둘 수 없습니다",
-        FailureReason::TargetNotAFolder => "대상 위치가 폴더가 아닙니다",
-        FailureReason::TooDeep => "폴더 안 너무 깊은 곳에 있어 건너뛰었습니다",
-        FailureReason::LinkLoop => "바로 가기가 자기를 담은 폴더를 다시 가리켜 따라갈 수 없습니다",
-        FailureReason::TooManyLinks => "바로 가기가 너무 여러 번 이어져 따라갈 수 없습니다",
-        FailureReason::LinkChanged => "따라가는 동안 바로 가기가 바뀌었습니다",
-        FailureReason::AbsoluteLink => "이 위치의 바로 가기는 따라갈 수 없습니다",
-        FailureReason::NotARegularFile => "장치나 파이프 같은 특수 파일이라 건너뛰었습니다",
-        FailureReason::SourceCutShort => {
-            "복사하는 동안 원본 파일이 줄어들어 사본을 만들지 않았습니다"
-        }
-        FailureReason::KindMismatch => {
-            "같은 이름의 항목이 있는데, 파일과 폴더는 서로 덮어쓸 수 없습니다"
-        }
-        FailureReason::NoFreeName => "번호를 붙인 이름도 모두 쓰이고 있습니다",
-        FailureReason::OntoItself => "대상 폴더가 원본이 있는 바로 그 폴더라 옮기지 않았습니다",
-        FailureReason::ChangedWhileMoved => "옮기는 동안 항목이 바뀌어 그대로 두었습니다",
-        FailureReason::KeptAsTargetFolder => {
-            "원본 폴더가 대상 폴더와 같은 폴더라 지우지 않았습니다"
-        }
-        FailureReason::CannotTellOwnFolder => {
-            "원본 폴더가 대상 폴더와 같은지 알 수 없어 지우지 않았습니다"
-        }
-        FailureReason::OtherVolume => "다른 드라이브의 항목이라 건너뛰었습니다",
-        FailureReason::TrashRefused => "휴지통으로 보낼 수 없습니다",
-        FailureReason::DeletedNotTrashed => "휴지통 대신 영구 삭제되어 되살릴 수 없습니다",
-        FailureReason::ChangedWhileDeleted => "지우는 동안 항목이 바뀌어 그대로 두었습니다",
-        FailureReason::Overwritten => "덮어쓴 파일의 예전 내용은 되살릴 수 없습니다",
-        FailureReason::ChangedSinceCopy => "복사한 뒤 바뀌어 되돌리지 않았습니다",
+    let key = match reason {
+        FailureReason::IntoItself => "failure-into-itself",
+        FailureReason::NoTargetFolder => "failure-no-target-folder",
+        FailureReason::TargetNotAFolder => "failure-target-not-a-folder",
+        FailureReason::TooDeep => "failure-too-deep",
+        FailureReason::LinkLoop => "failure-link-loop",
+        FailureReason::TooManyLinks => "failure-too-many-links",
+        FailureReason::LinkChanged => "failure-link-changed",
+        FailureReason::AbsoluteLink => "failure-absolute-link",
+        FailureReason::NotARegularFile => "failure-not-a-regular-file",
+        FailureReason::SourceCutShort => "failure-source-cut-short",
+        FailureReason::KindMismatch => "failure-kind-mismatch",
+        FailureReason::NoFreeName => "failure-no-free-name",
+        FailureReason::OntoItself => "failure-onto-itself",
+        FailureReason::ChangedWhileMoved => "failure-changed-while-moved",
+        FailureReason::KeptAsTargetFolder => "failure-kept-as-target-folder",
+        FailureReason::CannotTellOwnFolder => "failure-cannot-tell-own-folder",
+        FailureReason::OtherVolume => "failure-other-volume",
+        FailureReason::TrashRefused => "failure-trash-refused",
+        FailureReason::DeletedNotTrashed => "failure-deleted-not-trashed",
+        FailureReason::ChangedWhileDeleted => "failure-changed-while-deleted",
+        FailureReason::Overwritten => "failure-overwritten",
+        FailureReason::ChangedSinceCopy => "failure-changed-since-copy",
         // A copy as it was is never kept; the words of one that cannot be told do for it.
         FailureReason::CopyKept(found) => {
-            copy_kept(CopyKept::of(*found).unwrap_or(CopyKept::CopyUnknown))
+            return copy_kept(CopyKept::of(*found).unwrap_or(CopyKept::CopyUnknown)).to_owned();
         }
         // As the engine's message says, it may have been: a change of the folder by anyone looks
         // the same.
-        FailureReason::CopyPartlyDeleted => {
-            "복사본의 일부를 이미 지웠을 수 있어 나머지는 안전하게 비교할 수 없으므로 남겨 두었습니다"
-        }
-        FailureReason::ChangedSinceCreated => "만든 뒤 다른 종류로 바뀌어 되돌리지 않았습니다",
-        FailureReason::NotEmpty => "만든 뒤 내용이 생겨 되돌리지 않았습니다",
-        FailureReason::TrashLocationUnknown => {
-            "휴지통의 어디에 들어갔는지 알 수 없어 되돌릴 수 없습니다"
-        }
-        FailureReason::AcrossLocations => "이름 바꾸기로는 다른 위치로 옮길 수 없습니다",
-        FailureReason::LinkNotLocal => "링크는 이 컴퓨터의 드라이브에서만 만들 수 있습니다",
-        FailureReason::LinkNeedsPrivilege => {
-            "심볼릭 링크를 만들려면 개발자 모드를 켜거나 관리자 권한으로 실행해야 합니다"
-        }
-        FailureReason::LinkTargetMissing => "링크가 가리키는 대상이 없습니다",
-        FailureReason::ChangedSinceLinked => {
-            "링크가 바뀌었거나 다른 항목으로 대체되어 되돌리지 않았습니다"
-        }
-        FailureReason::TempLeftBehind => "임시 파일을 지우지 못해 남아 있습니다",
-        FailureReason::TrashItemChanged => {
-            "휴지통이 바뀌었습니다. 목록을 새로 고친 뒤 다시 해 주세요."
-        }
-        FailureReason::OriginalFolderGone => {
-            "원래 폴더가 없습니다. 위치를 골라 꺼내기…로 다른 폴더에 꺼낼 수 있습니다."
-        }
-        FailureReason::RestoreNeverReplaces => "복원은 그 자리에 있는 항목을 덮어쓰지 않습니다",
+        FailureReason::CopyPartlyDeleted => "failure-copy-partly-deleted",
+        FailureReason::ChangedSinceCreated => "failure-changed-since-created",
+        FailureReason::NotEmpty => "failure-not-empty",
+        FailureReason::TrashLocationUnknown => "failure-trash-location-unknown",
+        FailureReason::AcrossLocations => "failure-across-locations",
+        FailureReason::LinkNotLocal => "failure-link-not-local",
+        FailureReason::LinkNeedsPrivilege => "failure-link-needs-privilege",
+        FailureReason::LinkTargetMissing => "failure-link-target-missing",
+        FailureReason::ChangedSinceLinked => "failure-changed-since-linked",
+        FailureReason::TempLeftBehind => "failure-temp-left-behind",
+        FailureReason::TrashItemChanged => "failure-trash-item-changed",
+        FailureReason::OriginalFolderGone => "failure-original-folder-gone",
+        FailureReason::RestoreNeverReplaces => "failure-restore-never-replaces",
         FailureReason::Issue(issue) => {
-            return format!("{}. {}", issue_kind(issue), refused_because(issue));
+            return issue_and(issue, refused_because(issue));
         }
-        _ => "알 수 없는 이유로 처리하지 못했습니다",
+        _ => "failure-unknown",
     };
-    words.to_owned()
+    t_static(key).to_owned()
+}
+
+/// The [`issue_kind`] fact of `issue`, then what it meant (`consequence`), as one line.
+fn issue_and(issue: &IssueKind, consequence: &str) -> String {
+    t(
+        "issue-and-consequence",
+        &[
+            ("issue", issue_kind(issue).into()),
+            ("consequence", consequence.into()),
+        ],
+    )
 }
 
 /// What keeps an item from fitting its target as it is, as a fact: the character, the
@@ -650,52 +648,55 @@ pub fn failure_reason(reason: &FailureReason) -> String {
 /// the user reads come from [`failure_reason`] (the item was refused) or [`preflight_issue`]
 /// (before a transfer).
 pub fn issue_kind(issue: &IssueKind) -> String {
+    let sized = |key: &str, up: (&str, u64), down: (&str, u64)| {
+        t(
+            key,
+            &[
+                (up.0, format_size_rounded(up.1, Rounding::Up).into()),
+                (down.0, format_size_rounded(down.1, Rounding::Down).into()),
+            ],
+        )
+    };
     match issue {
-        IssueKind::InvalidCharacter(c) => {
-            format!(
-                "대상 위치가 허용하지 않는 {} 문자가 이름에 있습니다",
-                quote_char(*c)
-            )
-        }
-        IssueKind::ReservedName => {
-            "Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등)".to_owned()
-        }
-        IssueKind::TrailingDotOrSpace => "이름이 마침표나 공백으로 끝납니다".to_owned(),
+        IssueKind::InvalidCharacter(c) => t(
+            "issue-invalid-character",
+            &[("char", quote_char(*c).into())],
+        ),
+        IssueKind::ReservedName => t_static("issue-reserved-name").to_owned(),
+        IssueKind::TrailingDotOrSpace => t_static("issue-trailing-dot-or-space").to_owned(),
         // `len` and `max` count UTF-8 bytes or UTF-16 units, and a path may be the temporary
         // one: no number would mean much to the user.
-        IssueKind::NameTooLong { .. } => "이름이 너무 깁니다".to_owned(),
-        IssueKind::PathTooLong { .. } => "경로가 너무 깁니다".to_owned(),
-        IssueKind::FileTooLarge { size, max } => format!(
-            "파일이 대상 위치가 담을 수 있는 크기보다 큽니다 ({}, 최대 {})",
-            format_size_rounded(*size, Rounding::Up),
-            format_size_rounded(*max, Rounding::Down)
+        IssueKind::NameTooLong { .. } => t_static("issue-name-too-long").to_owned(),
+        IssueKind::PathTooLong { .. } => t_static("issue-path-too-long").to_owned(),
+        IssueKind::FileTooLarge { size, max } => {
+            sized("issue-file-too-large", ("size", *size), ("max", *max))
+        }
+        IssueKind::CaseCollision { other } => t(
+            "issue-case-collision",
+            &[("other", other.to_string_lossy().into())],
         ),
-        IssueKind::CaseCollision { other } => format!(
-            "대소문자만 다른 ‘{}’ 항목이 이미 있습니다",
-            other.to_string_lossy()
+        IssueKind::NotEnoughSpace { needed, available } => sized(
+            "issue-not-enough-space",
+            ("needed", *needed),
+            ("available", *available),
         ),
-        IssueKind::NotEnoughSpace { needed, available } => format!(
-            "대상 드라이브의 공간이 부족합니다 (필요 {}, 남은 공간 {})",
-            format_size_rounded(*needed, Rounding::Up),
-            format_size_rounded(*available, Rounding::Down)
-        ),
-        _ => "대상 위치에 맞지 않는 항목입니다".to_owned(),
+        _ => t_static("issue-unknown").to_owned(),
     }
 }
 
 /// What it meant for an item that a job refused it for `issue`.
 fn refused_because(issue: &IssueKind) -> &'static str {
-    match issue {
-        IssueKind::NameTooLong { .. } => "더 짧게 바꿔 주세요",
-        IssueKind::PathTooLong { .. } => "더 얕은 폴더나 짧은 이름을 써 주세요",
+    t_static(match issue {
+        IssueKind::NameTooLong { .. } => "refused-name-too-long",
+        IssueKind::PathTooLong { .. } => "refused-path-too-long",
         IssueKind::InvalidCharacter(_)
         | IssueKind::ReservedName
         | IssueKind::TrailingDotOrSpace
-        | IssueKind::CaseCollision { .. } => "이 이름은 쓸 수 없습니다",
-        IssueKind::NotEnoughSpace { .. } => "공간을 비우거나 다른 위치를 고르세요",
+        | IssueKind::CaseCollision { .. } => "refused-name",
+        IssueKind::NotEnoughSpace { .. } => "refused-no-space",
         // `FileTooLarge`, and any issue added after this was written.
-        _ => "이 위치에는 둘 수 없습니다",
-    }
+        _ => "refused-other",
+    })
 }
 
 /// One line of the pre-flight review a transfer shows before it writes anything: the
@@ -703,18 +704,16 @@ fn refused_because(issue: &IssueKind) -> &'static str {
 /// and may then be hard to open; one with a blocking issue cannot be written as it is; too
 /// little space lets the job start but may stop it halfway.
 pub fn preflight_issue(issue: &IssueKind) -> String {
-    format!("{}. {}", issue_kind(issue), preflight_follows(issue))
+    issue_and(issue, preflight_follows(issue))
 }
 
 /// What follows from `issue` for a transfer that has not written anything yet.
 fn preflight_follows(issue: &IssueKind) -> &'static str {
-    match issue {
-        IssueKind::NotEnoughSpace { .. } => "계속하면 공간이 모자라 중간에 멈출 수 있습니다",
-        _ if issue.severity() == Severity::Warning => {
-            "그대로 두면 Windows에서 열기 어려울 수 있습니다"
-        }
-        _ => "이 항목은 대상 위치에 둘 수 없습니다",
-    }
+    t_static(match issue {
+        IssueKind::NotEnoughSpace { .. } => "preflight-no-space",
+        _ if issue.severity() == Severity::Warning => "preflight-warning",
+        _ => "preflight-blocked",
+    })
 }
 
 /// `c` in quotes, or its code (`U+0001`) when it would not show.
@@ -729,14 +728,14 @@ fn quote_char(c: char) -> String {
 /// How a job of `work` ended, as one sentence: `이동했습니다`, `복사했지만 일부 항목을 처리하지
 /// 못했습니다`, `이동을 취소했습니다`, `문제가 생겨 삭제를 중단했습니다`.
 pub fn outcome(outcome: Outcome, work: JobWork) -> String {
-    let Phrases { done, object, .. } = work.phrases();
-    match outcome {
-        Outcome::Completed => format!("{done}습니다"),
-        Outcome::CompletedWithErrors => format!("{done}지만 일부 항목을 처리하지 못했습니다"),
-        Outcome::Cancelled => format!("{object} 취소했습니다"),
-        Outcome::Aborted => format!("문제가 생겨 {object} 중단했습니다"),
-        _ => format!("{object} 끝냈습니다"),
-    }
+    let key = match outcome {
+        Outcome::Completed => "job-done",
+        Outcome::CompletedWithErrors => "job-done-with-errors",
+        Outcome::Cancelled => "job-cancelled",
+        Outcome::Aborted => "job-aborted",
+        _ => "job-ended",
+    };
+    work.says(key, &[])
 }
 
 /// The title of a job's row in the job panel: `대기 중` in the queue, `일시정지됨` when paused,
@@ -744,301 +743,299 @@ pub fn outcome(outcome: Outcome, work: JobWork) -> String {
 /// the question itself), and its [`outcome`] once it has ended.
 pub fn job_title(work: JobWork, state: JobState) -> String {
     match state {
-        JobState::Queued => "대기 중".to_owned(),
-        JobState::Paused => "일시정지됨".to_owned(),
+        JobState::Queued => t_static("job-queued").to_owned(),
+        JobState::Paused => t_static("job-paused").to_owned(),
         JobState::Finished(end) => outcome(end, work),
         // `Planning`, `Running`, `Waiting`, and any state added after this was written.
-        _ => work.phrases().doing.to_owned(),
+        _ => work.says("job-doing", &[]),
     }
 }
 
 /// The notice of a second instance of the app: the first one keeps the job journal, so the
 /// second one ends.
 pub fn already_running() -> &'static str {
-    "이미 실행 중입니다. 먼저 연 창을 쓰세요."
+    t_static("startup-already-running")
+}
+
+/// `path` as a message's argument, as the system writes it.
+fn shown_path(path: &std::path::Path) -> FluentValue<'static> {
+    FluentValue::from(path.display().to_string())
 }
 
 /// The notice, once the window is open, when the settings file could not be used: it was moved
 /// to `backup` and the app started with the defaults (INST-08).
 pub fn settings_backed_up(backup: &std::path::Path) -> String {
-    format!(
-        "설정 파일을 읽을 수 없어 백업하고 기본값으로 시작했습니다: {}",
-        backup.display()
-    )
+    t("settings-backed-up", &[("path", shown_path(backup))])
 }
 
 /// What `--cleanup` says of a portable install, which has no uninstaller.
 pub fn cleanup_portable() -> &'static str {
-    "포터블 설치는 폴더를 지우면 됩니다."
+    t_static("cleanup-portable")
 }
 
 /// What `--cleanup` says when the app still runs after the wait (exit code 3).
 pub fn cleanup_still_running() -> &'static str {
-    "앱이 아직 실행 중입니다. 앱을 끝낸 뒤 다시 시도하세요."
+    t_static("cleanup-still-running")
 }
 
 /// What `--cleanup` says when the program runs from inside a folder it would delete (exit code
 /// 1): nothing was changed.
 pub fn cleanup_runs_from_owned(folder: &std::path::Path) -> String {
-    format!(
-        "이 프로그램이 지울 폴더 안에서 실행 중이라 아무것도 지우지 않았습니다: {}. 앱을 다른 폴더에 설치한 뒤 다시 시도하세요.",
-        folder.display()
-    )
+    t("cleanup-runs-from-owned", &[("folder", shown_path(folder))])
 }
 
 /// What `--cleanup-plan` says when there is nothing to delete.
 pub fn cleanup_plan_empty() -> &'static str {
-    "지울 것이 없습니다."
+    t_static("cleanup-plan-empty")
 }
 
 /// A step of the plan: the settings are copied to a file first.
 pub fn cleanup_step_backup(from: &std::path::Path, to: &std::path::Path) -> String {
-    format!("설정 백업: {} → {}", from.display(), to.display())
+    t(
+        "cleanup-step-backup",
+        &[("from", shown_path(from)), ("to", shown_path(to))],
+    )
 }
 
 /// A step of the plan: a recorded change of the system is put back.
 pub fn cleanup_step_revert(change: &str) -> String {
-    format!("시스템 변경 되돌리기: {change}")
+    t("cleanup-step-revert", &[("change", change.into())])
 }
 
 /// A step of the plan: the app's preferences are cleared from the system (macOS).
 pub fn cleanup_step_clear_domain(domain: &str) -> String {
-    format!("환경설정 지우기: {domain}")
+    t("cleanup-step-clear-domain", &[("domain", domain.into())])
 }
 
 /// A step of the plan: a file or folder is deleted.
 pub fn cleanup_step_delete(path: &std::path::Path) -> String {
-    format!("삭제: {}", path.display())
+    t("cleanup-step-delete", &[("path", shown_path(path))])
 }
 
 /// A step of the plan: a folder is deleted if it is empty.
 pub fn cleanup_step_remove_if_empty(path: &std::path::Path) -> String {
-    format!("비어 있으면 삭제: {}", path.display())
+    t(
+        "cleanup-step-remove-if-empty",
+        &[("path", shown_path(path))],
+    )
 }
 
 /// A step of the plan: the shared temporary folder is listed for what the app left there.
 pub fn cleanup_step_list_temp(path: &std::path::Path) -> String {
-    format!("임시 폴더에서 앱의 파일 찾기: {}", path.display())
+    t("cleanup-step-list-temp", &[("path", shown_path(path))])
 }
 
 /// A step of a kind this wording does not know.
 pub fn cleanup_step_other() -> &'static str {
-    "그 밖의 정리 단계"
+    t_static("cleanup-step-other")
 }
 
 /// 완전 삭제… did not start because the app cannot be moved to the trash from where it is: it
 /// would have deleted the data and left the app. Nothing was changed.
 pub fn removal_blocked(block: rf_platform::TrashBlock) -> &'static str {
     use rf_platform::TrashBlock;
-    match block {
-        TrashBlock::NotInBundle => {
-            "이 앱은 앱 번들로 실행 중이 아니라 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다."
-        }
-        TrashBlock::Translocated => {
-            "Gatekeeper가 앱을 임시 위치에서 실행 중이라 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 앱을 응용 프로그램 폴더로 옮긴 뒤 다시 실행해 주세요."
-        }
-        TrashBlock::ReadOnlyVolume => {
-            "앱이 읽기 전용 디스크(마운트한 디스크 이미지 등)에 있어 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 앱을 응용 프로그램 폴더로 복사해 그 앱으로 다시 실행해 주세요."
-        }
-        TrashBlock::FolderNotWritable => {
-            "앱이 있는 폴더에 쓸 권한이 없어 휴지통으로 옮길 수 없어 아무것도 지우지 않았습니다. 관리자에게 맡기거나 직접 휴지통으로 옮겨 주세요."
-        }
-    }
+    t_static(match block {
+        TrashBlock::NotInBundle => "removal-blocked-not-in-bundle",
+        TrashBlock::Translocated => "removal-blocked-translocated",
+        TrashBlock::ReadOnlyVolume => "removal-blocked-read-only-volume",
+        TrashBlock::FolderNotWritable => "removal-blocked-folder-not-writable",
+    })
 }
 
 /// The settings could not be written for good before the removal went on.
 pub fn removal_save_pending() -> &'static str {
-    "설정 저장이 끝나지 않아 설정 폴더는 지우지 않았습니다. 잠시 뒤 앱을 끝내고 다시 실행해 지워 주세요."
+    t_static("removal-save-pending")
 }
 
 /// The settings were copied to `copy`.
 pub fn cleanup_backup_done(copy: &std::path::Path) -> String {
-    format!("설정을 백업했습니다: {}", copy.display())
+    t("cleanup-backup-done", &[("path", shown_path(copy))])
 }
 
 /// There was no settings file to back up.
 pub fn cleanup_backup_none() -> &'static str {
-    "백업할 설정 파일이 없습니다."
+    t_static("cleanup-backup-none")
 }
 
 /// The settings could not be copied to `to`; nothing was deleted (exit code 4).
 pub fn cleanup_backup_failed(to: &std::path::Path, reason: &str) -> String {
-    format!(
-        "설정을 백업하지 못해 아무것도 지우지 않았습니다: {} ({reason})",
-        to.display()
+    t(
+        "cleanup-backup-failed",
+        &[("path", shown_path(to)), ("reason", reason.into())],
     )
 }
 
 /// The clean removal could not run (the ledger file is refused, the lock cannot be taken).
 pub fn cleanup_failed(reason: &str) -> String {
-    format!("정리하지 못했습니다: {reason}")
+    t("cleanup-failed", &[("reason", reason.into())])
 }
 
-/// `count` changes of the system were put back.
-pub fn cleanup_reverted(count: usize) -> String {
-    format!("되돌린 시스템 변경: {count}개")
+/// `n` changes of the system were put back.
+pub fn cleanup_reverted(n: usize) -> String {
+    t("cleanup-reverted", &[("count", count(n))])
 }
 
 /// A change of the system that could not be put back.
 pub fn cleanup_revert_failed(change: &str, reason: &str) -> String {
-    format!("되돌리지 못함: {change} ({reason})")
+    t(
+        "cleanup-revert-failed",
+        &[("change", change.into()), ("reason", reason.into())],
+    )
 }
 
 /// Nothing was deleted because a change of the system could not be put back.
 pub fn cleanup_deletes_skipped() -> &'static str {
-    "시스템 변경을 되돌리지 못해 아무것도 지우지 않았습니다. 다시 실행하면 남은 것부터 이어서 합니다."
+    t_static("cleanup-deletes-skipped")
 }
 
 /// A step that was done.
 pub fn cleanup_done_line(step: &str) -> String {
-    format!("완료 · {step}")
+    t("cleanup-done-line", &[("step", step.into())])
 }
 
 /// A step that was not done, and why.
 pub fn cleanup_remaining_line(step: &str, reason: &str) -> String {
-    format!("남음 · {step} ({reason})")
+    t(
+        "cleanup-remaining-line",
+        &[("step", step.into()), ("reason", reason.into())],
+    )
 }
 
 /// The clean removal is complete.
 pub fn cleanup_complete() -> &'static str {
-    "정리를 마쳤습니다."
+    t_static("cleanup-complete")
 }
 
 /// Part of the clean removal remains (exit code 5).
 pub fn cleanup_partial() -> &'static str {
-    "일부를 정리하지 못했습니다."
+    t_static("cleanup-partial")
 }
 
 /// The line of the list in the window of 완전 삭제…: the app itself goes to the trash last.
 pub fn removal_step_bundle(bundle: &std::path::Path) -> String {
-    format!("앱을 휴지통으로 옮기기: {}", bundle.display())
+    t("removal-step-bundle", &[("path", shown_path(bundle))])
+}
+
+/// The message `key` with the app's name as its `$app`.
+fn of_app(key: &str) -> String {
+    t(key, &[("app", rf_core::identity::DISPLAY_NAME.into())])
 }
 
 /// The item at the bottom of 보기 ▸ 설정 that removes the app (macOS).
 pub fn remove_app_menu() -> String {
-    format!("{} 완전 삭제…", rf_core::identity::DISPLAY_NAME)
+    of_app("removal-menu")
 }
 
 /// The title of the window of 완전 삭제….
 pub fn removal_title() -> String {
-    format!("{} 완전 삭제", rf_core::identity::DISPLAY_NAME)
+    of_app("removal-title")
 }
 
 /// What the window of 완전 삭제… says before the list of what goes.
 pub fn removal_message() -> String {
-    format!(
-        "이 컴퓨터에서 {}를 지웁니다. 아래 설정·캐시·로그와 앱이 기록한 시스템 변경이 사라지고, 마지막으로 앱을 휴지통으로 옮깁니다(옮길 수 없으면 알려 드립니다). 지운 데이터는 되돌릴 수 없습니다.",
-        rf_core::identity::DISPLAY_NAME
-    )
+    of_app("removal-message")
 }
 
 /// The checkbox of the window of 완전 삭제…: the settings are copied to the documents folder
 /// first, and nothing is deleted if that fails.
 pub fn removal_backup_label() -> &'static str {
-    "문서 폴더에 설정 백업"
+    t_static("removal-backup-label")
 }
 
 /// Under the list of the window of 완전 삭제…: what the checkbox does.
 pub fn removal_backup_note() -> String {
-    format!(
-        "설정 백업을 켜면 지우기 전에 문서 폴더의 {}로 복사합니다. 같은 이름의 파일이 있으면 덮어쓰지 않고 다른 이름으로 저장하며, 백업하지 못하면 아무것도 지우지 않습니다.",
-        crate::removal::backup_file_name()
+    t(
+        "removal-backup-note",
+        &[("file", crate::removal::backup_file_name().into())],
     )
 }
 
 /// The button of the window of 완전 삭제… that deletes.
 pub fn removal_button() -> &'static str {
-    "완전 삭제"
+    t_static("removal-button")
 }
 
 /// The title of the question when jobs run as 완전 삭제… is confirmed.
 pub fn removal_jobs_title() -> &'static str {
-    "작업이 진행 중입니다"
+    t_static("removal-jobs-title")
 }
 
-/// The question when `count` jobs run as 완전 삭제… is confirmed: they stop for good, or the
+/// The question when `n` jobs run as 완전 삭제… is confirmed: they stop for good, or the
 /// removal waits (취소).
-pub fn removal_with_jobs(count: usize) -> String {
-    format!(
-        "진행 중인 작업 {count}개가 있습니다.\n지금 지우면 이 작업은 멈추고 다시 이어 할 수 없습니다. 작업이 끝나기를 기다리려면 취소하세요."
-    )
+pub fn removal_with_jobs(n: usize) -> String {
+    t("removal-with-jobs", &[("count", count(n))])
 }
 
 /// The button that stops the jobs and goes on with 완전 삭제….
 pub fn removal_jobs_button() -> &'static str {
-    "작업을 멈추고 삭제"
+    t_static("removal-jobs-button")
 }
 
 /// The list of what 완전 삭제… deletes could not be made; nothing was changed.
 pub fn removal_plan_failed(reason: &str) -> String {
-    format!("지울 목록을 만들지 못했습니다: {reason}")
+    t("removal-plan-failed", &[("reason", reason.into())])
 }
 
 /// What the window shows while 완전 삭제… works.
 pub fn removing() -> String {
-    format!("{}를 지우는 중…", rf_core::identity::DISPLAY_NAME)
+    of_app("removal-removing")
 }
 
 /// The title of the window that tells how far 완전 삭제… got when it stopped.
 pub fn removal_stopped_title() -> &'static str {
-    "완전 삭제를 마치지 못했습니다"
+    t_static("removal-stopped-title")
 }
 
 /// Said above the report when the app's data is partly or wholly gone and the app stays.
 pub fn removal_stopped_note() -> &'static str {
-    "여기서 멈췄습니다. 아래에 어디까지 했는지 적었습니다. 지우지 못한 것이 있으면 앱을 끝낸 뒤 다시 실행해 이어서 지울 수 있습니다."
+    t_static("removal-stopped-note")
 }
 
 /// The app's data is gone, but the app could not be moved to the trash.
 pub fn removal_not_trashed(reason: &str) -> String {
-    format!(
-        "앱의 데이터는 모두 지웠지만 앱을 휴지통으로 옮기지 못했습니다: {reason}\n앱을 끝낸 뒤 직접 휴지통으로 옮겨 주세요."
-    )
+    t("removal-not-trashed", &[("reason", reason.into())])
 }
 
 /// The settings were copied to `copy` before 완전 삭제… went on.
 pub fn removal_backup_done(copy: &std::path::Path) -> String {
-    format!("설정을 백업했습니다: {}", copy.display())
+    t("removal-backup-done", &[("path", shown_path(copy))])
 }
 
 /// The uninstaller of an installed app could not be started.
 pub fn uninstaller_failed(reason: &str) -> String {
-    format!("제거 프로그램을 열지 못했습니다: {reason}")
+    t("removal-uninstaller-failed", &[("reason", reason.into())])
 }
 
 /// What is said of arguments `--cleanup` does not understand (exit code 2).
 pub fn cleanup_usage() -> &'static str {
-    "사용법: --cleanup [--backup-settings <파일>] | --cleanup-plan [--backup-settings <파일>]"
+    t_static("cleanup-usage")
 }
 
 /// The title of the window that says the app could not start.
 pub fn startup_failed() -> &'static str {
-    "앱을 시작하지 못했습니다"
+    t_static("startup-failed")
 }
 
 /// Why the app could not start: the window system or the renderer failed.
 pub fn no_window() -> &'static str {
-    "창을 열 수 없습니다. 화면이나 그래픽 드라이버 설정을 확인해 주세요"
+    t_static("startup-no-window")
 }
 
 /// Why the app could not start: the folders it keeps its settings and job journal in cannot
 /// be found or made.
 pub fn no_app_folders(kind: ErrorKind) -> String {
-    format!(
-        "설정과 작업 기록을 둘 폴더를 쓸 수 없습니다: {}",
-        error_kind(kind)
-    )
+    with_reason("startup-no-app-folders", kind)
 }
 
 /// Why the app could not start: the lock of the job journal's folder could not be taken.
 pub fn lock_failed(kind: ErrorKind) -> String {
-    format!("작업 기록 폴더를 잠글 수 없습니다: {}", error_kind(kind))
+    with_reason("startup-lock-failed", kind)
 }
 
 /// The notice when the job journal could not be read or written: the jobs run on, but one
 /// that a crash cuts off may not be offered again.
 pub fn journal_error() -> &'static str {
-    "작업 기록을 저장하지 못했습니다. 작업은 계속되지만 앱이 갑자기 꺼지면 이어서 할 수 없습니다"
+    t_static("job-journal-error")
 }
 
 /// What the job panel shows under a job's bar: `3 / 12 항목 · 48 MB/s · 남은 시간 약 20초 ·
@@ -1054,19 +1051,25 @@ pub fn job_progress(
 ) -> String {
     let mut parts = Vec::new();
     if total_items > 0 {
-        parts.push(format!(
-            "{} / {total_items} 항목",
-            done_items.min(total_items)
+        parts.push(t(
+            "job-progress-items",
+            &[
+                ("done", number(done_items.min(total_items))),
+                ("total", number(total_items)),
+            ],
         ));
     }
     if bytes_per_sec > 0 {
-        parts.push(format!("{}/s", format_size(bytes_per_sec)));
+        parts.push(t(
+            "job-speed",
+            &[("speed", format_size(bytes_per_sec).into())],
+        ));
         if let Some(eta) = eta.filter(|eta| !eta.is_zero()) {
             parts.push(time_left(eta));
         }
     }
     if queued > 0 {
-        parts.push(format!("대기 중인 작업 {queued}개"));
+        parts.push(t("job-progress-queued", &[("count", count(queued))]));
     }
     parts.join(" · ")
 }
@@ -1076,17 +1079,29 @@ pub fn job_progress(
 pub fn time_left(eta: Duration) -> String {
     let secs = eta.as_secs() + u64::from(eta.subsec_nanos() > 0);
     let about = if secs < 60 {
-        format!("{secs}초")
+        t("duration-seconds", &[("seconds", number(secs))])
     } else if secs < 3600 {
-        format!("{}분", secs.div_ceil(60))
+        t(
+            "duration-minutes",
+            &[("minutes", number(secs.div_ceil(60)))],
+        )
     } else {
         let minutes = secs.div_ceil(60);
-        match minutes % 60 {
-            0 => format!("{}시간", minutes / 60),
-            rest => format!("{}시간 {rest}분", minutes / 60),
-        }
+        hours_minutes(minutes / 60, minutes % 60)
     };
-    format!("남은 시간 약 {about}")
+    t("job-time-left", &[("time", about.into())])
+}
+
+/// `hours` hours and `minutes` minutes, without the minutes when there are none: `1시간 5분`,
+/// `2시간`.
+fn hours_minutes(hours: u64, minutes: u64) -> String {
+    match minutes {
+        0 => t("duration-hours", &[("hours", number(hours))]),
+        minutes => t(
+            "duration-hours-minutes",
+            &[("hours", number(hours)), ("minutes", number(minutes))],
+        ),
+    }
 }
 
 /// How many cells of a file's name the row of a running job shows at most: a longer name is
@@ -1114,23 +1129,23 @@ pub fn queued_detail(work: JobWork, detail: &str) -> String {
 
 /// The title of the window the job panel shows in when it is not under the panes (LAY-09).
 pub fn job_window_title() -> String {
-    format!("작업 - {}", rf_core::identity::DISPLAY_NAME)
+    of_app("job-window-title")
 }
 
 /// The notice when the window of the job panel could not be opened: the panel shows under the
 /// panes again.
 pub fn job_window_failed() -> &'static str {
-    "작업 패널 창을 열지 못해 창 아래에 다시 붙였습니다"
+    t_static("job-window-failed")
 }
 
 /// The progress line of a job that is still counting what it will do.
 pub fn job_planning() -> &'static str {
-    "준비 중"
+    t_static("job-planning")
 }
 
 /// The progress line of a job that waits for the user to answer its question.
 pub fn job_waiting() -> &'static str {
-    "답을 기다리는 중"
+    t_static("job-waiting")
 }
 
 /// What a job that ended did, in the job panel's 최근 완료 (XFER-14): `복사 12개 · 건너뜀 1개 ·
@@ -1144,28 +1159,18 @@ pub fn job_report(
     average_speed: Option<u64>,
     elapsed: Duration,
 ) -> String {
-    let counted = match work {
-        JobWork::Copy => "복사",
-        JobWork::Move => "이동",
-        JobWork::Trash => "휴지통",
-        JobWork::Delete => "삭제",
-        JobWork::Rename => "이름 바꿈",
-        JobWork::Create => "만듦",
-        JobWork::Link => "링크 만듦",
-        JobWork::Restore => "복원",
-        JobWork::Undo => "되돌림",
-        JobWork::Redo => "다시 실행",
-        JobWork::Other => "처리",
-    };
     let mut parts = vec![
-        format!("{counted} {done}개"),
-        format!("건너뜀 {skipped}개"),
-        format!("오류 {failed}개"),
+        work.says("job-report-done", &[("count", number(done))]),
+        t("job-report-skipped", &[("count", number(skipped))]),
+        t("job-report-failed", &[("count", count(failed))]),
     ];
     if let Some(speed) = average_speed {
-        parts.push(format!("평균 {}/s", format_size(speed)));
+        parts.push(t(
+            "job-report-speed",
+            &[("speed", format_size(speed).into())],
+        ));
     }
-    parts.push(format!("걸린 시간 {}", took(elapsed)));
+    parts.push(t("job-report-took", &[("time", took(elapsed).into())]));
     parts.join(" · ")
 }
 
@@ -1173,42 +1178,42 @@ pub fn job_report(
 pub fn took(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     match secs {
-        0 => "1초 미만".to_owned(),
-        1..60 => format!("{secs}초"),
+        0 => t_static("duration-under-a-second").to_owned(),
+        1..60 => t("duration-seconds", &[("seconds", number(secs))]),
         60..3600 => match secs % 60 {
-            0 => format!("{}분", secs / 60),
-            rest => format!("{}분 {rest}초", secs / 60),
+            0 => t("duration-minutes", &[("minutes", number(secs / 60))]),
+            rest => t(
+                "duration-minutes-seconds",
+                &[("minutes", number(secs / 60)), ("seconds", number(rest))],
+            ),
         },
-        _ => match secs / 60 % 60 {
-            0 => format!("{}시간", secs / 3600),
-            rest => format!("{}시간 {rest}분", secs / 3600),
-        },
+        _ => hours_minutes(secs / 3600, secs / 60 % 60),
     }
 }
 
 /// The notice of a log saved as `name` (XFER-14's 로그 저장).
 pub fn log_saved(name: &str) -> String {
-    format!("로그를 저장했습니다: {name}")
+    t("job-log-saved", &[("name", name.into())])
 }
 
 /// The notice of a log that could not be saved, for an error of `kind`.
 pub fn log_failed(kind: ErrorKind) -> String {
-    format!("로그를 저장하지 못했습니다: {}", error_kind(kind))
+    with_reason("job-log-failed", kind)
 }
 
 /// The title of the destination picker that chooses where a job's log goes (PICK-09).
 pub fn pick_log_title() -> &'static str {
-    "로그를 어디에 저장할까요?"
+    t_static("pick-log-title")
 }
 
 /// The head of the quick target of the app's own folder for logs.
 pub fn pick_log_folder() -> &'static str {
-    "로그 폴더"
+    t_static("pick-log-folder")
 }
 
 /// The picker's confirm button when it chooses where a log goes.
 pub fn pick_log_confirm() -> &'static str {
-    "여기에 저장"
+    t_static("pick-log-confirm")
 }
 
 /// The picker's line under its title when it chooses where the log of a job goes: how the job
@@ -1222,54 +1227,53 @@ pub fn pick_log_summary(title: &str, detail: &str) -> String {
 }
 
 /// The title of the system's notification of a job that ended while the window was not in
-/// front (XFER-14): `복사를 마쳤습니다 · 항목 12개`, the job having been asked to act on `count`
+/// front (XFER-14): `복사를 마쳤습니다 · 항목 12개`, the job having been asked to act on `items`
 /// items, `failed` of which it could not process; `None` for a job the user cancelled.
-pub fn job_notice(work: JobWork, outcome: Outcome, count: usize, failed: usize) -> Option<String> {
-    let Phrases { object, .. } = work.phrases();
+pub fn job_notice(work: JobWork, outcome: Outcome, items: usize, failed: usize) -> Option<String> {
     Some(match outcome {
-        Outcome::Completed => format!("{object} 마쳤습니다 · 항목 {count}개"),
+        Outcome::Completed => work.says("job-notice-done", &[("count", count(items))]),
         Outcome::CompletedWithErrors => {
-            format!("{object} 마쳤지만 항목 {failed}개를 처리하지 못했습니다")
+            work.says("job-notice-done-with-errors", &[("failed", count(failed))])
         }
         Outcome::Cancelled => return None,
-        Outcome::Aborted => format!("문제가 생겨 {object} 중단했습니다"),
-        _ => format!("{object} 끝냈습니다"),
+        Outcome::Aborted => work.says("job-aborted", &[]),
+        _ => work.says("job-ended", &[]),
     })
 }
 
 /// What the last notification adds after the window's jobs went on in the tray and all of them
 /// have ended: the app has ended too.
 pub fn all_jobs_done() -> &'static str {
-    "모든 작업을 마쳐 앱을 끝냈습니다."
+    t_static("tray-all-done")
 }
 
 /// What the last notification adds after the window's jobs went on in the tray and all of them
 /// have ended, some of them with items they could not process: the window shows them.
 pub fn all_jobs_done_with_failures() -> &'static str {
-    "처리하지 못한 항목이 있어 창을 다시 열었습니다. 최근 완료의 자세히에서 볼 수 있습니다."
+    t_static("tray-all-done-with-failures")
 }
 
 /// The notice of a window that stays shown because it could not make the tray icon.
 pub fn tray_unavailable() -> &'static str {
-    "트레이 아이콘을 만들지 못해 창을 닫지 않았습니다"
+    t_static("tray-unavailable")
 }
 
 /// The button of the question before the window closes while jobs run that keeps them going
 /// behind the system's tray icon (Windows) or menu bar icon (macOS), on `os`.
 pub fn continue_in_tray(os: Os) -> &'static str {
-    match os {
-        Os::MacOs => "메뉴 막대에서 계속",
-        Os::Windows | Os::Other => "트레이에서 계속",
-    }
+    t_static(match os {
+        Os::MacOs => "tray-continue-menu-bar",
+        Os::Windows | Os::Other => "tray-continue",
+    })
 }
 
 /// What the question before the window closes while jobs run asks when the jobs can go on
 /// behind the tray icon (XFER-15), on `os`.
 pub fn quit_or_tray(os: Os) -> &'static str {
-    match os {
-        Os::MacOs => "작업이 끝날 때까지 메뉴 막대에서 계속할까요?",
-        Os::Windows | Os::Other => "작업이 끝날 때까지 트레이에서 계속할까요?",
-    }
+    t_static(match os {
+        Os::MacOs => "tray-ask-menu-bar",
+        Os::Windows | Os::Other => "tray-ask",
+    })
 }
 
 /// The tooltip of the tray icon while the jobs go on behind it: `app`, then each job a worker
@@ -1278,7 +1282,7 @@ pub fn quit_or_tray(os: Os) -> &'static str {
 pub fn tray_status(app: &str, rows: &[JobRow]) -> String {
     let mut lines = vec![app.to_owned()];
     if rows.is_empty() {
-        lines.push("대기 중".to_owned());
+        lines.push(t_static("job-queued").to_owned());
     }
     for row in rows.iter().take(3) {
         lines.push(format!("{} {}", row.title, percent(row.fraction)));
@@ -1357,62 +1361,60 @@ fn trash_items_named(items: &[&rf_vfs::TrashItem]) -> String {
 /// The notice when items cannot be copied or moved at all (a volume root, a name the target
 /// cannot take): `복사하거나 옮길 수 없습니다: 쓸 수 없는 이름이나 경로입니다`.
 pub fn cannot_transfer(kind: ErrorKind) -> String {
-    format!("복사하거나 옮길 수 없습니다: {}", error_kind(kind))
+    with_reason("error-cannot-transfer", kind)
 }
 
 /// Why the clipboard did not take or give what was asked: the system has no clipboard for it
 /// (text on Linux), or another app held it or the system refused.
 pub fn clipboard_failed(failure: ClipboardFailure) -> &'static str {
-    match failure {
-        ClipboardFailure::Unsupported => "이 시스템에서는 클립보드에 글자를 넣을 수 없습니다",
-        ClipboardFailure::Unavailable => {
-            "클립보드를 쓸 수 없습니다. 다른 앱이 쓰고 있다면 잠시 뒤에 다시 해 보세요"
-        }
-    }
+    t_static(match failure {
+        ClipboardFailure::Unsupported => "clipboard-unsupported",
+        ClipboardFailure::Unavailable => "clipboard-unavailable",
+    })
 }
 
 /// A paste with no files or folders on the clipboard (text, an image, nothing).
 pub fn nothing_to_paste() -> &'static str {
-    "클립보드에 붙여넣을 파일이나 폴더가 없습니다"
+    t_static("paste-nothing")
 }
 
 /// A paste of a cut the user cancelled with Esc, which the clipboard still holds: nothing
 /// moves.
 pub fn cut_cancelled() -> &'static str {
-    "잘라내기를 취소해 붙여넣을 항목이 없습니다"
+    t_static("paste-cut-cancelled")
 }
 
-/// A paste whose `count` paths of the clipboard all name no folder or file it can take (a
-/// device or a volume of Windows, a file URL of another computer on macOS): nothing is pasted.
-pub fn clipboard_skipped(count: usize) -> String {
-    format!("클립보드의 항목 {count}개가 모두 붙여넣을 수 없는 경로라 붙여넣지 않았습니다")
+/// A paste whose `n` paths of the clipboard all name no folder or file it can take (a device
+/// or a volume of Windows, a file URL of another computer on macOS): nothing is pasted.
+pub fn clipboard_skipped(n: usize) -> String {
+    t("paste-all-skipped", &[("count", count(n))])
 }
 
 /// A paste of a folder into itself or into a folder inside it.
 pub fn paste_into_itself() -> &'static str {
-    "폴더를 그 폴더 안에 붙여넣을 수 없습니다"
+    t_static("paste-into-itself")
 }
 
 /// A paste of items cut, into the folder they are in already: nothing moves.
 pub fn paste_already_here() -> &'static str {
-    "잘라낸 항목이 이미 이 폴더에 있습니다"
+    t_static("paste-already-here")
 }
 
 /// The same cut pasted again while its first paste still moves the items.
 pub fn paste_moving() -> &'static str {
-    "잘라낸 항목을 옮기는 중입니다"
+    t_static("paste-moving")
 }
 
 /// A cut cancelled with Esc that the clipboard could not drop (another app held it): a paste
 /// in another app could still move the items.
 pub fn clipboard_not_emptied() -> &'static str {
-    "클립보드를 비우지 못했습니다. 다른 앱에서 붙여넣으면 잘라낸 항목이 이동될 수 있습니다"
+    t_static("clipboard-not-emptied")
 }
 
-/// A paste that left out `count` paths of the clipboard, which name no folder or file it can
-/// take (a device or a volume of Windows, a file URL of another computer on macOS).
-pub fn paste_left_out(count: usize) -> String {
-    format!("클립보드의 항목 {count}개는 붙여넣을 수 없는 경로라 건너뛰었습니다")
+/// A paste that left out `n` paths of the clipboard, which name no folder or file it can take
+/// (a device or a volume of Windows, a file URL of another computer on macOS).
+pub fn paste_left_out(n: usize) -> String {
+    t("paste-left-out", &[("count", count(n))])
 }
 
 /// What the app asked of the system ([`ShellWork`](crate::state::ShellWork)), for the notice
@@ -1438,40 +1440,32 @@ pub enum ShellAction {
 /// not let the app control Finder, or else what went wrong
 /// (`터미널을 열지 못했습니다: 찾을 수 없습니다`).
 pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
+    let unsupported = match action {
+        ShellAction::OpenWith => "shell-open-with-unsupported",
+        ShellAction::RunAsAdmin => "shell-run-as-admin-unsupported",
+        ShellAction::Terminal => "shell-terminal-unsupported",
+        ShellAction::SystemProperties => "shell-properties-unsupported",
+        ShellAction::SystemMenu => "shell-system-menu-unsupported",
+        ShellAction::Share => "shell-share-unsupported",
+    };
     match (action, kind) {
-        (ShellAction::OpenWith, ErrorKind::Unsupported) => {
-            "이 시스템에서는 연결 프로그램 고르기를 지원하지 않습니다".to_owned()
-        }
-        (ShellAction::RunAsAdmin, ErrorKind::Unsupported) => {
-            "이 시스템에서는 관리자 권한으로 실행할 수 없습니다".to_owned()
-        }
-        (ShellAction::Terminal, ErrorKind::Unsupported) => {
-            "터미널 프로그램을 찾지 못했습니다".to_owned()
-        }
-        (ShellAction::SystemProperties, ErrorKind::Unsupported) => {
-            "이 시스템에서는 OS 속성 창을 지원하지 않습니다".to_owned()
-        }
-        (ShellAction::SystemMenu, ErrorKind::Unsupported) => {
-            "이 시스템에는 Windows 메뉴가 없습니다".to_owned()
-        }
-        (ShellAction::Share, ErrorKind::Unsupported) => {
-            "이 시스템에서는 공유를 지원하지 않습니다".to_owned()
-        }
+        (_, ErrorKind::Unsupported) => t(unsupported, &[(OS_ARG, os_arg(os))]),
         (ShellAction::SystemProperties, ErrorKind::PermissionDenied) if os == Os::MacOs => {
-            "Finder를 제어할 권한이 없어 정보 창을 열지 못했습니다. 시스템 설정 ▸ 개인정보 보호 및 \
-             보안 ▸ 자동화에서 허용해 주세요"
-                .to_owned()
+            t("shell-finder-not-allowed", &[(OS_ARG, os_arg(os))])
         }
         (action, kind) => {
-            let what = match action {
-                ShellAction::OpenWith => "연결 프로그램으로 열지 못했습니다",
-                ShellAction::RunAsAdmin => "관리자 권한으로 실행하지 못했습니다",
-                ShellAction::Terminal => "터미널을 열지 못했습니다",
-                ShellAction::SystemProperties => "OS 속성 창을 열지 못했습니다",
-                ShellAction::SystemMenu => "Windows 메뉴를 띄우지 못했습니다",
-                ShellAction::Share => "공유하지 못했습니다",
+            let failed = match action {
+                ShellAction::OpenWith => "shell-open-with-failed",
+                ShellAction::RunAsAdmin => "shell-run-as-admin-failed",
+                ShellAction::Terminal => "shell-terminal-failed",
+                ShellAction::SystemProperties => "shell-properties-failed",
+                ShellAction::SystemMenu => "shell-system-menu-failed",
+                ShellAction::Share => "shell-share-failed",
             };
-            format!("{what}: {}", error_kind(kind))
+            t(
+                failed,
+                &[(OS_ARG, os_arg(os)), ("reason", error_kind(kind).into())],
+            )
         }
     }
 }
@@ -1479,24 +1473,59 @@ pub fn shell_failed(action: ShellAction, kind: ErrorKind, os: Os) -> String {
 /// 관리자 권한으로 실행 refused for a batch file whose path `cmd.exe` would read as a command
 /// (`rf_platform::shell::elevation`).
 pub fn batch_path_refused() -> &'static str {
-    "이 경로의 배치 파일은 관리자 권한으로 실행할 수 없습니다. 경로에 % ! ^ & ( ) @ ; , = 같은 \
-     글자가 있으면 명령 프롬프트가 경로를 명령으로 읽습니다"
+    t_static("shell-batch-path-refused")
 }
 
 /// The link chosen leads elsewhere than the command wants: to no folder, for a terminal
 /// (`folder`), or to no file, for 연결 프로그램 and 관리자 권한으로 실행. A dangling link leads to
 /// neither.
 pub fn link_elsewhere(folder: bool) -> &'static str {
-    if folder {
-        "링크가 폴더를 가리키지 않습니다"
+    t_static(if folder {
+        "shell-link-not-folder"
     } else {
-        "링크가 파일을 가리키지 않습니다"
-    }
+        "shell-link-not-file"
+    })
 }
 
 /// The system knows no app that opens the file (연결 프로그램, macOS).
 pub fn no_apps() -> &'static str {
-    "이 파일을 열 수 있는 앱이 없습니다"
+    t_static("shell-no-apps")
+}
+
+// ---- i18n: words not yet moved ----
+//
+// Task 9b moves what follows to the Fluent files (`crates/rf-ui/i18n`) as the part above was
+// moved: until then its words are Korean in every language. The check
+// `i18n::tests::no_hangul_string_literal_outside_tests` allows Hangul literals in this file
+// below this line alone; 9b removes the line and the allowance.
+
+impl JobWork {
+    /// The pieces the job sentences below are made of (9b makes each sentence one message, as
+    /// [`outcome`] is, and removes these).
+    fn phrases(self) -> Phrases {
+        let (done, object) = match self {
+            JobWork::Copy => ("복사했", "복사를"),
+            JobWork::Move => ("이동했", "이동을"),
+            JobWork::Trash => ("휴지통으로 보냈", "휴지통으로 보내기를"),
+            JobWork::Delete => ("삭제했", "삭제를"),
+            JobWork::Rename => ("이름을 바꿨", "이름 바꾸기를"),
+            JobWork::Create => ("만들었", "만들기를"),
+            JobWork::Link => ("링크를 만들었", "링크 만들기를"),
+            JobWork::Restore => ("복원했", "복원을"),
+            JobWork::Undo => ("되돌렸", "되돌리기를"),
+            JobWork::Redo => ("다시 실행했", "다시 실행을"),
+            JobWork::Other => ("작업을 마쳤", "작업을"),
+        };
+        Phrases { done, object }
+    }
+}
+
+/// How one [`JobWork`] reads in a sentence.
+struct Phrases {
+    /// The past form without its ending, for `…습니다` and `…지만`: `복사했`.
+    done: &'static str,
+    /// The work as the object of a verb, with its particle: `복사를`.
+    object: &'static str,
 }
 
 /// An app of the menu of 연결 프로그램: its name, and `(기본)` after the system's default one.

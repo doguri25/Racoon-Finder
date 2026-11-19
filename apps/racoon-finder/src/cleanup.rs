@@ -10,7 +10,8 @@
 //! - A portable install has no uninstaller and is not touched: deleting its folder is the
 //!   removal.
 //!
-//! The exit code says how it went ([`Exit`]), the output says what was done, in Korean.
+//! The exit code says how it went ([`Exit`]), the output says what was done, in the language
+//! of the app (`rf_ui::i18n`, which `main` sets before this runs; Korean in the tests).
 
 use std::ffi::OsString;
 use std::io::Write;
