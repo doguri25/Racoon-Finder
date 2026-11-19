@@ -11031,18 +11031,26 @@ fn panes_keep_their_parts_in_the_smallest_window(
     }
 }
 
-/// THEME-07 at 900×560: at 넉넉하게 and 130 % the conflict window's content is taller than the
-/// window may be: it scrolls, its buttons stay at its foot inside the window, and the keys on the
-/// buttons bring the end of the choices into sight above them. At 보통 and 100 % nothing of that
-/// shows: one row of buttons, in the content.
+/// THEME-07 at 900×560: where the conflict window's content is taller than the window may be, it
+/// scrolls, its buttons stay at its foot inside the window, and the keys on the buttons bring the
+/// end of the choices into sight above them. The overflow does not hang on the runner's fonts: at
+/// 넉넉하게 and 130 % the description has eight lines (each at least the 18px of its text), which
+/// with five 44px choices, the title and the cards puts the last choice below 600px on any font;
+/// scrolled to the end, the last choice ends at most 560 − 104 (the bottom padding, the row of
+/// buttons, the warning's least room and two gaps) and the title, 150px or more above, is out of
+/// sight. At 보통 and 100 % with a short description the buttons are inside too.
 #[test]
 fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
     let bottom = |element: &ElementHandle| element.absolute_position().y + element.size().height;
     let inside =
         |element: &ElementHandle| element.absolute_position().y >= 0.0 && bottom(element) <= 560.0;
+    let long = (1..=8)
+        .map(|line| format!("{line}번째 줄"))
+        .collect::<Vec<_>>()
+        .join("\n");
     // A window of its own for each look (the backend is set up once, by the first).
     let first = std::cell::Cell::new(true);
-    let open = |density: Density, scale: FontScale| {
+    let open = |density: Density, scale: FontScale, description: &str| {
         let window = if first.replace(false) {
             window()
         } else {
@@ -11051,20 +11059,26 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
             window
         };
         window.window().set_size(LogicalSize::new(900.0, 560.0));
-        window.set_conflict_view(conflict_view());
+        window.set_conflict_view(ConflictView {
+            description: description.into(),
+            ..conflict_view()
+        });
         ui_bridge::show_theme(&window, &scaled_light(density, scale));
         window.set_dialog(DialogKind::Conflict);
         slint::platform::update_timers_and_animations();
         window
     };
-    let normal = open(Density::Normal, FontScale::Normal);
+    let normal = open(
+        Density::Normal,
+        FontScale::Normal,
+        "‘a.txt’가 /home/me 에 있습니다.",
+    );
     for label in ["작업 취소", "계속"] {
         let buttons = labelled(&normal, label, AccessibleRole::Button);
-        assert_eq!(buttons.len(), 1, "{label}");
-        assert!(inside(&buttons[0]), "{label}");
+        assert!(buttons.iter().any(&inside), "{label}");
     }
 
-    let window = open(Density::Roomy, FontScale::Largest);
+    let window = open(Density::Roomy, FontScale::Largest, &long);
     for label in ["작업 취소", "계속"] {
         let buttons = labelled(&window, label, AccessibleRole::Button);
         assert!(
@@ -11076,14 +11090,15 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
                 .collect::<Vec<_>>()
         );
     }
-    // The content goes past the window: the last choice is below the buttons' row at first.
+    // Where the last choice ends and starts; none while it is out of the dialog's sight.
     let last = || {
         labelled(
             &window,
             "크기가 다를 때만 덮어쓰기",
             AccessibleRole::RadioButton,
         )
-        .remove(0)
+        .first()
+        .map(|row| (bottom(row), row.absolute_position().y))
     };
     // Where the title is; none once it is scrolled out of the dialog's sight.
     let title = || {
@@ -11101,20 +11116,19 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
         .expect("the buttons at the foot");
     let foot_top = foot.absolute_position().y;
     assert!(
-        bottom(&last()) > foot_top,
-        "the content scrolls: {}",
-        bottom(&last())
+        last().is_none_or(|(end, _)| end > 560.0),
+        "the content goes past the window: {:?}",
+        last()
     );
     assert!(title().is_some_and(|y| y >= 0.0), "{:?}", title());
     // Tab puts the keys on the box, and the end of the content comes up above the buttons.
     press(&window, Key::Tab);
     slint::platform::update_timers_and_animations();
     assert!(
-        bottom(&last()) <= foot_top,
-        "{} below the buttons at {foot_top}",
-        bottom(&last())
+        last().is_some_and(|(end, start)| end <= foot_top && start >= 0.0),
+        "{:?} below the buttons at {foot_top}",
+        last()
     );
-    assert!(last().absolute_position().y >= 0.0);
     assert!(
         title().is_none_or(|y| y < 0.0),
         "scrolled past the title: {:?}",
@@ -11129,17 +11143,39 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
 }
 
 /// THEME-07 at 900×560: the picker's choice of what a name conflict does lies beside its heading
-/// where the two fit (보통 and 100 %), and under it where they do not (넉넉하게 and 130 %), so
-/// that its last choice stays inside the dialog.
+/// exactly where the two fit (heading + 12px + the track within the row), and under it where they
+/// do not, so that its last choice stays inside the dialog whenever the track alone fits. The rule
+/// is read from the widths the layout measured, since each runner draws the text in its own fonts
+/// (a full-em Hangul font here makes 넉넉하게 + 130 % go under, a narrower one keeps it beside); a
+/// look with 8px text and one with 60px text make sure both ways are taken on every font (30
+/// Hangul syllables and six 24px paddings: at most 450px at 8px, at least 900px at 60px).
 #[test]
 fn the_picker_s_conflict_choice_goes_under_its_heading_where_it_does_not_fit_beside_it() {
+    let sized = |body: f32| {
+        let mut tokens = scaled_light(Density::Normal, FontScale::Normal);
+        tokens.font.body = body;
+        tokens
+    };
     let first = std::cell::Cell::new(true);
-    for (density, scale, beside) in [
-        (Density::Normal, FontScale::Normal, true),
-        (Density::Roomy, FontScale::Largest, false),
-        (Density::Compact, FontScale::Smaller, true),
+    for (what, tokens, forced) in [
+        (
+            "normal 100",
+            scaled_light(Density::Normal, FontScale::Normal),
+            None,
+        ),
+        (
+            "roomy 130",
+            scaled_light(Density::Roomy, FontScale::Largest),
+            None,
+        ),
+        (
+            "compact 90",
+            scaled_light(Density::Compact, FontScale::Smaller),
+            None,
+        ),
+        ("8px text", sized(8.0), Some(true)),
+        ("60px text", sized(60.0), Some(false)),
     ] {
-        let what = format!("{density:?} {scale:?}");
         let window = if first.replace(false) {
             window()
         } else {
@@ -11148,35 +11184,56 @@ fn the_picker_s_conflict_choice_goes_under_its_heading_where_it_does_not_fit_bes
             window
         };
         window.window().set_size(LogicalSize::new(900.0, 560.0));
-        ui_bridge::show_theme(&window, &scaled_light(density, scale));
+        ui_bridge::show_theme(&window, &tokens);
         window.set_pick_view(pick_view());
         window.set_dialog(DialogKind::Pick);
         slint::platform::update_timers_and_animations();
+        let width = |id: &str| {
+            ElementHandle::find_by_element_id(&window, id)
+                .next()
+                .unwrap_or_else(|| panic!("{what}: {id}"))
+                .size()
+                .width
+        };
+        let (heading_w, track_w, room) = (
+            width("PickDialog::policy-measure"),
+            width("PickDialog::policy-track"),
+            width("PickDialog::policy-box"),
+        );
+        let fits = heading_w + 12.0 + track_w <= room;
+        if let Some(beside) = forced {
+            assert_eq!(
+                fits, beside,
+                "{what}: {heading_w} + 12 + {track_w} of {room}"
+            );
+        }
         let heading = labelled(&window, "이름이 겹치면", AccessibleRole::Text).remove(0);
         let first_choice = labelled(&window, "물어보기", AccessibleRole::RadioButton).remove(0);
-        let last = labelled(
-            &window,
-            "크기가 다를 때만 덮어쓰기",
-            AccessibleRole::RadioButton,
-        )
-        .remove(0);
-        let dialog = ElementHandle::find_by_element_type_name(&window, "PickDialog")
-            .next()
-            .expect("the picker");
-        let right = dialog.absolute_position().x + dialog.size().width;
-        assert!(
-            last.absolute_position().x + last.size().width <= right - 20.0,
-            "{what}: the last choice ends at {} of {right}",
-            last.absolute_position().x + last.size().width
-        );
         let (h_at, h_size) = (heading.absolute_position(), heading.size());
         let c_at = first_choice.absolute_position();
-        if beside {
+        if fits {
             assert!(c_at.x > h_at.x + h_size.width, "{what}: beside");
             assert!(c_at.y < h_at.y + h_size.height, "{what}: on its line");
         } else {
             assert!(c_at.y >= h_at.y + h_size.height, "{what}: under it");
             assert!((c_at.x - h_at.x).abs() < 8.0, "{what}: under its start");
+        }
+        if track_w <= room {
+            let last = labelled(
+                &window,
+                "크기가 다를 때만 덮어쓰기",
+                AccessibleRole::RadioButton,
+            )
+            .remove(0);
+            let dialog = ElementHandle::find_by_element_type_name(&window, "PickDialog")
+                .next()
+                .expect("the picker");
+            let right = dialog.absolute_position().x + dialog.size().width;
+            assert!(
+                last.absolute_position().x + last.size().width <= right - 20.0,
+                "{what}: the last choice ends at {} of {right}",
+                last.absolute_position().x + last.size().width
+            );
         }
     }
 }

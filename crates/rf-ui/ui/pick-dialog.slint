@@ -692,9 +692,11 @@ export component PickDialog inherits DialogFrame {
             if !root.view.for-log: policy-box := Rectangle {
                 property <bool> inline: policy-measure.preferred-width + 12px + policy-track.preferred-width <= self.width;
 
-                // The heading's width, for `inline`.
+                // The heading's width, for `inline`: as wide as its text, and drawn in no color (a
+                // test reads its width, which an element that is not visible does not give).
                 policy-measure := Text {
-                    visible: false;
+                    width: self.preferred-width;
+                    color: transparent;
                     text: "이름이 겹치면";
                     font-weight: 500;
                     accessible-role: none;
