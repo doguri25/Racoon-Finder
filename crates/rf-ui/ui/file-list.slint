@@ -13,7 +13,7 @@
 // (`DragPointer`). Held near the top or the bottom of the rows, a drag scrolls them (DND-08).
 
 import { ListView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
@@ -512,6 +512,8 @@ export component FileList inherits Rectangle {
                                 border-color: Theme.accent;
                                 border-radius: 4px;
                             }
+                            // A selected row, besides its color, in a theme with marks.
+                            if Theme.marks && row.selected: SelectedMark { }
                         }
                     }
                 }

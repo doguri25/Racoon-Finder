@@ -22,7 +22,7 @@
 // icons up and down, 목록 sideways.
 
 import { ListView, ScrollView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
@@ -265,6 +265,10 @@ component Tile inherits Rectangle {
         border-width: 2px;
         border-color: Theme.accent;
         border-radius: 6px;
+    }
+    // A selected item, besides its color, in a theme with marks: along the foot of a large one.
+    if Theme.marks && root.item.selected: SelectedMark {
+        foot: root.big;
     }
 }
 

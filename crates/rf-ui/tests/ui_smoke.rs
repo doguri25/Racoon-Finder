@@ -227,6 +227,52 @@ fn pane_view_shows_rows_from_the_model() {
     );
 }
 
+/// In a theme with marks (고대비) a selected row has a bar besides its color, and the tab shown
+/// a bar along its top; the other themes draw neither (the drop targets have their frames in
+/// every theme, and errors their words).
+#[test]
+fn high_contrast_marks_the_selected_rows_with_a_shape_too() {
+    let window = window();
+    let mut pane = listed_pane(vec![
+        entry("docs", EntryKind::Dir, 0),
+        entry("notes.txt", EntryKind::File, 3100),
+        entry("설계안.pdf", EntryKind::File, 1_258_291),
+    ]);
+    {
+        let tab = pane.active_tab_mut();
+        let (selection, rows) = tab.selection_mut();
+        selection.click(1, rows);
+        selection.toggle(2, rows);
+    }
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let marks = || ElementHandle::find_by_element_type_name(&window, "SelectedMark").count();
+    assert_eq!(marks(), 0, "light");
+    ui_bridge::show_theme(&window, &theme::Builtin::HighContrast.tokens());
+    assert_eq!(marks(), 2, "the two selected rows");
+    // The bar sits at the start of each selected row, inside it.
+    let rows = labelled(&window, "notes.txt", AccessibleRole::ListItem);
+    let row_at = rows[0].absolute_position();
+    let bars: Vec<_> = ElementHandle::find_by_element_type_name(&window, "SelectedMark")
+        .map(|mark| (mark.absolute_position(), mark.size()))
+        .collect();
+    let bar = bars
+        .iter()
+        .find(|(at, _)| (at.y - row_at.y).abs() < 0.5)
+        .unwrap_or_else(|| panic!("a mark on the row of notes.txt at {row_at:?}: {bars:?}"));
+    assert!((bar.0.x - row_at.x).abs() < 0.5, "{bar:?} {row_at:?}");
+    {
+        let tab = pane.active_tab_mut();
+        let (selection, _) = tab.selection_mut();
+        selection.clear();
+    }
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(marks(), 0, "nothing selected");
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(marks(), 0, "dark");
+}
+
 #[test]
 fn a_held_key_reaches_rust_as_repeated() {
     let window = window();
@@ -2934,6 +2980,14 @@ fn the_theme_follows_the_view_menu() {
     // The menu is a popup window of its own: the element clicks there.
     click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2]);
+    button[0].invoke_accessible_default_action();
+    click("테마");
+    click("고대비");
+    assert_eq!(chosen.borrow().as_slice(), [2, 3]);
+    button[0].invoke_accessible_default_action();
+    click("테마");
+    click("어둡게");
+    assert_eq!(chosen.borrow().as_slice(), [2, 3, 2]);
 
     // The marks of the menus: the theme chosen, and 숨김 파일 보기 as `show-hidden` says (with
     // the marks of the layout's 툴바, 폴더 트리 and 듀얼 패널, which are on: the toolbar's
@@ -2952,7 +3006,7 @@ fn the_theme_follows_the_view_menu() {
     assert_eq!(open_themes(), 2);
     // Choosing the theme that is chosen keeps its mark.
     click("어둡게");
-    assert_eq!(chosen.borrow().as_slice(), [2, 2]);
+    assert_eq!(chosen.borrow().as_slice(), [2, 3, 2, 2]);
     assert_eq!(open_themes(), 2);
     click("어둡게");
     window.set_show_hidden(true);

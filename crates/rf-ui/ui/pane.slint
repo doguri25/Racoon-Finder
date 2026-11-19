@@ -11,7 +11,7 @@
 // back to the list.
 
 import { ListView, Slider } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { FileList, FileRow, ColumnView } from "file-list.slint";
 import { FileGrid } from "file-grid.slint";
@@ -162,6 +162,8 @@ export component FolderMenu inherits Rectangle {
                         root.chosen(i);
                     }
                 }
+                // The line the keys are on, besides its color, in a theme with marks.
+                if Theme.marks && i == root.view.cursor: SelectedMark { }
             }
         }
 
@@ -468,6 +470,16 @@ component TabButton inherits Rectangle {
         border-top-right-radius: Theme.radius;
         border-width: 2px;
         border-color: Theme.accent;
+    }
+    // The tab shown, besides its color, in a theme with marks (where the panel's color is the
+    // strip's): a bar along its top.
+    if Theme.marks && root.tab.active: Rectangle {
+        x: Theme.radius;
+        y: 0px;
+        width: max(0px, parent.width - 2 * Theme.radius);
+        height: 3px;
+        border-radius: 1.5px;
+        background: Theme.accent;
     }
 }
 

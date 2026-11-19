@@ -465,7 +465,8 @@ export component ChoiceRow inherits Rectangle {
     callback clicked();
 
     min-height: 48px;
-    border-width: 1px;
+    // The chosen one's frame is heavier too in a theme with marks.
+    border-width: Theme.marks && root.chosen ? 2px : 1px;
     border-radius: 10px;
     border-color: root.chosen ? Theme.accent : Theme.border;
     background: root.chosen ? Theme.selection : touch.has-hover && root.enabled ? Theme.raised : transparent;
@@ -539,6 +540,10 @@ export component Segment inherits Rectangle {
     background: root.chosen ? Theme.panel : touch.has-hover ? Theme.border : transparent;
     drop-shadow-blur: root.chosen ? 3px : 0px;
     drop-shadow-color: Theme.shadow-small;
+    // The chosen part has a frame in a theme with marks, where its color and shadow may not
+    // show.
+    border-width: Theme.marks && root.chosen ? 2px : 0px;
+    border-color: Theme.accent;
     accessible-role: radio-button;
     accessible-label: root.label;
     accessible-checkable: true;
@@ -585,9 +590,11 @@ export component SegmentTrack inherits Rectangle {
 }
 
 // The frame every dialog sits in: the panel color, rounded corners and a shadow over the
-// scrim.
+// scrim; and a line around it in a theme with marks, where the panel is as dark as the window.
 export component DialogFrame inherits Rectangle {
     background: Theme.panel;
+    border-width: Theme.marks ? 2px : 0px;
+    border-color: Theme.text;
     border-radius: 12px;
     drop-shadow-blur: 32px;
     drop-shadow-offset-y: 12px;

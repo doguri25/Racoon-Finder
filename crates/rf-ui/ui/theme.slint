@@ -83,7 +83,7 @@ export global Theme {
 // What marks a selected item besides its color while the theme has `marks`: a short bar at
 // its start, or one along its foot (`foot`, the icon views' items). It fills the item; the item
 // shows it only then (`if Theme.marks && …`).
-export component SelectedMark {
+export component SelectedMark inherits Rectangle {
     in property <bool> foot;
 
     Rectangle {

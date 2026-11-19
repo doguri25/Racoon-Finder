@@ -19,7 +19,7 @@
 // value is shortened (a long path) has the whole of it in a tooltip and for screen readers.
 
 import { ListView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { PrimaryButton, OutlineButton, DialogFrame, Segment, SegmentTrack, ProgressBar, Field } from "widgets.slint";
 import { DialogKeys } from "shortcuts.slint";
@@ -181,6 +181,8 @@ component HashLine inherits Rectangle {
             }
         }
     }
+    // The row the keys are on, besides its color, in a theme with marks.
+    if Theme.marks && root.current: SelectedMark { }
 }
 
 export component PropertiesDialog inherits DialogFrame {

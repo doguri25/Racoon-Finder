@@ -17,7 +17,7 @@
 // (`TreeRow.row`).
 
 import { ListView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { DragPointer, DragSeen, DropPlace, DropAt } from "list-parts.slint";
@@ -530,6 +530,8 @@ component TreeItem inherits Rectangle {
             border-width: 2px;
             border-color: Theme.accent;
         }
+        // The selected row, besides its color and its bold name, in a theme with marks.
+        if Theme.marks && root.item.selected: SelectedMark { }
 
         // Where a folder dropped on the list of favorites would go: a line between this favorite
         // and the one above it, or below it (the line after the last one shows under it).

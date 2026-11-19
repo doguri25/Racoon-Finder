@@ -1,0 +1,180 @@
+# 테마 (THEME-01·03·09)
+
+**테마는 디자인 토큰 파일(TOML)이다**(THEME-03). 화면의 색, 글꼴, 글자 크기, 간격, 줄 높이, 모서리, 아이콘 스타일이
+모두 이 파일에서 온다. 화면(`crates/rf-ui/ui/*.slint`)은 값을 스스로 적지 않고 Slint 전역 `Theme`의 속성을 쓰며,
+Rust(`crates/rf-ui/src/theme.rs`)가 고른 테마의 토큰을 창마다 그 전역에 넣는다.
+
+## 내장 테마와 고르기
+
+| 보기 ▸ 테마 | 설정 파일(`settings.toml`의 `theme`) | 토큰 파일 |
+| --- | --- | --- |
+| 밝게 | `"light"` | `crates/rf-ui/themes/light.toml` |
+| 어둡게 | `"dark"` | `crates/rf-ui/themes/dark.toml` |
+| 고대비 | `"high-contrast"` | `crates/rf-ui/themes/high-contrast.toml` |
+| 시스템 설정 따르기(기본) | `"system"` | OS가 고대비를 켰으면 고대비, 아니면 OS의 밝게·어둡게에 따라 밝게·어둡게 |
+
+- 세 파일은 `include_str!`로 프로그램에 들어 있다. 앱은 테마 파일을 디스크에서 읽지 않는다(UI 스레드의 파일 읽기가
+  없다). 밝게·어둡게의 값은 토큰 이전의 `theme.slint`가 가졌던 값과 하나도 다르지 않다(테스트
+  `light_and_dark_keep_the_values_theme_slint_had`가 색마다, 섞어 만든 강조색·선택색은 Slint의 `mix`로 다시 계산해
+  견준다).
+- 테마를 바꾸면 재시작 없이 그 자리에서 바뀐다(THEME-09): 주 창, 작업 패널의 별도 창, 알림 창이 모두 같이 바뀐다.
+  창은 시작할 때, `theme-choice`가 바뀔 때, OS의 밝게·어둡게가 바뀔 때 `Theme.pick`으로 토큰을 청하고, Rust가 그
+  자리에서 넣는다. 시스템 설정 따르기에서는 창이 앞으로 올 때도 다시 청한다: Windows·macOS는 고대비만 켜고 끌 때
+  창에 알리지 않을 때가 있다. 같은 토큰을 다시 넣으면 화면은 다시 그리지 않는다.
+- `"high-contrast"`는 더한 값이다: 설정 파일의 버전은 그대로(2)이고, 고대비 이전의 판(0.4.0)은 모르는 값이라 이 키를
+  `"system"`으로 읽는다(테스트 `the_high_contrast_theme_round_trips_and_an_older_build_reads_it_as_system`).
+
+**OS의 고대비 읽기**(`rf_platform::desktop::high_contrast`): Windows는 대비 테마(`SystemParametersInfoW`의
+`SPI_GETHIGHCONTRAST`), macOS는 손쉬운 사용 ▸ 디스플레이 ▸ 대비 증가(`NSWorkspace.accessibilityDisplayShouldIncreaseContrast`),
+Linux는 `GTK_THEME`가 고대비 테마(`HighContrast`, `HighContrastInverse`, `Adwaita-hc` 등)를 가리킬 때다. GNOME의 고대비
+스위치는 dconf 설정이라 D-Bus나 파일을 읽어야 해서 보지 않는다. 읽기는 설정 하나를 묻고 바로 돌아오며 프레임마다 하지
+않는다.
+
+## 파일 형식
+
+네 절에 모든 키가 있어야 한다. 아래는 밝게의 값이다.
+
+```toml
+[theme]
+scheme = "light"      # 또는 "dark"
+icon-style = "line"   # 또는 "bold"
+marks = false
+
+[color]
+bg = "#F6F7F9"
+panel = "#FFFFFF"
+# … 아래 표의 색 23개, "#RRGGBB" 또는 "#RRGGBBAA"
+
+[font]
+ui = ""               # 빈 문자열은 시스템 글꼴
+list = ""
+mono = ""
+small = 12            # 논리 픽셀
+note = 13
+body = 14
+app-name = 15
+heading = 16
+title = 20
+
+[size]
+gap-xs = 4
+gap-s = 8
+gap-m = 12
+gap-l = 16
+row-height = 32
+radius = 8
+radius-large = 12
+```
+
+## 토큰
+
+Slint 전역 `Theme`의 이름은 색과 `[size]`는 키 그대로, `[font]`는 `font-` + 키다(`font-body`, `font-mono`).
+
+**`[theme]`**
+
+| 키 | 값 | 뜻 |
+| --- | --- | --- |
+| `scheme` | `"light"`, `"dark"` | OS 위젯(스크롤바, 메뉴, 입력란)을 어둡게 그릴지(`Theme.dark`). 시스템 설정 따르기에서는 OS 위젯의 색을 OS에 맡긴다 |
+| `icon-style` | `"line"`, `"bold"` | 아이콘의 선: `line`은 시안의 1.8px, `bold`는 3분의 1 굵게(2.4px, `Theme.icon-weight`) |
+| `marks` | `true`, `false` | 색으로 알리는 것을 모양으로도 알린다(아래 "고대비") |
+
+**`[color]`**
+
+| 키 | 뜻 |
+| --- | --- |
+| `bg` | 패널 뒤의 창 바탕 |
+| `panel` | 패널, 사이드바, 대화상자, 메뉴 |
+| `raised` | 포인터가 올라간 줄과 단추, 입력란 |
+| `text` | 글자 |
+| `muted` | 둘째 글자: 크기, 날짜, 안내 |
+| `faint` | 지금 쓸 수 없는 것 |
+| `border` | 부분 사이의 선과 테두리, 눌린 단추 |
+| `folder` | 폴더 아이콘 |
+| `warning` | 경고(덮어쓰기)의 아이콘. 경고의 글자는 `text`로 둔다(밝게의 호박색은 패널 위 3.6:1로 그림에는 되지만 글자에는 모자란다) |
+| `accent` | 키보드 테두리, 놓을 자리의 테두리, 주 단추 |
+| `on-accent` | 강조색 위의 글자와 아이콘 |
+| `selection` | 선택한 항목의 바탕(글자는 `text`) |
+| `toast-bg`, `toast-text`, `toast-link` | 창 구석의 알림, 거절된 끌기의 안내, 알림의 동작(되돌리기) |
+| `toast-hover`, `toast-pressed` | 알림 단추에 포인터가 올라갔을 때와 눌렀을 때 덮는 색 |
+| `shadow` | 메뉴, 포인터 옆 안내, 길게 누르기 고리의 그림자 |
+| `shadow-small` | 나눔 선택(Segment)에서 고른 칸의 그림자 |
+| `shadow-toast`, `shadow-dialog` | 알림과 대화상자의 그림자 |
+| `scrim` | 대화상자·빠른 보기 뒤의 창을 덮는 색 |
+| `scrim-light` | 위치 고르기 창 위에 대화상자가 뜰 때 그 창을 덮는 색 |
+
+**`[font]`**
+
+| 키 | 뜻 |
+| --- | --- |
+| `ui` | 창의 글꼴(빈 문자열: 시스템 글꼴) |
+| `list` | 항목 목록(자세히와 아이콘 보기)의 글꼴(빈 문자열: `ui`) |
+| `mono` | 고정폭 글꼴: 텍스트 미리 보기, 체크섬(빈 문자열: Windows Consolas, macOS Menlo, Linux DejaVu Sans Mono) |
+| `small` | 작은 글자: 열 머리, 개수, 둘째 줄 |
+| `note` | 대화상자의 본문 옆 안내(충돌 창의 크기·날짜, 위치 고르기의 정책 안내) |
+| `body` | 창의 글자 |
+| `app-name` | 툴바의 앱 이름 |
+| `heading` | 알림 창·미리 보기·열 수 없는 폴더의 제목 |
+| `title` | 대화상자의 제목 |
+
+**`[size]`**: `gap-xs`·`gap-s`·`gap-m`·`gap-l`(간격), `row-height`(목록의 줄 높이), `radius`(단추, 입력란, 줄,
+대화상자의 모서리), `radius-large`(패널과 사이드바의 모서리). 모두 논리 픽셀이다. 표시 밀도와 글자 크기 설정(THEME-07)은
+이 값 위에 곱하는 배율이다.
+
+**`.slint`의 규칙.** `theme.slint` 밖의 `.slint`에는 `font-size: <숫자>px`도 `#hex` 색도 쓰지 않는다. 테스트
+`the_screens_take_their_font_sizes_and_colors_from_the_theme`가 모든 `.slint`를 읽어(문자열과 주석은 빼고) 하나라도
+있으면 실패한다. 꼭 남겨야 할 값이 생기면 그 테스트의 목록에 까닭과 함께 적는다(지금은 없다). `theme.slint`의 기본값은
+밝게의 값이고(Rust가 토큰을 넣기 전의 창), 테스트 `main_window_builds_with_theme`가 `light.toml`과 같은지 본다.
+
+## 거부 규칙
+
+`theme::parse`는 파일을 통째로만 받는다. 아래 중 하나라도 어기면 거부하고, 오류가 `절.키`로 그 키를 말한다
+(`ThemeError::key`). 거부된 파일은 아무것도 바꾸지 않는다: 보이던 테마가 그대로 남는다(THEME-05의 규칙).
+
+- 절(`[theme]`·`[color]`·`[font]`·`[size]`)과 그 안의 키가 모두 있어야 한다. 없으면 `Missing`(`color.muted`).
+- 모르는 절이나 키는 오류다(`Unknown`, `color.pannel`). 오타가 기본값으로 묻히지 않는다. 오타 난 키는 원래 키도 빠진
+  셈인데, 오타 쪽을 먼저 말한다.
+- 색은 `"#RRGGBB"` 또는 `"#RRGGBBAA"`(대소문자 무관)다. 이름(`"red"`), 짧은 꼴(`"#FFF"`), 따옴표 없는 수는 거부한다.
+- 크기는 0보다 크고 상한 이하인 수(정수나 소수)다: 글자 72, 간격 64, 줄 높이 128, 모서리 64. 0, 음수, `nan`,
+  `"32px"` 같은 문자열은 거부한다.
+- 글꼴 이름은 100자 이하의 문자열이고 제어 문자가 없다(빈 문자열은 시스템 글꼴).
+- `scheme`·`icon-style`은 위의 낱말 중 하나, `marks`는 `true`·`false`다.
+- TOML이 아니면 `Syntax`(키 없음).
+
+## 고대비
+
+검정 바탕(`#000000`), 흰 글자(`#FFFFFF`), 노랑 강조(`#FFE500`, 그 위의 글자는 검정)다. 선택 바탕은 짙은 올리브
+(`#4D4000`), 알림은 흰 바탕에 검정 글자다. WCAG 대비(테스트 `high_contrast_keeps_text_at_seven_to_one_or_more`):
+
+| 무엇 | 대비 | 기준 |
+| --- | --- | --- |
+| 글자 / 창·패널 | 21:1 | 7:1 |
+| 둘째 글자 / 패널 | 15.9:1 | 7:1 |
+| 강조색 위의 글자 | 16.5:1 | 7:1 |
+| 선택한 항목의 글자 / 선택 바탕 | 10.3:1 (둘째 글자 7.8:1) | 7:1 |
+| 알림의 글자·동작 / 알림 바탕 | 21:1 · 11.2:1 | 7:1 |
+| 강조색(키보드·놓을 자리 테두리) / 패널 | 16.5:1 | 7:1 |
+| 쓸 수 없는 글자 / 패널 | 11.2:1 | 4.5:1 |
+| 선·테두리 / 패널 | 3.7:1 | 3:1 |
+| 쓸 수 없는 단추의 글자 / 그 바탕(`border`) | 3.1:1 | 3:1 |
+
+아이콘 선은 굵다(`bold`). **색만으로 알리지 않는다**(`marks = true`):
+
+- **선택:** 자세히 목록의 줄, 아이콘 보기의 항목(큰 아이콘은 아래쪽, 나머지는 앞쪽), 사이드바의 줄(이름도 굵다), 위치
+  고르기의 대상(이름도 굵다), 경로 줄의 폴더 메뉴에서 키가 있는 줄, 체크섬 창에서 키가 있는 줄에 앞쪽의 노랑 막대
+  (`SelectedMark`)가 붙는다. 보이는 탭은 위쪽에 노랑 막대가 붙는다. 하나를 고르는 줄(충돌 창의 선택지 등,
+  `ChoiceRow`)은 고른 줄의 테두리가 두꺼워지고(2px), 나눔 선택(`Segment`)은 고른 칸에 테두리가 붙는다. 대화상자는
+  바탕이 창과 같은 검정이라 흰 테두리(2px)를 두른다.
+- **놓을 자리:** 모든 테마에서 이미 테두리다(줄·항목·사이드바 줄·탭은 2px 강조 테두리, 패널은 테두리 상자, 즐겨찾기
+  사이는 선). 키보드 커서는 1px 테두리라 놓을 자리(2px)와 굵기로도 다르다.
+- **오류:** 모든 테마에서 글자로 말한다. 이름 입력의 문제는 경고 아이콘과 문구(입력란의 테두리 색은 덤), 열 수 없는
+  폴더는 "이 폴더를 열 수 없습니다"와 까닭, 위치 고르기의 경로 오류와 문제는 문구, 작업의 실패는 알림("…지만 일부 항목을 처리하지 못했습니다")과 실패 항목 창의 문구,
+  거절된 끌기는 커서 옆의 까닭이다.
+
+시스템 설정 따르기로 고대비가 될 때 OS 위젯(스크롤바, 메뉴)의 색은 OS를 따른다: Windows는 대비 테마에서 앱에 밝게라고
+알리므로 스크롤바·메뉴가 밝게 그려질 수 있다. 보기 ▸ 테마 ▸ 고대비를 직접 고르면 어둡게 그린다.
+
+## 다음 판
+
+테마 파일 가져오기·내보내기(THEME-05)와 프리셋 테마 6종(THEME-02)은 M3에서 한다. 가져오기는 `theme::parse`를 쓰고, 거부된
+파일은 보이던 테마를 그대로 둔다. 앱 안의 테마 편집기(THEME-04, P1), OS 강조색 따르기(THEME-06), 아이콘 팩(THEME-08,
+P1)도 이 판에 없다.

@@ -25,7 +25,7 @@ import { PaneView } from "pane.slint";
 export component ViewMenu inherits ContextMenuArea {
     // What the active pane shows.
     in property <PaneView> view;
-    // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게).
+    // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게, 3 고대비).
     in property <int> theme-choice;
     // The layout, the hidden items and the extensions, two-way with the window's. The folder
     // tree shows (`show-tree`) with a tree for each pane (`tree-per-pane`) or one shared tree.
@@ -193,10 +193,12 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> system-mark: true;
     private property <bool> light-mark;
     private property <bool> dark-mark;
+    private property <bool> high-contrast-mark;
     function mark-theme(choice: int) {
         root.system-mark = choice == 0;
         root.light-mark = choice == 1;
         root.dark-mark = choice == 2;
+        root.high-contrast-mark = choice == 3;
     }
     init => {
         root.mark-theme(root.theme-choice);
@@ -787,6 +789,16 @@ export component ViewMenu inherits ContextMenuArea {
                 activated => {
                     root.mark-theme(2);
                     root.theme-chosen(2);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: "고대비";
+                checkable: true;
+                checked <=> root.high-contrast-mark;
+                activated => {
+                    root.mark-theme(3);
+                    root.theme-chosen(3);
                     root.done();
                 }
             }

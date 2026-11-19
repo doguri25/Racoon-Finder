@@ -23,7 +23,7 @@
 // picker does not take itself.
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Theme, SelectedMark } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, PrimaryButton, OutlineButton, DialogFrame, Field, Segment, SegmentTrack, CheckBox } from "widgets.slint";
 import { Sidebar, TreeRow } from "sidebar.slint";
@@ -197,6 +197,9 @@ component TargetItem inherits Rectangle {
                 }
             }
         }
+
+        // The selected target, besides its color and its bold name, in a theme with marks.
+        if Theme.marks && root.item.selected: SelectedMark { }
     }
 }
 
