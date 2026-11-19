@@ -65,7 +65,8 @@ pub fn link_facts(os: Os, items: &[(VPath, &Entry)], symlink_needs_privilege: bo
 }
 
 /// The job that makes a link of `kind` to each of `targets` in `folder`, each under the name
-/// `os` gives it ([`link_name`]). `Unsupported` for a target with no name (a volume root).
+/// `os` gives it ([`link_name`], with the app's word for a shortcut there,
+/// [`words::link_name_word`]). `Unsupported` for a target with no name (a volume root).
 pub fn link_job(
     os: Os,
     kind: LinkKind,
@@ -79,7 +80,7 @@ pub fn link_job(
             .ok_or_else(|| Error::Unsupported(format!("cannot link a volume root: {target}")))?;
         links.push((
             target.clone(),
-            folder.join(link_name(name, kind, os))?,
+            folder.join(link_name(name, kind, os, words::link_name_word(os)))?,
             kind,
         ));
     }

@@ -76,14 +76,16 @@ pub fn drop_kind(os: Os) -> LinkKind {
 }
 
 /// The name a link of `kind` to the item called `target_name` gets on `os`, before a number
-/// is added for a name that is taken: `이름 - 바로 가기.lnk` for a shortcut on Windows,
-/// `이름 별칭` for an alias on macOS, and the target's own name for a symbolic link, a junction
-/// and anything else.
-pub fn link_name(target_name: &OsStr, kind: LinkKind, os: Os) -> OsString {
+/// is added for a name that is taken: for a shortcut, the target's name and `shortcut`, the
+/// word the app's language has for one on `os` (the caller's, which keeps the app's words:
+/// `바로 가기` or `Shortcut` on Windows, `별칭` or `alias` on macOS), in the system's form:
+/// `이름 - 바로 가기.lnk` on Windows, `이름 별칭` on macOS. A symbolic link, a junction and
+/// anything else take the target's own name, and `shortcut` is not used.
+pub fn link_name(target_name: &OsStr, kind: LinkKind, os: Os, shortcut: &str) -> OsString {
     let mut name = target_name.to_owned();
     match (kind, os) {
-        (LinkKind::Shortcut, Os::Windows) => name.push(" - 바로 가기.lnk"),
-        (LinkKind::Shortcut, Os::MacOs) => name.push(" 별칭"),
+        (LinkKind::Shortcut, Os::Windows) => name.push(format!(" - {shortcut}.lnk")),
+        (LinkKind::Shortcut, Os::MacOs) => name.push(format!(" {shortcut}")),
         _ => {}
     }
     name
@@ -413,7 +415,15 @@ mod tests {
 
     #[test]
     fn a_link_is_named_as_its_system_names_it() {
-        let name = |target: &str, kind, os| link_name(OsStr::new(target), kind, os);
+        // The words of the app in Korean, as its tests read them.
+        let word = |os| {
+            if os == Os::MacOs {
+                "별칭"
+            } else {
+                "바로 가기"
+            }
+        };
+        let name = |target: &str, kind, os| link_name(OsStr::new(target), kind, os, word(os));
         assert_eq!(
             name("보고서.docx", LinkKind::Shortcut, Os::Windows),
             "보고서.docx - 바로 가기.lnk"
@@ -425,6 +435,15 @@ mod tests {
         }
         // A system with no shortcut keeps the name.
         assert_eq!(name("a", LinkKind::Shortcut, Os::Other), "a");
+        // The word is the caller's: in English, as Windows and macOS write it.
+        let english =
+            |target: &str, os, word| link_name(OsStr::new(target), LinkKind::Shortcut, os, word);
+        assert_eq!(
+            english("report.docx", Os::Windows, "Shortcut"),
+            "report.docx - Shortcut.lnk"
+        );
+        assert_eq!(english("photos", Os::MacOs, "alias"), "photos alias");
+        assert_eq!(english("a.txt", Os::Other, "Shortcut"), "a.txt");
     }
 
     /// The buffer of `C:\t` written out by hand.

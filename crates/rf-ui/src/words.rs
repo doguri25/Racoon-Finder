@@ -1753,14 +1753,12 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
         put(label, named(path))
     };
     match (record, redo) {
-        (UndoRecord::Renamed { from, to }, false) => put(
-            "history-rename",
-            format!("{} → {}", named(from), named(to)),
-        ),
-        (UndoRecord::Renamed { from, to }, true) => put(
-            "history-rename",
-            format!("{} → {}", named(to), named(from)),
-        ),
+        (UndoRecord::Renamed { from, to }, false) => {
+            put("history-rename", format!("{} → {}", named(from), named(to)))
+        }
+        (UndoRecord::Renamed { from, to }, true) => {
+            put("history-rename", format!("{} → {}", named(to), named(from)))
+        }
         (UndoRecord::Moved { moves, .. }, false) => {
             let moved: Vec<&VPath> = moves.iter().map(|m| &m.to).collect();
             let into = moves.first().map(|m| folder_of(&m.to)).unwrap_or_default();
@@ -2502,64 +2500,63 @@ pub fn preflight_line(target: &VPath, issue: &IssueKind) -> String {
     )
 }
 
-// ---- i18n: words not yet moved ----
-//
-// Task 9b moves what follows to the Fluent files (`crates/rf-ui/i18n`) as the part above was
-// moved: until then its words are Korean in every language. The check
-// `i18n::tests::no_hangul_string_literal_outside_tests` allows Hangul literals in this file
-// below this line alone; 9b removes the line and the allowance.
-
 /// The title of the destination picker.
 pub fn pick_title(mode: TransferMode) -> &'static str {
-    match mode {
-        TransferMode::Copy => "어디로 복사할까요?",
-        TransferMode::Move => "어디로 이동할까요?",
-    }
+    t_static(match mode {
+        TransferMode::Copy => "pick-title-copy",
+        TransferMode::Move => "pick-title-move",
+    })
 }
 
 /// The confirm button of the destination picker.
 pub fn pick_confirm(mode: TransferMode) -> &'static str {
-    match mode {
-        TransferMode::Copy => "여기로 복사",
-        TransferMode::Move => "여기로 이동",
-    }
+    t_static(match mode {
+        TransferMode::Copy => "pick-confirm-copy",
+        TransferMode::Move => "pick-confirm-move",
+    })
 }
 
-/// What the picker copies or moves: `항목 3개 · 1.2 GB` for `count` items whose `files`
+/// What the picker copies or moves: `항목 3개 · 1.2 GB` for `n` items whose `files`
 /// files are `bytes` together, `항목 3개 · 파일 1.2 MB와 폴더 1개` with `folders` folders
 /// among them (whose size is not known before the job looks inside), `항목 2개 · 폴더 2개`
 /// without files, and `항목 1개` for links alone, which have no size. Every unit of a size ends
 /// in a vowel when read, so `와` always follows it.
-pub fn pick_summary(count: usize, files: usize, bytes: u64, folders: usize) -> String {
+pub fn pick_summary(n: usize, files: usize, bytes: u64, folders: usize) -> String {
     let what = match (files, folders) {
-        (0, 0) => return item_count(count),
+        (0, 0) => return item_count(n),
         (_, 0) => format_size(bytes),
-        (0, folders) => format!("폴더 {folders}개"),
-        (_, folders) => format!("파일 {}와 폴더 {folders}개", format_size(bytes)),
+        (0, folders) => t("pick-summary-folders", &[("count", count(folders))]),
+        (_, folders) => t(
+            "pick-summary-files-and-folders",
+            &[
+                ("size", format_size(bytes).into()),
+                ("count", count(folders)),
+            ],
+        ),
     };
-    format!("{} · {what}", item_count(count))
+    format!("{} · {what}", item_count(n))
 }
 
 /// After the names of the first items the picker shows: how many more there are.
-pub fn pick_more(count: usize) -> String {
-    format!("외 {count}개")
+pub fn pick_more(n: usize) -> String {
+    t("pick-more", &[("count", count(n))])
 }
 
 /// The heads of the picker's quick targets.
 pub fn pick_opposite() -> &'static str {
-    "반대편 패널"
+    t_static("pick-opposite")
 }
 
 pub fn pick_tabs() -> &'static str {
-    "열린 탭"
+    t_static("pick-tabs")
 }
 
 pub fn pick_recent() -> &'static str {
-    "최근 위치"
+    t_static("pick-recent")
 }
 
 pub fn pick_favorites() -> &'static str {
-    "즐겨찾기"
+    t_static("pick-favorites")
 }
 
 /// Why a folder cannot be chosen, or what to beware of when it is; empty for a folder with
@@ -2567,67 +2564,78 @@ pub fn pick_favorites() -> &'static str {
 /// never read as the same number; `at_least` when folders are among the items, whose content
 /// adds to the need.
 pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> String {
-    match validity {
-        Validity::Ok => String::new(),
-        Validity::IntoSource if mode == TransferMode::Copy => {
-            "복사하는 항목 안이라 고를 수 없음".to_owned()
+    let key = match validity {
+        Validity::Ok => return String::new(),
+        Validity::IntoSource if mode == TransferMode::Copy => "pick-problem-into-copied",
+        Validity::IntoSource => "pick-problem-into-moved",
+        Validity::SameFolder => "pick-problem-same-folder",
+        Validity::NotAFolder => "pick-problem-not-a-folder",
+        Validity::ShellPlace | Validity::ForeignToTrash => "pick-problem-shell-place",
+        Validity::NotWritable => "pick-problem-not-writable",
+        Validity::NotEnoughSpace { need, available } => {
+            let key = if at_least {
+                "pick-problem-space-at-least"
+            } else {
+                "pick-problem-space"
+            };
+            return t(
+                key,
+                &[
+                    ("need", format_size_rounded(need, Rounding::Up).into()),
+                    (
+                        "available",
+                        format_size_rounded(available, Rounding::Down).into(),
+                    ),
+                ],
+            );
         }
-        Validity::IntoSource => "옮기는 항목 안이라 고를 수 없음".to_owned(),
-        Validity::SameFolder => "원래 있던 폴더라 고를 수 없음".to_owned(),
-        Validity::NotAFolder => "폴더를 찾을 수 없어 고를 수 없음".to_owned(),
-        Validity::ShellPlace | Validity::ForeignToTrash => {
-            "휴지통과 내 PC에는 넣을 수 없음".to_owned()
-        }
-        Validity::NotWritable => "읽기 전용 위치라 작업이 실패할 수 있습니다".to_owned(),
-        Validity::NotEnoughSpace { need, available } => format!(
-            "공간이 부족할 수 있습니다: 필요 {}{}, 남은 공간 {}",
-            format_size_rounded(need, Rounding::Up),
-            if at_least { " 이상" } else { "" },
-            format_size_rounded(available, Rounding::Down)
-        ),
-    }
+    };
+    t_static(key).to_owned()
 }
 
 /// The free room at the picker's target: `남은 공간 212 GB`, rounded down like the status
 /// bar's.
 pub fn pick_space(available: u64) -> String {
-    format!(
-        "남은 공간 {}",
-        format_size_rounded(available, Rounding::Down)
+    t(
+        "pick-space",
+        &[(
+            "free",
+            format_size_rounded(available, Rounding::Down).into(),
+        )],
     )
 }
 
 /// The picker's space line while a worker looks at the target.
 pub fn pick_space_pending() -> &'static str {
-    "남은 공간을 확인하는 중…"
+    t_static("pick-space-pending")
 }
 
 /// What the picker says while a worker looks at a path typed into it.
 pub fn pick_path_pending() -> &'static str {
-    "입력한 경로를 확인하는 중…"
+    t_static("pick-path-pending")
 }
 
 /// What the picker says while its path field holds a path typed and not entered: its button
 /// is off until the path is entered (or another folder is chosen).
 pub fn pick_path_unentered() -> &'static str {
-    "Enter로 경로를 먼저 확인하세요"
+    t_static("pick-path-unentered")
 }
 
 /// What the picker says while its path field has been cleared: there is nothing to enter, and
 /// its button is off until a path is entered or a folder is chosen.
 pub fn pick_path_blank() -> &'static str {
-    "경로를 입력하거나 폴더를 고르세요"
+    t_static("pick-path-blank")
 }
 
 /// What the picker says while its policy overwrites: Enter does not confirm it.
 pub fn pick_overwrite_by_button() -> &'static str {
-    "덮어쓰기는 버튼으로만 확인합니다"
+    t_static("pick-overwrite-by-button")
 }
 
 /// Why a path typed into the picker cannot be the target.
 pub fn pick_path_error(kind: ErrorKind) -> String {
     match kind {
-        ErrorKind::NotADirectory => "폴더가 아닙니다".to_owned(),
+        ErrorKind::NotADirectory => t_static("pick-path-not-a-folder").to_owned(),
         kind => error_kind(kind).to_owned(),
     }
 }
@@ -2636,56 +2644,59 @@ pub fn pick_path_error(kind: ErrorKind) -> String {
 /// policy destroys something, which the picker then shows in the text's color and never
 /// confirms with Enter alone.
 pub fn pick_policy(policy: ConflictPolicy) -> (&'static str, bool) {
-    match policy {
-        // One sentence a line, so that a narrow window breaks the line between them.
-        ConflictPolicy::Overwrite => (
-            "같은 이름의 파일을 바꿉니다.\n있던 파일의 내용은 되살릴 수 없습니다.",
-            true,
-        ),
-        ConflictPolicy::OverwriteIfNewer => (
-            "수정한 날짜가 더 최근일 때만 같은 이름의 파일을 바꾸고, 아니면 건너뜁니다.\n\
-             바꾼 파일의 내용은 되살릴 수 없습니다.",
-            true,
-        ),
-        ConflictPolicy::OverwriteIfSizeDiffers => (
-            "크기가 다를 때만 같은 이름의 파일을 바꾸고, 같으면 건너뜁니다.\n\
-             바꾼 파일의 내용은 되살릴 수 없습니다.",
-            true,
-        ),
-        ConflictPolicy::Skip => ("같은 이름이 있는 항목은 건너뜁니다", false),
-        ConflictPolicy::AutoRename => ("같은 이름이 있으면 번호를 붙여 둘 다 둡니다", false),
-        ConflictPolicy::Ask => ("같은 이름이 있으면 그때 묻습니다", false),
-    }
+    // One sentence a line, so that a narrow window breaks the line between them.
+    let (key, destroys) = match policy {
+        ConflictPolicy::Overwrite => ("pick-policy-overwrite", true),
+        ConflictPolicy::OverwriteIfNewer => ("pick-policy-if-newer", true),
+        ConflictPolicy::OverwriteIfSizeDiffers => ("pick-policy-if-size-differs", true),
+        ConflictPolicy::Skip => ("pick-policy-skip", false),
+        ConflictPolicy::AutoRename => ("pick-policy-auto-rename", false),
+        ConflictPolicy::Ask => ("pick-policy-ask", false),
+    };
+    (t_static(key), destroys)
 }
 
 /// What the picker's folder tree shows when its filter finds nothing: it looks only among
 /// the folders listed so far.
 pub fn pick_no_match() -> &'static str {
-    "펼쳐 본 폴더 중에 맞는 이름이 없습니다"
+    t_static("pick-no-match")
 }
 
 /// What a drop at the place under the pointer would do, beside the pointer while a drag hovers
 /// there (DND-03): `이동 → 백업`, with `folder`, the name of the folder the items would go
 /// into, or why the keys held refuse the drop.
 pub fn drop_badge(choice: DropChoice, folder: &str) -> String {
-    match choice {
-        DropChoice::Do(DropEffect::Move) => format!("이동 → {folder}"),
-        DropChoice::Do(DropEffect::Copy) => format!("복사 → {folder}"),
-        DropChoice::Ask => format!("놓을 때 묻기 → {folder}"),
-        DropChoice::Do(DropEffect::Link) => format!("링크 만들기: {folder}"),
-        DropChoice::Refuse(Refusal::NotAllowed) => "여기에는 놓을 수 없습니다".to_owned(),
-    }
+    let key = match choice {
+        DropChoice::Do(DropEffect::Move) => "drop-badge-move",
+        DropChoice::Do(DropEffect::Copy) => "drop-badge-copy",
+        DropChoice::Ask => "drop-badge-ask",
+        DropChoice::Do(DropEffect::Link) => "drop-badge-link",
+        DropChoice::Refuse(Refusal::NotAllowed) => {
+            return t_static("drop-badge-refused").to_owned();
+        }
+    };
+    t(key, &[("folder", folder.into())])
 }
 
 /// The name of a kind of link in the item menu's 링크 만들기 ▸: the shortcut of Windows (바로
 /// 가기), the alias of macOS (별칭), a symbolic link, a junction.
 pub fn link_kind(kind: LinkKind, os: Os) -> &'static str {
-    match (kind, os) {
-        (LinkKind::Shortcut, Os::MacOs) => "별칭",
-        (LinkKind::Shortcut, _) => "바로 가기",
-        (LinkKind::Symlink, _) => "심볼릭 링크",
-        (LinkKind::Junction, _) => "정션",
-    }
+    t_static(match (kind, os) {
+        (LinkKind::Shortcut, Os::MacOs) => "link-kind-alias",
+        (LinkKind::Shortcut, _) => "link-kind-shortcut",
+        (LinkKind::Symlink, _) => "link-kind-symlink",
+        (LinkKind::Junction, _) => "link-kind-junction",
+    })
+}
+
+/// The word a new shortcut's name takes after the name of its target on `os`, which
+/// [`rf_platform::link_name`] puts in the system's form: `바로 가기` on Windows (`보고서.docx -
+/// 바로 가기.lnk`), `별칭` on macOS (`사진 별칭`).
+pub fn link_name_word(os: Os) -> &'static str {
+    t_static(match os {
+        Os::MacOs => "link-name-alias",
+        Os::Windows | Os::Other => "link-name-shortcut",
+    })
 }
 
 /// The entry of a kind of link in 링크 만들기 ▸: its name, and for one that is off (`enabled`
@@ -2696,159 +2707,162 @@ pub fn link_entry(kind: LinkKind, enabled: bool, os: Os) -> String {
     if enabled {
         name.to_owned()
     } else {
-        format!("{name} (개발자 모드나 관리자 권한 필요)")
+        t("link-entry-off", &[("name", name.into())])
     }
 }
 
 /// What a click on a symbolic link that is off says: why, and what to do.
 pub fn link_needs_privilege() -> &'static str {
-    "심볼릭 링크를 만들려면 Windows 설정에서 개발자 모드를 켜거나 관리자 권한으로 실행해야 합니다"
+    t_static("link-needs-privilege")
 }
 
 /// The notice of links made: `링크 3개를 만들었습니다`, with how many of them (`dangling`)
 /// point to nothing: `링크 3개를 만들었습니다 · 대상이 없는 링크 1개`.
-pub fn links_made(count: u64, dangling: usize) -> String {
-    let made = format!("링크 {count}개를 만들었습니다");
+pub fn links_made(n: u64, dangling: usize) -> String {
+    let made = t("links-made", &[("count", number(n))]);
     if dangling == 0 {
         made
     } else {
-        format!("{made} · 대상이 없는 링크 {dangling}개")
+        format!(
+            "{made} · {}",
+            t("links-dangling", &[("count", count(dangling))])
+        )
     }
 }
 
 /// The notice of a link that could not be made, with why: `링크를 만들지 못했습니다: 같은 이름의
 /// 항목이 이미 있습니다`.
 pub fn link_refused(failure: &ItemFailure) -> String {
-    format!("링크를 만들지 못했습니다: {}", item_failure(failure))
+    t("link-refused", &[("reason", item_failure(failure).into())])
 }
 
 /// The title of the picker that finds where links go (PICK-09).
 pub fn pick_link_title() -> &'static str {
-    "링크를 어디에 만들까요?"
+    t_static("pick-link-title")
 }
 
 /// The picker's confirm button when it finds where links go.
 pub fn pick_link_confirm() -> &'static str {
-    "여기에 링크 만들기"
+    t_static("pick-link-confirm")
 }
 
 /// The title of the picker that finds where items of the trash are taken out to
 /// (위치를 골라 꺼내기…).
 pub fn pick_restore_title() -> &'static str {
-    "위치를 골라 꺼내기"
+    t_static("pick-restore-title")
 }
 
-/// The picker's line under its title when it finds where `count` items of the trash go.
-pub fn pick_restore_summary(count: usize) -> String {
-    format!("휴지통의 항목 {count}개")
+/// The picker's line under its title when it finds where `n` items of the trash go.
+pub fn pick_restore_summary(n: usize) -> String {
+    t("pick-restore-summary", &[("count", count(n))])
 }
 
 /// The confirm button of the picker that takes items out of the trash.
 pub fn pick_restore_confirm() -> &'static str {
-    "여기로 꺼내기"
+    t_static("pick-restore-confirm")
 }
 
-/// The picker's line under its title when it finds where `count` links of `kind` go.
-pub fn pick_link_summary(kind: LinkKind, count: usize, os: Os) -> String {
-    format!("항목 {count}개의 {}", link_kind(kind, os))
+/// The picker's line under its title when it finds where `n` links of `kind` go.
+pub fn pick_link_summary(kind: LinkKind, n: usize, os: Os) -> String {
+    t(
+        "pick-link-summary",
+        &[("count", count(n)), ("kind", link_kind(kind, os).into())],
+    )
 }
 
 /// Why the picker cannot find a folder for links: one of the items, or a folder inside one, or
 /// else what [`pick_problem`] says.
 pub fn pick_link_problem(validity: Validity) -> String {
     match validity {
-        Validity::IntoSource => "링크를 만드는 항목 안이라 고를 수 없음".to_owned(),
+        Validity::IntoSource => t_static("pick-problem-into-linked").to_owned(),
         other => pick_problem(other, TransferMode::Copy, false),
     }
 }
 
-/// A drop from another app that left out `count` of its paths, which name no folder or file it
+/// A drop from another app that left out `n` of its paths, which name no folder or file it
 /// can take (a device or a volume of Windows, a relative path): the others go.
-pub fn dropped_left_out(count: usize) -> String {
-    format!("끌어 온 항목 {count}개는 받을 수 없는 경로라 건너뛰었습니다")
+pub fn dropped_left_out(n: usize) -> String {
+    t("dropped-left-out", &[("count", count(n))])
 }
 
-/// A drop from another app whose `count` paths all name no folder or file it can take: nothing
+/// A drop from another app whose `n` paths all name no folder or file it can take: nothing
 /// goes.
-pub fn dropped_skipped(count: usize) -> String {
-    format!("끌어 온 항목 {count}개가 모두 받을 수 없는 경로라 받지 않았습니다")
+pub fn dropped_skipped(n: usize) -> String {
+    t("dropped-skipped", &[("count", count(n))])
 }
 
 /// What the window says while a drag of another app whose paths all name no folder or file it
 /// can take hovers over a place (the pointer says so too).
 pub fn drop_no_paths() -> &'static str {
-    "여기에 놓을 수 없습니다: 받을 수 있는 경로가 없습니다"
+    t_static("drop-no-paths")
 }
 
 /// The head of the sidebar's group of the folders visited last.
 pub fn recent_folders() -> &'static str {
-    "최근 폴더"
+    t_static("sidebar-recent")
 }
 
 /// What a drop between the favorites, or in the empty part of their list, would do, beside the
 /// pointer (NAV-05, DND-01): the folders are kept as favorites, and nothing is moved.
 pub fn drop_keeps() -> &'static str {
-    "즐겨찾기에 추가"
+    t_static("drop-keeps")
 }
 
 /// Why the list of favorites takes the drag: it holds files, and the list takes folders only.
 pub fn drop_only_folders() -> &'static str {
-    "폴더만 즐겨찾기에 추가할 수 있습니다"
+    t_static("drop-only-folders")
 }
 
 /// Why the list of favorites takes nothing of a drag whose keys ask for a link: it makes none
 /// (OPS-08): the drop is refused, and the words say what is taken, without the link key.
 pub fn drop_favorites_no_links() -> &'static str {
-    "링크 키를 떼고 놓으면 폴더를 즐겨찾기에 추가합니다"
+    t_static("drop-favorites-no-links")
 }
 
 /// The notice for a folder the user asked to keep as a favorite that is one already.
 pub fn favorite_already(name: &str) -> String {
-    format!("이미 즐겨찾기에 있습니다: {name}")
+    t("favorite-already", &[("name", name.into())])
 }
 
 /// The title of the window that asks for a favorite's new name.
 pub fn favorite_rename_title() -> &'static str {
-    "즐겨찾기 이름 바꾸기"
+    t_static("favorite-rename-title")
 }
 
 /// What the window says while a drag of items hovers over a place that does not take them
 /// (the pointer says so too): why, for the reason `validity` gives.
 pub fn drop_refused(validity: Validity) -> String {
-    let why = match validity {
-        Validity::IntoSource => "끌고 있는 폴더 자신이거나 그 안입니다",
-        Validity::SameFolder => "항목이 이미 이 폴더에 있습니다",
-        Validity::NotAFolder => "폴더가 아닙니다",
-        Validity::ShellPlace => "휴지통 목록과 내 PC에는 항목을 넣을 수 없습니다",
-        Validity::ForeignToTrash => "다른 앱에서 끌어 온 항목은 그 앱에서 휴지통으로 보내세요",
+    t_static(match validity {
+        Validity::IntoSource => "drop-refused-into-source",
+        Validity::SameFolder => "drop-refused-same-folder",
+        Validity::NotAFolder => "drop-refused-not-a-folder",
+        Validity::ShellPlace => "drop-refused-shell-place",
+        Validity::ForeignToTrash => "drop-refused-foreign-to-trash",
         // A place that takes them with a warning is no refusal.
-        Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => {
-            return "여기에 놓을 수 없습니다".to_owned();
-        }
-    };
-    format!("여기에 놓을 수 없습니다: {why}")
+        Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => "drop-refused",
+    })
+    .to_owned()
 }
 
 /// What the preview panel and quick look say of an item that cannot be shown: it could not be
 /// read, or its content is broken (a damaged image, bytes not valid in their encoding).
 pub fn preview_unavailable() -> &'static str {
-    "미리 볼 수 없습니다"
+    t_static("preview-unavailable")
 }
 
 /// What the preview says of an image file too large to decode (over 50 MB): its size shows
 /// beside it.
 pub fn preview_too_large() -> &'static str {
-    "파일이 커서 미리 보지 않습니다"
+    t_static("preview-too-large")
 }
 
 /// How many items a folder in the preview shows: `항목 12개`, or `항목 10000개 이상` past the
 /// count's cap (`more`).
 pub fn preview_items(items: usize, more: bool) -> String {
-    let count = item_count(items);
     if more {
-        format!("{count} 이상")
+        t("preview-items-at-least", &[("count", count(items))])
     } else {
-        count
+        item_count(items)
     }
 }
 
@@ -2862,7 +2876,10 @@ pub fn preview_image_size(width: u32, height: u32) -> String {
 pub fn preview_text_note(encoding: &str, truncated: bool) -> String {
     if truncated {
         let shown = format_size(u64::try_from(crate::preview::TEXT_BYTES).unwrap_or(u64::MAX));
-        format!("{encoding} · 앞 {shown}만 보입니다")
+        format!(
+            "{encoding} · {}",
+            t("preview-text-first", &[("size", shown.into())])
+        )
     } else {
         encoding.to_owned()
     }
@@ -2886,77 +2903,94 @@ pub fn preview_facts(kind: &str, size: Option<&str>, modified: Option<&str>) -> 
 /// What the preview says of a file stored online only (a cloud drive's placeholder): it is not
 /// downloaded to be shown.
 pub fn preview_online_only() -> &'static str {
-    "온라인 전용 파일은 미리 보지 않습니다"
+    t_static("preview-online-only")
 }
 
 /// The notice when the preview panel is hidden because the window is too narrow for it; it
 /// comes back when the window is wide enough.
 pub fn preview_no_room() -> &'static str {
-    "창이 좁아 미리 보기 패널을 숨겼습니다. 창을 넓히면 다시 보입니다"
+    t_static("preview-no-room")
 }
 
 /// The labels of the facts of the properties window (OPS-06), in their order.
 pub fn fact_kind() -> &'static str {
-    "종류"
+    t_static("fact-kind")
 }
 
 pub fn fact_place() -> &'static str {
-    "위치"
+    t_static("fact-place")
 }
 
 pub fn fact_size() -> &'static str {
-    "크기"
+    t_static("fact-size")
 }
 
 /// What a folder holds, everything under it.
 pub fn fact_contents() -> &'static str {
-    "내용"
+    t_static("fact-contents")
 }
 
 pub fn fact_link_target() -> &'static str {
-    "링크 대상"
+    t_static("fact-link-target")
 }
 
 pub fn fact_created() -> &'static str {
-    "만든 날짜"
+    t_static("fact-created")
 }
 
 pub fn fact_modified() -> &'static str {
-    "수정한 날짜"
+    t_static("fact-modified")
 }
 
 pub fn fact_accessed() -> &'static str {
-    "접근한 날짜"
+    t_static("fact-accessed")
 }
 
 pub fn fact_attributes() -> &'static str {
-    "속성"
+    t_static("fact-attributes")
 }
 
 /// What a fact of the properties window says while a worker reads it.
 pub fn reading() -> &'static str {
-    "읽는 중…"
+    t_static("properties-reading")
 }
 
 /// A time the system does not keep for the item (the creation time on some Linux file
 /// systems).
 pub fn unknown_time() -> &'static str {
-    "알 수 없음"
+    t_static("properties-unknown-time")
+}
+
+/// `n` as a count argument that shows as [`grouped`] does: a number below 1000, where there
+/// is no comma to show, which gives English its plural; from 1000 on its grouped text, which
+/// selects the `other` plural, its own.
+fn grouped_count(n: u64) -> FluentValue<'static> {
+    if n < 1000 {
+        number(n)
+    } else {
+        FluentValue::from(grouped(n))
+    }
 }
 
 /// The kinds of several items in the properties window, as File Explorer counts them: `파일 2개,
 /// 폴더 1개` (a link or a special file is a file there).
 pub fn chosen_kinds(files: u64, folders: u64) -> String {
     match (files, folders) {
-        (files, 0) => format!("파일 {}개", grouped(files)),
-        (0, folders) => format!("폴더 {}개", grouped(folders)),
-        (files, folders) => format!("파일 {}개, 폴더 {}개", grouped(files), grouped(folders)),
+        (files, 0) => t("properties-files", &[("files", grouped_count(files))]),
+        (0, folders) => t("properties-folders", &[("folders", grouped_count(folders))]),
+        (files, folders) => contents(files, folders),
     }
 }
 
 /// What the folders of the properties window hold: `파일 12,345개, 폴더 678개`.
 pub fn contents(files: u64, folders: u64) -> String {
-    format!("파일 {}개, 폴더 {}개", grouped(files), grouped(folders))
+    t(
+        "properties-files-and-folders",
+        &[
+            ("files", grouped_count(files)),
+            ("folders", grouped_count(folders)),
+        ],
+    )
 }
 
 /// The size of the properties window: `1.2 MB (1,258,291 바이트)`, and `이상` after it while it
@@ -2966,29 +3000,35 @@ pub fn size_fact(bytes: u64, whole: bool) -> String {
     if whole {
         size
     } else {
-        format!("{size} 이상")
+        t("properties-size-at-least", &[("size", size.into())])
     }
 }
 
 /// The read-only, hidden, system and archive attributes of the properties window: the names
-/// of those that `flagged` (how many of `count` items have each) has, `(일부)` after one that
+/// of those that `flagged` (how many of `of` items have each) has, `(일부)` after one that
 /// only some of them have, or `없음`.
-pub fn attribute_names(flagged: &[usize; 4], count: usize) -> String {
-    const NAMES: [&str; 4] = ["읽기 전용", "숨김", "시스템", "보관"];
+pub fn attribute_names(flagged: &[usize; 4], of: usize) -> String {
+    const NAMES: [&str; 4] = [
+        "attribute-read-only",
+        "attribute-hidden",
+        "attribute-system",
+        "attribute-archive",
+    ];
     let names: Vec<String> = NAMES
         .iter()
         .zip(flagged)
         .filter(|(_, flagged)| **flagged > 0)
-        .map(|(name, flagged)| {
-            if *flagged < count {
-                format!("{name} (일부)")
+        .map(|(key, flagged)| {
+            let name = t_static(key);
+            if *flagged < of {
+                t("attribute-partly", &[("name", name.into())])
             } else {
-                (*name).to_owned()
+                name.to_owned()
             }
         })
         .collect();
     if names.is_empty() {
-        "없음".to_owned()
+        t_static("attribute-none").to_owned()
     } else {
         names.join(", ")
     }
@@ -2996,52 +3036,55 @@ pub fn attribute_names(flagged: &[usize; 4], count: usize) -> String {
 
 /// The count of the properties window's folders goes on.
 pub fn counting() -> &'static str {
-    "세는 중…"
+    t_static("properties-counting")
 }
 
 /// 중지 stopped the count: the size is what it had found.
 pub fn count_stopped() -> &'static str {
-    "세다가 멈췄습니다"
+    t_static("properties-count-stopped")
 }
 
 /// The count failed (its worker did).
 pub fn count_failed() -> &'static str {
-    "크기를 끝까지 세지 못했습니다"
+    t_static("properties-count-failed")
 }
 
 /// The folders under the properties window's that could not be listed.
-pub fn unreadable_folders(count: u64) -> String {
-    format!("읽을 수 없는 폴더 {}개는 세지 못했습니다", grouped(count))
+pub fn unreadable_folders(n: u64) -> String {
+    t(
+        "properties-unreadable-folders",
+        &[("count", grouped_count(n))],
+    )
 }
 
 /// The folders under the properties window's that are on another file system (a drive mounted
 /// in a folder), which the count does not enter.
-pub fn folders_elsewhere(count: u64) -> String {
-    format!(
-        "다른 드라이브의 폴더 {}개는 세지 않았습니다",
-        grouped(count)
+pub fn folders_elsewhere(n: u64) -> String {
+    t(
+        "properties-folders-elsewhere",
+        &[("count", grouped_count(n))],
     )
 }
 
 /// The size of the properties window's folder that could not be listed: why, in place of a size
 /// of nothing.
 pub fn folder_unreadable(kind: ErrorKind) -> String {
-    format!("폴더를 읽을 수 없습니다: {}", error_kind(kind))
+    with_reason("properties-folder-unreadable", kind)
 }
 
 /// A file whose checksum 중지 stopped before it was made.
 pub fn hash_stopped() -> &'static str {
-    "멈춤"
+    t_static("hash-stopped")
 }
 
 /// 중지 stopped the checksums, and how to go on.
 pub fn hashes_stopped() -> &'static str {
-    "계산을 멈췄습니다. 같은 알고리즘을 다시 고르면 남은 파일을 계산합니다"
+    t_static("hashes-stopped")
 }
 
 /// A file whose checksum waits for the files before it.
 pub fn hash_waiting() -> &'static str {
-    "대기 중"
+    t_static("hash-waiting")
 }
 
 /// How far a file's checksum is: `42%`.
@@ -3059,60 +3102,63 @@ pub fn hash_percent(fraction: f32) -> String {
 /// Why a file has no checksum.
 pub fn hash_failure(failure: HashFailure) -> String {
     match failure {
-        HashFailure::NotAFile => "일반 파일이 아니라 계산하지 않았습니다".to_owned(),
-        HashFailure::Unreadable(kind) => format!("계산하지 못했습니다: {}", error_kind(kind)),
+        HashFailure::NotAFile => t_static("hash-not-a-file").to_owned(),
+        HashFailure::Unreadable(kind) => with_reason("hash-unreadable", kind),
     }
 }
 
 /// A file stored online only, which reading would download, has no checksum.
 pub fn hash_online_only() -> &'static str {
-    "온라인 전용 파일이라 내려받지 않았습니다"
+    t_static("hash-online-only")
 }
 
 /// The properties window shows no file to hash (folders, links, special files).
 pub fn only_files_hashed() -> &'static str {
-    "체크섬은 파일만 계산합니다"
+    t_static("hash-only-files")
 }
 
 /// Before an algorithm is chosen.
 pub fn choose_algorithm() -> &'static str {
-    "알고리즘을 고르면 계산합니다"
+    t_static("hash-choose-algorithm")
 }
 
 /// How far the checksums of several files are: `계산 중… 파일 3/10`.
 pub fn hashing_files(finished: usize, total: usize) -> String {
-    format!("계산 중… 파일 {finished}/{total}")
+    t(
+        "hash-progress",
+        &[("done", count(finished)), ("total", count(total))],
+    )
 }
 
-/// The files past the first `count` have no checksum.
-pub fn hashed_first(count: usize) -> String {
-    format!(
-        "체크섬은 처음 파일 {}개만 계산합니다",
-        grouped(u64::try_from(count).unwrap_or(u64::MAX))
+/// The files past the first `n` have no checksum.
+pub fn hashed_first(n: usize) -> String {
+    t(
+        "hash-first-files",
+        &[("count", grouped_count(u64::try_from(n).unwrap_or(u64::MAX)))],
     )
 }
 
 /// What the comparison with a pasted hash says when a checksum is it: `일치`, with the name of
 /// its file among several (`일치: a.txt`) or how many are (`일치: 파일 2개`).
-pub fn verdict_match(name: Option<&str>, count: usize) -> String {
+pub fn verdict_match(name: Option<&str>, n: usize) -> String {
     match name {
-        Some(name) => format!("일치: {name}"),
-        None if count > 1 => format!(
-            "일치: 파일 {}개",
-            grouped(u64::try_from(count).unwrap_or(u64::MAX))
+        Some(name) => t("hash-match-named", &[("name", name.into())]),
+        None if n > 1 => t(
+            "hash-match-files",
+            &[("count", grouped_count(u64::try_from(n).unwrap_or(u64::MAX)))],
         ),
-        None => "일치".to_owned(),
+        None => t_static("hash-match").to_owned(),
     }
 }
 
 /// No checksum is the pasted hash.
 pub fn verdict_mismatch() -> &'static str {
-    "불일치"
+    t_static("hash-mismatch")
 }
 
 /// No checksum is the pasted hash so far, and some are still to come.
 pub fn verdict_waiting() -> &'static str {
-    "계산이 끝나면 비교합니다"
+    t_static("hash-waiting-to-compare")
 }
 
 #[cfg(test)]

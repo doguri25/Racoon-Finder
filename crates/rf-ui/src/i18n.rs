@@ -151,15 +151,20 @@ macro_rules! area {
 }
 
 /// The areas, each a file in every language's folder (a test holds the folders to this list).
-const AREAS: [(&str, &str, &str); 13] = [
+const AREAS: [(&str, &str, &str); 18] = [
     area!("conflict"),
+    area!("drop"),
     area!("errors"),
     area!("format"),
     area!("history"),
     area!("jobs"),
+    area!("links"),
     area!("names"),
     area!("notices"),
+    area!("pick"),
     area!("places"),
+    area!("preview"),
+    area!("properties"),
     area!("removal"),
     area!("shell"),
     area!("startup"),
@@ -605,17 +610,6 @@ mod tests {
         ));
     }
 
-    /// The line in `words.rs` above which its words are moved; below it, 9b's still are not.
-    const SPLIT_MARKER: &str = "// ---- i18n: words not yet moved ----";
-
-    /// The files whose Hangul literals are allowed for now, from the marker on when one is
-    /// named, else whole: Task 9b moves their words to the Fluent files and removes them here.
-    const NOT_YET_MOVED: [(&str, Option<&str>); 2] = [
-        ("crates/rf-ui/src/words.rs", Some(SPLIT_MARKER)),
-        // The names a new link takes on Windows and macOS (` - 바로 가기.lnk`, ` 별칭`).
-        ("crates/rf-platform/src/links/mod.rs", None),
-    ];
-
     /// Test support that is compiled into the library, whose Hangul literals are the names of
     /// the files its checks make, never words of the app.
     const FIXTURES: [&str; 1] = ["crates/rf-vfs/src/testkit.rs"];
@@ -830,7 +824,7 @@ mod tests {
 
     /// The rule of I18N-02 after Task 9: the words of the app are in the Fluent files, so no
     /// Rust code outside tests holds a Hangul string or character literal, but in what
-    /// [`NOT_YET_MOVED`] (9b's) and [`FIXTURES`] allow.
+    /// [`FIXTURES`] allows.
     #[test]
     fn no_hangul_string_literal_outside_tests() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -858,7 +852,6 @@ mod tests {
         }
         let mut test_files = Vec::new();
         let mut found: Vec<(String, usize, String)> = Vec::new();
-        let mut allowed: Vec<&str> = Vec::new();
         for (path, name) in files.iter().zip(&names) {
             let source = std::fs::read_to_string(path).expect("a Rust file");
             let chars: Vec<char> = source.chars().collect();
@@ -879,27 +872,14 @@ mod tests {
                     test_files.push(relative(&dir.join(&module).join("mod.rs")));
                 }
             }
-            let allowed_from = match NOT_YET_MOVED.iter().find(|(file, _)| file == name) {
-                Some((_, Some(marker))) => {
-                    let at = source
-                        .find(marker)
-                        .unwrap_or_else(|| panic!("{name} has no marker {marker:?}"));
-                    source[..at].chars().count()
-                }
-                Some((_, None)) => 0,
-                None if FIXTURES.contains(&name.as_str()) => 0,
-                None => usize::MAX,
-            };
+            if FIXTURES.contains(&name.as_str()) {
+                continue;
+            }
             for (at, literal) in scanned.literals {
                 let in_test = tests.iter().any(|&(from, to)| (from..to).contains(&at));
-                if !literal.chars().any(is_hangul) || in_test {
-                    continue;
-                }
-                if at < allowed_from {
+                if literal.chars().any(is_hangul) && !in_test {
                     let line = chars[..at].iter().filter(|&&c| c == '\n').count() + 1;
                     found.push((name.clone(), line, literal));
-                } else {
-                    allowed.push(name);
                 }
             }
         }
@@ -908,13 +888,6 @@ mod tests {
             found.is_empty(),
             "Hangul literals outside tests (move the words to crates/rf-ui/i18n): {found:#?}"
         );
-        // An allowance goes once its file has no Korean words left.
-        for (file, _) in NOT_YET_MOVED {
-            assert!(
-                allowed.contains(&file),
-                "{file} needs no allowance any more: take it out of NOT_YET_MOVED"
-            );
-        }
     }
 
     #[test]
@@ -1025,9 +998,8 @@ mod tests {
         let mut asked = 0;
         for file in ["words.rs", "format.rs"] {
             let source = std::fs::read_to_string(src.join(file)).expect("a Rust file");
-            // The code above 9b's marker and outside the tests.
-            let moved = source.split(SPLIT_MARKER).next().unwrap_or_default();
-            let moved = moved.split("#[cfg(test)]").next().unwrap_or_default();
+            // The code outside the tests.
+            let moved = source.split("#[cfg(test)]").next().unwrap_or_default();
             let chars: Vec<char> = moved.chars().collect();
             for (_, literal) in scan(&chars).literals {
                 // A `ko-` name is a Korean argument's, not a key.

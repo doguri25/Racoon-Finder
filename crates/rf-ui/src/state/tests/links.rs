@@ -108,7 +108,12 @@ fn first_entry(state: &AppState, name: &str) -> (LinkKind, std::ffi::OsString) {
     assert!(enabled, "the first entry of every system works");
     (
         kind,
-        link_name(std::ffi::OsStr::new(name), kind, Os::CURRENT),
+        link_name(
+            std::ffi::OsStr::new(name),
+            kind,
+            Os::CURRENT,
+            words::link_name_word(Os::CURRENT),
+        ),
     )
 }
 
@@ -281,7 +286,12 @@ fn a_drop_with_the_keys_for_a_link_makes_the_links_of_the_system() {
             links: vec![(
                 in_a("x.txt"),
                 folder("b")
-                    .join(link_name(std::ffi::OsStr::new("x.txt"), kind, Os::CURRENT))
+                    .join(link_name(
+                        std::ffi::OsStr::new("x.txt"),
+                        kind,
+                        Os::CURRENT,
+                        words::link_name_word(Os::CURRENT)
+                    ))
                     .unwrap(),
                 kind
             )]
