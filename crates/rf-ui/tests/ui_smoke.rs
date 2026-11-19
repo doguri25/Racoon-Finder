@@ -5770,7 +5770,9 @@ fn the_tree_and_the_preview_panel_come_and_go() {
 /// menu is shorter than the window, and the menus that show side by side (a sub-menu beside its
 /// menu) are narrower than it together. At the default size the menu's last item ends well
 /// before 500px in both. (The testing backend tells the size of a menu and the places of its
-/// items in it, not where it is in the window.)
+/// items in it, not where it is in the window.) These are the menus Slint draws itself, which
+/// Linux shows: on Windows and macOS the same menus are the system's (muda), which the system
+/// places and sizes, and which this cannot measure.
 #[test]
 fn the_view_menu_fits_the_smallest_window_in_both_languages() {
     let window = window();
@@ -5895,8 +5897,9 @@ fn lies_in_a_row(frame: &ElementHandle, row: &[ElementHandle], pad: f32, what: &
     }
 }
 
-/// The words of the dialogs in English (I18N-01), longer than the Korean ones, lie in the
-/// smallest window at the largest look (THEME-07): the choices of the pattern window, the foot
+/// A coarse guard, which sees a row that grows past its dialog by far and no small overflow: the
+/// words of the dialogs in English (I18N-01), longer than the Korean ones, lie in the smallest
+/// window at the largest look (THEME-07): the choices of the pattern window, the foot
 /// of the conflict window with the items left, the picker's conflict policy and the buttons of
 /// the properties window lie inside their dialogs, side by side; in Korean too. The rule is
 /// checked, no width. The testing backend's text is narrower than a real font's (Inter's 130 %
@@ -10085,6 +10088,10 @@ fn the_picker_s_path_field_completes_with_tab_and_the_window_s_key_makes_a_folde
     }
 }
 
+/// The visit history's menus (NAV-04), of one way and of the key, with as many lines as Rust gives,
+/// end inside a 900x560 window. They are the menus Slint draws itself, which Linux shows: on
+/// Windows and macOS the same menus are the system's (muda), which the system places, and which
+/// this cannot measure.
 #[test]
 fn the_visit_history_s_menus_fit_the_smallest_window() {
     let window = window();

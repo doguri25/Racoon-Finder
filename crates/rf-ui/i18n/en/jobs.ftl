@@ -254,9 +254,9 @@ tray-ask-menu-bar = Keep the jobs going in the menu bar until they finish?
 # Links say "created", as links-made does.
 job-items-done =
     { $work ->
-        [link] Links created for { $count ->
-            [one] 1 item
-           *[other] { $count } items
+        [link] { $count ->
+            [one] Link created for 1 item
+           *[other] Links created for { $count } items
         }
        *[other] { $count ->
             [one] 1 item

@@ -342,6 +342,13 @@ pub fn t(key: &str, args: &[Arg<'_>]) -> String {
     localizer(lang()).text(key, args)
 }
 
+/// The message `key` with `args` in `lang`, which need not be the language of the run (the
+/// notice of the next start's language): from the messages the run keeps of each language,
+/// parsed once.
+pub fn text_in(lang: Lang, key: &str, args: &[Arg<'_>]) -> String {
+    localizer(lang).text(key, args)
+}
+
 /// The message `key`, which has no arguments, in the language of the run, for the functions of
 /// the words that return `&'static str`. Each message is made once a language and kept for the
 /// rest of the run: at most one copy of each message of each language.

@@ -25,7 +25,7 @@ use rf_vfs::ShellPlace;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
-use crate::i18n::{Arg, Lang, Localizer, OS_ARG, count, number, os_arg, t, t_static};
+use crate::i18n::{Arg, Lang, OS_ARG, count, number, os_arg, t, t_static, text_in};
 use crate::jobs::JobRow;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
@@ -224,7 +224,7 @@ pub fn recent_head(n: usize) -> String {
 /// the window speaks, in `next`, the language of the next start: the window keeps its words until
 /// then (I18N-01; a change without a restart is P1).
 pub fn language_restart(next: Lang) -> String {
-    Localizer::new(next).text("notice-language-restart", &[])
+    text_in(next, "notice-language-restart", &[])
 }
 
 /// The notice of a drop the window did not make: the rows changed under the pointer (a
@@ -3224,6 +3224,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::i18n::Localizer;
 
     /// Whether `text` reads as Korean: it holds at least one Hangul syllable.
     fn is_korean(text: &str) -> bool {
@@ -4375,6 +4376,31 @@ mod tests {
             let args = [("kind", kind.into()), ("reason", "x".into())];
             assert_eq!(english.text("job-create-refused", &args), said);
         }
+    }
+
+    #[test]
+    fn links_made_for_one_item_say_link_in_the_singular() {
+        let english = Localizer::new(Lang::En);
+        let said = |n: usize| {
+            let args = [("work", "link".into()), ("count", count(n))];
+            english.text("job-items-done", &args)
+        };
+        assert_eq!(said(1), "Link created for 1 item");
+        assert_eq!(said(3), "Links created for 3 items");
+    }
+
+    #[test]
+    fn the_restart_notice_is_in_the_language_chosen() {
+        assert_eq!(
+            language_restart(Lang::En),
+            "The language changes when you restart the app"
+        );
+        assert_eq!(language_restart(Lang::Ko), "다시 시작하면 바뀝니다");
+        // From the messages the run keeps, not a new parse at each choice.
+        assert_eq!(
+            text_in(Lang::En, "notice-language-restart", &[]),
+            language_restart(Lang::En)
+        );
     }
 
     #[test]
