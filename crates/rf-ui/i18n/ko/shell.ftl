@@ -33,3 +33,8 @@ paste-into-itself = 폴더를 그 폴더 안에 붙여넣을 수 없습니다
 paste-already-here = 잘라낸 항목이 이미 이 폴더에 있습니다
 paste-moving = 잘라낸 항목을 옮기는 중입니다
 paste-left-out = 클립보드의 항목 { $count }개는 붙여넣을 수 없는 경로라 건너뛰었습니다
+
+## 연결 프로그램의 메뉴
+
+# 시스템의 기본 앱.
+shell-app-default = { $name } (기본)

@@ -108,3 +108,11 @@ refused-other = It can't be put in this location
 preflight-no-space = If it goes on, it may stop halfway for lack of space
 preflight-warning = As it is, it may be hard to open on Windows
 preflight-blocked = This item can't be put in the target
+
+## The window of the review (words::preflight_title, words::preflight_line)
+
+preflight-title = Some items don't fit the target
+# $name: the item's name, $issue: the fact (issue-*), $follows: what follows (preflight-*).
+preflight-line =
+    { $name }: { $issue }.
+    { $follows }

@@ -1492,54 +1492,18 @@ pub fn no_apps() -> &'static str {
     t_static("shell-no-apps")
 }
 
-// ---- i18n: words not yet moved ----
-//
-// Task 9b moves what follows to the Fluent files (`crates/rf-ui/i18n`) as the part above was
-// moved: until then its words are Korean in every language. The check
-// `i18n::tests::no_hangul_string_literal_outside_tests` allows Hangul literals in this file
-// below this line alone; 9b removes the line and the allowance.
-
-impl JobWork {
-    /// The pieces the job sentences below are made of (9b makes each sentence one message, as
-    /// [`outcome`] is, and removes these).
-    fn phrases(self) -> Phrases {
-        let (done, object) = match self {
-            JobWork::Copy => ("복사했", "복사를"),
-            JobWork::Move => ("이동했", "이동을"),
-            JobWork::Trash => ("휴지통으로 보냈", "휴지통으로 보내기를"),
-            JobWork::Delete => ("삭제했", "삭제를"),
-            JobWork::Rename => ("이름을 바꿨", "이름 바꾸기를"),
-            JobWork::Create => ("만들었", "만들기를"),
-            JobWork::Link => ("링크를 만들었", "링크 만들기를"),
-            JobWork::Restore => ("복원했", "복원을"),
-            JobWork::Undo => ("되돌렸", "되돌리기를"),
-            JobWork::Redo => ("다시 실행했", "다시 실행을"),
-            JobWork::Other => ("작업을 마쳤", "작업을"),
-        };
-        Phrases { done, object }
-    }
-}
-
-/// How one [`JobWork`] reads in a sentence.
-struct Phrases {
-    /// The past form without its ending, for `…습니다` and `…지만`: `복사했`.
-    done: &'static str,
-    /// The work as the object of a verb, with its particle: `복사를`.
-    object: &'static str,
-}
-
 /// An app of the menu of 연결 프로그램: its name, and `(기본)` after the system's default one.
 pub fn app_title(app: &App) -> String {
     if app.default {
-        format!("{} (기본)", app.name)
+        t("shell-app-default", &[("name", app.name.as_str().into())])
     } else {
         app.name.clone()
     }
 }
 
 /// `항목 3개`.
-pub fn item_count(count: usize) -> String {
-    format!("항목 {count}개")
+pub fn item_count(n: usize) -> String {
+    t("count-items", &[("count", count(n))])
 }
 
 /// The name of the one item in `paths`, or the count of them.
@@ -1558,28 +1522,34 @@ fn name_of(path: &VPath) -> String {
     )
 }
 
-/// The notice of a transfer or a trash that ended as asked, `count` items at its top level:
+/// The notice of a transfer or a trash that ended as asked, `n` items at its top level:
 /// `항목 3개를 이동했습니다`. When its conflict policy left items out, the numbers are of every
 /// item it went through (`done` made, `skipped` left out): `항목 3개 중 1개를 복사했습니다 ·
 /// 2개 건너뜀`, or `항목 3개를 건너뛰었습니다` when it made none.
-pub fn items_done(work: JobWork, count: usize, done: u64, skipped: u64) -> String {
-    done_with(work.phrases().done, count, done, skipped)
+pub fn items_done(work: JobWork, n: usize, done: u64, skipped: u64) -> String {
+    done_with(work.arg(), n, done, skipped)
 }
 
 /// The notice of a move that a drag made and that ended without failures (DND-07), as
 /// [`items_done`] says the others: `항목 3개를 옮겼습니다`.
-pub fn dragged_move_done(count: usize, done: u64, skipped: u64) -> String {
-    done_with("옮겼", count, done, skipped)
+pub fn dragged_move_done(n: usize, done: u64, skipped: u64) -> String {
+    done_with(FluentValue::from("drag"), n, done, skipped)
 }
 
-/// [`items_done`] with the stem `made` of what was done (`이동했`, `옮겼`).
-fn done_with(made: &str, count: usize, done: u64, skipped: u64) -> String {
+/// [`items_done`] of the work `work` as the messages' `$work` selects it, which may also be
+/// `drag` for a move a drag made (`옮겼습니다`).
+fn done_with(work: FluentValue<'static>, n: usize, done: u64, skipped: u64) -> String {
     match (done, skipped) {
-        (_, 0) => format!("항목 {count}개를 {made}습니다"),
-        (0, skipped) => format!("항목 {skipped}개를 건너뛰었습니다"),
-        (done, skipped) => format!(
-            "항목 {}개 중 {done}개를 {made}습니다 · {skipped}개 건너뜀",
-            done.saturating_add(skipped)
+        (_, 0) => t("job-items-done", &[("work", work), ("count", count(n))]),
+        (0, skipped) => t("job-items-skipped", &[("count", number(skipped))]),
+        (done, skipped) => t(
+            "job-items-partly-done",
+            &[
+                ("work", work),
+                ("count", number(done.saturating_add(skipped))),
+                ("done", number(done)),
+                ("skipped", number(skipped)),
+            ],
         ),
     }
 }
@@ -1589,16 +1559,17 @@ fn done_with(made: &str, count: usize, done: u64, skipped: u64) -> String {
 pub fn trash_done(trashed: usize, gone: usize) -> String {
     match (trashed, gone) {
         (trashed, 0) => items_done(JobWork::Trash, trashed, 0, 0),
-        (0, gone) => format!("항목 {gone}개가 휴지통에 들어가지 않고 영구 삭제되었습니다"),
-        (trashed, gone) => format!(
-            "항목 {trashed}개를 휴지통으로 보냈고, {gone}개는 휴지통 대신 영구 삭제되었습니다"
+        (0, gone) => t("job-trash-all-gone", &[("count", count(gone))]),
+        (trashed, gone) => t(
+            "job-trash-some-gone",
+            &[("count", count(trashed)), ("gone", count(gone))],
         ),
     }
 }
 
 /// The notice of a job some items of which failed: `항목 2개를 처리하지 못했습니다`.
-pub fn items_failed(count: usize) -> String {
-    format!("항목 {count}개를 처리하지 못했습니다")
+pub fn items_failed(n: usize) -> String {
+    t("job-items-failed", &[("count", count(n))])
 }
 
 /// The notice of a job that was stopped at a failed item (중단 in the window that asks about
@@ -1606,29 +1577,27 @@ pub fn items_failed(count: usize) -> String {
 /// `left` items after them were not processed (`None`: how many cannot be told; `Some(0)`: it
 /// stopped at its last item). `복사를 중단했습니다 · 실패 1개 · 남은 항목 2개는 처리하지 않았습니다`.
 pub fn job_stopped(work: JobWork, failed: usize, left: Option<u64>) -> String {
-    let object = work.phrases().object;
-    let rest = match left {
-        Some(0) => String::new(),
-        Some(left) => format!(" · 남은 항목 {left}개는 처리하지 않았습니다"),
-        None => " · 남은 항목은 처리하지 않았습니다".to_owned(),
-    };
-    format!("{object} 중단했습니다 · 실패 {failed}개{rest}")
+    let mut parts = vec![
+        work.says("job-stopped", &[]),
+        t("job-stopped-failed", &[("count", count(failed))]),
+    ];
+    match left {
+        Some(0) => {}
+        Some(left) => parts.push(t("job-stopped-left", &[("count", number(left))])),
+        None => parts.push(t_static("job-stopped-left-unknown").to_owned()),
+    }
+    parts.join(" · ")
 }
 
 /// The first line of the window of failed items of such a job: the items below are where it
 /// stopped, what came after them was not processed, and the window has no 다시 시도, which
 /// would try the listed items alone.
 pub fn job_stopped_note(work: JobWork, left: Option<u64>) -> String {
-    let object = work.phrases().object;
-    let rest = match left {
-        Some(0) => return format!("{object} 중단했습니다. 아래 항목에서 멈췄습니다."),
-        Some(left) => format!("그 뒤의 항목 {left}개는"),
-        None => "그 뒤의 항목은".to_owned(),
-    };
-    format!(
-        "{object} 중단했습니다. 아래 항목에서 멈췄고 {rest} 처리하지 않았습니다. \
-         마저 하려면 {object} 다시 시작하세요."
-    )
+    match left {
+        Some(0) => work.says("job-stopped-note-last", &[]),
+        Some(left) => work.says("job-stopped-note-left", &[("count", number(left))]),
+        None => work.says("job-stopped-note", &[]),
+    }
 }
 
 /// `text`, the notice of a job that ended, and how many of its items (`gone`) the location
@@ -1638,7 +1607,10 @@ pub fn and_gone(text: String, gone: usize) -> String {
     if gone == 0 {
         text
     } else {
-        format!("{text} · {gone}개는 휴지통 대신 영구 삭제되었습니다")
+        format!(
+            "{text} · {}",
+            t("job-gone-instead", &[("count", count(gone))])
+        )
     }
 }
 
@@ -1655,17 +1627,17 @@ pub fn undone(record: &UndoRecord) -> String {
         // The record of an undo, or one added after this was written.
         _ => JobWork::Other,
     };
-    format!("{} 되돌렸습니다", work.phrases().object)
+    work.says("job-undone", &[])
 }
 
 /// The notice of a rename or a create that failed, with why: `이름을 바꾸지 못했습니다: 같은
 /// 이름의 항목이 이미 있습니다`.
 pub fn name_refused(work: JobWork, failure: &ItemFailure) -> String {
-    let what = match work {
-        JobWork::Create => "새 폴더를 만들지 못했습니다",
-        _ => "이름을 바꾸지 못했습니다",
+    let key = match work {
+        JobWork::Create => "job-create-refused",
+        _ => "job-rename-refused",
     };
-    format!("{what}: {}", item_failure(failure))
+    t(key, &[("reason", item_failure(failure).into())])
 }
 
 /// Why one item failed: its [`failure_reason`] when the job refused it, else the
@@ -1691,27 +1663,27 @@ pub fn failure_line(failure: &ItemFailure) -> String {
 
 /// The title of the window of failed items.
 pub fn failures_title() -> &'static str {
-    "처리하지 못한 항목"
+    t_static("job-failures-title")
 }
 
 /// The label of the toast's button that undoes the job it tells of.
 pub fn undo_action() -> &'static str {
-    "되돌리기"
+    t_static("toast-undo")
 }
 
 /// The label of the toast's button that shows the failed items.
 pub fn details_action() -> &'static str {
-    "자세히"
+    t_static("toast-details")
 }
 
 /// The notice when the toast's job is no longer the next one to undo.
 pub fn undo_order() -> &'static str {
-    "나중에 한 작업이 있어 먼저 그 작업을 되돌려야 합니다"
+    t_static("undo-order")
 }
 
 /// The notice when an undo or a redo is asked for while one is under way: one runs at a time.
 pub fn undo_busy() -> &'static str {
-    "되돌리기나 다시 실행이 진행 중입니다. 끝난 뒤에 다시 해 보세요"
+    t_static("undo-busy")
 }
 
 // ---- 되돌리기 기록 (OPS-12) ----
@@ -1731,18 +1703,18 @@ pub enum Stale {
 }
 
 /// The head of the group in the job panel.
-pub fn history_head(count: usize) -> String {
-    format!("되돌리기 기록 {count}개")
+pub fn history_head(n: usize) -> String {
+    t("history-head", &[("count", count(n))])
 }
 
 /// The head of the list of what can be undone.
-pub fn history_undo_section(count: usize) -> String {
-    format!("되돌릴 수 있음 {count}개")
+pub fn history_undo_section(n: usize) -> String {
+    t("history-undo-section", &[("count", count(n))])
 }
 
 /// The head of the list of what can be done again.
-pub fn history_redo_section(count: usize) -> String {
-    format!("다시 실행할 수 있음 {count}개")
+pub fn history_redo_section(n: usize) -> String {
+    t("history-redo-section", &[("count", count(n))])
 }
 
 /// How many cells the name of an item takes at most in a row of the history.
@@ -1768,28 +1740,31 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
     fn items(paths: &[&VPath]) -> String {
         match paths {
             [one] => named(one),
-            many => format!("{}개 항목", many.len()),
+            many => t("history-items", &[("count", count(many.len()))]),
         }
     }
-    let put = |label: &str, what: String| format!("{label}: {what}");
+    // The head of the row (a message), then what it was done to.
+    let put = |label: &'static str, what: String| format!("{}: {what}", t_static(label));
     let make = |kind: &CreateKind, path: &VPath| {
         let label = match kind {
-            CreateKind::File => "새 파일",
-            CreateKind::Dir => "새 폴더",
+            CreateKind::File => "history-new-file",
+            CreateKind::Dir => "history-new-folder",
         };
         put(label, named(path))
     };
     match (record, redo) {
-        (UndoRecord::Renamed { from, to }, false) => {
-            put("이름 바꾸기", format!("{} → {}", named(from), named(to)))
-        }
-        (UndoRecord::Renamed { from, to }, true) => {
-            put("이름 바꾸기", format!("{} → {}", named(to), named(from)))
-        }
+        (UndoRecord::Renamed { from, to }, false) => put(
+            "history-rename",
+            format!("{} → {}", named(from), named(to)),
+        ),
+        (UndoRecord::Renamed { from, to }, true) => put(
+            "history-rename",
+            format!("{} → {}", named(to), named(from)),
+        ),
         (UndoRecord::Moved { moves, .. }, false) => {
             let moved: Vec<&VPath> = moves.iter().map(|m| &m.to).collect();
             let into = moves.first().map(|m| folder_of(&m.to)).unwrap_or_default();
-            put("이동", format!("{} → {into}", items(&moved)))
+            put("history-move", format!("{} → {into}", items(&moved)))
         }
         (UndoRecord::Moved { moves, .. }, true) => {
             let moved: Vec<&VPath> = moves.iter().map(|m| &m.from).collect();
@@ -1797,7 +1772,7 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
                 .first()
                 .map(|m| folder_of(&m.from))
                 .unwrap_or_default();
-            put("이동", format!("{} → {into}", items(&moved)))
+            put("history-move", format!("{} → {into}", items(&moved)))
         }
         (UndoRecord::Copied { created, .. }, false) => {
             let made: Vec<&VPath> = created.iter().map(|item| &item.path).collect();
@@ -1805,20 +1780,20 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
                 .first()
                 .map(|item| folder_of(&item.path))
                 .unwrap_or_default();
-            put("복사", format!("{} → {into}", items(&made)))
+            put("history-copy", format!("{} → {into}", items(&made)))
         }
         (UndoRecord::Copied { created, .. }, true) => put(
-            "휴지통으로",
+            "history-to-trash",
             items(&created.iter().map(|item| &item.path).collect::<Vec<_>>()),
         ),
         (UndoRecord::Created { path, kind }, false)
         | (UndoRecord::Removed { path, kind }, true) => make(kind, path),
         (UndoRecord::Created { path, .. }, true) | (UndoRecord::Removed { path, .. }, false) => {
-            put("삭제", named(path))
+            put("history-delete", named(path))
         }
         (UndoRecord::Trashed { items: trashed }, false)
         | (UndoRecord::Restored { items: trashed }, true) => put(
-            "휴지통으로",
+            "history-to-trash",
             items(
                 &trashed
                     .iter()
@@ -1828,7 +1803,7 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
         ),
         (UndoRecord::Trashed { items: trashed }, true)
         | (UndoRecord::Restored { items: trashed }, false) => put(
-            "휴지통에서 꺼내기",
+            "history-from-trash",
             items(
                 &trashed
                     .iter()
@@ -1838,16 +1813,16 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
         ),
         (UndoRecord::LinksMade { at: links }, false)
         | (UndoRecord::LinksRemoved { links }, true) => put(
-            "링크 만들기",
+            "history-link",
             items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
         ),
         (UndoRecord::LinksMade { at: links }, true)
         | (UndoRecord::LinksRemoved { links }, false) => put(
-            "링크 지우기",
+            "history-unlink",
             items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
         ),
         // A record added after this was written.
-        _ => "작업".to_owned(),
+        _ => t_static("history-other").to_owned(),
     }
 }
 
@@ -1907,19 +1882,17 @@ fn clip_end(text: &str, max: usize) -> String {
 /// is the next one: the folders on screen can lag behind the disk, and the undo looks again
 /// itself.
 pub fn history_note(redo: bool, next: bool, stale: Option<Stale>) -> String {
-    let maybe = if redo {
-        "다시 실행하지 못할 수 있습니다"
-    } else {
-        "되돌리지 못할 수 있습니다"
+    let key = match (stale, next, redo) {
+        (Some(Stale::Missing), _, false) => "history-missing-undo",
+        (Some(Stale::Missing), _, true) => "history-missing-redo",
+        (Some(Stale::Changed), _, false) => "history-changed-undo",
+        (Some(Stale::Changed), _, true) => "history-changed-redo",
+        (None, true, false) => "history-next-undo",
+        (None, true, true) => "history-next-redo",
+        (None, false, false) => return undo_order().to_owned(),
+        (None, false, true) => "history-redo-first",
     };
-    match (stale, next, redo) {
-        (Some(Stale::Missing), _, _) => format!("항목이 목록에 보이지 않아 {maybe}"),
-        (Some(Stale::Changed), _, _) => format!("복사한 뒤 항목이 바뀌어 {maybe}"),
-        (None, true, false) => "다음에 되돌릴 작업".to_owned(),
-        (None, true, true) => "다음에 다시 실행할 작업".to_owned(),
-        (None, false, false) => undo_order().to_owned(),
-        (None, false, true) => "먼저 다시 실행할 작업이 있습니다".to_owned(),
-    }
+    t_static(key).to_owned()
 }
 
 /// The time of a row: `14:32` for today (the day of `now` in `tz`), `10월 30일 14:32` before.
@@ -1937,38 +1910,45 @@ pub fn history_time(at: SystemTime, now: SystemTime, tz: &TimeZone) -> String {
     if today.is_ok_and(|today| today == when.date()) {
         hour_minute
     } else {
-        format!("{}월 {}일 {hour_minute}", when.month(), when.day())
+        t(
+            "history-time-day",
+            &[
+                ("month", number(u64::from(when.month().unsigned_abs()))),
+                ("day", number(u64::from(when.day().unsigned_abs()))),
+                ("time", hour_minute.into()),
+            ],
+        )
     }
 }
 
 /// The label of a row's button.
 pub fn history_button(redo: bool) -> &'static str {
-    if redo {
-        "다시 실행"
+    t_static(if redo {
+        "history-redo-button"
     } else {
-        "되돌리기"
-    }
+        "history-undo-button"
+    })
 }
 
 /// The default name of a new folder.
 pub fn new_folder_name() -> &'static str {
-    "새 폴더"
+    t_static("name-new-folder")
 }
 
 /// The title of the window that asks for a new folder's name.
 pub fn new_folder_title() -> &'static str {
-    "새 폴더"
+    t_static("name-new-folder-title")
 }
 
 /// The default name of a new empty text file (새 파일 ▸ 빈 텍스트 파일, OPS-01): File Explorer's
 /// "새 텍스트 문서.txt" in the words of this app's menu.
 pub fn new_file_name() -> &'static str {
-    "새 텍스트 파일.txt"
+    t_static("name-new-file")
 }
 
 /// The title of the window that asks for a new file's name.
 pub fn new_file_title() -> &'static str {
-    "새 파일"
+    t_static("name-new-file-title")
 }
 
 /// The line of a folder in the visit history's menu (NAV-04): its name, and the folder it is in
@@ -1984,112 +1964,114 @@ pub fn history_entry(name: &str, parent: Option<&str>) -> String {
 
 /// The title of the window that asks for an item's new name.
 pub fn rename_title() -> &'static str {
-    "이름 바꾸기"
+    t_static("name-rename-title")
 }
 
 /// The warning under a name that holds a character no name may have on this system.
 pub fn name_has_character(c: char) -> String {
-    format!("이름에 {} 문자를 쓸 수 없습니다", quote_char(c))
+    t("name-has-character", &[("char", quote_char(c).into())])
 }
 
 /// The warning under `.` or `..`, which name the folder itself and its parent.
 pub fn name_is_dots() -> &'static str {
-    "‘.’과 ‘..’은 이름으로 쓸 수 없습니다"
+    t_static("name-is-dots")
 }
 
 /// The title of the confirmation before a permanent delete.
 pub fn delete_permanently_title() -> &'static str {
-    "영구 삭제"
+    t_static("delete-permanently-title")
 }
 
 /// The label of the button that deletes for good.
 pub fn delete_permanently_button() -> &'static str {
-    "영구 삭제"
+    t_static("delete-permanently-button")
 }
 
 /// The question before a permanent delete the user asked for (Shift+Delete): what goes and
 /// that nothing brings it back.
-pub fn delete_permanently(count: usize) -> String {
-    format!("항목 {count}개를 영구 삭제할까요?\n휴지통을 거치지 않으며 되돌릴 수 없습니다.")
+pub fn delete_permanently(n: usize) -> String {
+    t("delete-permanently", &[("count", count(n))])
 }
 
 /// The question before items of the trash are deleted for good (휴지통 ▸ 영구 삭제…, NAV-16):
 /// how many, their size when the trash knows it for every one, and that nothing brings them
 /// back.
-pub fn delete_from_trash(count: usize, size: Option<u64>) -> String {
-    format!(
-        "휴지통의 항목 {count}개{}를 영구 삭제할까요?\n되돌릴 수 없습니다.",
-        size_part(size)
-    )
+pub fn delete_from_trash(n: usize, size: Option<u64>) -> String {
+    sized("trash-delete-items", "trash-delete-items-sized", n, size)
 }
 
 /// The title and the button of the question before the trash is emptied.
 pub fn empty_trash_title() -> &'static str {
-    "휴지통 비우기"
+    t_static("trash-empty-title")
 }
 
 /// The question before the trash is emptied (휴지통 비우기…): how many items it holds as the
 /// list was read for the question, their size when the trash knows it for every one, and that
 /// nothing brings them back.
-pub fn empty_trash(count: usize, size: Option<u64>) -> String {
-    format!(
-        "휴지통의 항목 {count}개{}를 모두 영구 삭제할까요?\n되돌릴 수 없습니다.",
-        size_part(size)
-    )
+pub fn empty_trash(n: usize, size: Option<u64>) -> String {
+    sized("trash-empty", "trash-empty-sized", n, size)
 }
 
-/// `(1.2 MB)` after a count, for a size that is known; nothing for one that is not.
-fn size_part(size: Option<u64>) -> String {
-    size.map(|size| format!("({})", format_size(size)))
-        .unwrap_or_default()
+/// The message `key` of `n` items, or `with_size` with their size (`1.2 MB`) when it is known.
+fn sized(key: &str, with_size: &str, n: usize, size: Option<u64>) -> String {
+    match size {
+        Some(size) => t(
+            with_size,
+            &[("count", count(n)), ("size", format_size(size).into())],
+        ),
+        None => t(key, &[("count", count(n))]),
+    }
 }
 
 /// The notice when 휴지통 비우기… finds the trash empty.
 pub fn trash_already_empty() -> &'static str {
-    "휴지통이 비어 있습니다"
+    t_static("trash-already-empty")
 }
 
 /// The notice when the trash could not be read for 휴지통 비우기…, with why.
 pub fn trash_unreadable(kind: ErrorKind) -> String {
-    format!("휴지통을 읽지 못했습니다: {}", error_kind(kind))
+    with_reason("trash-unreadable", kind)
 }
 
 /// The notice when 복원 is asked for items whose original place the trash does not keep (macOS,
 /// or a record that cannot be read): only 위치를 골라 꺼내기… can take them out.
 pub fn restore_place_unknown() -> &'static str {
-    "원래 위치를 모르는 항목이 있어 복원할 수 없습니다. 위치를 골라 꺼내기…로 꺼내세요."
+    t_static("trash-place-unknown")
 }
 
 /// The notice after a restore that put every item back: how many, and where to (`to`, the name
 /// of the one folder they went into; none when they went to several, each to its own).
-pub fn restored(count: usize, to: Option<&str>) -> String {
+pub fn restored(n: usize, to: Option<&str>) -> String {
     match to {
-        Some(folder) => format!("항목 {count}개를 ‘{folder}’ 폴더로 복원했습니다"),
-        None => format!("항목 {count}개를 각각 원래 위치로 복원했습니다"),
+        Some(folder) => t(
+            "trash-restored-to",
+            &[("count", count(n)), ("folder", folder.into())],
+        ),
+        None => t("trash-restored", &[("count", count(n))]),
     }
 }
 
 /// The notice after a restore of which some items found their original folder gone: they stay
 /// in the trash, and the toast's button finds them another place.
-pub fn restore_folders_gone(count: usize) -> String {
-    format!("원래 폴더가 없어 항목 {count}개를 복원하지 못했습니다")
+pub fn restore_folders_gone(n: usize) -> String {
+    t("trash-folders-gone", &[("count", count(n))])
 }
 
 /// The label of the button that takes items out of the trash to a folder the user chooses.
 pub fn restore_elsewhere_action() -> &'static str {
-    "위치를 골라 꺼내기…"
+    t_static("trash-restore-elsewhere")
 }
 
 /// The notice when an item of the trash is opened (Enter, a double click): it is opened once it
 /// is back.
 pub fn trash_item_not_opened() -> &'static str {
-    "휴지통 안의 항목은 열 수 없습니다. 먼저 복원하세요."
+    t_static("trash-item-not-opened")
 }
 
 /// The notice when a drive of 내 PC cannot be opened: its row stands for no drive the sidebar
 /// knows (any more).
 pub fn drive_gone() -> &'static str {
-    "드라이브를 찾을 수 없습니다. 새로 고침(F5)으로 목록을 다시 읽으세요."
+    t_static("computer-drive-gone")
 }
 
 /// What a command could not do in a place of the shell (NAV-16): the trash and the computer are
@@ -2117,81 +2099,78 @@ pub enum Blocked {
 /// The notice when a command does nothing in the trash or the computer, and what is possible
 /// there: `휴지통에서는 새 폴더를 만들 수 없습니다. 항목은 복원하거나 영구 삭제할 수 있습니다.`
 pub fn shell_blocked(place: ShellPlace, what: Blocked) -> String {
-    let verb = match what {
-        Blocked::NewFolder => "새 폴더를 만들",
-        Blocked::NewFile => "새 파일을 만들",
-        Blocked::Paste => "붙여넣을",
-        Blocked::Rename => "이름을 바꿀",
-        Blocked::Link => "링크를 만들",
-        Blocked::Copy => "복사할",
-        Blocked::Cut => "잘라낼",
-        Blocked::Transfer => "복사하거나 옮길",
-        Blocked::CopyPath => "경로를 복사할",
-        Blocked::Properties => "속성을 볼",
-        Blocked::OpenWith => "다른 프로그램으로 열",
-        Blocked::Terminal => "터미널을 열",
-        Blocked::Preview => "미리 볼",
-        Blocked::Share => "공유할",
-        Blocked::Delete => "삭제할",
-        Blocked::Favorite => "즐겨찾기에 추가할",
+    // What could not be done, as the message's `$what` selects it.
+    let what = match what {
+        Blocked::NewFolder => "new_folder",
+        Blocked::NewFile => "new_file",
+        Blocked::Paste => "paste",
+        Blocked::Rename => "rename",
+        Blocked::Link => "link",
+        Blocked::Copy => "copy",
+        Blocked::Cut => "cut",
+        Blocked::Transfer => "transfer",
+        Blocked::CopyPath => "copy_path",
+        Blocked::Properties => "properties",
+        Blocked::OpenWith => "open_with",
+        Blocked::Terminal => "terminal",
+        Blocked::Preview => "preview",
+        Blocked::Share => "share",
+        Blocked::Delete => "delete",
+        Blocked::Favorite => "favorite",
     };
-    let what_can = match place {
-        ShellPlace::Trash => "항목은 복원하거나 영구 삭제할 수 있습니다.",
-        ShellPlace::Computer => "드라이브를 열면 그 안에서 할 수 있습니다.",
+    let place = match place {
+        ShellPlace::Trash => "trash",
+        ShellPlace::Computer => "computer",
     };
-    format!(
-        "{}에서는 {verb} 수 없습니다. {what_can}",
-        shell_place(place)
+    t(
+        "shell-blocked",
+        &[("place", place.into()), ("what", what.into())],
     )
 }
 
 /// What shows beside the pointer of a drag over the 휴지통 of the sidebar: a drop there sends
 /// the items to the trash.
 pub fn drop_to_trash() -> &'static str {
-    "휴지통으로 보내기"
+    t_static("drop-to-trash")
 }
 
 /// The question when the folder's location has no trash (OPS-03): the items would go for
 /// good, which only the user may choose.
-pub fn trash_unavailable(count: usize) -> String {
-    format!(
-        "휴지통을 쓸 수 없는 위치입니다.\n항목 {count}개를 영구 삭제할까요? 되돌릴 수 없습니다."
-    )
+pub fn trash_unavailable(n: usize) -> String {
+    t("trash-unavailable", &[("count", count(n))])
 }
 
 /// The question when the trash refused some items of a trash job: they are still there, and
 /// would go for good.
-pub fn trash_refused(count: usize) -> String {
-    format!(
-        "휴지통이 받지 않은 항목이 {count}개 있습니다.\n이 항목을 영구 삭제할까요? 되돌릴 수 없습니다."
-    )
+pub fn trash_refused(n: usize) -> String {
+    t("trash-refused", &[("count", count(n))])
 }
 
 /// What the confirmation after an undo of a copy says first, once a worker has found every
 /// copy's original as it was: the trash refused the copies, and nothing is lost without them.
 pub fn copies_refused() -> &'static str {
-    "복사본을 휴지통으로 보낼 수 없습니다. 원본은 그대로 있습니다."
+    t_static("copies-refused")
 }
 
 /// The question of that confirmation, under the copies' paths.
-pub fn delete_copies(count: usize) -> String {
-    format!("복사본 {count}개를 영구 삭제할까요? 되돌릴 수 없습니다.")
+pub fn delete_copies(n: usize) -> String {
+    t("copies-delete", &[("count", count(n))])
 }
 
 /// The toast once the copies an undo could not trash are deleted for good: the copy is undone.
-pub fn copies_deleted(count: usize) -> String {
-    format!("복사본 {count}개를 영구 삭제해 복사를 되돌렸습니다")
+pub fn copies_deleted(n: usize) -> String {
+    t("copies-deleted", &[("count", count(n))])
 }
 
 /// The toast when the copies an undo could not trash were all gone by the time their delete
 /// ran: nothing was deleted, and the copy is undone all the same.
 pub fn copies_were_gone() -> &'static str {
-    "복사본이 이미 없어 복사를 되돌렸습니다"
+    t_static("copies-were-gone")
 }
 
 /// The notice while a worker looks at the copies an undo could not trash and their originals.
 pub fn checking_originals() -> &'static str {
-    "원본을 확인하는 중…"
+    t_static("copies-checking")
 }
 
 /// Why the copies an undo could not trash were not offered for a permanent delete, or not
@@ -2199,14 +2178,14 @@ pub fn checking_originals() -> &'static str {
 /// (another kind, another size, something of the copy missing in it), or it could not be found
 /// out; or the copy itself was written to, is gone, or could not be looked at.
 pub fn copy_kept(why: CopyKept) -> &'static str {
-    match why {
-        CopyKept::OriginalMissing => "원본이 없어 복사본을 지우지 않았습니다",
-        CopyKept::OriginalChanged => "원본이 바뀌어 복사본을 지우지 않았습니다",
-        CopyKept::OriginalUnknown => "원본을 확인할 수 없어 복사본을 지우지 않았습니다",
-        CopyKept::CopyChanged => "복사본이 바뀌어 지우지 않았습니다",
-        CopyKept::CopyMissing => "복사본이 이미 없습니다",
-        CopyKept::CopyUnknown => "복사본을 확인할 수 없어 지우지 않았습니다",
-    }
+    t_static(match why {
+        CopyKept::OriginalMissing => "copy-kept-original-missing",
+        CopyKept::OriginalChanged => "copy-kept-original-changed",
+        CopyKept::OriginalUnknown => "copy-kept-original-unknown",
+        CopyKept::CopyChanged => "copy-kept-copy-changed",
+        CopyKept::CopyMissing => "copy-kept-copy-missing",
+        CopyKept::CopyUnknown => "copy-kept-copy-unknown",
+    })
 }
 
 /// Why a copy an undo could not trash stays ([`copy_kept`]).
@@ -2255,39 +2234,40 @@ pub fn shown_names_line(names: &[String]) -> String {
     let shown: Vec<String> = names
         .iter()
         .take(SHOWN)
-        .map(|name| format!("‘{name}’"))
+        .map(|name| t("names-quoted", &[("name", name.as_str().into())]))
         .collect();
     let mut line = shown.join(", ");
     if names.len() > SHOWN {
-        let _ = write!(line, " 외 {}개", names.len() - SHOWN);
+        let more = t("names-more", &[("count", count(names.len() - SHOWN))]);
+        let _ = write!(line, " {more}");
     }
     line
 }
 
 /// The title of the confirmation before the window closes while jobs run.
 pub fn quit_title() -> &'static str {
-    "끝낼까요?"
+    t_static("quit-title")
 }
 
 /// The label of the button that ends the app while jobs run.
 pub fn quit_button() -> &'static str {
-    "끝내기"
+    t_static("quit-button")
 }
 
 /// The question before the window closes while jobs run: they stop, and the next start offers
 /// them again.
-pub fn quit_with_jobs(count: usize) -> String {
-    format!("진행 중인 작업 {count}개가 있습니다.\n끝내면 다음 실행 때 이어서 할 수 있습니다.")
+pub fn quit_with_jobs(n: usize) -> String {
+    t("quit-with-jobs", &[("count", count(n))])
 }
 
 /// What the window shows while the jobs stop before the app ends.
 pub fn closing() -> &'static str {
-    "작업을 멈추고 있습니다…"
+    t_static("quit-closing")
 }
 
 /// The title of the window of the jobs that the last run did not finish.
-pub fn recovery_title(count: usize) -> String {
-    format!("지난번에 끝나지 않은 작업이 {count}개 있습니다")
+pub fn recovery_title(n: usize) -> String {
+    t("recovery-title", &[("count", count(n))])
 }
 
 /// What running a recovered job again may do (carry-m1-03 2), and what closing the window
@@ -2295,10 +2275,7 @@ pub fn recovery_title(count: usize) -> String {
 /// neither run again nor dropped is offered again at the next start. One sentence a line, so
 /// that a line breaks between words.
 pub fn recovery_note() -> &'static str {
-    "다시 실행하면 처음부터 다시 합니다.\n\
-     이미 끝난 항목은 건너뛰거나 번호를 붙인 사본이 생길 수 있습니다.\n\
-     이미 옮긴 항목은 찾을 수 없다고 나올 수 있습니다.\n\
-     닫으면 다음 실행 때 다시 묻습니다."
+    t_static("recovery-note")
 }
 
 /// One recovered job: `복사 · assets → /…/작업/백업 · 2026-10-28 22:08`, the target with the
@@ -2310,75 +2287,75 @@ pub fn recovered_job(spec: &JobSpec, submitted: &str, started: bool) -> String {
         let _ = write!(line, " · {submitted}");
     }
     if !started {
-        line.push_str(" (시작 전)");
+        line.push(' ');
+        line.push_str(t_static("recovery-not-started"));
     }
     line
 }
 
 /// The title of the conflict window, by what is at the target already.
 pub fn conflict_title(existing: EntryKind) -> &'static str {
-    match existing {
-        EntryKind::File => "같은 이름의 파일이 이미 있습니다",
-        EntryKind::Dir => "같은 이름의 폴더가 이미 있습니다",
-        EntryKind::Symlink | EntryKind::Other => "같은 이름의 항목이 이미 있습니다",
-    }
+    t_static(match existing {
+        EntryKind::File => "conflict-title-file",
+        EntryKind::Dir => "conflict-title-folder",
+        EntryKind::Symlink | EntryKind::Other => "conflict-title-item",
+    })
 }
 
 /// What the conflict is about: `‘설계안.pdf’가 C:\…\백업 에 이미 있습니다.`
 pub fn conflict_description(name: &str, folder: &str) -> String {
-    format!(
-        "‘{name}’{} {folder} 에 이미 있습니다.",
-        subject_particle(name)
+    t(
+        "conflict-description",
+        &[
+            ("name", name.into()),
+            ("folder", folder.into()),
+            ("ko-final", ko_final(name)),
+        ],
     )
+}
+
+/// Whether `word` ends in a final consonant as it is read, as the Korean messages' `$ko-final`
+/// selects it (`yes` or `no`) to choose the particle after it: `이` after a final consonant,
+/// else `가`. Hangul is read by its last syllable, digits and Latin letters by their Korean
+/// names (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else, and nothing, has none.
+fn ko_final(word: &str) -> FluentValue<'static> {
+    /// The first Hangul syllable, 가: the syllables after it come in runs of 28, the first of
+    /// each with no final consonant.
+    const FIRST_SYLLABLE: u32 = 0xAC00;
+    let final_consonant = word.chars().last().is_some_and(|last| match last {
+        '\u{AC00}'..='\u{D7A3}' => (u32::from(last) - FIRST_SYLLABLE) % 28 != 0,
+        '0' | '1' | '3' | '6' | '7' | '8' => true,
+        c if c.is_ascii_alphabetic() => matches!(c.to_ascii_lowercase(), 'l' | 'm' | 'n' | 'r'),
+        _ => false,
+    });
+    FluentValue::from(if final_consonant { "yes" } else { "no" })
+}
+
+/// An item of `kind` as the conflict window's messages' `$kind` selects it: `file`, `folder`, or
+/// `item` for a link or anything else.
+fn entry_arg(kind: EntryKind) -> FluentValue<'static> {
+    FluentValue::from(match kind {
+        EntryKind::File => "file",
+        EntryKind::Dir => "folder",
+        EntryKind::Symlink | EntryKind::Other => "item",
+    })
 }
 
 /// The head of a conflict card: the item that would come, by what `work` does with it (`복사해
 /// 올 파일`, `옮겨 올 폴더`), or the one that is there (`이미 있는 파일`), by its `kind`.
 pub fn conflict_card(incoming: bool, kind: EntryKind, work: JobWork) -> String {
-    let what = item_kind(kind);
+    let kind = [("kind", entry_arg(kind))];
     if incoming {
-        format!("{} {what}", coming(work))
+        work.says("conflict-card-incoming", &kind)
     } else {
-        format!("이미 있는 {what}")
+        t("conflict-card-existing", &kind)
     }
 }
 
 /// The hint of the skip choice of a conflict: what `work` leaves out (`이 파일은 복사하지
 /// 않습니다`), by the `kind` of the item that would come.
 pub fn skip_hint(kind: EntryKind, work: JobWork) -> String {
-    let (what, particle) = match kind {
-        EntryKind::File => ("파일", "은"),
-        EntryKind::Dir => ("폴더", "는"),
-        EntryKind::Symlink | EntryKind::Other => ("항목", "은"),
-    };
-    let verb = match work {
-        JobWork::Copy => "복사하지",
-        JobWork::Move => "옮기지",
-        // It stays in the trash.
-        JobWork::Restore => return format!("이 {what}{particle} 휴지통에 그대로 둡니다"),
-        _ => "가져오지",
-    };
-    format!("이 {what}{particle} {verb} 않습니다")
-}
-
-/// How the item that would come is called by what `work` does with it.
-fn coming(work: JobWork) -> &'static str {
-    match work {
-        JobWork::Copy => "복사해 올",
-        JobWork::Move => "옮겨 올",
-        JobWork::Restore => "복원할",
-        // A job this window did not start.
-        _ => "가져올",
-    }
-}
-
-/// An item of `kind` as a conflict names it.
-fn item_kind(kind: EntryKind) -> &'static str {
-    match kind {
-        EntryKind::File => "파일",
-        EntryKind::Dir => "폴더",
-        EntryKind::Symlink | EntryKind::Other => "항목",
-    }
+    work.says("conflict-skip", &[("kind", entry_arg(kind))])
 }
 
 /// The size of a conflict card: `1.2 MB (1,258,291 바이트)`, and the rounded size alone
@@ -2388,7 +2365,10 @@ pub fn exact_size(bytes: u64) -> String {
     if bytes < 1024 {
         return rounded;
     }
-    format!("{rounded} ({} 바이트)", grouped(bytes))
+    t(
+        "size-exact",
+        &[("size", rounded.into()), ("bytes", grouped(bytes).into())],
+    )
 }
 
 /// `number` with a comma between each three digits: `1,258,291`.
@@ -2408,26 +2388,26 @@ pub fn grouped(number: u64) -> String {
 /// it, or why there is none: a file and a folder never replace each other.
 pub fn overwrite_hint(can_overwrite: bool, work: JobWork) -> String {
     if can_overwrite {
-        format!("있던 파일을 {} 파일로 바꿉니다", coming(work))
+        work.says("conflict-overwrite", &[])
     } else if work == JobWork::Restore {
         failure_reason(&FailureReason::RestoreNeverReplaces)
     } else {
-        "파일과 폴더는 서로 덮어쓸 수 없습니다".to_owned()
+        t_static("conflict-overwrite-kind-mismatch").to_owned()
     }
 }
 
 /// The hint of the rename choice, with the first numbered name the job tries.
 pub fn rename_hint(numbered: &str) -> String {
-    format!("‘{numbered}’처럼 번호를 붙여 저장합니다")
+    t("conflict-rename", &[("name", numbered.into())])
 }
 
 /// The warning while overwrite is chosen: what it does to the file that is there.
 pub fn overwrite_warning(apply_all: bool) -> &'static str {
-    if apply_all {
-        "남은 충돌도 모두 덮어씁니다. 있던 파일의 내용은 되살릴 수 없습니다."
+    t_static(if apply_all {
+        "conflict-overwrite-warning-all"
     } else {
-        "있던 파일의 내용은 되살릴 수 없습니다."
-    }
+        "conflict-overwrite-warning"
+    })
 }
 
 /// The hint of the conflict window's 더 새 파일만 덮어쓰기: what it does to this file, which it
@@ -2437,12 +2417,12 @@ pub fn newer_hint(can_overwrite: bool, overwrites: bool, work: JobWork) -> Strin
     if !can_overwrite {
         return String::new();
     }
-    let coming = coming(work);
-    if overwrites {
-        format!("{coming} 파일이 더 최근이라 이 파일은 덮어씁니다")
+    let key = if overwrites {
+        "conflict-newer-overwrites"
     } else {
-        format!("{coming} 파일이 더 최근이 아니라 이 파일은 건너뜁니다")
-    }
+        "conflict-newer-skips"
+    };
+    work.says(key, &[])
 }
 
 /// The hint of the conflict window's 크기가 다를 때만 덮어쓰기: what it does to this file, which
@@ -2450,21 +2430,21 @@ pub fn newer_hint(can_overwrite: bool, overwrites: bool, work: JobWork) -> Strin
 pub fn size_differs_hint(can_overwrite: bool, overwrites: bool) -> &'static str {
     match (can_overwrite, overwrites) {
         (false, _) => "",
-        (true, true) => "크기가 달라 이 파일은 덮어씁니다",
-        (true, false) => "크기가 같아 이 파일은 건너뜁니다",
+        (true, true) => t_static("conflict-size-differs-overwrites"),
+        (true, false) => t_static("conflict-size-same-skips"),
     }
 }
 
 /// The warning while a conditional overwrite is chosen for the remaining conflicts too: each
 /// of them is decided by the same condition.
 pub fn conditional_warning_all() -> &'static str {
-    "남은 충돌도 같은 조건으로 덮어씁니다. 덮어쓴 파일의 내용은 되살릴 수 없습니다."
+    t_static("conflict-conditional-warning-all")
 }
 
 /// The title of the window that asks about an item a job could not process (XFER-09, 파일마다
 /// 묻기), by what the job does: `복사 중 오류가 났습니다`.
 pub fn error_ask_title(work: JobWork) -> String {
-    format!("{} 중 오류가 났습니다", work.noun())
+    work.says("error-ask-title", &[])
 }
 
 /// The item the error window asks about, by its whole path (the source, or the target when
@@ -2483,44 +2463,51 @@ pub fn error_ask_item(failure: &ItemFailure) -> String {
 /// 두었습니다", [`failure_reason`]) say here only what is wrong, since whether the item is left
 /// out is what the window asks. Any other failure reads as in that list ([`item_failure`]).
 pub fn error_ask_reason(failure: &ItemFailure) -> String {
-    let words = match &failure.reason {
-        Some(FailureReason::TooDeep) => "폴더 안 너무 깊은 곳에 있어 처리할 수 없습니다",
-        Some(FailureReason::NotARegularFile) => {
-            "장치나 파이프 같은 특수 파일이라 처리할 수 없습니다"
-        }
-        Some(FailureReason::SourceCutShort) => "복사하는 동안 원본 파일이 줄어들었습니다",
-        Some(FailureReason::OntoItself) => "대상 폴더가 원본이 있는 바로 그 폴더입니다",
-        Some(FailureReason::ChangedWhileMoved) => "옮기는 동안 항목이 바뀌었습니다",
-        Some(FailureReason::OtherVolume) => "다른 드라이브의 항목이라 함께 옮길 수 없습니다",
+    let key = match &failure.reason {
+        Some(FailureReason::TooDeep) => "error-ask-too-deep",
+        Some(FailureReason::NotARegularFile) => "error-ask-not-a-regular-file",
+        Some(FailureReason::SourceCutShort) => "error-ask-source-cut-short",
+        Some(FailureReason::OntoItself) => "error-ask-onto-itself",
+        Some(FailureReason::ChangedWhileMoved) => "error-ask-changed-while-moved",
+        Some(FailureReason::OtherVolume) => "error-ask-other-volume",
         _ => return item_failure(failure),
     };
-    words.to_owned()
+    t_static(key).to_owned()
 }
 
 /// What the error window says while 남은 오류에도 같은 선택 is on: why 다시 시도 is off.
 pub fn error_ask_retry_once() -> &'static str {
-    "다시 시도는 한 번에 한 항목만 할 수 있습니다"
+    t_static("error-ask-retry-once")
 }
 
 /// The items still to come in a job that asks about a conflict.
-pub fn items_left(count: u64) -> String {
-    format!("이 작업에 남은 항목 {count}개")
+pub fn items_left(n: u64) -> String {
+    t("job-items-left", &[("count", number(n))])
 }
 
 /// The title of the window of the pre-flight check.
 pub fn preflight_title() -> &'static str {
-    "대상 위치에 맞지 않는 항목이 있습니다"
+    t_static("preflight-title")
 }
 
 /// One line of the pre-flight window: the item's name and its [`preflight_issue`].
 pub fn preflight_line(target: &VPath, issue: &IssueKind) -> String {
-    format!(
-        "{}: {}.\n{}",
-        name_of(target),
-        issue_kind(issue),
-        preflight_follows(issue)
+    t(
+        "preflight-line",
+        &[
+            ("name", name_of(target).into()),
+            ("issue", issue_kind(issue).into()),
+            ("follows", preflight_follows(issue).into()),
+        ],
     )
 }
+
+// ---- i18n: words not yet moved ----
+//
+// Task 9b moves what follows to the Fluent files (`crates/rf-ui/i18n`) as the part above was
+// moved: until then its words are Korean in every language. The check
+// `i18n::tests::no_hangul_string_literal_outside_tests` allows Hangul literals in this file
+// below this line alone; 9b removes the line and the allowance.
 
 /// The title of the destination picker.
 pub fn pick_title(mode: TransferMode) -> &'static str {
@@ -2906,22 +2893,6 @@ pub fn preview_online_only() -> &'static str {
 /// comes back when the window is wide enough.
 pub fn preview_no_room() -> &'static str {
     "창이 좁아 미리 보기 패널을 숨겼습니다. 창을 넓히면 다시 보입니다"
-}
-
-/// The particle `이` or `가` after `word`, as it is read: `이` after a final consonant.
-/// Hangul is read by its last syllable, digits and Latin letters by their Korean names
-/// (`1` 일, `L` 엘, `M` 엠, `N` 엔, `R` 알); anything else takes `가`.
-fn subject_particle(word: &str) -> &'static str {
-    let Some(last) = word.chars().last() else {
-        return "가";
-    };
-    let final_consonant = match last {
-        '가'..='힣' => (u32::from(last) - u32::from('가')) % 28 != 0,
-        '0' | '1' | '3' | '6' | '7' | '8' => true,
-        c if c.is_ascii_alphabetic() => matches!(c.to_ascii_lowercase(), 'l' | 'm' | 'n' | 'r'),
-        _ => false,
-    };
-    if final_consonant { "이" } else { "가" }
 }
 
 /// The labels of the facts of the properties window (OPS-06), in their order.

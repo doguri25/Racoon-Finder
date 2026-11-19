@@ -18,8 +18,10 @@
 //!   and gives English its plural (`{ $count -> [one] 1 item *[other] { $count } items }`).
 //! - A sentence is one message in each language, never put together from pieces of another:
 //!   what a job did is a selector on its work (`{ $work -> [copy] … *[other] … }`).
-//! - A Korean particle (이/가) is chosen in Rust and passed as an argument whose name starts
-//!   with `ko-` (`$ko-ga`): only the Korean messages use such arguments.
+//! - A Korean particle that follows how a name is read (이/가) is chosen by the Korean message
+//!   from what Rust tells of the name, in an argument whose name starts with `ko-`
+//!   (`$ko-final`: `yes` when it ends in a final consonant, else `no`): only the Korean messages
+//!   use such arguments, and Rust holds no Korean word.
 //! - Every message may use `$os` ([`OS_ARG`]: `windows`, `macos` or `other`), the system the app
 //!   runs on, which the caller need not pass: English says "Recycle Bin" on Windows and "Trash"
 //!   elsewhere where Korean says 휴지통 on both. A caller that names a system passes `os` itself.
@@ -149,16 +151,20 @@ macro_rules! area {
 }
 
 /// The areas, each a file in every language's folder (a test holds the folders to this list).
-const AREAS: [(&str, &str, &str); 9] = [
+const AREAS: [(&str, &str, &str); 13] = [
+    area!("conflict"),
     area!("errors"),
     area!("format"),
+    area!("history"),
     area!("jobs"),
+    area!("names"),
     area!("notices"),
     area!("places"),
     area!("removal"),
     area!("shell"),
     area!("startup"),
     area!("status"),
+    area!("trash"),
 ];
 
 type Bundle = FluentBundle<FluentResource>;
@@ -1024,8 +1030,10 @@ mod tests {
             let moved = moved.split("#[cfg(test)]").next().unwrap_or_default();
             let chars: Vec<char> = moved.chars().collect();
             for (_, literal) in scan(&chars).literals {
+                // A `ko-` name is a Korean argument's, not a key.
                 let is_key = literal.contains('-')
                     && !literal.starts_with('-')
+                    && !literal.starts_with("ko-")
                     && literal
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');

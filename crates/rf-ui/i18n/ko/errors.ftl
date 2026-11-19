@@ -95,3 +95,11 @@ refused-other = 이 위치에는 둘 수 없습니다
 preflight-no-space = 계속하면 공간이 모자라 중간에 멈출 수 있습니다
 preflight-warning = 그대로 두면 Windows에서 열기 어려울 수 있습니다
 preflight-blocked = 이 항목은 대상 위치에 둘 수 없습니다
+
+## 검토 창 (words::preflight_title, words::preflight_line)
+
+preflight-title = 대상 위치에 맞지 않는 항목이 있습니다
+# $name: 항목의 이름, $issue: 사실(issue-*), $follows: 뒤따르는 것(preflight-*).
+preflight-line =
+    { $name }: { $issue }.
+    { $follows }

@@ -36,3 +36,9 @@ kind-audio = { $ext } 오디오
 kind-video = { $ext } 동영상
 kind-archive = { $ext } 압축 파일
 kind-other = { $ext } 파일
+
+## 수
+
+count-items = 항목 { $count }개
+# 충돌 창의 크기. $size: 크기(1.2 MB), $bytes: 쉼표로 묶은 바이트 수(1,258,291).
+size-exact = { $size } ({ $bytes } 바이트)

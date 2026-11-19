@@ -40,3 +40,8 @@ paste-left-out = { $count ->
         [one] 1 item on the clipboard was skipped: its path can't be pasted
        *[other] { $count } items on the clipboard were skipped: their paths can't be pasted
     }
+
+## The menu of Open With
+
+# The system's default app.
+shell-app-default = { $name } (default)

@@ -245,3 +245,286 @@ tray-continue = Continue in Tray
 tray-continue-menu-bar = Continue in Menu Bar
 tray-ask = Keep the jobs going in the tray until they finish?
 tray-ask-menu-bar = Keep the jobs going in the menu bar until they finish?
+
+## The notices of jobs that ended (words::items_done, words::trash_done, words::job_stopped,
+## words::undone)
+#
+# In job-items-done and job-items-partly-done, $work may also be drag: a move made by dragging.
+
+job-items-done =
+    { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } { $work ->
+        [copy] copied
+        [move] moved
+        [trash] moved to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] deleted
+        [rename] renamed
+        [create] created
+        [link] linked
+        [restore] restored
+        [undo] undone
+        [redo] redone
+        [drag] moved
+       *[other] done
+    }
+job-items-skipped = { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } skipped
+# When the conflict policy skipped some. $count: every item gone through, $done: those done,
+# $skipped: those skipped.
+job-items-partly-done =
+    { $done } of { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } { $work ->
+        [copy] copied
+        [move] moved
+        [trash] moved to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] deleted
+        [rename] renamed
+        [create] created
+        [link] linked
+        [restore] restored
+        [undo] undone
+        [redo] redone
+        [drag] moved
+       *[other] done
+    } · { $skipped } skipped
+# When the location deleted for good what was to go to the Recycle Bin or Trash.
+job-trash-all-gone =
+    { $count ->
+        [one] 1 item was
+       *[other] { $count } items were
+    } deleted permanently instead of going to the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    }
+job-trash-some-gone =
+    { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } moved to the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    }, and { $gone ->
+        [one] 1 was
+       *[other] { $gone } were
+    } deleted permanently instead
+job-items-failed = { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } couldn't be processed
+# Put after a notice with " · ".
+job-gone-instead =
+    { $count ->
+        [one] 1 item was
+       *[other] { $count } items were
+    } deleted permanently instead of going to the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    }
+job-undone =
+    Undid { $work ->
+        [copy] the copy
+        [move] the move
+        [trash] moving to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] the delete
+        [rename] the rename
+        [create] the new item
+        [link] the links
+        [restore] the restore
+        [undo] the undo
+        [redo] the redo
+       *[other] the job
+    }
+# When a rename or a new item failed. $reason: why (error-*, failure-*).
+job-create-refused = Couldn't create the new item: { $reason }
+job-rename-refused = Couldn't rename: { $reason }
+job-failures-title = Items Not Processed
+
+## A job that was stopped (words::job_stopped: the parts are joined with " · ",
+## words::job_stopped_note)
+
+job-stopped =
+    { $work ->
+        [copy] Copying
+        [move] Moving
+        [trash] { $os ->
+            [windows] Moving to the Recycle Bin
+           *[other] Moving to the Trash
+        }
+        [delete] Deleting
+        [rename] Renaming
+        [create] Creating
+        [link] Creating links
+        [restore] Restoring
+        [undo] Undo
+        [redo] Redo
+       *[other] The job
+    } stopped
+job-stopped-failed = { $count } failed
+job-stopped-left = { $count ->
+        [one] The 1 item left was
+       *[other] The { $count } items left were
+    } not processed
+job-stopped-left-unknown = The items left were not processed
+# The first line of the window of failed items: the job stopped at its last item.
+job-stopped-note-last =
+    { $work ->
+        [copy] Copying
+        [move] Moving
+        [trash] { $os ->
+            [windows] Moving to the Recycle Bin
+           *[other] Moving to the Trash
+        }
+        [delete] Deleting
+        [rename] Renaming
+        [create] Creating
+        [link] Creating links
+        [restore] Restoring
+        [undo] Undo
+        [redo] Redo
+       *[other] The job
+    } stopped at the items below.
+# $count items after them were left.
+job-stopped-note-left =
+    { $work ->
+        [copy] Copying
+        [move] Moving
+        [trash] { $os ->
+            [windows] Moving to the Recycle Bin
+           *[other] Moving to the Trash
+        }
+        [delete] Deleting
+        [rename] Renaming
+        [create] Creating
+        [link] Creating links
+        [restore] Restoring
+        [undo] Undo
+        [redo] Redo
+       *[other] The job
+    } stopped at the items below, and { $count ->
+        [one] the 1 item after them was
+       *[other] the { $count } items after them were
+    } not processed. To finish, start { $work ->
+        [copy] copying
+        [move] moving
+        [trash] moving to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] deleting
+        [rename] renaming
+        [create] creating
+        [link] creating links
+        [restore] restoring
+        [undo] the undo
+        [redo] the redo
+       *[other] the job
+    } again.
+# How many items are left is not known.
+job-stopped-note =
+    { $work ->
+        [copy] Copying
+        [move] Moving
+        [trash] { $os ->
+            [windows] Moving to the Recycle Bin
+           *[other] Moving to the Trash
+        }
+        [delete] Deleting
+        [rename] Renaming
+        [create] Creating
+        [link] Creating links
+        [restore] Restoring
+        [undo] Undo
+        [redo] Redo
+       *[other] The job
+    } stopped at the items below, and the items after them were not processed. To finish, start { $work ->
+        [copy] copying
+        [move] moving
+        [trash] moving to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] deleting
+        [rename] renaming
+        [create] creating
+        [link] creating links
+        [restore] restoring
+        [undo] the undo
+        [redo] the redo
+       *[other] the job
+    } again.
+
+## The window that asks about an error (XFER-09, ask for each file)
+
+error-ask-title =
+    An error occurred while { $work ->
+        [copy] copying
+        [move] moving
+        [trash] moving to the { $os ->
+            [windows] Recycle Bin
+           *[other] Trash
+        }
+        [delete] deleting
+        [rename] renaming
+        [create] creating
+        [link] creating links
+        [restore] restoring
+        [undo] undoing
+        [redo] redoing
+       *[other] working
+    }
+# Why, while the job still waits for the answer: it does not say the item was skipped (the
+# failure-* lines do, once the job has ended).
+error-ask-too-deep = It is too deep inside folders to be processed
+error-ask-not-a-regular-file = It is a special file, such as a device or a pipe, and can't be processed
+error-ask-source-cut-short = The original file got shorter while it was copied
+error-ask-onto-itself = The target is the folder the original is in
+error-ask-changed-while-moved = The item changed while it was moved
+error-ask-other-volume = The item is on another drive and can't be moved with the others
+error-ask-retry-once = Retry works on one item at a time
+# The items still to come in a job that asks about a conflict.
+job-items-left = { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    } left in this job
+
+## Quitting while jobs run, and the jobs the last run did not finish
+
+quit-title = Quit?
+quit-button = Quit
+quit-with-jobs =
+    { $count ->
+        [one] 1 job is running.
+       *[other] { $count } jobs are running.
+    }
+    If you quit, you can go on with { $count ->
+        [one] it
+       *[other] them
+    } the next time the app starts.
+quit-closing = Stopping the jobs…
+recovery-title = { $count ->
+        [one] 1 job
+       *[other] { $count } jobs
+    } didn't finish last time
+# One sentence a line, so that a narrow window breaks lines between words.
+recovery-note =
+    Running a job again starts it over from the beginning.
+    Items it had finished may be skipped or get numbered copies.
+    Items it had moved may be reported as not found.
+    If you close this, you'll be asked again at the next start.
+# At the end of the line of a job that never started, and so changed nothing.
+recovery-not-started = (not started)

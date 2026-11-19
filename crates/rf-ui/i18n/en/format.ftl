@@ -67,3 +67,12 @@ kind-audio = { $ext } Audio
 kind-video = { $ext } Video
 kind-archive = { $ext } Archive
 kind-other = { $ext } File
+
+## Counts
+
+count-items = { $count ->
+        [one] 1 item
+       *[other] { $count } items
+    }
+# The size of a conflict card. $size: a size (1.2 MB), $bytes: the bytes, grouped (1,258,291).
+size-exact = { $size } ({ $bytes } bytes)
