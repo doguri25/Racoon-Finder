@@ -325,14 +325,15 @@ export component FileGrid inherits Rectangle {
     // The room of an item; an item takes all of it but a 4px gap. Its width is Rust's
     // `ViewMode::cell_width` (a test holds the two together): the thumbnails' square with 12px
     // at each side, and the tiles 260. Its height follows the theme (THEME-07): 목록 and the
-    // small icons are rows of the list (its row height less 2px), the larger icons and the
-    // thumbnails have two lines of the name under the picture, and the tiles three lines beside
-    // it, which grow with the size of the text past the room they have at 14px (`name-grow`,
-    // `lines-grow`); at 보통 and 100 % 30, 112, 156, 220, the thumbnails' square + 60, and 64.
+    // small icons are rows of the list (its row height less 2px, never less than their line of
+    // text and 6px, which 촘촘하게 would cut), the larger icons and the thumbnails have two lines
+    // of the name under the picture, and the tiles three lines beside it, which grow with the
+    // size of the text past the room they have at 14px (`name-grow`, `lines-grow`); at 보통 and
+    // 100 % 30, 112, 156, 220, the thumbnails' square + 60, and 64.
     private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : root.mode == 4 ? 136px : root.mode == 6 ? root.thumb-size + 24px : root.mode == 7 ? 260px : 184px;
     private property <length> name-grow: max(0px, 2 * Theme.line(Theme.font-body) - 42px);
     private property <length> lines-grow: max(0px, Theme.line(Theme.font-body) + 2 * Theme.line(Theme.font-small) - 57px);
-    private property <length> tile-h: root.mode <= 2 ? Theme.row-height - 2px : root.mode == 7 ? 64px + root.lines-grow : root.name-grow + (root.mode == 3 ? 112px : root.mode == 4 ? 156px : root.mode == 6 ? root.thumb-size + 60px : 220px);
+    private property <length> tile-h: root.mode <= 2 ? max(Theme.row-height - 2px, Theme.line(Theme.font-body) + 6px) : root.mode == 7 ? 64px + root.lines-grow : root.name-grow + (root.mode == 3 ? 112px : root.mode == 4 ? 156px : root.mode == 6 ? root.thumb-size + 60px : 220px);
     // The scroll bar's room, which the items leave free.
     private property <length> bar: 14px;
     // The icons: how many a row holds, and how many rows there are.

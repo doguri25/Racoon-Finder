@@ -82,8 +82,9 @@ component Card inherits Rectangle {
         padding-bottom: 10px;
         spacing: 8px;
 
+        // Its head: a line of small text (22px at 12px, more with a larger size of text).
         HorizontalLayout {
-            height: 22px;
+            height: max(22px, Theme.line(Theme.font-small));
 
             Text {
                 text: root.label;
@@ -260,12 +261,36 @@ export component ConflictDialog inherits DialogFrame {
     private property <int> serial: root.view.serial;
     changed serial => {
         root.on-button = -1;
+        flick.content-y = 0px;
     }
-    // The content is taller than the dialog (THEME-07): it scrolls, under its buttons.
-    private property <bool> overflowing: flick.content-height > flick.height;
+    // The content is taller than the dialog (THEME-07): it scrolls, under its buttons. Up to 12px
+    // more than the dialog it does not: those go into the content's bottom padding, so that a
+    // font whose lines are taller than this machine's (Noto Sans CJK's 1.45 times their size)
+    // does not make the window scroll at 보통 and 100 %.
+    private property <bool> overflowing: body.preferred-height > flick.height + 12px;
+    // The height of the buttons' row at the foot, with the gap above it and the padding below.
+    private property <length> foot-height: 12px + 40px + 20px;
     // The part the keys are on comes into sight, where the dialog scrolls.
     changed on-button => {
         flick.content-y = root.on-button < 0 ? 0px : min(0px, flick.height - flick.content-height);
+    }
+    // ↑, ↓ or a click chose another choice, or the warning under the choices changed: the choices
+    // and the warning come into sight above the foot, where the dialog scrolls and the keys are on
+    // the choices. Not for a new question, whose choice is the first again: it starts at the top.
+    changed choice => {
+        root.show-choices();
+    }
+    changed warning => {
+        root.show-choices();
+    }
+    function show-choices() {
+        if (!root.overflowing || root.on-button >= 0 || root.picked-for != root.view.serial) {
+            return;
+        }
+        let room = flick.height - root.foot-height;
+        let end = warning-box.y + warning-box.height;
+        let lowest = min(0px, flick.height - flick.content-height);
+        flick.content-y = max(lowest, min(0px, max(-choices.y, min(flick.content-y, room - end))));
     }
 
     width: 760px;
@@ -353,7 +378,7 @@ export component ConflictDialog inherits DialogFrame {
         // and 100 %), nothing of this shows.
         flick := Flickable {
             content-width: self.width;
-            content-height: max(self.height, body.preferred-height);
+            content-height: root.overflowing ? body.preferred-height : self.height;
 
             body := VerticalLayout {
                 width: flick.content-width;
@@ -406,7 +431,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                 }
 
-                VerticalLayout {
+                choices := VerticalLayout {
                     spacing: 4px;
                     accessible-role: radio-group;
                     accessible-label: "어떻게 할까요?";
@@ -471,13 +496,14 @@ export component ConflictDialog inherits DialogFrame {
                     }
                 }
 
-                Rectangle {
+                // What the choice destroys, at the top of the room the rest leave: as many lines
+                // as it takes (a larger size of text wraps it), at least 20px.
+                warning-box := VerticalLayout {
                     vertical-stretch: 1;
                     min-height: 20px;
+                    alignment: start;
 
-                    if root.warning != "": Text {
-                        y: 0;
-                        width: parent.width;
+                    Text {
                         text: root.warning;
                         color: Theme.text;
                         font-weight: 500;
@@ -485,42 +511,35 @@ export component ConflictDialog inherits DialogFrame {
                     }
                 }
 
-                AnswerRow {
-                    apply-all: root.apply-all;
-                    items-left: root.view.items-left;
-                    on-button: root.on-button;
-                    overwrites-this: root.overwrites-this;
-                    toggle-all => {
-                        root.toggle-all();
-                        keys.focus();
-                    }
-                    cancel => {
-                        root.cancelled();
-                    }
-                    answer => {
-                        root.answered(root.choice, root.apply-all);
-                    }
+                // The room of the row of buttons, which lies at the foot (below).
+                Rectangle {
+                    height: 40px;
                 }
             }
         }
 
-        // Where the dialog scrolls, its row of buttons stays at its foot, over the content that
-        // scrolls under it (the row in the content lies under this one once it is scrolled to
-        // the end).
-        if root.overflowing: Rectangle {
-            y: root.height - self.height;
-            height: 20px + 40px + 12px;
-            background: Theme.panel;
+        // The row of buttons, at the foot: where the content fits, just where the content's
+        // last row would be (the content keeps its room); where the dialog scrolls, over the
+        // content that scrolls under it, with a line above it. It is the only one, so a screen
+        // reader finds each of its controls once, and it takes every click on it, also on its
+        // blank parts, so that none reaches a choice scrolled under it.
+        Rectangle {
+            x: root.border-width;
+            y: root.height - root.foot-height;
+            width: root.width - 2 * root.border-width;
+            height: root.foot-height - root.border-width;
+            background: root.overflowing ? Theme.panel : transparent;
 
-            Rectangle {
+            TouchArea { }
+            if root.overflowing: Rectangle {
                 y: 0;
                 height: 1px;
                 background: Theme.border;
             }
             AnswerRow {
-                x: 28px;
+                x: 28px - root.border-width;
                 y: 12px;
-                width: parent.width - 56px;
+                width: root.width - 56px;
                 height: 40px;
                 apply-all: root.apply-all;
                 items-left: root.view.items-left;
@@ -541,7 +560,7 @@ export component ConflictDialog inherits DialogFrame {
 
         // The bar that says the dialog scrolls, beside the part that does.
         if root.overflowing: Rectangle {
-            private property <length> room: root.height - 72px - 8px;
+            private property <length> room: root.height - root.foot-height - 8px;
 
             x: root.width - 7px;
             y: 4px + (self.room - self.height) * (-flick.content-y / max(1px, flick.content-height - flick.height));

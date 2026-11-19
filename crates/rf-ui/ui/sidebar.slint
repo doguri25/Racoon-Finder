@@ -212,8 +212,8 @@ component TreeItem inherits Rectangle {
     callback menu-command(name: string);
 
     // The head of a section, and of the group of recent folders: a line of small text with 6px
-    // around it at the top of the list (24px at 14px text), and 12px more above the drives,
-    // which come after the favorites; it grows with the size of the text (THEME-07).
+    // around it at the top of the list (24px at the 12px small text), and 12px more above the
+    // drives, which come after the favorites; it grows with the size of the text (THEME-07).
     private property <length> first-head: max(24px, Theme.line(Theme.font-small) + 6px);
     private property <length> head-room: root.index > 0 ? root.first-head + 12px : root.first-head;
     private property <length> head-height: root.item.head == SectionHead.none ? 0px : root.head-room;

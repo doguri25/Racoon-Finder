@@ -10857,9 +10857,10 @@ fn the_rows_on_screen_and_the_row_under_a_point_follow_the_row_height() {
 }
 
 /// THEME-07: the items of 목록 and the small icons are rows of the list (its row height less
-/// 2px, an item taking all but its gap), and the names under the larger icons and the tiles' lines
-/// grow with the size of the text; at 보통 and 100 % they are as before. Rust's reckoning of how
-/// many a row holds (its widths) stays the screen's.
+/// 2px, and never less than their line of text and 6px; an item taking all but its gap), and the
+/// names under the larger icons and the tiles' lines grow with the size of the text; at 보통 and
+/// 100 % they are as before. Rust's reckoning of how many a row holds (its widths) stays the
+/// screen's.
 #[test]
 fn the_items_of_the_icon_views_follow_the_row_height_and_the_size_of_the_text() {
     let window = window();
@@ -10876,13 +10877,15 @@ fn the_items_of_the_icon_views_follow_the_row_height_and_the_size_of_the_text() 
         let tokens = scaled_light(density, scale);
         ui_bridge::show_theme(&window, &tokens);
         let row = tokens.size.row_height;
+        // A small item's room: a row of the list less 2px, at least its line of text and 6px.
+        let line = (row - 2.0).max(theme::line(tokens.font.body) + 6.0);
         let two_lines = 2.0 * theme::line(tokens.font.body);
         let grow = (two_lines - 42.0).max(0.0);
         let three_lines = theme::line(tokens.font.body) + 2.0 * theme::line(tokens.font.small);
         let tiles_grow = (three_lines - 57.0).max(0.0);
         for (mode, height) in [
-            (ViewMode::List, row - 4.0),
-            (ViewMode::SmallIcons, row - 6.0),
+            (ViewMode::List, line - 2.0),
+            (ViewMode::SmallIcons, line - 4.0),
             (ViewMode::MediumIcons, 108.0 + grow),
             (ViewMode::LargeIcons, 152.0 + grow),
             (ViewMode::ExtraLargeIcons, 216.0 + grow),
@@ -10896,9 +10899,15 @@ fn the_items_of_the_icon_views_follow_the_row_height_and_the_size_of_the_text() 
             window.set_left_pane(models.view(&pane, true));
             slint::platform::update_timers_and_animations();
             assert_eq!(item(&window).size().height, height, "{what} {mode:?}");
+            // No item is lower than its line of text and 2px.
+            assert!(
+                item(&window).size().height >= theme::line(tokens.font.body) + 2.0,
+                "{what} {mode:?}"
+            );
         }
     }
-    // At 보통 and 100 % the heights are those before the tokens: 30 − 4, 30 − 2, 112 − 4, …
+    // At 보통 and 100 % the heights are those before the tokens: 목록 30 − 2, 작은 아이콘 30 − 4,
+    // 보통 아이콘 112 − 4, …
     ui_bridge::show_theme(&window, &scaled_light(Density::Normal, FontScale::Normal));
     pane.active_tab_mut().set_view(FolderView {
         mode: ViewMode::MediumIcons,
@@ -11075,7 +11084,8 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
     );
     for label in ["작업 취소", "계속"] {
         let buttons = labelled(&normal, label, AccessibleRole::Button);
-        assert!(buttons.iter().any(&inside), "{label}");
+        assert_eq!(buttons.len(), 1, "{label}");
+        assert!(inside(&buttons[0]), "{label}");
     }
 
     let window = open(Density::Roomy, FontScale::Largest, &long);
@@ -11236,4 +11246,194 @@ fn the_picker_s_conflict_choice_goes_under_its_heading_where_it_does_not_fit_bes
             );
         }
     }
+}
+
+/// A conflict window at 900×560, 넉넉하게 and 130 %, whose description has `lines` lines: taller
+/// than the window on any font (see `the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look`).
+/// The first window of a test (the backend is set up once).
+fn overflowing_conflict_window(lines: usize) -> MainWindow {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let description = (1..=lines)
+        .map(|line| format!("{line}번째 줄"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    window.set_conflict_view(ConflictView {
+        description: description.into(),
+        ..conflict_view()
+    });
+    ui_bridge::show_theme(&window, &scaled_light(Density::Roomy, FontScale::Largest));
+    window.set_dialog(DialogKind::Conflict);
+    slint::platform::update_timers_and_animations();
+    window
+}
+
+/// The five choices of the conflict window that are in sight, with their top and bottom.
+fn choices_in_sight(window: &MainWindow) -> Vec<(String, ElementHandle, f32, f32)> {
+    [
+        "덮어쓰기",
+        "건너뛰기",
+        "이름 바꿔 둘 다 두기",
+        "더 새 파일만 덮어쓰기",
+        "크기가 다를 때만 덮어쓰기",
+    ]
+    .into_iter()
+    .flat_map(|label| {
+        labelled(window, label, AccessibleRole::RadioButton)
+            .into_iter()
+            .map(move |row| {
+                let top = row.absolute_position().y;
+                let bottom = top + row.size().height;
+                (label.to_owned(), row, top, bottom)
+            })
+    })
+    .collect()
+}
+
+/// Where the conflict window scrolls, its foot (the row of buttons pinned at the bottom) takes
+/// every click: a click on its blank strip over a choice scrolled under it chooses nothing, where
+/// a click on a choice in sight does. And a screen reader finds the box and each button once,
+/// whether the window scrolls or not. With a four-line description the choices run from below
+/// 390px (on fonts whose line is up to 1.45 times their size) to past 534px (at least 1×), so one
+/// lies under the foot's strip at 488–500px on any font.
+#[test]
+fn the_conflict_window_s_foot_takes_its_clicks_and_holds_each_control_once() {
+    let window = overflowing_conflict_window(4);
+    let checked = |window: &MainWindow| {
+        choices_in_sight(window)
+            .into_iter()
+            .filter(|(_, row, _, _)| row.accessible_checked() == Some(true))
+            .map(|(label, ..)| label)
+            .collect::<Vec<_>>()
+    };
+    for (label, role) in [
+        ("남은 충돌에도 같은 선택 적용", AccessibleRole::Checkbox),
+        ("작업 취소", AccessibleRole::Button),
+        ("계속", AccessibleRole::Button),
+    ] {
+        assert_eq!(labelled(&window, label, role).len(), 1, "{label} once");
+    }
+    let foot = labelled(&window, "계속", AccessibleRole::Button).remove(0);
+    let foot_top = foot.absolute_position().y;
+    assert!(foot.absolute_position().y + foot.size().height <= 560.0);
+    // The foot's blank strip: the 12px above its buttons.
+    let under = (1_u8..=11)
+        .map(|d| foot_top - f32::from(d))
+        .find_map(|y| {
+            choices_in_sight(&window)
+                .into_iter()
+                .find(|(_, _, top, bottom)| *top <= y && y < *bottom)
+                .map(|(label, row, ..)| {
+                    let x = row.absolute_position().x + row.size().width / 2.0;
+                    (label, x, y)
+                })
+        })
+        .expect("a choice under the foot's strip");
+    assert_eq!(checked(&window), ["이름 바꿔 둘 다 두기"]);
+    click_at(&window, under.1, under.2);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        checked(&window),
+        ["이름 바꿔 둘 다 두기"],
+        "a click on the foot over {}",
+        under.0
+    );
+    // A choice in sight above the foot takes a click (the window scrolls, so the click goes
+    // through its flicking first).
+    let (label, row, _, _) = choices_in_sight(&window)
+        .into_iter()
+        .find(|(label, _, top, bottom)| {
+            label == "건너뛰기" && *top >= 0.0 && *bottom <= foot_top - 12.0
+        })
+        .or_else(|| {
+            choices_in_sight(&window)
+                .into_iter()
+                .find(|(label, _, top, bottom)| {
+                    label != "이름 바꿔 둘 다 두기" && *top >= 0.0 && *bottom <= foot_top - 12.0
+                })
+        })
+        .expect("a choice in sight");
+    let at = row.absolute_position();
+    click_at(&window, at.x + 40.0, at.y + row.size().height / 2.0);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(checked(&window), [label]);
+    // Scrolled to the end (the keys on the box), where the content's own room for the buttons
+    // lies under the foot: still one of each.
+    press(&window, Key::Tab);
+    slint::platform::update_timers_and_animations();
+    for (label, role) in [
+        ("남은 충돌에도 같은 선택 적용", AccessibleRole::Checkbox),
+        ("작업 취소", AccessibleRole::Button),
+        ("계속", AccessibleRole::Button),
+    ] {
+        assert_eq!(
+            labelled(&window, label, role).len(),
+            1,
+            "{label} once, at the end"
+        );
+    }
+}
+
+/// Where the conflict window scrolls, ↑ and ↓ bring the chosen choice and the warning under the
+/// choices into sight above the buttons; a new question starts at the top again.
+#[test]
+fn the_conflict_window_brings_the_chosen_choice_and_its_warning_into_sight() {
+    let window = overflowing_conflict_window(8);
+    let foot_top = labelled(&window, "계속", AccessibleRole::Button)
+        .remove(0)
+        .absolute_position()
+        .y;
+    let title = |window: &MainWindow| {
+        labelled(
+            window,
+            "같은 이름의 파일이 이미 있습니다",
+            AccessibleRole::Text,
+        )
+        .first()
+        .map(|text| text.absolute_position().y)
+    };
+    assert!(title(&window).is_some_and(|y| y >= 0.0));
+    // ↓ twice: 크기가 다를 때만 덮어쓰기, which overwrites this file, and says so.
+    press(&window, Key::DownArrow);
+    press(&window, Key::DownArrow);
+    slint::platform::update_timers_and_animations();
+    let chosen = choices_in_sight(&window)
+        .into_iter()
+        .find(|(label, ..)| label == "크기가 다를 때만 덮어쓰기")
+        .expect("the chosen choice in sight");
+    assert_eq!(chosen.1.accessible_checked(), Some(true));
+    assert!(
+        chosen.2 >= 0.0 && chosen.3 <= foot_top,
+        "{} to {}",
+        chosen.2,
+        chosen.3
+    );
+    let warning = labelled(
+        &window,
+        "있던 파일의 내용은 되살릴 수 없습니다.",
+        AccessibleRole::Text,
+    )
+    .remove(0);
+    let warning_end = warning.absolute_position().y + warning.size().height;
+    assert!(
+        warning_end <= foot_top,
+        "the warning ends at {warning_end}, the foot at {foot_top}"
+    );
+    assert!(
+        title(&window).is_none_or(|y| y < 0.0),
+        "scrolled down: {:?}",
+        title(&window)
+    );
+    // A new question: the top again, its title in sight.
+    window.set_conflict_view(ConflictView {
+        serial: 2,
+        description: "a\nb\nc\nd\ne\nf\ng\nh".into(),
+        ..conflict_view()
+    });
+    slint::platform::update_timers_and_animations();
+    assert!(
+        title(&window).is_some_and(|y| y >= 0.0),
+        "{:?}",
+        title(&window)
+    );
 }
