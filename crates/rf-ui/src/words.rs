@@ -1743,6 +1743,15 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
             many => t("history-items", &[("count", count(many.len()))]),
         }
     }
+    /// Items of the trash, by where they were.
+    fn originals(trashed: &[rf_jobs::TrashedItem]) -> String {
+        items(
+            &trashed
+                .iter()
+                .map(|item| &item.original)
+                .collect::<Vec<_>>(),
+        )
+    }
     // The head of the row, then what it was done to.
     let put = |label: &str, what: String| format!("{label}: {what}");
     let make = |kind: &CreateKind, path: &VPath| {
@@ -1801,25 +1810,13 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
             put(t_static("history-delete"), named(path))
         }
         (UndoRecord::Trashed { items: trashed }, false)
-        | (UndoRecord::Restored { items: trashed }, true) => put(
-            t_static("history-to-trash"),
-            items(
-                &trashed
-                    .iter()
-                    .map(|item| &item.original)
-                    .collect::<Vec<_>>(),
-            ),
-        ),
+        | (UndoRecord::Restored { items: trashed }, true) => {
+            put(t_static("history-to-trash"), originals(trashed))
+        }
         (UndoRecord::Trashed { items: trashed }, true)
-        | (UndoRecord::Restored { items: trashed }, false) => put(
-            t_static("history-from-trash"),
-            items(
-                &trashed
-                    .iter()
-                    .map(|item| &item.original)
-                    .collect::<Vec<_>>(),
-            ),
-        ),
+        | (UndoRecord::Restored { items: trashed }, false) => {
+            put(t_static("history-from-trash"), originals(trashed))
+        }
         (UndoRecord::LinksMade { at: links }, false)
         | (UndoRecord::LinksRemoved { links }, true) => put(
             t_static("history-link"),
@@ -2332,7 +2329,7 @@ fn ko_final(word: &str) -> FluentValue<'static> {
     /// each with no final consonant.
     const FIRST_SYLLABLE: u32 = 0xAC00;
     let final_consonant = word.chars().last().is_some_and(|last| match last {
-        '\u{AC00}'..='\u{D7A3}' => (u32::from(last) - FIRST_SYLLABLE) % 28 != 0,
+        '\u{AC00}'..='\u{D7A3}' => !(u32::from(last) - FIRST_SYLLABLE).is_multiple_of(28),
         '0' | '1' | '3' | '6' | '7' | '8' => true,
         c if c.is_ascii_alphabetic() => matches!(c.to_ascii_lowercase(), 'l' | 'm' | 'n' | 'r'),
         _ => false,

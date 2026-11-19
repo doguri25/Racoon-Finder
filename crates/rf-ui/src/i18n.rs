@@ -704,13 +704,12 @@ mod tests {
                             .strip_prefix('{')
                             .and_then(|hex| u32::from_str_radix(&hex.replace('_', ""), 16).ok())
                             .and_then(char::from_u32);
-                        match decoded {
-                            Some(decoded) => out.push(decoded),
-                            None => {
-                                out.push_str("\\u");
-                                out.push_str(&code);
-                                out.push('}');
-                            }
+                        if let Some(decoded) = decoded {
+                            out.push(decoded);
+                        } else {
+                            out.push_str("\\u");
+                            out.push_str(&code);
+                            out.push('}');
                         }
                     }
                     Some(other) => {
@@ -731,6 +730,24 @@ mod tests {
         literals: Vec<Literal>,
     }
 
+    /// The literal of `chars` that starts at `at` and ends at `end`, its text from `from` to `to`.
+    fn literal(
+        chars: &[char],
+        at: usize,
+        (from, to): (usize, usize),
+        end: usize,
+        written: Written,
+    ) -> Literal {
+        Literal {
+            at,
+            end,
+            text: chars[from.min(chars.len())..to.min(chars.len())]
+                .iter()
+                .collect(),
+            written,
+        }
+    }
+
     /// `chars` with its comments and its string and character literals blanked (the line breaks
     /// kept), and the literals as written, escapes and all.
     fn scan(chars: &[char]) -> Scanned {
@@ -744,9 +761,6 @@ mod tests {
             }
         };
         let at = |i: usize| chars.get(i).copied();
-        let text = |from: usize, to: usize| -> String {
-            chars[from..to.min(chars.len())].iter().collect()
-        };
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
@@ -797,12 +811,7 @@ mod tests {
                     end += 1;
                 }
                 let after = end + 1 + hashes;
-                literals.push(Literal {
-                    at: i,
-                    end: after,
-                    text: text(body, end),
-                    written: Written::Raw,
-                });
+                literals.push(literal(chars, i, (body, end), after, Written::Raw));
                 blank(&mut masked, i, after);
                 i = after;
             } else if c == '"' {
@@ -810,12 +819,7 @@ mod tests {
                 while end < chars.len() && chars[end] != '"' {
                     end += if chars[end] == '\\' { 2 } else { 1 };
                 }
-                literals.push(Literal {
-                    at: i,
-                    end: end + 1,
-                    text: text(i + 1, end),
-                    written: Written::Plain,
-                });
+                literals.push(literal(chars, i, (i + 1, end), end + 1, Written::Plain));
                 blank(&mut masked, i, end + 1);
                 i = end + 1;
             } else if c == '\'' && (at(i + 1) == Some('\\') || at(i + 2) == Some('\'')) {
@@ -824,12 +828,7 @@ mod tests {
                 while end < chars.len() && chars[end] != '\'' {
                     end += 1;
                 }
-                literals.push(Literal {
-                    at: i,
-                    end: end + 1,
-                    text: text(i + 1, end),
-                    written: Written::Char,
-                });
+                literals.push(literal(chars, i, (i + 1, end), end + 1, Written::Char));
                 blank(&mut masked, i, end + 1);
                 i = end + 1;
             } else {
@@ -909,9 +908,8 @@ mod tests {
         while j < masked.len() {
             match masked[j] {
                 '(' | '[' => depth += 1,
-                ')' | ']' | '}' if depth == 0 => break,
+                ')' | ']' | '}' | ';' | ',' if depth == 0 => break,
                 ')' | ']' => depth -= 1,
-                ';' | ',' if depth == 0 => break,
                 '{' if depth == 0 => {
                     let mut braces = 0;
                     while j < masked.len() {
@@ -1488,6 +1486,12 @@ mod tests {
             ko.text("conflict-description", &conflict("no")),
             "‘photos’가 C:\\Backup 에 이미 있습니다."
         );
+    }
+
+    #[test]
+    fn english_names_the_properties_a_date_and_a_shortcut() {
+        let en = Localizer::new(Lang::En);
+        let on = |os| (OS_ARG, os_arg(os));
         // The labels of the properties window.
         let label = |key: &str, os| en.text(key, &[on(os)]);
         assert_eq!(label("fact-kind", Os::MacOs), "Kind");
