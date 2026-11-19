@@ -116,7 +116,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         Ok(instance::Start::Shown) => return Ok(()),
         Ok(instance::Start::Running) => {
             // The theme of the instance that runs, read only: that one writes the settings.
-            let theme = settings::peek_theme(paths.config_dir());
+            let theme = settings::peek_look(paths.config_dir()).theme;
             show_notice(words::already_running(), theme)?;
             return Err(RunError::AlreadyRunning);
         }
@@ -246,7 +246,7 @@ pub fn report_startup_failure(error: &RunError) {
     };
     let message = format!("{}: {reason}", words::startup_failed());
     let theme = rf_core::AppPaths::detect()
-        .map(|paths| settings::peek_theme(paths.config_dir()))
+        .map(|paths| settings::peek_look(paths.config_dir()).theme)
         .unwrap_or_default();
     if show_notice(&message, theme).is_ok() {
         return;

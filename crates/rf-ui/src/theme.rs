@@ -16,7 +16,7 @@
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
-use crate::settings::ThemeChoice;
+use crate::settings::{Density, FontScale, ThemeChoice};
 
 /// A color: red, green, blue and alpha (255 is opaque).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -550,6 +550,86 @@ pub fn builtin(choice: ThemeChoice, os_dark: bool, os_high_contrast: bool) -> To
     Builtin::of(choice, os_dark, os_high_contrast).tokens()
 }
 
+/// The tallest a line of text is, as a share of its font size. The systems' fonts draw a line
+/// about 1.2 (Segoe UI 1.33, Malgun Gothic 1.33) to 1.45 (Noto Sans CJK) times their size; the
+/// screens reckon a line's room with the same share (`Theme.line`, which a test holds to
+/// [`line`]).
+pub const LINE: f32 = 1.5;
+/// The least room a row of a list leaves above and below its line of text, together.
+pub const ROW_PADDING: f32 = 4.0;
+
+/// The room of a line of text of `size` logical pixels: [`LINE`] times it, in whole pixels up.
+pub fn line(size: f32) -> f32 {
+    (size * LINE).ceil()
+}
+
+/// The share of the theme's row height and gaps that `density` gives them, as a fraction: four
+/// fifths, all, or five quarters.
+pub fn density_share(density: Density) -> (u16, u16) {
+    match density {
+        Density::Compact => (4, 5),
+        Density::Normal => (1, 1),
+        Density::Roomy => (5, 4),
+    }
+}
+
+/// The tokens of a theme at a density and a size of text (THEME-07), the two apart:
+///
+/// - `density` changes the row height and the gaps (`gap-xs` to `gap-l`) alone, each to its
+///   [`density_share`], rounded to whole pixels;
+/// - `font_scale` changes the font sizes alone (`small` to `title`), each to its
+///   [`FontScale::percent`], rounded to whole pixels;
+/// - and nothing else: the colors, the fonts' families, the corners, the icons, the dims and the
+///   marks stay as the theme has them.
+///
+/// The one meeting point is the row's floor, so that no row cuts its text: the row height is
+/// `max(the density's row height, line(body) + ROW_PADDING)`, where `line(body)` is
+/// `ceil(1.5 × the scaled body size)` ([`line`]) and [`ROW_PADDING`] 4 px. It depends on the size
+/// of the text alone, and a row is taller than its density's only where its text needs it (115 %
+/// and 130 % at 촘촘하게). Every result stays within the bounds a token file may give
+/// ([`FONT_SIZES`], [`GAPS`], [`ROW_HEIGHTS`]). At 보통 and 100 % a built-in theme comes back as it
+/// went in.
+pub fn scaled(mut tokens: Tokens, density: Density, font_scale: FontScale) -> Tokens {
+    // `size` times `over` / `under`, in whole pixels within `bounds`; a share of 1 leaves a size
+    // as it is, also one with a fraction (a theme file may give one). Whole numbers keep the
+    // product exact (130 / 100, not the float 1.3, which makes 15 px 19.4999 px).
+    let times = |size: f32, (over, under): (u16, u16), bounds: &RangeInclusive<f32>| {
+        if over == under {
+            size
+        } else {
+            (size * f32::from(over) / f32::from(under))
+                .round()
+                .clamp(*bounds.start(), *bounds.end())
+        }
+    };
+    let share = density_share(density);
+    let size = &mut tokens.size;
+    for gap in [
+        &mut size.gap_xs,
+        &mut size.gap_s,
+        &mut size.gap_m,
+        &mut size.gap_l,
+    ] {
+        *gap = times(*gap, share, &GAPS);
+    }
+    let row = times(size.row_height, share, &ROW_HEIGHTS);
+    let percent = (font_scale.percent(), 100);
+    let font = &mut tokens.font;
+    for text in [
+        &mut font.small,
+        &mut font.note,
+        &mut font.body,
+        &mut font.app_name,
+        &mut font.heading,
+        &mut font.title,
+    ] {
+        *text = times(*text, percent, &FONT_SIZES);
+    }
+    let floor = line(tokens.font.body) + ROW_PADDING;
+    tokens.size.row_height = row.max(floor).min(*ROW_HEIGHTS.end());
+    tokens
+}
+
 /// The contrast ratio of the colors `a` and `b` as WCAG 2 counts it, from 1 (the same) to 21
 /// (black and white). Their alpha is not counted.
 pub fn contrast(a: Rgba, b: Rgba) -> f64 {
@@ -851,6 +931,163 @@ mod tests {
             assert_eq!(Builtin::of(choice, os_dark, os_high), shown, "{choice:?}");
             assert_eq!(builtin(choice, os_dark, os_high), shown.tokens());
         }
+    }
+
+    /// The gaps and the row height of `tokens`.
+    fn room(tokens: &Tokens) -> [f32; 5] {
+        let s = &tokens.size;
+        [s.gap_xs, s.gap_s, s.gap_m, s.gap_l, s.row_height]
+    }
+
+    /// The font sizes of `tokens`.
+    fn text(tokens: &Tokens) -> [f32; 6] {
+        let f = &tokens.font;
+        [f.small, f.note, f.body, f.app_name, f.heading, f.title]
+    }
+
+    /// THEME-07: the density never changes a font size, the size of the text never changes a gap,
+    /// and neither changes anything else; the row height is the density's, or the floor of its
+    /// text where that is higher, and the floor follows the size of the text alone.
+    #[test]
+    fn the_density_and_the_size_of_the_text_are_apart() {
+        for theme in Builtin::ALL {
+            let tokens = theme.tokens();
+            for density in Density::ALL {
+                for scale in FontScale::ALL {
+                    let what = format!("{theme:?} {density:?} {scale:?}");
+                    let both = scaled(tokens.clone(), density, scale);
+                    let text_alone = scaled(tokens.clone(), Density::Normal, scale);
+                    let room_alone = scaled(tokens.clone(), density, FontScale::Normal);
+                    assert_eq!(both.font, text_alone.font, "{what}: the text");
+                    assert_eq!(room(&both)[..4], room(&room_alone)[..4], "{what}: the gaps");
+                    let floor = line(both.font.body) + ROW_PADDING;
+                    assert_eq!(
+                        both.size.row_height,
+                        room_alone.size.row_height.max(floor),
+                        "{what}: the row"
+                    );
+                    // The text's floor is the same at every density.
+                    for other in Density::ALL {
+                        let at = scaled(tokens.clone(), other, scale);
+                        assert_eq!(line(at.font.body), line(both.font.body), "{what}");
+                    }
+                    // What neither touches: the colors, the families, the corners, the icons,
+                    // the dims and the marks.
+                    let mut rest = both.clone();
+                    rest.font.small = tokens.font.small;
+                    rest.font.note = tokens.font.note;
+                    rest.font.body = tokens.font.body;
+                    rest.font.app_name = tokens.font.app_name;
+                    rest.font.heading = tokens.font.heading;
+                    rest.font.title = tokens.font.title;
+                    rest.size.gap_xs = tokens.size.gap_xs;
+                    rest.size.gap_s = tokens.size.gap_s;
+                    rest.size.gap_m = tokens.size.gap_m;
+                    rest.size.gap_l = tokens.size.gap_l;
+                    rest.size.row_height = tokens.size.row_height;
+                    assert_eq!(rest, tokens, "{what}: the rest");
+                    // A density changes the row and the gaps of the theme, a size its text, at
+                    // every step but the normal one.
+                    if density != Density::Normal {
+                        assert_ne!(room(&room_alone)[..4], room(&tokens)[..4], "{what}");
+                    }
+                    if scale != FontScale::Normal {
+                        assert_ne!(text(&text_alone), text(&tokens), "{what}");
+                    }
+                }
+            }
+            // 보통 and 100 %: the theme as it is.
+            assert_eq!(
+                scaled(tokens.clone(), Density::Normal, FontScale::Normal),
+                tokens
+            );
+        }
+    }
+
+    /// The two ends: 촘촘하게 at 90 % and 넉넉하게 at 130 %, of the light theme (dark and high
+    /// contrast have the same sizes).
+    #[test]
+    fn the_smallest_and_the_largest_looks_have_these_sizes() {
+        let light = Builtin::Light.tokens();
+        let smallest = scaled(light.clone(), Density::Compact, FontScale::Smaller);
+        // small 12, note 13, body 14, app-name 15, heading 16, title 20 at 90 %, rounded.
+        assert_eq!(text(&smallest), [11.0, 12.0, 13.0, 14.0, 14.0, 18.0]);
+        // gap-xs 4, s 8, m 12, l 16 and the row 32 at four fifths, rounded.
+        assert_eq!(room(&smallest), [3.0, 6.0, 10.0, 13.0, 26.0]);
+        let largest = scaled(light.clone(), Density::Roomy, FontScale::Largest);
+        assert_eq!(text(&largest), [16.0, 17.0, 18.0, 20.0, 21.0, 26.0]);
+        assert_eq!(room(&largest), [5.0, 10.0, 15.0, 20.0, 40.0]);
+        // And the steps between.
+        let larger = scaled(light.clone(), Density::Normal, FontScale::Larger);
+        assert_eq!(text(&larger), [14.0, 15.0, 16.0, 17.0, 18.0, 23.0]);
+        assert_eq!(room(&larger), room(&light));
+        for theme in [Builtin::Dark, Builtin::HighContrast] {
+            let tokens = theme.tokens();
+            for (density, scale, want) in [
+                (Density::Compact, FontScale::Smaller, &smallest),
+                (Density::Roomy, FontScale::Largest, &largest),
+            ] {
+                let got = scaled(tokens.clone(), density, scale);
+                assert_eq!(
+                    (text(&got), room(&got)),
+                    (text(want), room(want)),
+                    "{theme:?}"
+                );
+            }
+        }
+    }
+
+    /// No row cuts its line of text: the row height is at least `ceil(1.5 × body) + 4`, at every
+    /// look and for a theme whose rows are lower than its text, within the bounds of a token file.
+    #[test]
+    fn a_row_is_never_lower_than_its_line_of_text() {
+        assert_eq!(
+            (line(13.0), line(14.0), line(16.0), line(18.0)),
+            (20.0, 21.0, 24.0, 27.0)
+        );
+        let light = Builtin::Light.tokens();
+        // 촘촘하게 is 26 px, which its own text fits (21 + 4) and 90 % too (20 + 4); 16 px text
+        // takes 28 px (24 + 4), 18 px text 31 px (27 + 4).
+        for (scale, row) in [
+            (FontScale::Smaller, 26.0),
+            (FontScale::Normal, 26.0),
+            (FontScale::Larger, 28.0),
+            (FontScale::Largest, 31.0),
+        ] {
+            let got = scaled(light.clone(), Density::Compact, scale);
+            assert_eq!(got.size.row_height, row, "{scale:?}");
+        }
+        for theme in Builtin::ALL {
+            for density in Density::ALL {
+                for scale in FontScale::ALL {
+                    let got = scaled(theme.tokens(), density, scale);
+                    assert!(
+                        got.size.row_height >= line(got.font.body) + ROW_PADDING,
+                        "{theme:?} {density:?} {scale:?}"
+                    );
+                }
+            }
+        }
+        // A theme whose rows are lower than its text gets the floor at 보통 and 100 % too.
+        let low = parse(&light_with("row-height = 32", "row-height = 16")).expect("taken");
+        assert_eq!(
+            scaled(low, Density::Normal, FontScale::Normal)
+                .size
+                .row_height,
+            25.0
+        );
+        // The largest text a file may give stays within its bound at 130 %, and so does its row.
+        let huge = parse(&light_with("body = 14", "body = 72")).expect("taken");
+        let got = scaled(huge, Density::Compact, FontScale::Largest);
+        assert_eq!(got.font.body, *FONT_SIZES.end());
+        assert_eq!(got.size.row_height, 112.0);
+        let tall = parse(&light_with("row-height = 32", "row-height = 128")).expect("taken");
+        let got = scaled(tall, Density::Roomy, FontScale::Normal);
+        assert_eq!(got.size.row_height, *ROW_HEIGHTS.end());
+        // The smallest gap a file may give stays 1 px at 촘촘하게.
+        let thin = parse(&light_with("gap-xs = 4", "gap-xs = 1")).expect("taken");
+        let got = scaled(thin, Density::Compact, FontScale::Normal);
+        assert_eq!(got.size.gap_xs, *GAPS.start());
     }
 
     #[test]

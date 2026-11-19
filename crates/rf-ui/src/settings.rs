@@ -117,6 +117,86 @@ pub enum ThemeChoice {
     HighContrast,
 }
 
+/// How much room the rows and the gaps take (보기 ▸ 테마 ▸ 표시 밀도, THEME-07): `density =
+/// "compact"`, `"normal"` or `"roomy"`. It changes the theme's row height and gaps, nothing else
+/// (`theme::scaled`); the size of the text is [`FontScale`]'s. A value this version does not know
+/// reads as `"normal"`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    /// More rows on the screen: the rows and the gaps at four fifths.
+    Compact,
+    /// The theme's own rows and gaps.
+    #[default]
+    Normal,
+    /// Larger targets: the rows and the gaps at five quarters.
+    Roomy,
+}
+
+impl Density {
+    /// The three, in the order of the menu.
+    pub const ALL: [Density; 3] = [Density::Compact, Density::Normal, Density::Roomy];
+}
+
+/// How large the text is (보기 ▸ 테마 ▸ 글자 크기, THEME-07): `font_scale = 90`, `100`, `115` or
+/// `130`, in percent of the theme's font sizes. It changes the font sizes, nothing else
+/// (`theme::scaled`); a row grows with it only where its line of text would not fit. A number
+/// this version does not offer reads as `100`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FontScale {
+    /// 90 %.
+    Smaller,
+    /// 100 %: the theme's own sizes.
+    #[default]
+    Normal,
+    /// 115 %.
+    Larger,
+    /// 130 %.
+    Largest,
+}
+
+impl FontScale {
+    /// The four, in the order of the menu.
+    pub const ALL: [FontScale; 4] = [
+        FontScale::Smaller,
+        FontScale::Normal,
+        FontScale::Larger,
+        FontScale::Largest,
+    ];
+
+    /// Its share of the theme's font sizes, in percent (the number of the settings file).
+    pub fn percent(self) -> u16 {
+        match self {
+            FontScale::Smaller => 90,
+            FontScale::Normal => 100,
+            FontScale::Larger => 115,
+            FontScale::Largest => 130,
+        }
+    }
+
+    /// The scale of `percent`, when it is one of the four.
+    pub fn of_percent(percent: i64) -> Option<FontScale> {
+        FontScale::ALL
+            .into_iter()
+            .find(|scale| i64::from(scale.percent()) == percent)
+    }
+}
+
+impl Serialize for FontScale {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u16(self.percent())
+    }
+}
+
+impl<'de> Deserialize<'de> for FontScale {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<FontScale, D::Error> {
+        let percent = i64::deserialize(deserializer)?;
+        FontScale::of_percent(percent).ok_or_else(|| {
+            serde::de::Error::custom(format!("{percent} is not 90, 100, 115 or 130"))
+        })
+    }
+}
+
 /// What a drop does when no modifier key says (보기 ▸ 설정 ▸ 끌어 놓기: …, DND-02).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -327,6 +407,14 @@ pub struct Settings {
     pub version: u32,
     #[serde(deserialize_with = "or_default")]
     pub theme: ThemeChoice,
+    /// The rows' and the gaps' room (THEME-07). A file without the key (0.4.0 and before), or
+    /// with a value this version cannot read, is normal; not written while it is.
+    #[serde(skip_serializing_if = "is_default", deserialize_with = "or_default")]
+    pub density: Density,
+    /// The text's size (THEME-07). A file without the key, or with a number this version does
+    /// not offer, is 100 %; not written while it is.
+    #[serde(skip_serializing_if = "is_default", deserialize_with = "or_default")]
+    pub font_scale: FontScale,
     #[serde(deserialize_with = "or_default")]
     pub show_hidden: bool,
     /// The names of files show no extensions (NAV-11); a file without the key shows them.
@@ -439,6 +527,8 @@ impl Default for Settings {
         Settings {
             version: SETTINGS_VERSION,
             theme: ThemeChoice::default(),
+            density: Density::default(),
+            font_scale: FontScale::default(),
             show_hidden: false,
             hide_extensions: false,
             window: None,
@@ -567,6 +657,10 @@ pub struct FolderViewSettings {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[expect(
@@ -1180,6 +1274,8 @@ impl Settings {
         let head = Settings {
             version: self.version.max(SETTINGS_VERSION),
             theme: self.theme,
+            density: self.density,
+            font_scale: self.font_scale,
             show_hidden: self.show_hidden,
             hide_extensions: self.hide_extensions,
             window: self.window,
@@ -1393,14 +1489,26 @@ fn backup_path(config_dir: &Path, name: &str, tries: u32) -> Option<PathBuf> {
 /// How many names [`backup_path`] tries before it gives up.
 const BACKUP_TRIES: u32 = 1000;
 
-/// The theme of `settings.toml` in `config_dir`, for a window shown while another instance
-/// runs (it says so): the file is only read. Without a file, or with one [`load`] would not
-/// take, it is the default theme. A small local file; the UI thread may call it.
-pub fn peek_theme(config_dir: &Path) -> ThemeChoice {
+/// How the windows look by the settings: the theme, the density and the size of the text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    pub theme: ThemeChoice,
+    pub density: Density,
+    pub font_scale: FontScale,
+}
+
+/// The look of `settings.toml` in `config_dir`, for a window shown while another instance runs
+/// (it says so): the file is only read. Without a file, or with one [`load`] would not take, it
+/// is the default look. A small local file; the UI thread may call it.
+pub fn peek_look(config_dir: &Path) -> Look {
     read_small(&config_dir.join(FILE_NAME))
         .ok()
         .and_then(|text| parse(&text))
-        .map(|settings| settings.theme)
+        .map(|settings| Look {
+            theme: settings.theme,
+            density: settings.density,
+            font_scale: settings.font_scale,
+        })
         .unwrap_or_default()
 }
 
@@ -1736,14 +1844,14 @@ mod tests {
     fn the_theme_is_peeked_at_without_touching_the_file() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let file = dir.path().join(FILE_NAME);
-        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+        assert_eq!(peek_look(dir.path()).theme, ThemeChoice::System);
         assert!(!file.exists());
         std::fs::write(&file, "theme = \"dark\"\nshow_hidden = true\n").expect("written");
-        assert_eq!(peek_theme(dir.path()), ThemeChoice::Dark);
+        assert_eq!(peek_look(dir.path()).theme, ThemeChoice::Dark);
         // A broken file stays where it is, for the instance that runs to look at.
         let broken = "theme = \"dark\"\npanes = [[[[\n";
         std::fs::write(&file, broken).expect("written");
-        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+        assert_eq!(peek_look(dir.path()).theme, ThemeChoice::System);
         assert_eq!(std::fs::read_to_string(&file).expect("read"), broken);
         assert_eq!(backups(dir.path()), Vec::<String>::new());
     }
@@ -3201,7 +3309,7 @@ mod tests {
         assert!(text.starts_with("version = 7\n"), "{text}");
         assert!(text.contains("zoom = 3"), "{text}");
         assert!(text.contains("[sparkle]"), "{text}");
-        assert_eq!(peek_theme(dir.path()), ThemeChoice::System);
+        assert_eq!(peek_look(dir.path()).theme, ThemeChoice::System);
     }
 
     #[test]
@@ -3401,7 +3509,7 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).expect("read");
         assert!(text.contains("theme = \"high-contrast\"\n"), "{text}");
         assert_eq!(load(dir.path()), writable(settings));
-        assert_eq!(peek_theme(dir.path()), ThemeChoice::HighContrast);
+        assert_eq!(peek_look(dir.path()).theme, ThemeChoice::HighContrast);
         // An added value: the file keeps the version it had.
         assert_eq!(SETTINGS_VERSION, 2);
         assert!(text.contains("version = 2\n"), "{text}");
@@ -3411,6 +3519,124 @@ mod tests {
         for (theme, before) in [("light", Before::Light), ("dark", Before::Dark)] {
             let older: Older = toml::from_str(&format!("theme = \"{theme}\"\n")).expect("read");
             assert_eq!(older.theme, before);
+        }
+    }
+
+    /// THEME-07: the density and the size of the text are added keys: they round-trip, a file
+    /// without them (0.4.0) is normal and 100 %, they are not written while they are, and the
+    /// file's version stays.
+    #[test]
+    fn the_density_and_the_size_of_the_text_round_trip_as_added_keys() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        for density in Density::ALL {
+            for font_scale in FontScale::ALL {
+                let settings = Settings {
+                    density,
+                    font_scale,
+                    ..Settings::default()
+                };
+                settings.save(dir.path()).expect("saved");
+                let text = std::fs::read_to_string(dir.path().join(FILE_NAME)).expect("read");
+                let word = match density {
+                    Density::Compact => Some("compact"),
+                    Density::Normal => None,
+                    Density::Roomy => Some("roomy"),
+                };
+                assert_eq!(
+                    text.contains("density ="),
+                    word.is_some(),
+                    "written only when not normal: {text}"
+                );
+                if let Some(word) = word {
+                    assert!(text.contains(&format!("density = \"{word}\"\n")), "{text}");
+                }
+                let percent = font_scale.percent();
+                assert_eq!(text.contains("font_scale ="), percent != 100, "{text}");
+                if percent != 100 {
+                    assert!(
+                        text.contains(&format!("font_scale = {percent}\n")),
+                        "{text}"
+                    );
+                }
+                assert!(text.contains("version = 2\n"), "{text}");
+                assert_eq!(load(dir.path()), writable(settings));
+                let look = peek_look(dir.path());
+                assert_eq!((look.density, look.font_scale), (density, font_scale));
+            }
+        }
+        assert_eq!(SETTINGS_VERSION, 2);
+        // 0.4.0's file has neither key.
+        std::fs::write(
+            dir.path().join(FILE_NAME),
+            "version = 2\ntheme = \"dark\"\n",
+        )
+        .expect("written");
+        let loaded = load(dir.path()).settings;
+        assert_eq!(
+            (loaded.density, loaded.font_scale),
+            (Density::Normal, FontScale::Normal)
+        );
+        assert_eq!(
+            [90, 100, 115, 130].map(FontScale::of_percent),
+            FontScale::ALL.map(Some)
+        );
+        assert_eq!(FontScale::of_percent(120), None);
+    }
+
+    /// A density or a size of text this version does not know (a newer version's, or a hand's)
+    /// reads as normal and 100 %, one key at a time, and the file is not backed up for it.
+    #[test]
+    fn a_density_or_a_size_of_text_it_does_not_know_falls_back_without_a_backup() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        for (odd, density, font_scale) in [
+            (
+                "density = \"cosy\"\nfont_scale = 130\n",
+                Density::Normal,
+                FontScale::Largest,
+            ),
+            (
+                "density = \"roomy\"\nfont_scale = 120\n",
+                Density::Roomy,
+                FontScale::Normal,
+            ),
+            (
+                "density = 2\nfont_scale = \"large\"\n",
+                Density::Normal,
+                FontScale::Normal,
+            ),
+            (
+                "density = \"Compact\"\nfont_scale = 90.0\n",
+                Density::Normal,
+                FontScale::Normal,
+            ),
+            (
+                "density = \"compact\"\nfont_scale = -100\n",
+                Density::Compact,
+                FontScale::Normal,
+            ),
+        ] {
+            std::fs::write(
+                dir.path().join(FILE_NAME),
+                format!("{odd}theme = \"dark\"\n"),
+            )
+            .expect("written");
+            let loaded = load(dir.path());
+            assert!(loaded.writable, "{odd}");
+            assert_eq!(loaded.backup, None, "{odd}");
+            assert_eq!(backups(dir.path()), Vec::<String>::new(), "{odd}");
+            let settings = loaded.settings;
+            assert_eq!(settings.theme, ThemeChoice::Dark, "{odd}");
+            assert_eq!(
+                (settings.density, settings.font_scale),
+                (density, font_scale),
+                "{odd}"
+            );
+            let look = peek_look(dir.path());
+            assert_eq!(
+                (look.density, look.font_scale),
+                (density, font_scale),
+                "{odd}"
+            );
         }
     }
 
