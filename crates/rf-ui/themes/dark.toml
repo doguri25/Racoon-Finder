@@ -26,6 +26,9 @@ accent = "#78A1F2"
 on-accent = "#0E1A33"
 # 22% of the accent over the panel.
 selection = "#313C51"
+# The selected text in a field: the selection's color, and the text.
+text-selection = "#313C51"
+on-text-selection = "#E7E9EC"
 toast-bg = "#2C3138"
 toast-text = "#F2F4F7"
 toast-link = "#9DBBFF"

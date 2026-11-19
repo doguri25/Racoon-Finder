@@ -689,8 +689,8 @@ export component Field inherits Rectangle {
                 width: max(parent.width - self.text-cursor-width, self.preferred-width);
                 height: 100%;
                 color: Theme.text;
-                selection-background-color: Theme.selection;
-                selection-foreground-color: Theme.text;
+                selection-background-color: Theme.text-selection;
+                selection-foreground-color: Theme.on-text-selection;
                 vertical-alignment: center;
                 single-line: true;
                 accessible-role: text-input;

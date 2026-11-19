@@ -1774,6 +1774,8 @@ where
     shown.set_accent(c(color.accent));
     shown.set_on_accent(c(color.on_accent));
     shown.set_selection(c(color.selection));
+    shown.set_text_selection(c(color.text_selection));
+    shown.set_on_text_selection(c(color.on_text_selection));
     shown.set_toast_bg(c(color.toast_bg));
     shown.set_toast_text(c(color.toast_text));
     shown.set_toast_link(c(color.toast_link));
@@ -1842,6 +1844,8 @@ where
             accent: c(shown.get_accent()),
             on_accent: c(shown.get_on_accent()),
             selection: c(shown.get_selection()),
+            text_selection: c(shown.get_text_selection()),
+            on_text_selection: c(shown.get_on_text_selection()),
             toast_bg: c(shown.get_toast_bg()),
             toast_text: c(shown.get_toast_text()),
             toast_link: c(shown.get_toast_link()),

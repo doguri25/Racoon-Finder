@@ -27,6 +27,9 @@ accent = "#2F6FEB"
 on-accent = "#FFFFFF"
 # 12% of the accent over white.
 selection = "#E6EEFD"
+# The selected text in a field: the selection's color, and the text.
+text-selection = "#E6EEFD"
+on-text-selection = "#1C2024"
 toast-bg = "#1C2024"
 toast-text = "#F2F4F7"
 toast-link = "#9DBBFF"

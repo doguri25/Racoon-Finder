@@ -89,6 +89,10 @@ pub struct Colors {
     pub on_accent: Rgba,
     /// Behind a selected item, whose text stays `text`.
     pub selection: Rgba,
+    /// Behind the selected text in a field.
+    pub text_selection: Rgba,
+    /// The selected text in a field.
+    pub on_text_selection: Rgba,
     /// The notices in the window's corner, and a refused drop's hint.
     pub toast_bg: Rgba,
     pub toast_text: Rgba,
@@ -113,7 +117,7 @@ pub struct Colors {
 
 impl Colors {
     /// Every color with its key, in the order of `[color]`.
-    pub fn named(&self) -> [(&'static str, Rgba); 25] {
+    pub fn named(&self) -> [(&'static str, Rgba); 27] {
         [
             ("bg", self.bg),
             ("panel", self.panel),
@@ -129,6 +133,8 @@ impl Colors {
             ("accent", self.accent),
             ("on-accent", self.on_accent),
             ("selection", self.selection),
+            ("text-selection", self.text_selection),
+            ("on-text-selection", self.on_text_selection),
             ("toast-bg", self.toast_bg),
             ("toast-text", self.toast_text),
             ("toast-link", self.toast_link),
@@ -248,6 +254,8 @@ const COLOR_KEYS: &[&str] = &[
     "accent",
     "on-accent",
     "selection",
+    "text-selection",
+    "on-text-selection",
     "toast-bg",
     "toast-text",
     "toast-link",
@@ -326,6 +334,8 @@ pub fn parse(text: &str) -> Result<Tokens, ThemeError> {
             accent: color.color("accent")?,
             on_accent: color.color("on-accent")?,
             selection: color.color("selection")?,
+            text_selection: color.color("text-selection")?,
+            on_text_selection: color.color("on-text-selection")?,
             toast_bg: color.color("toast-bg")?,
             toast_text: color.color("toast-text")?,
             toast_link: color.color("toast-link")?,
@@ -706,6 +716,8 @@ mod tests {
             ("disabled", "#8A919C", "#7D848E"),
             ("border", "#E1E4E8", "#2C3036"),
             ("pressed", "#E1E4E8", "#2C3036"),
+            // The fields' selected text was `text` on `selection` (below).
+            ("on-text-selection", "#1C2024", "#E7E9EC"),
             ("folder", "#B7791F", "#E0A84A"),
             ("warning", "#B7791F", "#E0A84A"),
             ("on-accent", "#FFFFFF", "#0E1A33"),
@@ -733,8 +745,12 @@ mod tests {
         assert_eq!(light.color.selection, mix(base, white, 0.12));
         let dark_selection = mix(mix(base, white, 0.65), hex("#1D2024"), 0.22);
         assert_eq!(dark.color.selection, dark_selection);
-        // Every color is counted above: 23 by their values, the accent and the selection.
-        assert_eq!(light.color.named().len(), 25);
+        for tokens in [&light, &dark] {
+            assert_eq!(tokens.color.text_selection, tokens.color.selection);
+        }
+        // Every color is counted above: 24 by their values, the accent, the selection and the
+        // fields' text selection.
+        assert_eq!(light.color.named().len(), 27);
         for tokens in [&light, &dark] {
             // The sizes: theme.slint's, and the literals of the screens (13, 15 and 16 px).
             let f = &tokens.font;
@@ -1114,6 +1130,13 @@ mod tests {
                 7.0,
             ),
             ("muted text on a hovered segment", c.muted, c.pressed, 7.0),
+            (
+                "the selected text in a field",
+                c.on_text_selection,
+                c.text_selection,
+                7.0,
+            ),
+            ("a field's text selection", c.text_selection, c.bg, 3.0),
             ("a notice", c.toast_text, c.toast_bg, 7.0),
             ("a notice's action", c.toast_link, c.toast_bg, 7.0),
             (
@@ -1212,6 +1235,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The light and dark themes show the selected text in a field as before (`text` on
+    /// `selection`, with their ratios); high contrast gives it the accent.
+    #[test]
+    fn light_and_dark_select_text_in_fields_as_before() {
+        // The text on the selection, and the selection against the field: the ratios of 0.4.0,
+        // less 0.01.
+        for (theme, on, against) in [(Builtin::Light, 14.05, 1.08), (Builtin::Dark, 9.10, 1.62)] {
+            let c = theme.tokens().color;
+            let ratio = contrast(c.on_text_selection, c.text_selection);
+            assert!(ratio >= on, "{theme:?}: {ratio:.3}");
+            let ratio = contrast(c.text_selection, c.bg);
+            assert!(ratio >= against, "{theme:?}: {ratio:.3}");
+        }
+        let c = Builtin::HighContrast.tokens().color;
+        assert_eq!(
+            (c.text_selection, c.on_text_selection),
+            (c.accent, c.on_accent)
+        );
+    }
+
+    /// Every field draws its selected text with the tokens for it, so that a theme sets it in
+    /// one place.
+    #[test]
+    fn the_fields_take_their_text_selection_from_the_theme() {
+        let setting = regex::Regex::new(r"selection-(background|foreground)-color\s*:\s*([^;]*);")
+            .expect("a pattern");
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&folder).expect("the screens' folder") {
+            let path = entry.expect("an entry").path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "slint")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a .slint file");
+            for found in setting.captures_iter(&code_of(&text)) {
+                let want = if &found[1] == "background" {
+                    "Theme.text-selection"
+                } else {
+                    "Theme.on-text-selection"
+                };
+                assert_eq!(found[2].trim(), want, "{}", path.display());
+                seen += 1;
+            }
+        }
+        // The rename and pattern dialogs, the path field and `Field`, two colors each.
+        assert!(seen >= 8, "{seen}");
     }
 
     /// `text` with its string literals and comments blanked out, for the look below.

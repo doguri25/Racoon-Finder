@@ -33,6 +33,10 @@ on-accent = "#000000"
 # Dark olive: the text (14:1), the muted text (11:1) and the faint text (7.5:1) of a selected item
 # stay readable on it, dimmed too; the bar beside a selected item tells it.
 selection = "#332B00"
+# The selected text in a field is black on the accent (16.5:1), a highlight no one misses on the
+# black field; the selection's dark olive would be 1.5:1 against it.
+text-selection = "#FFE500"
+on-text-selection = "#000000"
 # The notices are white, so that they stand out of the black window.
 toast-bg = "#FFFFFF"
 toast-text = "#000000"
