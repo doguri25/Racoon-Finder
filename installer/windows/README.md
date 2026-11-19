@@ -24,6 +24,21 @@ as it is. The script stops with an error on an older compiler or when that file 
 the Inno Setup on the runner image if it is 6.3 or newer, else installs a pinned 6.x with Chocolatey
 (never the latest: a 7.x installs to a different folder).
 
+## Languages
+
+The installer and the uninstaller speak English (`compiler:Default.isl`) and Korean
+(`compiler:Languages\Korean.isl`). Which one is Windows' user interface language
+(`LanguageDetectionMethod=uilanguage`): Korean on a Korean Windows, English on an English one,
+without asking; on any other Windows the list of languages shows with English chosen
+(`ShowLanguageDialog=auto`, English is the first entry), as the app itself speaks English on any
+system that is not Korean. An upgrade keeps the language of the install before it
+(`UsePreviousLanguage`, on by default: an upgrade of 0.4.0, which spoke only Korean, stays Korean),
+and the uninstaller speaks the language the install chose. The script's own
+words (the desktop shortcut task, the launch box, the uninstaller's question and messages) are in
+`[CustomMessages]`, one line per language (`english.RfBackupAsk=…`, `korean.RfBackupAsk=…`): a new
+language needs its `[Languages]` entry and a line of each. The app's own language is a setting of the
+app (View ▸ Theme, `docs/i18n.md`), not the installer's.
+
 ## The AppId rule
 
 `AppId` in the script is a GUID generated once. **It must never change**: Windows and later
@@ -32,7 +47,7 @@ one instead of upgrading, and leaves two entries in the Apps list.
 
 ## What the uninstaller does
 
-1. Asks "삭제하기 전에 설정을 백업할까요?" (default: No). Yes copies `settings.toml` to
+1. Asks "삭제하기 전에 설정을 백업할까요?" ("Back up the settings before uninstalling?", default: No). Yes copies `settings.toml` to
    `Documents\RacoonFinder-settings-backup.toml`. A silent uninstall does not ask: no backup.
 2. Runs `racoon-finder.exe --cleanup [--backup-settings <file>]` (from `[Code]`, before the files are
    deleted): it asks a running app to quit (waits up to 30 s), puts back what the app changed, and
@@ -60,4 +75,5 @@ for the x64 installer. The manual list is in the root `README.md`, "실제 PC에
 
 - Not code-signed: SmartScreen warns ("Windows의 PC 보호").
 - No option yet to replace Explorer or to start resident at sign-in.
-- The script could not be compiled by the author's tooling; CI is its first compile.
+- The script could not be compiled by the author's tooling; CI is its first compile. That holds for
+  the languages too: the English pages and messages have not been seen on a real Windows yet.
