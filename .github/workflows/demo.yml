@@ -1,5 +1,5 @@
 # Builds the demo app for each OS and uploads one downloadable package per platform
-# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.4.0`), or a
+# (README.md "데모 실행" tells users how to get and run them). A version tag (`v0.5.0`), or a
 # manual run with "release" ticked, also publishes the four packages, the two Windows installers and the macOS disk
 # image (seven files) as the GitHub release v<workspace version>, with docs/releases/<tag>.md as its notes.
 name: Demo build

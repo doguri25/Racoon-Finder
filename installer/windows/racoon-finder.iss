@@ -8,7 +8,7 @@
 ; [CustomMessages], one of each per language.
 ;
 ; Build (see installer/windows/README.md):
-;   ISCC.exe /DAppVersion=0.4.0 /DArch=x64 /DSource=C:\path\to\folder\with\exe racoon-finder.iss
+;   ISCC.exe /DAppVersion=0.5.0 /DArch=x64 /DSource=C:\path\to\folder\with\exe racoon-finder.iss
 ;   AppVersion  plain x.y.z, the workspace version
 ;   Arch        x64 or arm64, which Windows the installer accepts
 ;   Source      folder that holds racoon-finder.exe

@@ -8,7 +8,7 @@ installs to `%LOCALAPPDATA%\Programs\RacoonFinder`.
 ## Build locally
 
 ```bat
-ISCC.exe /DAppVersion=0.4.0 /DArch=x64 /DSource=C:\path\to\folder installer\windows\racoon-finder.iss
+ISCC.exe /DAppVersion=0.5.0 /DArch=x64 /DSource=C:\path\to\folder installer\windows\racoon-finder.iss
 ```
 
 | Define | Meaning |
@@ -63,7 +63,7 @@ It touches nothing else. A portable install (a `portable` file next to the exe) 
 ## Test
 
 ```bat
-RacoonFinder-setup-0.4.0-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=C:\Temp\rfinst /LOG=install.log
+RacoonFinder-setup-0.5.0-windows-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=C:\Temp\rfinst /LOG=install.log
 C:\Temp\rfinst\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /LOG=uninstall.log
 ```
 
