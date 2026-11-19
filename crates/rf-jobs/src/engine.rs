@@ -155,7 +155,6 @@ impl LanePolicy for DefaultLanes {
             | JobSpec::DeleteCopies(_)
             | JobSpec::RestoreFromTrash { .. }
             | JobSpec::DeleteFromTrash { .. }
-            | JobSpec::EmptyTrash
             | JobSpec::Undo(_) => LaneId::MAIN,
         }
     }

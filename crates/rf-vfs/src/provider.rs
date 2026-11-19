@@ -35,8 +35,8 @@ bitflags::bitflags! {
         /// Items can be put back from here, to the place they came from or another
         /// (`Provider::restore_from_trash`): the trash.
         const RESTORE = 1 << 3;
-        /// Items can be deleted for good from here, and the whole place emptied
-        /// (`Provider::delete_from_trash`, `Provider::empty_trash`): the trash. Without
+        /// Items can be deleted for good from here (`Provider::delete_from_trash`; emptying
+        /// the trash deletes the items it lists, one by one): the trash. Without
         /// [`WRITE`](Self::WRITE) nothing can be made, renamed or moved in.
         const DELETE_FOREVER = 1 << 4;
     }
@@ -502,30 +502,13 @@ pub trait Provider: Send + Sync + Debug {
 
     /// Every item of the trash this provider shows, each with the stamp that
     /// [`delete_from_trash`](Self::delete_from_trash) and
-    /// [`restore_from_trash`](Self::restore_from_trash) check: what a job that empties the trash
-    /// item by item works through. For the shell provider it is `rf_platform::trash::list`; the
-    /// default implementation gives `Error::Unsupported`.
+    /// [`restore_from_trash`](Self::restore_from_trash) check: what the question before the trash
+    /// is emptied counts, and what the delete it asks for then deletes, item by item. For the shell
+    /// provider it is `rf_platform::trash::list`; the default implementation gives
+    /// `Error::Unsupported`.
     fn trash_items(&self) -> Result<Vec<TrashItem>> {
         Err(Error::Unsupported(format!(
             "trash_items is not supported for {} paths",
-            self.scheme()
-        )))
-    }
-
-    /// Whether the trash this provider shows is emptied in one call of the system's that cannot
-    /// be split into one per item (`rf_platform::trash::EMPTIES_AT_ONCE`, the Windows recycle
-    /// bin): a job then empties it with [`empty_trash`](Self::empty_trash), else item by item.
-    /// The default implementation says no.
-    fn empties_trash_at_once(&self) -> bool {
-        false
-    }
-
-    /// Deletes everything in the trash this provider shows for good. Nothing outside the trash
-    /// folders is touched. For the shell provider it is `rf_platform::trash::empty`; the default
-    /// implementation gives `Error::Unsupported`.
-    fn empty_trash(&self) -> Result<()> {
-        Err(Error::Unsupported(format!(
-            "empty_trash is not supported for {} paths",
             self.scheme()
         )))
     }

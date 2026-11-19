@@ -1312,12 +1312,13 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 
 /// What 다시 시도 of the window of the failed items of `report` submits (XFER-09): for a copy or
 /// a move, the transfer of the failed items alone, with the mode, the targets and the policies
-/// of the job they come from; for a restore from the trash, a delete from it and its emptying,
-/// the items that failed, as the trash's list showed them (`JobReport::retry_spec`; a delete for
-/// good asks again before it goes, [`AppState::failures_retried`]). `None` for another kind of
-/// job, and for one none of whose failures can be tried again (a source that could not be
-/// removed after its copy was in place, a link that leads back to its own folder, an item of the
-/// trash that changed since it was listed, an emptying the system did at once).
+/// of the job they come from; for a restore from the trash and a delete from it (an emptying is
+/// one, of the items its question counted), the items that failed, as the trash's list showed
+/// them (`JobReport::retry_spec`; a delete for good asks again before it goes,
+/// [`AppState::failures_retried`]). `None` for another kind of job, and for one none of whose
+/// failures can be tried again (a source that could not be removed after its copy was in place,
+/// a link that leads back to its own folder, an item of the trash that changed since it was
+/// listed).
 ///
 /// `None` too for a job that was stopped (`Outcome::Aborted`): the items it never came to are
 /// no failures, and the report does not name them (it counts them at most), so a retry would
@@ -1326,16 +1327,13 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
     let retried = matches!(
         report.spec,
-        JobSpec::Transfer(_)
-            | JobSpec::RestoreFromTrash { .. }
-            | JobSpec::DeleteFromTrash { .. }
-            | JobSpec::EmptyTrash
+        JobSpec::Transfer(_) | JobSpec::RestoreFromTrash { .. } | JobSpec::DeleteFromTrash { .. }
     );
     if !retried || report.outcome == Outcome::Aborted {
         return None;
     }
-    // The report's own retry: an emptying of the trash tries again the items it listed and could
-    // not delete, never what was trashed since (and one the system did at once, none).
+    // An emptying of the trash tries again the items it listed and could not delete, never what
+    // was trashed since.
     let spec = report.retry_spec()?;
     Some(Retry {
         job: report.id,

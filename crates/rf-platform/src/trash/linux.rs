@@ -92,10 +92,6 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
     home_trash().ok_or_else(no_home_trash)?.delete_forever(item)
 }
 
-pub fn empty() -> Result<()> {
-    home_trash().map_or(Ok(()), |trash| trash.empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

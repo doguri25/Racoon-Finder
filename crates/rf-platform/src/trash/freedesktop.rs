@@ -237,56 +237,9 @@ impl FreedesktopTrash {
         Ok(())
     }
 
-    /// Removes everything in `files/` for good as [`delete_forever`](Self::delete_forever) does,
-    /// every `*.trashinfo` record in `info/`, and the `directorysizes` cache: the trash's folders
-    /// stay, empty. Nothing else is touched, whatever the links in it lead to. It goes on after
-    /// an error and gives the first one; a trash that does not exist is empty already.
-    pub fn empty(&self) -> Result<()> {
-        self.check_folders()?;
-        let mut first = None;
-        let mut keep = |result: Result<()>| {
-            if let Err(e) = result
-                && first.is_none()
-            {
-                first = Some(e);
-            }
-        };
-        for (dir, records_only) in [(self.files_dir(), false), (self.info_dir(), true)] {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    keep(Err(io_error("empty_trash", &dir, e)));
-                    continue;
-                }
-            };
-            for entry in entries {
-                let path = match entry {
-                    Ok(entry) => entry.path(),
-                    Err(e) => {
-                        keep(Err(io_error("empty_trash", &dir, e)));
-                        continue;
-                    }
-                };
-                if records_only && !is_record(&path) {
-                    continue;
-                }
-                keep(remove_tree(&path).map_err(|e| io_error("empty_trash", &path, e)));
-            }
-        }
-        let sizes = self.root.join("directorysizes");
-        match std::fs::remove_file(&sizes) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                keep(Err(io_error("empty_trash", &sizes, e)));
-            }
-            _ => {}
-        }
-        first.map_or(Ok(()), Err)
-    }
-
     /// Refuses, with `Error::Unsupported`, a trash whose `files/` or `info/` is a link (to the
     /// user's documents, say), which would make what it leads to the trash: nothing is listed,
-    /// deleted, emptied or moved through it.
+    /// deleted or moved through it.
     fn check_folders(&self) -> Result<()> {
         for dir in [self.files_dir(), self.info_dir()] {
             if std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -316,12 +269,6 @@ fn info_name(name: &OsStr) -> OsString {
     let mut record = name.to_os_string();
     record.push(INFO_SUFFIX);
     record
-}
-
-/// Whether `path` is named as a record is (`*.trashinfo`).
-fn is_record(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name.as_encoded_bytes().ends_with(INFO_SUFFIX.as_bytes()))
 }
 
 /// `name` for the `n`th try: as it is first, then with `.n` before its extension (`a.2.txt`,
@@ -584,9 +531,10 @@ mod tests {
         assert_eq!(names(&trash.info_dir()), ["other.txt.trashinfo"]);
     }
 
-    /// A link put in the trash goes as a link; emptying the trash leaves what it leads to.
+    /// A link put in the trash goes as a link, and deleting it for good leaves what it leads to;
+    /// what else lies in `info/` and the size cache stay.
     #[test]
-    fn empty_leaves_nothing_outside_the_trash_touched() {
+    fn a_trashed_link_is_deleted_as_the_link() {
         let (_dir, trash, home) = fixture();
         let outside = home.join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -605,19 +553,17 @@ mod tests {
             .unwrap();
         assert!(!link_item.is_dir);
 
-        trash.empty().unwrap();
+        trash.delete_forever(&link_item).unwrap();
 
-        assert_eq!(names(&trash.files_dir()), Vec::<String>::new());
-        assert_eq!(names(&trash.info_dir()), ["README"]);
-        assert!(!trash.root().join("directorysizes").exists());
+        assert_eq!(names(&trash.files_dir()), ["a.txt"]);
+        assert_eq!(names(&trash.info_dir()), ["README", "a.txt.trashinfo"]);
+        assert!(trash.root().join("directorysizes").exists());
         assert_eq!(
             std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
             "K"
         );
         assert_eq!(names(&home), ["outside"]);
-        // An empty trash, and one not made yet, empty without a word.
-        trash.empty().unwrap();
-        FreedesktopTrash::new(home.join("none")).empty().unwrap();
+        // A trash not made yet lists nothing.
         assert_eq!(FreedesktopTrash::new(home.join("none")).list().unwrap(), []);
     }
 
@@ -894,7 +840,7 @@ mod tests {
     }
 
     /// A `files/` or `info/` that is a link (to the user's documents, say) is never taken for the
-    /// trash's own folder: nothing is listed, deleted, emptied or moved through it.
+    /// trash's own folder: nothing is listed, deleted or moved through it.
     #[test]
     fn a_trash_folder_that_is_a_link_is_not_used() {
         for linked in ["files", "info"] {
@@ -913,7 +859,6 @@ mod tests {
             linked_item.location = trash.files_dir().join("a.txt");
             let refusals = [
                 trash.list().map(drop),
-                trash.empty(),
                 trash.delete_forever(&linked_item),
                 trash.restore(&linked_item, &home.join("back.txt")),
             ];

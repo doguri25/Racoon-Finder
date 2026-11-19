@@ -341,20 +341,6 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
     remove(&item.location)
 }
 
-/// Removes every item of every trash folder with `NSFileManager`, Finder's `.DS_Store` aside. It
-/// goes on after an error and gives the first one.
-pub fn empty() -> Result<()> {
-    let mut first = None;
-    for item in list()? {
-        if let Err(e) = remove(&item.location)
-            && first.is_none()
-        {
-            first = Some(e);
-        }
-    }
-    first.map_or(Ok(()), Err)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

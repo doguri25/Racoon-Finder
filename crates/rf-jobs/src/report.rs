@@ -6,7 +6,7 @@ use std::io::{self, BufWriter, Write};
 use std::time::{Duration, SystemTime};
 
 use rf_core::{ErrorKind, VPath};
-use rf_platform::{LinkKind, TrashItem};
+use rf_platform::LinkKind;
 use serde::{Deserialize, Serialize};
 
 use crate::copies::CopyFound;
@@ -348,10 +348,6 @@ pub struct JobReport {
     pub elapsed: Duration,
     /// How to reverse the job, when it can be reversed.
     pub undo: Option<UndoRecord>,
-    /// The items of the trash, as the job listed them (stamps included), that an
-    /// [`JobSpec::EmptyTrash`] which went item by item could not delete: what its retry deletes
-    /// ([`JobReport::retry_spec`]). Empty for every other job.
-    pub trash_left: Vec<TrashItem>,
 }
 
 impl JobReport {
@@ -378,7 +374,6 @@ impl JobReport {
             started: SystemTime::now(),
             elapsed: Duration::ZERO,
             undo: None,
-            trash_left: Vec::new(),
         }
     }
 
@@ -394,21 +389,7 @@ impl JobReport {
 
     /// The job to submit to try again what went wrong in this job: [`retry_spec`] of its spec
     /// and its failures. `None` when there is nothing to retry.
-    ///
-    /// An [`JobSpec::EmptyTrash`] that went item by item is retried as a
-    /// [`JobSpec::DeleteFromTrash`] of exactly the items it could not delete, as it listed them
-    /// ([`JobReport::trash_left`]), so that nothing trashed since is ever taken without a new
-    /// question; one the system did at once (Windows) is not retried at all.
     pub fn retry_spec(&self) -> Option<JobSpec> {
-        if matches!(self.spec, JobSpec::EmptyTrash) {
-            let items: Vec<TrashItem> = self
-                .trash_left
-                .iter()
-                .filter(|item| failed_in_trash(&item.location, &self.failures))
-                .cloned()
-                .collect();
-            return (!items.is_empty()).then_some(JobSpec::DeleteFromTrash { items });
-        }
         retry_spec(&self.spec, &self.failures)
     }
 
@@ -507,8 +488,8 @@ impl JobReport {
 /// - A rename, a create or an undo is retried as it was asked, when it has any failure.
 /// - A restore from the trash and a delete from it retry each item that failed, with the stamp
 ///   it was listed with, but not one that failed for being no longer the item listed
-///   (`TrashItemChanged`). An empty of the trash is never retried here: its spec names no item
-///   (see `JobReport::retry_spec`, which retries the items its report kept).
+///   (`TrashItemChanged`). An emptying of the trash is such a delete, of the items its question
+///   counted, so its retry never takes what was trashed since.
 ///
 /// Items that a cancelled or aborted job never reached are not failures and are not in the
 /// retry. An item that fails again (its source is gone, say) is a failure of the retry, which
@@ -538,9 +519,6 @@ pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec>
         JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
             (!failed.is_empty()).then(|| original.clone())
         }
-        // The spec names no item: a new empty would take what was trashed since the user was
-        // asked. `JobReport::retry_spec` retries the items the report kept instead.
-        JobSpec::EmptyTrash => None,
     }
 }
 

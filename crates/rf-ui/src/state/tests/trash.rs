@@ -636,56 +636,6 @@ fn the_reasons_of_the_trash_s_jobs_are_said_in_words() {
 }
 
 #[test]
-fn a_failed_empty_is_tried_again_for_exactly_its_items_and_asks_first() {
-    let left = item("b.txt", Some("docs"), Some(5));
-    let mut state = in_trash(std::slice::from_ref(&left));
-    let effects = finish(
-        &mut state,
-        1,
-        &JobSpec::EmptyTrash,
-        JobWork::Delete,
-        |report| {
-            report.outcome = Outcome::CompletedWithErrors;
-            report.trash_left = vec![left.clone()];
-            report.failures.push(ItemFailure {
-                source: VPath::local(&left.location).ok(),
-                target: None,
-                stage: Stage::Delete,
-                kind: ErrorKind::PermissionDenied,
-                message: String::new(),
-                reason: None,
-            });
-        },
-    );
-    let token = effects
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::Toast { token, .. } => Some(*token),
-            _ => None,
-        })
-        .expect("a toast");
-    state.toast_clicked(token);
-    let Some(Modal::Failures(failures)) = state.modal() else {
-        panic!("the failed items show: {:?}", state.modal());
-    };
-    assert_eq!(
-        failures.retry.as_ref().map(|retry| &retry.spec),
-        Some(&JobSpec::DeleteFromTrash {
-            items: vec![left.clone()]
-        })
-    );
-    // 다시 시도 asks again before it deletes for good.
-    assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
-    assert_eq!(
-        confirm(&state).purpose,
-        ConfirmPurpose::RetryDeleteFromTrash {
-            job: JobId(1),
-            items: vec![left]
-        }
-    );
-}
-
-#[test]
 fn the_trash_is_listed_again_after_its_jobs_and_when_the_window_comes_to_the_front() {
     let mut state = in_trash(&[item("a.txt", Some("docs"), Some(5))]);
     let before = state.panes()[LEFT].active_tab().generation();
@@ -709,7 +659,9 @@ fn the_trash_is_listed_again_after_its_jobs_and_when_the_window_comes_to_the_fro
             .iter()
             .any(|request| request.path == trash())
     );
-    assert!(changes_trash(&JobSpec::EmptyTrash));
+    assert!(changes_trash(&JobSpec::DeleteFromTrash {
+        items: Vec::new()
+    }));
     assert!(!changes_trash(&JobSpec::Create {
         parent: folder("b"),
         name: "c".into(),

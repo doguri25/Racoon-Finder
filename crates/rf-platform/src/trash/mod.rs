@@ -1,6 +1,7 @@
 //! The system trash: sending items to it, which never turns into a permanent delete, and the
-//! trash as a place (NAV-16): what it holds, putting an item back, deleting one for good and
-//! emptying it.
+//! trash as a place (NAV-16): what it holds, putting an item back and deleting one for good.
+//! There is no call that empties a whole trash: emptying it is deleting, one by one, the items a
+//! listing found and the user was asked about, so that nothing trashed since goes unasked.
 //!
 //! A request that the trash cannot serve (a network share, a USB stick, a path the Windows
 //! recycle bin cannot take, a system without a trash) fails and leaves the item alone. Only the
@@ -382,21 +383,6 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
     imp::delete_forever(item)
 }
 
-/// Whether the system empties its trash in one call that cannot be split into one call per item:
-/// `SHEmptyRecycleBinW` on Windows. Elsewhere [`empty`] deletes item by item, and a job that
-/// empties the trash does so itself with [`delete_forever`], so that each item that cannot be
-/// deleted is a failure of its own, which a retry deletes alone.
-pub const EMPTIES_AT_ONCE: bool = cfg!(windows);
-
-/// Deletes everything in the user's trashes for good, by the system's own way where it has one:
-/// `SHEmptyRecycleBinW` on Windows (with no question and no sound: the app asks first), each item
-/// with `NSFileManager` on macOS, and on Linux the items, records and size cache of the home
-/// trash. Nothing outside the trash folders is touched. The app must ask the user first: this
-/// cannot be undone.
-pub fn empty() -> Result<()> {
-    imp::empty()
-}
-
 /// What marks the error of an item that is not the one that was listed (see
 /// [`is_changed_since_listed`]).
 #[derive(Debug)]
@@ -544,10 +530,6 @@ mod imp {
 
     pub fn delete_forever(item: &TrashItem) -> Result<()> {
         Err(not_in_trash(&item.location))
-    }
-
-    pub fn empty() -> Result<()> {
-        Ok(())
     }
 }
 

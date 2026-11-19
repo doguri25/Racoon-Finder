@@ -1,6 +1,6 @@
 #![allow(
     unsafe_code,
-    reason = "IFileOperation COM, the user's SID and SHEmptyRecycleBinW"
+    reason = "IFileOperation COM, the user's SID and the drive types"
 )]
 
 //! The Windows recycle bin through the shell's `IFileOperation`, and the bin as a place: its
@@ -29,7 +29,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
     FOF_ALLOWUNDO, FOF_NO_UI, FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FileOperation,
     IFileOperation, IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
-    SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW, SIGDN_FILESYSPATH,
+    SIGDN_FILESYSPATH,
 };
 use windows::core::{IUnknown, PCWSTR, PWSTR};
 
@@ -421,38 +421,6 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
     super::remove_tree(&extended).map_err(|e| io_error("delete_forever", &item.location, e))?;
     super::remove_recycle_record(&location);
     Ok(())
-}
-
-/// Empties every recycle bin with `SHEmptyRecycleBinW`, on a thread of its own for COM, with no
-/// question, progress or sound. The shell fails this call when the bins are empty already
-/// (`E_UNEXPECTED` on some versions); a failure after which the user's bins hold nothing counts
-/// as done.
-pub fn empty() -> Result<()> {
-    let emptied = std::thread::spawn(|| {
-        // SAFETY: no reserved pointer; the thread is new, so no apartment is set yet.
-        let init =
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-        if init.is_err() {
-            return Err(to_io(&windows::core::Error::from_hresult(init)));
-        }
-        let _scope = ComScope;
-        let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
-        // SAFETY: no owner window, and a null root path, which means every bin.
-        unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.map_err(|e| to_io(&e))
-    })
-    .join()
-    .unwrap_or_else(|_| Err(io::Error::other("the thread that empties the bin panicked")));
-    match emptied {
-        Ok(()) => Ok(()),
-        Err(_) if list().is_ok_and(|items| items.is_empty()) => Ok(()),
-        Err(e) => {
-            let bin = bins()
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| PathBuf::from("C:\\"));
-            Err(io_error("empty_trash", &bin, e))
-        }
-    }
 }
 
 /// The progress sink, in a module of its own because the `implement` macro writes code that

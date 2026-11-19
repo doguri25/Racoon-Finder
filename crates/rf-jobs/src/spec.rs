@@ -202,16 +202,13 @@ pub enum JobSpec {
     /// Deletes items of the trash for good, each with the trash's record of it. Its kind is
     /// [`JobKind::Delete`], and it leaves no undo record: it cannot be undone, which the window
     /// says in the question it asks first.
+    ///
+    /// Emptying the trash is this job too, of the items the question before it counted: there is
+    /// no job that deletes whatever the trash holds when it runs, which would take what came in
+    /// after the question.
     DeleteFromTrash {
         items: Vec<TrashItem>,
     },
-    /// Deletes everything in the user's trashes for good: item by item where the system allows
-    /// it, each item that cannot be deleted a failure of its own, and in one call of the
-    /// system's where it does not (the Windows recycle bin). Its kind is [`JobKind::Delete`],
-    /// and, as [`JobSpec::DeleteFromTrash`], it leaves no undo record. A retry deletes only the
-    /// items that failed, as they were listed (`JobReport::retry_spec`), never what was trashed
-    /// since; one done in one call is not retried.
-    EmptyTrash,
 }
 
 /// The targets of a [`JobSpec::RestoreFromTrash`], kept as the OS's own strings so that no name
@@ -290,10 +287,9 @@ impl JobSpec {
                 TransferMode::Copy => JobKind::Copy,
                 TransferMode::Move => JobKind::Move,
             },
-            Self::Delete(_)
-            | Self::DeleteCopies(_)
-            | Self::DeleteFromTrash { .. }
-            | Self::EmptyTrash => JobKind::Delete,
+            Self::Delete(_) | Self::DeleteCopies(_) | Self::DeleteFromTrash { .. } => {
+                JobKind::Delete
+            }
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
             Self::MakeLink { .. } => JobKind::Link,
@@ -304,7 +300,7 @@ impl JobSpec {
 
     /// Whether a job of this spec can be undone once it has changed something: every job but
     /// those that delete for good (a permanent delete, a delete of copies, a delete from the
-    /// trash and emptying it), which leave no undo record. A window asks before it submits one of
+    /// trash), which leave no undo record. A window asks before it submits one of
     /// those, and its question says that it cannot be undone.
     pub fn undoable(&self) -> bool {
         !matches!(
@@ -314,7 +310,6 @@ impl JobSpec {
                 ..
             }) | Self::DeleteCopies(_)
                 | Self::DeleteFromTrash { .. }
-                | Self::EmptyTrash
         )
     }
 

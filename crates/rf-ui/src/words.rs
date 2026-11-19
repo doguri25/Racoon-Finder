@@ -1373,7 +1373,6 @@ fn detail(spec: &JobSpec, folder: impl Fn(&VPath) -> String) -> String {
             trash_items_named(&items.iter().map(|(item, _)| item).collect::<Vec<_>>())
         }
         JobSpec::DeleteFromTrash { items } => trash_items_named(&items.iter().collect::<Vec<_>>()),
-        JobSpec::EmptyTrash => shell_place(ShellPlace::Trash).to_owned(),
         // A kind of job added after this was written.
         _ => String::new(),
     }
@@ -4154,7 +4153,6 @@ mod tests {
             ],
         };
         assert_eq!(job_detail(&two), item_count(2));
-        assert_eq!(job_detail(&JobSpec::EmptyTrash), "휴지통");
         assert_eq!(JobWork::of(&two), JobWork::Restore);
         assert_eq!(queued_detail(JobWork::Restore, "a.txt"), "복원 · a.txt");
     }

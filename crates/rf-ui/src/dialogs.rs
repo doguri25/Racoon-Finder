@@ -684,8 +684,8 @@ impl Confirm {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
             ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
             // On every system, the items the question counted, each while it is that very item:
-            // never the whole trash as the job finds it (`JobSpec::EmptyTrash`, which would take
-            // what came in since, by this app's own jobs queued before it too).
+            // never the whole trash as a job would find it, which would take what came in since,
+            // by this app's own jobs queued before it too (there is no such job).
             ConfirmPurpose::DeleteFromTrash(items)
             | ConfirmPurpose::RetryDeleteFromTrash { items, .. }
             | ConfirmPurpose::EmptyTrash(items) => Some(JobSpec::DeleteFromTrash {

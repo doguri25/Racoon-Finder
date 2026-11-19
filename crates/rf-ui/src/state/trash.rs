@@ -77,15 +77,14 @@ pub fn computer_entries(places: &[Place]) -> Vec<rf_core::Entry> {
 }
 
 /// Whether a job of `spec` changes what the trash holds: a delete to the trash, a restore, a
-/// delete from the trash and its emptying, and an undo or a redo, which may send items to the
+/// delete from the trash (its emptying too), and an undo or a redo, which may send items to the
 /// trash or bring them back. The tabs that show the trash list it again when it ends.
 pub fn changes_trash(spec: &JobSpec) -> bool {
     match spec {
         JobSpec::Delete(delete) => delete.method == rf_jobs::DeleteMethod::Trash,
-        JobSpec::RestoreFromTrash { .. }
-        | JobSpec::DeleteFromTrash { .. }
-        | JobSpec::EmptyTrash
-        | JobSpec::Undo(_) => true,
+        JobSpec::RestoreFromTrash { .. } | JobSpec::DeleteFromTrash { .. } | JobSpec::Undo(_) => {
+            true
+        }
         _ => false,
     }
 }

@@ -3,9 +3,9 @@
 //!
 //! Both are lists, not folders of the file system: nothing can be made, renamed, written, moved
 //! or pasted in them. The trash takes two actions, putting an item back and deleting it for good
-//! (and emptying the whole trash), which jobs run through [`Provider::restore_from_trash`],
-//! [`Provider::delete_from_trash`] and [`Provider::empty_trash`]. A drive row is opened at its own
-//! folder ([`Drive::root`]), which the local provider serves.
+//! (emptying the trash deletes the items it lists), which jobs run through
+//! [`Provider::restore_from_trash`] and [`Provider::delete_from_trash`]. A drive row is opened at
+//! its own folder ([`Drive::root`]), which the local provider serves.
 //!
 //! An item's path is `shell://trash/<id>`, its `TrashId` as the one name; a drive's is
 //! `shell://computer/<id>`, from its root. The listing gives an [`Entry`] for each, named by that
@@ -119,13 +119,6 @@ pub trait TrashSource: Send + Sync + fmt::Debug {
     fn restore(&self, item: &TrashItem, to: &Path) -> Result<()>;
     /// Deletes `item` for good (see `rf_platform::trash::delete_forever`).
     fn delete_forever(&self, item: &TrashItem) -> Result<()>;
-    /// Deletes everything in the trash for good (see `rf_platform::trash::empty`).
-    fn empty(&self) -> Result<()>;
-    /// Whether the trash is emptied in one call that cannot be split into one per item (see
-    /// `rf_platform::trash::EMPTIES_AT_ONCE`); the default implementation says no.
-    fn empties_at_once(&self) -> bool {
-        false
-    }
 }
 
 /// The system trash of `rf_platform::trash`.
@@ -144,14 +137,6 @@ impl TrashSource for SystemTrash {
     fn delete_forever(&self, item: &TrashItem) -> Result<()> {
         rf_platform::trash::delete_forever(item)
     }
-
-    fn empty(&self) -> Result<()> {
-        rf_platform::trash::empty()
-    }
-
-    fn empties_at_once(&self) -> bool {
-        rf_platform::trash::EMPTIES_AT_ONCE
-    }
 }
 
 /// A freedesktop trash in a folder of its own, as tests keep one.
@@ -167,10 +152,6 @@ impl TrashSource for rf_platform::FreedesktopTrash {
 
     fn delete_forever(&self, item: &TrashItem) -> Result<()> {
         rf_platform::FreedesktopTrash::delete_forever(self, item)
-    }
-
-    fn empty(&self) -> Result<()> {
-        rf_platform::FreedesktopTrash::empty(self)
     }
 }
 
@@ -455,14 +436,6 @@ impl Provider for ShellProvider {
     fn trash_items(&self) -> Result<Vec<TrashItem>> {
         self.trash.list()
     }
-
-    fn empties_trash_at_once(&self) -> bool {
-        self.trash.empties_at_once()
-    }
-
-    fn empty_trash(&self) -> Result<()> {
-        self.trash.empty()
-    }
 }
 
 #[cfg(test)]
@@ -480,7 +453,6 @@ mod tests {
     enum Asked {
         Restore(PathBuf, PathBuf),
         DeleteForever(PathBuf),
-        Empty,
     }
 
     /// A trash that lists the items it was given and notes what it is asked.
@@ -506,10 +478,6 @@ mod tests {
         }
         fn delete_forever(&self, item: &TrashItem) -> Result<()> {
             self.note(Asked::DeleteForever(item.location.clone()));
-            Ok(())
-        }
-        fn empty(&self) -> Result<()> {
-            self.note(Asked::Empty);
             Ok(())
         }
     }
@@ -706,7 +674,6 @@ mod tests {
         let to = VPath::local(base().join("back.txt")).unwrap();
         shell.restore_from_trash(&a, &to).unwrap();
         shell.delete_from_trash(&a).unwrap();
-        shell.empty_trash().unwrap();
         let remote = VPath::new(Scheme::Remote, "p", &["x"]).unwrap();
         assert_eq!(
             shell.restore_from_trash(&a, &remote).unwrap_err().kind(),
@@ -717,7 +684,6 @@ mod tests {
             [
                 Asked::Restore(a.location.clone(), base().join("back.txt")),
                 Asked::DeleteForever(a.location.clone()),
-                Asked::Empty
             ]
         );
     }

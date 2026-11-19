@@ -178,7 +178,6 @@ fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
         JobSpec::Undo(record) => undo::run_undo(ctx, record),
         JobSpec::RestoreFromTrash { items } => trash::run_restore(ctx, items),
         JobSpec::DeleteFromTrash { items } => trash::run_delete(ctx, items),
-        JobSpec::EmptyTrash => trash::run_empty(ctx),
     }
 }
 

@@ -1,5 +1,5 @@
-//! The jobs on the trash as a place (NAV-16): putting items back, deleting them for good and
-//! emptying it. They run against a freedesktop trash in a temporary folder (on Unix), never the
+//! The jobs on the trash as a place (NAV-16): putting items back and deleting them for good, the
+//! emptying of the trash among them (a delete of the items its question counted). They run against a freedesktop trash in a temporary folder (on Unix), never the
 //! user's own.
 
 mod common;
@@ -33,14 +33,13 @@ fn the_jobs_on_the_trash_are_of_their_kinds_and_lanes() {
     assert_eq!(restore.kind(), JobKind::Restore);
     assert_eq!(JobKind::Restore.name(), "restore");
     assert_eq!(delete.kind(), JobKind::Delete);
-    assert_eq!(JobSpec::EmptyTrash.kind(), JobKind::Delete);
-    for spec in [&restore, &delete, &JobSpec::EmptyTrash] {
+    for spec in [&restore, &delete] {
         assert_eq!(DefaultLanes.lane(spec), LaneId::MAIN);
         assert!(!spec.journaled());
     }
-    // Only the restore can be undone; the other two delete for good, as a permanent delete does.
+    // Only the restore can be undone; the delete is for good, as a permanent delete is.
     assert!(restore.undoable());
-    assert!(!delete.undoable() && !JobSpec::EmptyTrash.undoable());
+    assert!(!delete.undoable());
     let permanent = JobSpec::Delete(DeleteSpec {
         paths: Vec::new(),
         method: DeleteMethod::Permanent,
@@ -74,11 +73,13 @@ fn a_job_on_the_trash_is_stored_and_read_back_whole() {
         JobSpec::DeleteFromTrash {
             items: vec![item.clone(), TrashItem::at(odd.clone(), true)],
         },
-        JobSpec::EmptyTrash,
     ] {
         let text = serde_json::to_string(&spec).unwrap();
         assert_eq!(serde_json::from_str::<JobSpec>(&text).unwrap(), spec);
     }
+    // No job empties whatever the trash holds when it runs (it would take what was trashed
+    // after the question): a spec that names one does not read.
+    assert!(serde_json::from_str::<JobSpec>(r#""EmptyTrash""#).is_err());
 }
 
 /// A record of a trash written before stamps were kept still undoes as it did: by the place
@@ -149,11 +150,6 @@ fn without_the_trash_provider_nothing_is_done() {
         assert_eq!(rep.failures[0].source, Some(v(&file)));
         assert_eq!(rep.undo, None);
     }
-    let rep = run_with(&JobSpec::EmptyTrash, &vfs, &NonInteractive);
-    assert_eq!(
-        rep.failures[0].target,
-        Some(rf_vfs::ShellPlace::Trash.path())
-    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "A");
     assert!(!dir.path().join("b.txt").exists());
 }
@@ -190,54 +186,6 @@ fn only_the_failed_items_of_a_job_on_the_trash_are_tried_again() {
         Some(JobSpec::DeleteFromTrash { items: vec![b] })
     );
     assert_eq!(rf_jobs::retry_spec(&delete, &[]), None);
-    // A new empty would take what was trashed since the user was asked: never by itself.
-    assert_eq!(rf_jobs::retry_spec(&JobSpec::EmptyTrash, &[failed]), None);
-    assert_eq!(rf_jobs::retry_spec(&JobSpec::EmptyTrash, &[]), None);
-}
-
-/// A trash the system empties in one call (the Windows recycle bin), which fails here.
-#[derive(Debug)]
-struct AtOnce;
-
-impl rf_vfs::TrashSource for AtOnce {
-    fn list(&self) -> rf_core::Result<Vec<TrashItem>> {
-        Ok(vec![TrashItem::at(std::env::temp_dir().join("x"), false)])
-    }
-    fn restore(&self, item: &TrashItem, _to: &std::path::Path) -> rf_core::Result<()> {
-        Err(rf_core::Error::Unsupported(
-            item.location.display().to_string(),
-        ))
-    }
-    fn delete_forever(&self, item: &TrashItem) -> rf_core::Result<()> {
-        Err(rf_core::Error::Unsupported(
-            item.location.display().to_string(),
-        ))
-    }
-    fn empty(&self) -> rf_core::Result<()> {
-        Err(rf_core::Error::Unsupported("the bin refused".to_owned()))
-    }
-    fn empties_at_once(&self) -> bool {
-        true
-    }
-}
-
-/// A trash emptied in one call fails as a whole, and is never tried again by itself: the user
-/// asks for a new empty, and is asked again.
-#[test]
-fn an_empty_at_once_is_not_tried_again() {
-    let mut vfs = Vfs::with_local();
-    vfs.register(std::sync::Arc::new(rf_vfs::ShellProvider::with_sources(
-        std::sync::Arc::new(AtOnce),
-        std::sync::Arc::new(rf_vfs::SystemDrives),
-    )));
-    let rep = run_with(&JobSpec::EmptyTrash, &vfs, &NonInteractive);
-    assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
-    assert_eq!(rep.failures.len(), 1);
-    assert_eq!(
-        rep.failures[0].target,
-        Some(rf_vfs::ShellPlace::Trash.path())
-    );
-    assert_eq!(rep.retry_spec(), None);
 }
 
 /// A freedesktop trash in a temporary folder, the local disk whose trash it is, and the trash as
@@ -559,8 +507,10 @@ mod in_a_trash_of_its_own {
         assert_eq!((again.outcome, again.skipped), (Outcome::Completed, 1));
     }
 
+    /// Emptying the trash is a delete of what its question listed: it leaves nothing outside the
+    /// trash touched, whatever the links in it lead to.
     #[test]
-    fn empty_leaves_nothing_outside_the_trash_touched() {
+    fn an_emptying_leaves_nothing_outside_the_trash_touched() {
         let b = bin();
         b.trashed("a.txt", "A");
         let folder = b.home.join("folder");
@@ -571,7 +521,10 @@ mod in_a_trash_of_its_own {
         b.trash.move_to_trash(&v(b.home.join("top-link"))).unwrap();
         std::fs::write(b.home.join("stays.txt"), "S").unwrap();
 
-        let rep = run_with(&JobSpec::EmptyTrash, &b.vfs, &NonInteractive);
+        let empty = JobSpec::DeleteFromTrash {
+            items: b.trash.list().unwrap(),
+        };
+        let rep = run_with(&empty, &b.vfs, &NonInteractive);
         assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
         assert_eq!((rep.planned.files, rep.planned.dirs), (2, 1));
         assert_eq!(rep.done, rep.planned);
@@ -630,10 +583,11 @@ mod in_a_trash_of_its_own {
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
     }
 
-    /// Emptying the trash goes item by item: an item that cannot be deleted is a failure of its
-    /// own, and the retry deletes that item alone, as it was listed, never what was trashed since.
+    /// Emptying the trash goes item by item, through what its question listed: an item that
+    /// cannot be deleted is a failure of its own, and the retry deletes that item alone, as it was
+    /// listed, never what was trashed since.
     #[test]
-    fn an_empty_that_fails_on_an_item_is_retried_as_a_delete_of_that_item() {
+    fn an_emptying_that_fails_on_an_item_is_retried_as_a_delete_of_that_item() {
         let b = bin();
         let a = b.trashed("a.txt", "A");
         let kept = b.trashed("b.txt", "B");
@@ -649,7 +603,10 @@ mod in_a_trash_of_its_own {
         );
         vfs.register(Arc::new(faulty));
 
-        let rep = run_with(&JobSpec::EmptyTrash, &vfs, &NonInteractive);
+        let empty = JobSpec::DeleteFromTrash {
+            items: b.trash.list().unwrap(),
+        };
+        let rep = run_with(&empty, &vfs, &NonInteractive);
         assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
         assert_eq!((rep.planned.files, rep.done.files), (3, 2));
         let [failure] = rep.failures.as_slice() else {

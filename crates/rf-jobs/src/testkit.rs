@@ -943,14 +943,6 @@ impl Provider for FaultyProvider {
         self.inner.trash_items()
     }
 
-    fn empties_trash_at_once(&self) -> bool {
-        self.inner.empties_trash_at_once()
-    }
-
-    fn empty_trash(&self) -> Result<()> {
-        self.inner.empty_trash()
-    }
-
     fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {
         self.inner.data_ranges(path)
     }
