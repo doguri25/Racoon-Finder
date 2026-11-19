@@ -57,12 +57,14 @@ impl FreedesktopTrash {
         self.root.join("info")
     }
 
-    /// Whether this trash can take the item at `local`: it is on the same file system as the
-    /// trash (the trash's nearest folder that exists, when it is not made yet), and it is neither
-    /// the trash, inside it, nor a folder above it. The item itself is looked at without following
-    /// a link; when it does not exist, its folder is.
+    /// Whether this trash takes items from the place `local`, an item or the folder a window
+    /// shows: it is on the same file system as the trash (the trash's nearest folder that exists,
+    /// when it is not made yet), and it is neither the trash nor inside it. A folder above the
+    /// trash (the home folder) counts: its items can go, though the folder itself never does (see
+    /// [`move_to_trash`](Self::move_to_trash)). The place itself is looked at without following a
+    /// link; when it does not exist, its folder is.
     pub fn takes(&self, local: &Path) -> bool {
-        if local.starts_with(&self.root) || self.root.starts_with(local) {
+        if local.starts_with(&self.root) {
             return false;
         }
         let item = std::fs::symlink_metadata(local)
@@ -81,9 +83,10 @@ impl FreedesktopTrash {
     /// record holds the absolute path and the local time.
     ///
     /// Gives `Ok(Some(location))`, the item's place in `files/`. A link is moved itself. A path
-    /// that [`takes`](Self::takes) refuses, or a rename across file systems (two mounts of one),
-    /// gives `Error::Unsupported` and leaves the item where it was; so does any other error, which
-    /// takes the record away again.
+    /// that [`takes`](Self::takes) refuses, a folder that holds the trash (it would take the trash
+    /// with it), or a rename across file systems (two mounts of one), gives `Error::Unsupported`
+    /// and leaves the item where it was; so does any other error, which takes the record away
+    /// again.
     pub fn move_to_trash(&self, path: &VPath) -> Result<Option<PathBuf>> {
         let Some(local) = path.as_local() else {
             return Err(Error::Unsupported(format!(
@@ -91,7 +94,7 @@ impl FreedesktopTrash {
             )));
         };
         std::fs::symlink_metadata(local).map_err(|e| Error::io("trash", path.clone(), e))?;
-        if !self.takes(local) {
+        if !self.takes(local) || self.root.starts_with(local) {
             return Err(Error::Unsupported(format!(
                 "the trash {} cannot take {path}; delete permanently instead",
                 self.root.display()
@@ -640,12 +643,16 @@ mod tests {
     fn the_trash_never_takes_itself_or_what_holds_it() {
         let (_dir, trash, home) = fixture();
         trash_file(&trash, &home.join("a.txt"), "A");
+        // Nothing in the trash can be trashed again.
+        for path in [trash.root().to_path_buf(), trash.files_dir().join("a.txt")] {
+            assert!(!trash.takes(&path), "{path:?}");
+        }
+        // The folders above it take items, but are never moved into it themselves.
         for path in [
             trash.root().to_path_buf(),
             trash.files_dir().join("a.txt"),
             trash.root().parent().unwrap().to_path_buf(),
         ] {
-            assert!(!trash.takes(&path), "{path:?}");
             let error = trash.move_to_trash(&local(&path)).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::Unsupported, "{path:?}");
             assert!(path.exists());
@@ -658,6 +665,32 @@ mod tests {
                 .kind(),
             ErrorKind::NotFound
         );
+    }
+
+    /// A home folder with the home trash in it: the home and every folder above the trash take
+    /// their items (`trash_supported` is asked for the folder a window shows), and none of those
+    /// folders goes into the trash itself.
+    #[test]
+    fn the_folders_above_the_trash_take_their_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap().join("kim");
+        let trash = FreedesktopTrash::new(home.join(".local").join("share").join("Trash"));
+        std::fs::create_dir_all(trash.root()).unwrap();
+        let above = [
+            home.clone(),
+            home.join(".local"),
+            home.join(".local").join("share"),
+        ];
+        for folder in &above {
+            assert!(trash.takes(folder), "{folder:?}");
+            let error = trash.move_to_trash(&local(folder)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{folder:?}");
+            assert!(folder.exists());
+        }
+        let notes = home.join("notes.txt");
+        let location = trash_file(&trash, &notes, "N");
+        assert!(!notes.exists());
+        assert_eq!(location, trash.files_dir().join("notes.txt"));
     }
 
     /// A file system other than the trash's is refused: `/dev/shm` is a `tmpfs` of its own on
