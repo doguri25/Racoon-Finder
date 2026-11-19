@@ -60,6 +60,7 @@ failure-changed-since-linked = 링크가 바뀌었거나 다른 항목으로 대
 failure-temp-left-behind = 임시 파일을 지우지 못해 남아 있습니다
 failure-trash-item-changed = 휴지통이 바뀌었습니다. 목록을 새로 고친 뒤 다시 해 주세요.
 failure-original-folder-gone = 원래 폴더가 없습니다. 위치를 골라 꺼내기…로 다른 폴더에 꺼낼 수 있습니다.
+failure-left-the-trash = 휴지통에 더 이상 없습니다(다른 앱이 꺼냈거나 지웠습니다). 목록을 새로 고쳐 보세요.
 failure-restore-never-replaces = 복원은 그 자리에 있는 항목을 덮어쓰지 않습니다
 failure-unknown = 알 수 없는 이유로 처리하지 못했습니다
 

@@ -225,6 +225,10 @@ pub enum FailureReason {
     /// `Restore`, `NotFound`: the folder an item of the trash was to go back to is gone; the item
     /// stays in the trash, and can be put back to a place the user picks. Nothing is made.
     OriginalFolderGone,
+    /// `Restore`, `NotFound`: the item is no longer in the trash (another app put it back or
+    /// deleted it since the trash was listed), whether or not the folder it was to go to is
+    /// there; nothing was done, and no other place can help. A retry cannot help.
+    LeftTheTrash,
     /// `Write` warning: a temporary file of the job could not be removed and stays under its
     /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
     /// crash recovery will not look for it.
@@ -276,6 +280,7 @@ impl FailureReason {
             Self::RestoreNeverReplaces => "restore_never_replaces",
             Self::TrashItemChanged => "trash_item_changed",
             Self::OriginalFolderGone => "original_folder_gone",
+            Self::LeftTheTrash => "left_the_trash",
             Self::TempLeftBehind => "temp_left_behind",
             Self::Issue(issue) => issue.name(),
         }
@@ -524,7 +529,8 @@ pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec>
 
 /// Whether one of `failed` names the item at `location` in the trash as its source, for a reason
 /// a retry can get past: not for an item that is no longer the one listed (`TrashItemChanged`),
-/// which a retry is refused again, nor for a restore to another volume (`CrossesDevices`: an item
+/// which a retry is refused again, or no longer in the trash at all (`LeftTheTrash`), nor for a
+/// restore to another volume (`CrossesDevices`: an item
 /// comes out of the trash by a rename), which would fail the same way.
 fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
     let Ok(location) = VPath::local(location) else {
@@ -532,7 +538,10 @@ fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
     };
     failed.iter().any(|failure| {
         failure.source.as_ref() == Some(&location)
-            && failure.reason != Some(FailureReason::TrashItemChanged)
+            && !matches!(
+                failure.reason,
+                Some(FailureReason::TrashItemChanged | FailureReason::LeftTheTrash)
+            )
             && failure.kind != ErrorKind::CrossesDevices
     })
 }

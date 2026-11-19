@@ -73,6 +73,10 @@ failure-trash-item-changed = The { $os ->
        *[other] Trash
     } has changed. Refresh the list and try again.
 failure-original-folder-gone = The original folder is gone. Restore To… can put it in another folder.
+failure-left-the-trash = It's no longer in the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    } (another app restored or deleted it). Refresh the list.
 failure-restore-never-replaces = Restoring never replaces an item that is in its place
 failure-unknown = Couldn't be processed, for an unknown reason
 

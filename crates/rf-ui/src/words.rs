@@ -652,6 +652,7 @@ pub fn failure_reason(reason: &FailureReason) -> String {
         FailureReason::TempLeftBehind => "failure-temp-left-behind",
         FailureReason::TrashItemChanged => "failure-trash-item-changed",
         FailureReason::OriginalFolderGone => "failure-original-folder-gone",
+        FailureReason::LeftTheTrash => "failure-left-the-trash",
         FailureReason::RestoreNeverReplaces => "failure-restore-never-replaces",
         FailureReason::Issue(issue) => {
             return issue_and(issue, refused_because(issue));

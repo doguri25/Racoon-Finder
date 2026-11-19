@@ -100,9 +100,9 @@ pub(crate) fn run_restore(ctx: &mut Ctx<'_>, items: &[(TrashItem, PathBuf)]) {
 /// cancels the job, and any overwrite fails as `Stage::Conflict` with `RestoreNeverReplaces`.
 /// Every other failure is `Stage::Restore` with the provider's error: `Unsupported` for an item
 /// that is not in a trash folder, `TrashItemChanged` for one that is no longer the item listed,
-/// `NotFound` with `OriginalFolderGone` when the folder of `to` is gone (nothing is made) and
-/// without a reason when the item left the trash, and `CrossesDevices` for a `to` on another
-/// volume than the trash.
+/// `NotFound` with `LeftTheTrash` when the item is no longer at its place in the trash (whatever
+/// the folder of `to`), with `OriginalFolderGone` when the folder of `to` is gone (nothing is
+/// made), and `CrossesDevices` for a `to` on another volume than the trash.
 fn restore_one(
     ctx: &mut Ctx<'_>,
     trash: &VPath,
@@ -117,6 +117,14 @@ fn restore_one(
         match provider.restore_from_trash(item, &target) {
             Ok(()) => return Ok(Some(target)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            // Another app took it out or deleted it: no other place would help.
+            Err(error) if error.kind() == ErrorKind::NotFound && left_the_trash(ctx, item) => {
+                return Err(Failed::refused(
+                    Stage::Restore,
+                    error,
+                    FailureReason::LeftTheTrash,
+                ));
+            }
             Err(error) if error.kind() == ErrorKind::NotFound && folder_gone(ctx, &target) => {
                 return Err(Failed::refused(
                     Stage::Restore,
@@ -154,6 +162,16 @@ fn restore_one(
         io::Error::from(io::ErrorKind::AlreadyExists),
     );
     Err(Failed::new(Stage::Conflict, error))
+}
+
+/// Whether `item` is no longer at its place in the trash: a `stat` there (of the item itself,
+/// a link not followed) says `NotFound`.
+fn left_the_trash(ctx: &Ctx<'_>, item: &TrashItem) -> bool {
+    place_of(item).is_some_and(|place| {
+        ctx.provider(&place)
+            .and_then(|provider| provider.stat(&place))
+            .is_err_and(|error| error.kind() == ErrorKind::NotFound)
+    })
 }
 
 /// Whether the folder `target` was to go in is gone (its `stat` says `NotFound`), rather than

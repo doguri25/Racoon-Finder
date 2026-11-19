@@ -730,6 +730,39 @@ fn the_reasons_of_the_trash_s_jobs_are_said_in_words() {
         words::failure_reason(&FailureReason::RestoreNeverReplaces),
         "복원은 그 자리에 있는 항목을 덮어쓰지 않습니다"
     );
+    // An item another app took out or deleted: no other place is offered for it.
+    let left = words::failure_reason(&FailureReason::LeftTheTrash);
+    assert_eq!(
+        left,
+        "휴지통에 더 이상 없습니다(다른 앱이 꺼냈거나 지웠습니다). 목록을 새로 고쳐 보세요."
+    );
+    assert!(!left.contains("위치를 골라 꺼내기"));
+}
+
+#[test]
+fn a_restore_of_an_item_that_left_the_trash_offers_no_other_place() {
+    let a = item("a.txt", Some("gone"), Some(5));
+    let mut state = in_trash(std::slice::from_ref(&a));
+    let to = a.original.clone().expect("an original place");
+    let spec = JobSpec::RestoreFromTrash {
+        items: vec![(a.clone(), to)],
+    };
+    let effects = finish(&mut state, 1, &spec, JobWork::Restore, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(ItemFailure {
+            source: VPath::local(&a.location).ok(),
+            target: None,
+            stage: Stage::Restore,
+            kind: ErrorKind::NotFound,
+            message: String::new(),
+            reason: Some(FailureReason::LeftTheTrash),
+        });
+    });
+    for effect in &effects {
+        if let Effect::Toast { action, .. } = effect {
+            assert_ne!(action, "위치를 골라 꺼내기…");
+        }
+    }
 }
 
 #[test]

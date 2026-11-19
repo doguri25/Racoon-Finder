@@ -376,25 +376,37 @@ mod in_a_trash_of_its_own {
         assert!(!b.home.join("a.txt").exists());
     }
 
-    /// An item that left the trash is gone: `NotFound` with no reason, unlike a gone folder.
+    /// An item that left the trash (another app restored or deleted it) is said to be no longer
+    /// there, whether or not its folder is gone too: never "choose another place" for it, and no
+    /// retry, which would find it gone again.
     #[test]
     fn an_item_that_left_the_trash_is_gone() {
         let b = bin();
         let item = b.trashed("a.txt", "A");
         std::fs::remove_file(&item.location).unwrap();
-        let spec = JobSpec::RestoreFromTrash {
-            items: vec![(item.clone(), b.home.join("a.txt"))],
-        };
-        let rep = run_with(&spec, &b.vfs, &NonInteractive);
-        assert_eq!(
-            (
-                rep.failures[0].stage,
-                rep.failures[0].kind,
-                rep.failures[0].reason.clone()
-            ),
-            (Stage::Restore, ErrorKind::NotFound, None)
-        );
-        assert!(!b.home.join("a.txt").exists());
+        let gone_folder = b.home.join("removed").join("a.txt");
+        for to in [b.home.join("a.txt"), gone_folder] {
+            let spec = JobSpec::RestoreFromTrash {
+                items: vec![(item.clone(), to.clone())],
+            };
+            let rep = run_with(&spec, &b.vfs, &NonInteractive);
+            assert_eq!(
+                (
+                    rep.failures[0].stage,
+                    rep.failures[0].kind,
+                    rep.failures[0].reason.clone()
+                ),
+                (
+                    Stage::Restore,
+                    ErrorKind::NotFound,
+                    Some(FailureReason::LeftTheTrash)
+                ),
+                "{}",
+                to.display()
+            );
+            assert_eq!(rep.retry_spec(), None);
+            assert!(!to.exists());
+        }
     }
 
     /// A taken place is a conflict, and the answer decides; nothing is ever written over.
