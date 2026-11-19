@@ -1,6 +1,6 @@
 //! The jobs on the trash as a place (NAV-16): putting items back and deleting them for good, the
-//! emptying of the trash among them (a delete of the items its question counted). They run against a freedesktop trash in a temporary folder (on Unix), never the
-//! user's own.
+//! emptying of the trash among them (a delete of the items its question counted). They run
+//! against a freedesktop trash in a temporary folder (on Unix), never the user's own.
 
 mod common;
 
