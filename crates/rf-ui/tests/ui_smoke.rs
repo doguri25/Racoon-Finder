@@ -390,6 +390,84 @@ fn high_contrast_badges_cut_and_hidden_rows_and_frames_what_is_off() {
     assert_eq!((badges().len(), frames()), (0, 0), "dark");
 }
 
+/// In a theme with marks, the column of the second sort key has a "2" by its arrow besides the
+/// arrow's fainter color; the other themes draw none.
+#[test]
+fn high_contrast_numbers_the_second_sort_key() {
+    let window = window();
+    // Sorted by size first, then by name: the name's head has the second arrow.
+    window.set_left_pane(PaneView {
+        sort_key: 1,
+        then_key: 0,
+        ..PaneView::default()
+    });
+    let seconds = || ElementHandle::find_by_element_type_name(&window, "SecondKeyMark").count();
+    assert_eq!(seconds(), 0, "light");
+    ui_bridge::show_theme(&window, &theme::Builtin::HighContrast.tokens());
+    assert_eq!(seconds(), 1, "the name's head");
+    // It sits in the name's head.
+    let head = labelled(&window, "이름", AccessibleRole::Button).remove(0);
+    let (at, size) = (head.absolute_position(), head.size());
+    let mark = ElementHandle::find_by_element_type_name(&window, "SecondKeyMark")
+        .next()
+        .expect("the mark");
+    let mark_at = mark.absolute_position();
+    assert!(mark_at.x >= at.x && mark_at.x + mark.size().width <= at.x + size.width);
+    assert!(mark_at.y >= at.y && mark_at.y + mark.size().height <= at.y + size.height);
+    // Sorted by one key only: none.
+    window.set_left_pane(PaneView {
+        sort_key: 1,
+        then_key: -1,
+        ..PaneView::default()
+    });
+    assert_eq!(seconds(), 0, "one key");
+    window.set_left_pane(PaneView {
+        sort_key: 1,
+        then_key: 0,
+        ..PaneView::default()
+    });
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    assert_eq!(seconds(), 0, "dark");
+}
+
+/// In a theme with marks, a recent folder that is gone has a badge on its icon besides its faint
+/// color; one that is there has none, and the other themes draw none.
+#[test]
+fn high_contrast_badges_a_recent_folder_that_is_gone() {
+    let (window, _calls, tree_rows) = drop_window();
+    let (state, _places) = favorites_state();
+    tree_rows.set_recent(RecentBlock {
+        folded: false,
+        folders: ["r1", "r2"]
+            .into_iter()
+            .map(|label| RecentFolder {
+                label: label.to_owned(),
+                place: "/tmp".to_owned(),
+                missing: label == "r2",
+                selected: false,
+            })
+            .collect(),
+        missing_favorites: std::collections::HashSet::new(),
+    });
+    tree_rows.sync(state.tree(), state.places());
+    // The badges within the row of `label`.
+    let badges_on = |label: &str| {
+        let row = labelled(&window, label, AccessibleRole::ListItem).remove(0);
+        let (top, height) = (row.absolute_position().y, row.size().height);
+        ElementHandle::find_by_element_type_name(&window, "StateBadge")
+            .filter(|badge| {
+                let y = badge.absolute_position().y;
+                y >= top && y + badge.size().height <= top + height
+            })
+            .count()
+    };
+    assert_eq!((badges_on("r1"), badges_on("r2")), (0, 0), "light");
+    ui_bridge::show_theme(&window, &theme::Builtin::HighContrast.tokens());
+    assert_eq!((badges_on("r1"), badges_on("r2")), (0, 1), "high contrast");
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    assert_eq!((badges_on("r1"), badges_on("r2")), (0, 0), "dark");
+}
+
 /// In high contrast a choice that is off has a dashed frame in the place of its solid one: a
 /// file meeting a folder of its name offers no overwrite of any kind. Light and dark draw none.
 #[test]

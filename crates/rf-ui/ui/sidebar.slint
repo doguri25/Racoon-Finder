@@ -548,6 +548,15 @@ component TreeItem inherits Rectangle {
             height: 16px;
             name: "hidden";
         }
+        // A recent folder that is gone, besides its faint color, in a theme with marks: a badge
+        // with a cross on its icon.
+        if Theme.marks && root.item.dimmed && root.item.kind == RowKind.recent: StateBadge {
+            x: 24px + root.indent + 6px;
+            y: (parent.height - 18px) / 2 + 5px;
+            width: 16px;
+            height: 16px;
+            name: "close";
+        }
 
         // Where a folder dropped on the list of favorites would go: a line between this favorite
         // and the one above it, or below it (the line after the last one shows under it).

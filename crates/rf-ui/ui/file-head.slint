@@ -31,8 +31,19 @@ export struct ColumnView {
     sortable: bool,
 }
 
+// What tells the second sort key's arrow from the first key's besides its fainter color, while
+// the theme has `marks`: a small "2" after it (a digit, the same in every language).
+component SecondKeyMark inherits Text {
+    accessible-role: none;
+    text: "2";
+    font-size: Theme.font-small;
+    font-weight: 700;
+    color: Theme.muted;
+    vertical-alignment: center;
+}
+
 // A column head: its name, an arrow on the column the rows are sorted by first (a fainter one
-// on the column of the second key). A left click is `clicked`, with Shift or not; a left press
+// on the column of the second key, with a "2" in a theme with marks). A left click is `clicked`, with Shift or not; a left press
 // moved sideways is a drag of the head along the header (`movable`), told where the pointer is
 // (`dragging`, relative to the head) and where it was let go (`dropped`); a right click asks
 // for the header's menu at a point of the head.
@@ -76,6 +87,7 @@ component HeadCell inherits Rectangle {
             name: root.ascending ? "sort-up" : "sort-down";
             color: root.sorted == 1 ? Theme.muted : Theme.faint;
         }
+        if Theme.marks && root.sorted == 2: SecondKeyMark { }
     }
 
     touch := TouchArea {
