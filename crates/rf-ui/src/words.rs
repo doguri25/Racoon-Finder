@@ -1335,8 +1335,22 @@ fn detail(spec: &JobSpec, folder: impl Fn(&VPath) -> String) -> String {
             format!("{} → {}", name.to_string_lossy(), folder(parent))
         }
         JobSpec::Undo(record) => item_count(record.item_count()),
+        // The items of the trash by the names they had (NAV-16).
+        JobSpec::RestoreFromTrash { items } => {
+            trash_items_named(&items.iter().map(|(item, _)| item).collect::<Vec<_>>())
+        }
+        JobSpec::DeleteFromTrash { items } => trash_items_named(&items.iter().collect::<Vec<_>>()),
+        JobSpec::EmptyTrash => shell_place(ShellPlace::Trash).to_owned(),
         // A kind of job added after this was written.
         _ => String::new(),
+    }
+}
+
+/// [`items_named`] of items of the trash, by the names they had there.
+fn trash_items_named(items: &[&rf_vfs::TrashItem]) -> String {
+    match items {
+        [one] => one.name.to_string_lossy().into_owned(),
+        many => item_count(many.len()),
     }
 }
 
@@ -4039,6 +4053,27 @@ mod tests {
             log_failed(ErrorKind::PermissionDenied),
             "로그를 저장하지 못했습니다: 권한이 없습니다"
         );
+    }
+
+    #[test]
+    fn the_trash_s_jobs_are_named_by_their_items() {
+        let item = |name: &str| {
+            rf_vfs::TrashItem::at(std::env::temp_dir().join("Trash").join(name), false)
+        };
+        let one = JobSpec::DeleteFromTrash {
+            items: vec![item("a.txt")],
+        };
+        assert_eq!(job_detail(&one), "a.txt");
+        let two = JobSpec::RestoreFromTrash {
+            items: vec![
+                (item("a.txt"), std::env::temp_dir().join("a.txt")),
+                (item("b.txt"), std::env::temp_dir().join("b.txt")),
+            ],
+        };
+        assert_eq!(job_detail(&two), item_count(2));
+        assert_eq!(job_detail(&JobSpec::EmptyTrash), "휴지통");
+        assert_eq!(JobWork::of(&two), JobWork::Restore);
+        assert_eq!(queued_detail(JobWork::Restore, "a.txt"), "복원 · a.txt");
     }
 
     #[test]
