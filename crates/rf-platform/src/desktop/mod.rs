@@ -24,6 +24,13 @@
 //! [`notify()`] blocks while the system takes the notification (on macOS also while the user
 //! answers the first question, [`ASK_WAIT`] at most): call it from a worker thread, never from
 //! the UI thread. A failure only means that nothing showed; callers log it and go on.
+//!
+//! [`high_contrast()`] tells whether the system asks apps for high contrast colors (THEME-01): on
+//! Windows a contrast theme (`SystemParametersInfoW(SPI_GETHIGHCONTRAST)`), on macOS
+//! 대비 증가 (`NSWorkspace.accessibilityDisplayShouldIncreaseContrast`), elsewhere a GTK theme
+//! of high contrast named by `GTK_THEME` (GNOME's own switch is a dconf setting, which takes
+//! D-Bus or a file to read: not looked at). It reads a setting and returns at once: the UI thread
+//! may call it, as the window starts and as the system's colors change, never per frame.
 
 use std::io;
 use std::time::Duration;
@@ -38,6 +45,8 @@ use self::xdg_or_toast as imp;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 #[cfg(not(target_os = "macos"))]
 mod xdg_or_toast;
 
@@ -69,6 +78,39 @@ pub fn notify(app_id: Option<&str>, title: &str, body: &str) -> io::Result<()> {
     imp::notify(app_id, title, body)
 }
 
+/// Whether the system asks apps for high contrast colors now (see the module). `false` where
+/// it cannot tell.
+pub fn high_contrast() -> bool {
+    #[cfg(windows)]
+    {
+        windows::high_contrast()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::high_contrast()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::env::var("GTK_THEME").is_ok_and(|theme| names_high_contrast(&theme))
+    }
+}
+
+/// Whether the GTK theme `theme` (as `GTK_THEME` gives it, perhaps with `:dark` after it) is
+/// one of high contrast: GTK's `HighContrast` and `HighContrastInverse`, libadwaita's
+/// `Adwaita-hc`, and the like.
+#[cfg_attr(
+    any(windows, target_os = "macos"),
+    allow(dead_code, reason = "read on Linux; tested on every system")
+)]
+fn names_high_contrast(theme: &str) -> bool {
+    let name = theme
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.contains("highcontrast") || name.ends_with("-hc")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +119,28 @@ mod tests {
     fn an_installed_app_notifies_under_its_own_id_and_a_portable_one_under_none() {
         assert_eq!(notification_app_id(InstallMode::Installed), Some(AUMID));
         assert_eq!(notification_app_id(InstallMode::Portable), None);
+    }
+
+    #[test]
+    fn gtk_themes_of_high_contrast_are_told_from_the_others() {
+        for theme in [
+            "HighContrast",
+            "HighContrastInverse",
+            "highcontrast:dark",
+            "Adwaita-hc",
+            "Adwaita-hc:light",
+        ] {
+            assert!(names_high_contrast(theme), "{theme}");
+        }
+        for theme in ["", "Adwaita", "Adwaita:dark", "Yaru-dark", "hc", "Contrast"] {
+            assert!(!names_high_contrast(theme), "{theme}");
+        }
+    }
+
+    #[test]
+    fn the_high_contrast_setting_can_be_read() {
+        // What it says depends on the system's setting; it answers at once, with no error.
+        let _ = high_contrast();
     }
 
     #[test]

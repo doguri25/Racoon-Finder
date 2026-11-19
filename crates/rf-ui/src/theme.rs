@@ -837,6 +837,100 @@ mod tests {
         assert_eq!(tokens.icon_style, IconStyle::Bold);
     }
 
+    /// `text` with its string literals and comments blanked out, for the look below.
+    fn code_of(text: &str) -> String {
+        let mut code = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        let (mut in_string, mut in_line_comment, mut in_block_comment) = (false, false, false);
+        while let Some(c) = chars.next() {
+            if in_line_comment {
+                if c == '\n' {
+                    in_line_comment = false;
+                    code.push(c);
+                }
+            } else if in_block_comment {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
+                } else if c == '\n' {
+                    code.push(c);
+                }
+            } else if in_string {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => {
+                        in_string = false;
+                        code.push(c);
+                    }
+                    _ => {}
+                }
+            } else if c == '"' {
+                in_string = true;
+                code.push(c);
+            } else if c == '/' && chars.peek() == Some(&'/') {
+                in_line_comment = true;
+            } else if c == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+            } else {
+                code.push(c);
+            }
+        }
+        code
+    }
+
+    /// The tokens are the source of the screens' text sizes and colors (the plan's "테마 토큰이
+    /// 화면 크기의 원본"): no .slint file but theme.slint writes a font size in pixels or a
+    /// color in hex. A literal that had to stay would be named here with its reason; none does.
+    #[test]
+    fn the_screens_take_their_font_sizes_and_colors_from_the_theme() {
+        const ALLOWED: &[(&str, &str, &str)] = &[];
+        let size = regex::Regex::new(r"font-size\s*:\s*-?[0-9.]+\s*px").expect("a pattern");
+        let color = regex::Regex::new(r"#[0-9A-Fa-f]{3,8}\b").expect("a pattern");
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        let mut files: Vec<_> = std::fs::read_dir(&folder)
+            .expect("the screens' folder")
+            .map(|entry| entry.expect("an entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "slint")
+            })
+            .collect();
+        files.sort();
+        assert!(files.len() > 15, "{files:?}");
+        let mut found = Vec::new();
+        for path in files {
+            let name = path
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            if name == "theme.slint" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a .slint file");
+            for (number, line) in code_of(&text).lines().enumerate() {
+                for literal in size.find_iter(line).chain(color.find_iter(line)) {
+                    let allowed = ALLOWED
+                        .iter()
+                        .any(|(file, what, _reason)| *file == name && *what == literal.as_str());
+                    if !allowed {
+                        found.push(format!("{name}:{}: {}", number + 1, literal.as_str()));
+                    }
+                }
+            }
+        }
+        assert_eq!(found, Vec::<String>::new());
+        // The look itself finds them, and skips what only a string or a comment says.
+        let sample =
+            "a { font-size: 13px; c: #FFFFFF33; }\n// #123456 font-size: 1px\nt: \"#ABCDEF\";";
+        let code = code_of(sample);
+        assert_eq!(size.find_iter(&code).count(), 1);
+        assert_eq!(color.find_iter(&code).count(), 1);
+    }
+
     #[test]
     fn contrast_is_as_wcag_counts_it() {
         let (black, white) = (Rgba::rgb(0, 0, 0), Rgba::rgb(255, 255, 255));

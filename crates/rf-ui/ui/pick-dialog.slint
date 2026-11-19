@@ -776,7 +776,7 @@ export component PickDialog inherits DialogFrame {
                     Text {
                         horizontal-stretch: 1;
                         text: root.view.policy-note;
-                        font-size: 13px;
+                        font-size: Theme.font-note;
                         color: root.view.policy-danger ? Theme.text : Theme.muted;
                         font-weight: root.view.policy-danger ? 600 : 400;
                         vertical-alignment: center;
@@ -821,7 +821,7 @@ export component PickDialog inherits DialogFrame {
                     }
                     if root.view.hint != "" || path.composing: Text {
                         text: path.composing ? root.view.unentered-hint : root.view.hint;
-                        font-size: 13px;
+                        font-size: Theme.font-note;
                         color: Theme.text;
                         wrap: word-wrap;
                     }

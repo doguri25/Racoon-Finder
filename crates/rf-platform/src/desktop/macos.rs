@@ -138,6 +138,11 @@ pub fn notify(_app_id: Option<&str>, title: &str, body: &str) -> io::Result<()> 
     })
 }
 
+/// Whether 손쉬운 사용 ▸ 디스플레이 ▸ 대비 증가 is on.
+pub fn high_contrast() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldIncreaseContrast()
+}
+
 /// Whether the app runs from an app bundle, which alone may use the notification center: a
 /// main bundle with an identifier, whose folder is an `.app`.
 fn in_app_bundle() -> bool {

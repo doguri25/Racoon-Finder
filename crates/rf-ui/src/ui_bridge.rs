@@ -51,6 +51,7 @@ use crate::state::{
     AppState, Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names,
     PathForm, PreviewShown, RIGHT, RecentAt, SelectState, ViewMode,
 };
+use crate::theme::{self, Colors, Fonts, IconStyle, Rgba, Sizes, Tokens};
 use crate::tree::{NodeId, Tree, TreeRowData};
 use crate::words;
 use crate::{
@@ -58,7 +59,8 @@ use crate::{
     ErrorView, FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView,
     ItemMenu, JobGraph, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView,
     PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, TreeRow, VisitEntry,
+    RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, Theme, TreeRow,
+    VisitEntry,
 };
 
 /// What separates the parts of a pane's status line in `PaneView.status`:
@@ -1703,6 +1705,161 @@ where
     let key = |key: PanelKey| SharedString::from(keys::panel_shortcut(key, os).unwrap_or_default());
     shown.set_move_job_up(key(PanelKey::MoveUp));
     shown.set_move_job_down(key(PanelKey::MoveDown));
+}
+
+/// Has `window` take the tokens of its theme from here whenever it asks for them (`Theme.pick`,
+/// as it starts, as its `theme-choice` changes and as the system's colors turn light or dark):
+/// the built-in theme of the choice it shows ([`theme::builtin`]), with the system's high
+/// contrast setting read then (`rf_platform::desktop::high_contrast`, a quick look at a setting,
+/// never per frame). Each window that uses `Theme` is given this once, as it is made; its
+/// `show-theme` then shows the theme before its first frame.
+pub fn follow_theme<W>(window: &W)
+where
+    W: ComponentHandle + 'static,
+    for<'a> Theme<'a>: slint::Global<'a, W>,
+{
+    let weak = window.as_weak();
+    window
+        .global::<Theme<'_>>()
+        .on_pick(move |choice, system_dark| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            let choice = controller::theme_of(choice).unwrap_or_default();
+            let high_contrast = rf_platform::desktop::high_contrast();
+            show_theme(&window, &theme::builtin(choice, system_dark, high_contrast));
+        });
+}
+
+/// Gives `window` the tokens of a theme (its `Theme` global): every screen of it shows them at
+/// once (THEME-09).
+pub fn show_theme<'a, W>(window: &'a W, tokens: &Tokens)
+where
+    W: ComponentHandle,
+    Theme<'a>: slint::Global<'a, W>,
+{
+    let shown = window.global::<Theme<'a>>();
+    let Tokens {
+        dark,
+        icon_style,
+        marks,
+        color,
+        font,
+        size,
+    } = tokens;
+    shown.set_dark(*dark);
+    shown.set_marks(*marks);
+    shown.set_icon_weight(icon_style.weight());
+    let c = |rgba: Rgba| slint::Color::from_argb_u8(rgba.alpha, rgba.red, rgba.green, rgba.blue);
+    shown.set_bg(c(color.bg));
+    shown.set_panel(c(color.panel));
+    shown.set_raised(c(color.raised));
+    shown.set_text(c(color.text));
+    shown.set_muted(c(color.muted));
+    shown.set_faint(c(color.faint));
+    shown.set_border(c(color.border));
+    shown.set_folder(c(color.folder));
+    shown.set_warning(c(color.warning));
+    shown.set_accent(c(color.accent));
+    shown.set_on_accent(c(color.on_accent));
+    shown.set_selection(c(color.selection));
+    shown.set_toast_bg(c(color.toast_bg));
+    shown.set_toast_text(c(color.toast_text));
+    shown.set_toast_link(c(color.toast_link));
+    shown.set_toast_hover(c(color.toast_hover));
+    shown.set_toast_pressed(c(color.toast_pressed));
+    shown.set_shadow(c(color.shadow));
+    shown.set_shadow_small(c(color.shadow_small));
+    shown.set_shadow_toast(c(color.shadow_toast));
+    shown.set_shadow_dialog(c(color.shadow_dialog));
+    shown.set_scrim(c(color.scrim));
+    shown.set_scrim_light(c(color.scrim_light));
+    shown.set_font_ui(font.ui.as_str().into());
+    shown.set_font_list(font.list.as_str().into());
+    shown.set_font_mono(font.mono.as_str().into());
+    shown.set_font_small(font.small);
+    shown.set_font_note(font.note);
+    shown.set_font_body(font.body);
+    shown.set_font_app_name(font.app_name);
+    shown.set_font_heading(font.heading);
+    shown.set_font_title(font.title);
+    shown.set_gap_xs(size.gap_xs);
+    shown.set_gap_s(size.gap_s);
+    shown.set_gap_m(size.gap_m);
+    shown.set_gap_l(size.gap_l);
+    shown.set_row_height(size.row_height);
+    shown.set_radius(size.radius);
+    shown.set_radius_large(size.radius_large);
+}
+
+/// The tokens `window` shows (its `Theme` global), as [`show_theme`] gave them: for the tests
+/// of the windows.
+pub fn shown_theme<'a, W>(window: &'a W) -> Tokens
+where
+    W: ComponentHandle,
+    Theme<'a>: slint::Global<'a, W>,
+{
+    let shown = window.global::<Theme<'a>>();
+    let c = |color: slint::Color| Rgba {
+        red: color.red(),
+        green: color.green(),
+        blue: color.blue(),
+        alpha: color.alpha(),
+    };
+    Tokens {
+        dark: shown.get_dark(),
+        icon_style: if shown.get_icon_weight() > IconStyle::Line.weight() {
+            IconStyle::Bold
+        } else {
+            IconStyle::Line
+        },
+        marks: shown.get_marks(),
+        color: Colors {
+            bg: c(shown.get_bg()),
+            panel: c(shown.get_panel()),
+            raised: c(shown.get_raised()),
+            text: c(shown.get_text()),
+            muted: c(shown.get_muted()),
+            faint: c(shown.get_faint()),
+            border: c(shown.get_border()),
+            folder: c(shown.get_folder()),
+            warning: c(shown.get_warning()),
+            accent: c(shown.get_accent()),
+            on_accent: c(shown.get_on_accent()),
+            selection: c(shown.get_selection()),
+            toast_bg: c(shown.get_toast_bg()),
+            toast_text: c(shown.get_toast_text()),
+            toast_link: c(shown.get_toast_link()),
+            toast_hover: c(shown.get_toast_hover()),
+            toast_pressed: c(shown.get_toast_pressed()),
+            shadow: c(shown.get_shadow()),
+            shadow_small: c(shown.get_shadow_small()),
+            shadow_toast: c(shown.get_shadow_toast()),
+            shadow_dialog: c(shown.get_shadow_dialog()),
+            scrim: c(shown.get_scrim()),
+            scrim_light: c(shown.get_scrim_light()),
+        },
+        font: Fonts {
+            ui: shown.get_font_ui().into(),
+            list: shown.get_font_list().into(),
+            mono: shown.get_font_mono().into(),
+            small: shown.get_font_small(),
+            note: shown.get_font_note(),
+            body: shown.get_font_body(),
+            app_name: shown.get_font_app_name(),
+            heading: shown.get_font_heading(),
+            title: shown.get_font_title(),
+        },
+        size: Sizes {
+            gap_xs: shown.get_gap_xs(),
+            gap_s: shown.get_gap_s(),
+            gap_m: shown.get_gap_m(),
+            gap_l: shown.get_gap_l(),
+            row_height: shown.get_row_height(),
+            radius: shown.get_radius(),
+            radius_large: shown.get_radius_large(),
+        },
+    }
 }
 
 /// The app's window as the owner of a dialog of the system and of the window's drop target: its

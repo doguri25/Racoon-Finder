@@ -620,8 +620,9 @@ impl Controller {
         }
     }
 
-    /// The 보기 menu chose `theme`: the window shows it at once (its colors follow
-    /// `theme-choice`), and so does the job panel's own window, while there is one.
+    /// The 보기 menu chose `theme`: the window shows it at once (as its `theme-choice` changes
+    /// it asks for the theme's tokens), and so does the job panel's own window, while there is
+    /// one.
     pub(super) fn choose_theme(&self, theme: ThemeChoice) {
         self.theme.set(theme);
         if let Some(window) = self.window.upgrade() {
@@ -631,6 +632,22 @@ impl Controller {
             own.set_theme_choice(theme_number(theme));
         }
         self.plan_save();
+    }
+
+    /// The window came to the front: while the theme follows the system's setting, the
+    /// windows take their tokens again, so that a high contrast the system turned on or off
+    /// meanwhile shows (Windows and macOS tell the window of a change between light and dark
+    /// alone). The same tokens change nothing on the screen.
+    pub(super) fn look_at_system_theme(&self) {
+        if self.theme.get() != ThemeChoice::System {
+            return;
+        }
+        if let Some(window) = self.window.upgrade() {
+            window.invoke_show_theme();
+        }
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.invoke_show_theme();
+        }
     }
 }
 

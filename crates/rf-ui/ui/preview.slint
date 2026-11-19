@@ -47,9 +47,9 @@ export struct PreviewView {
     lines: [string],
 }
 
-// The fixed width font of a text, each system's own.
+// The fixed width font of a text: the theme's (`font-mono`), or each system's own.
 export global PreviewFont {
-    out property <string> mono: Platform.os == OperatingSystemType.windows ? "Consolas" : Platform.os == OperatingSystemType.macos ? "Menlo" : "DejaVu Sans Mono";
+    out property <string> mono: Theme.font-mono != "" ? Theme.font-mono : Platform.os == OperatingSystemType.windows ? "Consolas" : Platform.os == OperatingSystemType.macos ? "Menlo" : "DejaVu Sans Mono";
 }
 
 // One line of a text, wrapped between words, and inside a word too long for the room.
@@ -233,7 +233,7 @@ export component QuickLook inherits Rectangle {
         keys.focus();
     }
 
-    background: #00000059;
+    background: Theme.scrim;
 
     TouchArea {
         clicked => {
@@ -281,7 +281,7 @@ export component QuickLook inherits Rectangle {
                     Text {
                         horizontal-stretch: 1;
                         text: root.view.name;
-                        font-size: 16px;
+                        font-size: Theme.font-heading;
                         font-weight: 700;
                         color: Theme.text;
                         vertical-alignment: center;

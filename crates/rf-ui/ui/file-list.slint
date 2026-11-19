@@ -479,6 +479,7 @@ export component FileList inherits Rectangle {
                                     width: head.name-end - self.x;
                                     height: parent.height;
                                     text: row.name;
+                                    font-family: Theme.font-list;
                                     color: Theme.text;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -488,6 +489,7 @@ export component FileList inherits Rectangle {
                                     width: head.w(c);
                                     height: parent.height;
                                     text: Cells.text(row, column.id);
+                                    font-family: Theme.font-list;
                                     color: Theme.muted;
                                     horizontal-alignment: column.align-end ? right : left;
                                     vertical-alignment: center;

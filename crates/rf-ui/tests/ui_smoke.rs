@@ -14,10 +14,12 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
+use rf_ui::settings::ThemeChoice;
 use rf_ui::state::{
     AppState, Column, DEFAULT_THUMB_SIZE, DropSpot, Effect, FolderView, Hover, MAX_THUMB_SIZE,
     MIN_THUMB_SIZE, MenuFacts, ShownColumn, TreeMode, ViewMode, grid_shape,
 };
+use rf_ui::theme;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
@@ -83,33 +85,86 @@ fn labelled(window: &MainWindow, label: &str, role: AccessibleRole) -> Vec<Eleme
         .collect()
 }
 
+/// The tokens the theme `choice` (the numbers of `theme-choice`) shows in the windows of the
+/// tests, where the system's widgets are light: high contrast as this system is set.
+fn tokens_of(choice: i32) -> theme::Tokens {
+    let choice = match choice {
+        1 => ThemeChoice::Light,
+        2 => ThemeChoice::Dark,
+        3 => ThemeChoice::HighContrast,
+        _ => ThemeChoice::System,
+    };
+    theme::builtin(choice, false, rf_platform::desktop::high_contrast())
+}
+
 #[test]
 fn the_notice_window_shows_the_theme_it_is_given() {
     i_slint_backend_testing::init_no_event_loop();
-    for (choice, dark) in [(1, false), (2, true)] {
+    for choice in [1, 2, 3, 0] {
         let notice = NoticeWindow::new().expect("NoticeWindow builds");
+        ui_bridge::follow_theme(&notice);
         notice.set_theme_choice(choice);
+        notice.invoke_show_theme();
         notice.show().expect("the notice shows");
-        assert_eq!(notice.global::<Theme<'_>>().get_dark(), dark, "{choice}");
+        assert_eq!(
+            ui_bridge::shown_theme(&notice),
+            tokens_of(choice),
+            "{choice}"
+        );
         notice.hide().expect("the notice hides");
     }
 }
 
+/// A window shows the light theme's tokens until Rust gives it its theme's: the values of
+/// theme.slint are those of themes/light.toml.
 #[test]
 fn main_window_builds_with_theme() {
     i_slint_backend_testing::init_no_event_loop();
     let window = MainWindow::new().expect("MainWindow builds");
+    assert_eq!(
+        ui_bridge::shown_theme(&window),
+        theme::Builtin::Light.tokens()
+    );
+    for tokens in theme::Builtin::ALL.map(theme::Builtin::tokens) {
+        ui_bridge::show_theme(&window, &tokens);
+        assert_eq!(ui_bridge::shown_theme(&window), tokens);
+    }
     let theme = window.global::<Theme<'_>>();
-
-    assert!(!theme.get_dark());
-    assert_eq!(theme.get_bg(), Color::from_rgb_u8(0xF6, 0xF7, 0xF9));
-    assert_eq!(theme.get_accent(), Color::from_rgb_u8(0x2F, 0x6F, 0xEB));
-    assert_eq!(theme.get_selection(), Color::from_rgb_u8(0xE6, 0xEE, 0xFD));
-
-    theme.set_dark(true);
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    assert!(theme.get_dark());
     assert_eq!(theme.get_bg(), Color::from_rgb_u8(0x15, 0x17, 0x1A));
     assert_eq!(theme.get_accent(), Color::from_rgb_u8(0x78, 0xA1, 0xF2));
     assert_eq!(theme.get_selection(), Color::from_rgb_u8(0x31, 0x3C, 0x51));
+}
+
+/// Each window takes its theme as it asks (`Theme.pick`): 시스템 설정 따르기, 밝게, 어둡게 and
+/// 고대비 show at once in the main window, the job panel's own window and the notice window
+/// alike, with no restart (THEME-09).
+#[test]
+fn a_theme_chosen_shows_at_once_in_every_window() {
+    let window = window();
+    let own = JobWindow::new().expect("JobWindow builds");
+    let notice = NoticeWindow::new().expect("NoticeWindow builds");
+    ui_bridge::follow_theme(&window);
+    ui_bridge::follow_theme(&own);
+    ui_bridge::follow_theme(&notice);
+    own.show().expect("the job window shows");
+    notice.show().expect("the notice shows");
+    for choice in [2, 3, 1, 0, 3, 2] {
+        window.set_theme_choice(choice);
+        own.set_theme_choice(choice);
+        notice.set_theme_choice(choice);
+        slint::platform::update_timers_and_animations();
+        let tokens = tokens_of(choice);
+        assert_eq!(ui_bridge::shown_theme(&window), tokens, "main {choice}");
+        assert_eq!(ui_bridge::shown_theme(&own), tokens, "job window {choice}");
+        assert_eq!(ui_bridge::shown_theme(&notice), tokens, "notice {choice}");
+    }
+    // Asked again with the same theme (as the window comes to the front), nothing changes.
+    window.invoke_show_theme();
+    assert_eq!(ui_bridge::shown_theme(&window), tokens_of(2));
+    own.hide().expect("hidden");
+    notice.hide().expect("hidden");
 }
 
 #[test]
@@ -2844,21 +2899,25 @@ fn the_picker_stays_under_its_name_window() {
 #[test]
 fn the_theme_follows_the_view_menu() {
     let window = window();
+    ui_bridge::follow_theme(&window);
+    window.invoke_show_theme();
     let theme = window.global::<Theme<'_>>();
     let chosen = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&chosen);
     window.on_theme_chosen(move |choice| record.borrow_mut().push(choice));
     let dark_bg = Color::from_rgb_u8(0x15, 0x17, 0x1A);
     let light_bg = Color::from_rgb_u8(0xF6, 0xF7, 0xF9);
+    let black = Color::from_rgb_u8(0, 0, 0);
 
-    // The testing backend's system asks for no dark colors: 시스템 설정 따르기 is light.
+    // The testing backend's system asks for no dark colors: 시스템 설정 따르기 is light, or
+    // high contrast where this system asks for it.
     slint::platform::update_timers_and_animations();
-    assert!(!theme.get_dark());
-    for (choice, dark) in [(2, true), (0, false), (1, false), (2, true)] {
+    assert_eq!(ui_bridge::shown_theme(&window), tokens_of(0));
+    for (choice, bg) in [(2, dark_bg), (1, light_bg), (3, black), (2, dark_bg)] {
         window.set_theme_choice(choice);
         slint::platform::update_timers_and_animations();
-        assert_eq!(theme.get_dark(), dark, "theme {choice}");
-        assert_eq!(theme.get_bg(), if dark { dark_bg } else { light_bg });
+        assert_eq!(theme.get_dark(), choice != 1, "theme {choice}");
+        assert_eq!(theme.get_bg(), bg, "theme {choice}");
     }
 
     // The 보기 button opens the menu whose 테마 menu chooses a theme.
@@ -6247,7 +6306,8 @@ fn the_job_window_takes_the_panels_keys_shows_the_theme_and_says_when_it_is_empt
     own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     assert_eq!(empty(), 0);
     // The theme of the settings, as the main window's and the notice window's.
-    for (choice, dark) in [(1, false), (2, true), (1, false)] {
+    ui_bridge::follow_theme(&own);
+    for (choice, dark) in [(1, false), (2, true), (3, true), (1, false)] {
         own.set_theme_choice(choice);
         slint::platform::update_timers_and_animations();
         assert_eq!(own.global::<Theme<'_>>().get_dark(), dark, "{choice}");

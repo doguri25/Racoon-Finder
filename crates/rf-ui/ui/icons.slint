@@ -1,4 +1,5 @@
-// Line icons from the mockup: 24×24 SVG paths, 1.8px round strokes, no fill.
+// Line icons from the mockup: 24×24 SVG paths, 1.8px round strokes (heavier in a theme whose
+// `icon-style` is bold, `Theme.icon-weight`), no fill.
 // Rectangles and circles of the mockup SVGs are written out as path commands.
 
 import { Theme } from "theme.slint";
@@ -20,7 +21,7 @@ export component Icon inherits Path {
     viewbox-height: 24;
     fill: transparent;
     stroke: root.color;
-    stroke-width: 1.8px;
+    stroke-width: 1.8px * Theme.icon-weight;
     stroke-line-cap: round;
     stroke-line-join: round;
     commands: root.commands-for(root.name);

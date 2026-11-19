@@ -156,7 +156,7 @@ export component MainWindow inherits Window {
     // is the one of the 보기 menu's 탭 items).
     private property <int> active-side: root.right-pane.active ? 1 : 0;
     private property <PaneView> active-view: root.active-side == 1 ? root.right-pane : root.left-pane;
-    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게), whether hidden
+    // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게, 3 고대비), whether hidden
     // items show and whether the names show their extensions, for the menu's check marks.
     in property <int> theme-choice;
     in-out property <bool> show-hidden;
@@ -980,16 +980,20 @@ export component MainWindow inherits Window {
             root.give-keys-back();
         }
     }
-    // The theme. 밝게 and 어둡게 set the scheme of the standard widgets (scroll bars, menus) and
-    // the app's colors. 시스템 설정 따르기 leaves the widgets' scheme to the system (`unknown`),
-    // and the app's colors follow theirs: their background is dark exactly when the system asks
-    // for dark colors. That keeps following the system's setting as it changes, also after
-    // another theme was chosen, which `Palette.color-scheme` itself (a value once set) could not.
+    // The theme. Rust gives the window the tokens of the theme chosen (`Theme.pick`): 밝게,
+    // 어둡게 and 고대비 also set the scheme of the standard widgets (scroll bars, menus) as their
+    // tokens say. 시스템 설정 따르기 leaves the widgets' scheme to the system (`unknown`), and the
+    // app's colors follow theirs: their background is dark exactly when the system asks for dark
+    // colors (and Rust takes 고대비 while the system asks for high contrast). That keeps
+    // following the system's setting as it changes, also after another theme was chosen, which
+    // `Palette.color-scheme` itself (a value once set) could not. Rust calls it as the window
+    // starts, and again as the window comes to the front while the system's setting is
+    // followed (the system does not always tell that high contrast turned on).
     private property <color> widget-background: Palette.background;
     private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
-    function show-theme() {
-        Palette.color-scheme = root.theme-choice == 1 ? ColorScheme.light : root.theme-choice == 2 ? ColorScheme.dark : ColorScheme.unknown;
-        Theme.dark = root.theme-choice == 2 || (root.theme-choice == 0 && root.system-dark);
+    public function show-theme() {
+        Theme.pick(root.theme-choice, root.system-dark);
+        Palette.color-scheme = root.theme-choice == 0 ? ColorScheme.unknown : Theme.dark ? ColorScheme.dark : ColorScheme.light;
     }
     changed system-dark => {
         root.show-theme();
@@ -1002,6 +1006,7 @@ export component MainWindow inherits Window {
     min-height: 560px;
     background: Theme.bg;
     default-font-size: Theme.font-body;
+    default-font-family: Theme.font-ui;
 
     forward-focus: keys;
 
@@ -1111,7 +1116,7 @@ export component MainWindow inherits Window {
                         }
                         if root.titled: Text {
                             text: root.app-title;
-                            font-size: 15px;
+                            font-size: Theme.font-app-name;
                             font-weight: 700;
                             color: Theme.text;
                             vertical-alignment: center;
@@ -2006,7 +2011,7 @@ export component MainWindow inherits Window {
         background: Theme.panel;
         drop-shadow-blur: 6px;
         drop-shadow-offset-y: 2px;
-        drop-shadow-color: #00000033;
+        drop-shadow-color: Theme.shadow;
         accessible-role: none;
 
         property <angle> sweep: min(LongPressRing.progress, 0.9999) * 360deg;
@@ -2061,7 +2066,7 @@ export component MainWindow inherits Window {
         background: root.hint-refused ? Theme.toast-bg : Theme.accent;
         drop-shadow-blur: 6px;
         drop-shadow-offset-y: 2px;
-        drop-shadow-color: #00000033;
+        drop-shadow-color: Theme.shadow;
 
         hint-text := Text {
             width: parent.width - 20px;
@@ -2190,7 +2195,7 @@ export component MainWindow inherits Window {
     // A dialog over a dark scrim that takes every click: the window behind it is not to be
     // used until it closes.
     if root.dialog != DialogKind.none: Rectangle {
-        background: #00000059;
+        background: Theme.scrim;
 
         TouchArea { }
 
@@ -2256,7 +2261,7 @@ export component MainWindow inherits Window {
         }
         // Over the picker while a dialog shows on top of it.
         if root.pick-behind: Rectangle {
-            background: #00000033;
+            background: Theme.scrim-light;
 
             TouchArea { }
         }

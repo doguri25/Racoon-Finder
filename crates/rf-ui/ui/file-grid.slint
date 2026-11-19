@@ -51,10 +51,10 @@ enum TileEvent {
 // the units of its viewbox, so a line is as wide whatever the icon's size: 1.8 px up to the
 // medium icons, 1.1 px for the large ones, 0.8 px for the extra large ones, and past them (the
 // thumbnail view, to 512 px) 0.8 px grown with the icon, so that a 512 px icon is the 160 px one
-// drawn larger.
+// drawn larger; all of them heavier in a theme whose `icon-style` is bold (`Theme.icon-weight`).
 export global IconLines {
     public pure function stroke(size: length) -> length {
-        return size >= 160px ? 0.8px * (size / 160px) : size >= 96px ? 1.1px : 1.8px;
+        return (size >= 160px ? 0.8px * (size / 160px) : size >= 96px ? 1.1px : 1.8px) * Theme.icon-weight;
     }
 }
 
@@ -187,11 +187,13 @@ component Tile inherits Rectangle {
 
             Text {
                 text: root.item.name;
+                font-family: Theme.font-list;
                 color: Theme.text;
                 overflow: elide;
             }
             if root.item.fill < 0: Text {
                 text: root.item.kind;
+                font-family: Theme.font-list;
                 color: Theme.muted;
                 font-size: Theme.font-small;
                 overflow: elide;
@@ -211,6 +213,7 @@ component Tile inherits Rectangle {
             }
             Text {
                 text: root.item.size;
+                font-family: Theme.font-list;
                 color: Theme.muted;
                 font-size: Theme.font-small;
                 overflow: elide;
@@ -222,6 +225,7 @@ component Tile inherits Rectangle {
             width: parent.width - 8px;
             height: parent.height - self.y - 4px;
             text: root.item.name;
+            font-family: Theme.font-list;
             color: Theme.text;
             horizontal-alignment: center;
             vertical-alignment: top;
@@ -233,6 +237,7 @@ component Tile inherits Rectangle {
             width: parent.width - self.x - 6px;
             height: parent.height;
             text: root.item.name;
+            font-family: Theme.font-list;
             color: Theme.text;
             vertical-alignment: center;
             overflow: elide;

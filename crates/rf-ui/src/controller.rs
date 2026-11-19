@@ -326,7 +326,11 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     }
     let session = settings.session();
     let started_at = start.is_some();
+    // The tokens of the theme before the first frame; the window asks again whenever its
+    // theme changes.
+    ui_bridge::follow_theme(window);
     window.set_theme_choice(theme_number(settings.theme));
+    window.invoke_show_theme();
     // The layout of the last run from the start, before the panes' folders are known.
     show_layout(window, session.layout, false);
     ui_bridge::show_shortcuts(window, Os::CURRENT);
@@ -1336,8 +1340,13 @@ fn watch_winit_events(window: &MainWindow) {
                 with(Controller::press_focus_lost);
             }
             // The trash cannot be watched: it is listed again as the window comes to the front.
+            // The theme of the system's setting is looked at again then too: the system does
+            // not always tell the window that high contrast turned on or off.
             WinitEvent::Focused(true) => {
-                with(|c| c.update(AppState::window_focused));
+                with(|c| {
+                    c.update(AppState::window_focused);
+                    c.look_at_system_theme();
+                });
             }
             // The settings keep the window's place (LAY-07).
             WinitEvent::Moved(at) => {
@@ -4146,7 +4155,9 @@ impl Controller {
     fn open_job_window(&self) -> Result<(), slint::PlatformError> {
         let own = JobWindow::new()?;
         own.set_window_title(words::job_window_title().into());
+        ui_bridge::follow_theme(&own);
         own.set_theme_choice(theme_number(self.theme.get()));
+        own.invoke_show_theme();
         // The keys of 위로 and 아래로, which each window that shows the panel has for itself.
         ui_bridge::show_panel_shortcuts(&own, Os::CURRENT);
         own.take_models(&self.panel);
@@ -5366,6 +5377,14 @@ mod tests {
         c.choose_theme(ThemeChoice::Dark);
         slint::platform::update_timers_and_animations();
         assert!(own.global::<crate::Theme<'_>>().get_dark());
+        c.choose_theme(ThemeChoice::HighContrast);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(
+            ui_bridge::shown_theme(&own),
+            crate::theme::Builtin::HighContrast.tokens()
+        );
+        c.choose_theme(ThemeChoice::Dark);
+        slint::platform::update_timers_and_animations();
 
         // Its close button: the panel is under the panes again, and the settings say so.
         own.window()

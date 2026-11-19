@@ -1,42 +1,97 @@
-// Colors, spacing and type sizes of the demo UI (the mockup palette).
-// The main window sets `dark` from the theme chosen in its 보기 menu; every color below follows it.
+// The colors, fonts and sizes of the screens: the tokens of the theme shown, which Rust gives
+// each window from the theme's token file (`theme::Tokens`, crates/rf-ui/themes/*.toml;
+// docs/ux/themes.md says what each means). No other .slint file writes a font size or a color
+// of its own (a test reads them all).
+//
+// The values here are the light theme's, which a window shows until Rust gives it its theme
+// (a test keeps them equal to crates/rf-ui/themes/light.toml). A window asks for the tokens of
+// its theme with `pick`: as it starts, when its `theme-choice` changes, and when the system's
+// own colors turn light or dark.
 
 export global Theme {
-    in-out property <bool> dark;
-    in-out property <color> accent-base: #2F6FEB;
+    // The theme's `scheme`: the system's own widgets (scroll bars, menus, fields) are drawn
+    // dark under it.
+    in property <bool> dark: false;
+    // What the colors tell is also told by a shape (`marks`, the high contrast theme's): a bar
+    // beside a selected item (`SelectedMark`), a heavier frame around the chosen one of a set,
+    // a frame around a dialog.
+    in property <bool> marks: false;
+    // How much heavier than the mockup's 1.8 px the icons' lines are (`icon-style`).
+    in property <float> icon-weight: 1;
 
-    out property <color> bg: root.dark ? #15171A : #F6F7F9;
-    out property <color> panel: root.dark ? #1D2024 : #FFFFFF;
-    out property <color> raised: root.dark ? #24282D : #F0F2F5;
-    out property <color> text: root.dark ? #E7E9EC : #1C2024;
-    out property <color> muted: root.dark ? #A0A7B1 : #5C6370;
-    out property <color> faint: root.dark ? #7D848E : #8A919C;
-    out property <color> border: root.dark ? #2C3036 : #E1E4E8;
-    out property <color> folder: root.dark ? #E0A84A : #B7791F;
-    // What warns (an overwrite): the folder amber of the palette. For icons only: on the light
-    // panel it is 3.6:1, enough for a graphic (3:1) but not for text (4.5:1); a warning's text
-    // stays Theme.text (an amber that text could take is #9A6316).
-    out property <color> warning: root.folder;
-    // Dark mode lifts the accent toward white (35%) so it reads on dark panels.
-    out property <color> accent: root.dark ? root.accent-base.mix(#FFFFFF, 0.65) : root.accent-base;
-    out property <color> on-accent: root.dark ? #0E1A33 : #FFFFFF;
-    // Light: 12% accent over white. Dark: 22% accent over the panel color.
-    out property <color> selection: root.dark ? root.accent.mix(root.panel, 0.22) : root.accent-base.mix(#FFFFFF, 0.12);
-    out property <color> toast-bg: root.dark ? #2C3138 : #1C2024;
-    out property <color> toast-text: #F2F4F7;
-    out property <color> toast-link: #9DBBFF;
+    in property <color> bg: #F6F7F9;
+    in property <color> panel: #FFFFFF;
+    in property <color> raised: #F0F2F5;
+    in property <color> text: #1C2024;
+    in property <color> muted: #5C6370;
+    in property <color> faint: #8A919C;
+    in property <color> border: #E1E4E8;
+    in property <color> folder: #B7791F;
+    // What warns (an overwrite): for icons only; a warning's text stays `text`.
+    in property <color> warning: #B7791F;
+    in property <color> accent: #2F6FEB;
+    in property <color> on-accent: #FFFFFF;
+    in property <color> selection: #E6EEFD;
+    in property <color> toast-bg: #1C2024;
+    in property <color> toast-text: #F2F4F7;
+    in property <color> toast-link: #9DBBFF;
+    // Over a notice's button the pointer is over, and one pressed.
+    in property <color> toast-hover: #FFFFFF1F;
+    in property <color> toast-pressed: #FFFFFF33;
+    // The shadows: of menus, the pointer's hints and the long press's ring; of the chosen part
+    // of a segmented choice; of a notice; of a dialog.
+    in property <color> shadow: #00000033;
+    in property <color> shadow-small: #00000029;
+    in property <color> shadow-toast: #0000003D;
+    in property <color> shadow-dialog: #00000052;
+    // Over the window behind a dialog or quick look, and over the picker under a dialog.
+    in property <color> scrim: #00000059;
+    in property <color> scrim-light: #00000033;
 
-    out property <length> gap-xs: 4px;
-    out property <length> gap-s: 8px;
-    out property <length> gap-m: 12px;
-    out property <length> gap-l: 16px;
+    // The font families (empty: the system's): of the window, of the lists of items, and the
+    // fixed width one (empty: each system's own, `PreviewFont`).
+    in property <string> font-ui: "";
+    in property <string> font-list: "";
+    in property <string> font-mono: "";
 
-    out property <length> font-small: 12px;
-    out property <length> font-body: 14px;
-    out property <length> font-title: 20px;
+    in property <length> font-small: 12px;
+    // Notes and hints beside the main text of a dialog.
+    in property <length> font-note: 13px;
+    in property <length> font-body: 14px;
+    // The app's name in the toolbar.
+    in property <length> font-app-name: 15px;
+    // The heading of a notice, of a preview and of a folder that cannot open.
+    in property <length> font-heading: 16px;
+    in property <length> font-title: 20px;
 
-    out property <length> row-height: 32px;
-    out property <length> radius: 8px;
+    in property <length> gap-xs: 4px;
+    in property <length> gap-s: 8px;
+    in property <length> gap-m: 12px;
+    in property <length> gap-l: 16px;
+
+    in property <length> row-height: 32px;
+    in property <length> radius: 8px;
     // Panes and the sidebar.
-    out property <length> radius-large: 12px;
+    in property <length> radius-large: 12px;
+
+    // A window asks Rust for the tokens of the theme `choice` (its `theme-choice`), with
+    // whether the system's own widgets are dark now (`system-dark`, which 시스템 설정 따르기
+    // follows). Rust gives them to that window's `Theme` before this returns.
+    callback pick(choice: int, system-dark: bool);
+}
+
+// What marks a selected item besides its color while the theme has `marks`: a short bar at
+// its start, or one along its foot (`foot`, the icon views' items). It fills the item; the item
+// shows it only then (`if Theme.marks && …`).
+export component SelectedMark {
+    in property <bool> foot;
+
+    Rectangle {
+        x: root.foot ? 8px : 4px;
+        y: root.foot ? root.height - 6px : (root.height - self.height) / 2;
+        width: root.foot ? max(0px, root.width - 16px) : 3px;
+        height: root.foot ? 3px : max(8px, root.height - 12px);
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
 }

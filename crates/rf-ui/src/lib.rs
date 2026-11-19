@@ -269,7 +269,9 @@ fn io_kind(path: &std::path::Path, source: &std::io::Error) -> rf_core::ErrorKin
 /// Shows `message` in a small window of its own, in `theme`, until it is closed.
 fn show_notice(message: &str, theme: settings::ThemeChoice) -> Result<(), slint::PlatformError> {
     let window = NoticeWindow::new()?;
+    ui_bridge::follow_theme(&window);
     window.set_theme_choice(controller::theme_number(theme));
+    window.invoke_show_theme();
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     window.set_heading(rf_core::identity::DISPLAY_NAME.into());
     window.set_message(message.into());

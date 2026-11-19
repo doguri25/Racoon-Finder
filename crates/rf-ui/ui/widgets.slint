@@ -248,7 +248,7 @@ component ToastButton inherits Rectangle {
     min-width: 32px;
     height: 32px;
     border-radius: Theme.radius;
-    background: touch.pressed ? #FFFFFF33 : touch.has-hover ? #FFFFFF1F : transparent;
+    background: touch.pressed ? Theme.toast-pressed : touch.has-hover ? Theme.toast-hover : transparent;
     accessible-role: button;
     accessible-label: root.label != "" ? root.label : root.text;
     accessible-action-default => {
@@ -298,7 +298,7 @@ export component Toast inherits Rectangle {
     background: Theme.toast-bg;
     drop-shadow-blur: 24px;
     drop-shadow-offset-y: 8px;
-    drop-shadow-color: #0000003D;
+    drop-shadow-color: Theme.shadow-toast;
     accessible-role: text;
     accessible-label: root.message;
 
@@ -508,7 +508,7 @@ export component ChoiceRow inherits Rectangle {
             accessible-role: none;
             horizontal-stretch: 1;
             text: root.hint;
-            font-size: 13px;
+            font-size: Theme.font-note;
             color: root.enabled ? Theme.muted : Theme.faint;
             vertical-alignment: center;
             overflow: elide;
@@ -538,7 +538,7 @@ export component Segment inherits Rectangle {
     border-radius: 6px;
     background: root.chosen ? Theme.panel : touch.has-hover ? Theme.border : transparent;
     drop-shadow-blur: root.chosen ? 3px : 0px;
-    drop-shadow-color: #00000029;
+    drop-shadow-color: Theme.shadow-small;
     accessible-role: radio-button;
     accessible-label: root.label;
     accessible-checkable: true;
@@ -591,7 +591,7 @@ export component DialogFrame inherits Rectangle {
     border-radius: 12px;
     drop-shadow-blur: 32px;
     drop-shadow-offset-y: 12px;
-    drop-shadow-color: #00000052;
+    drop-shadow-color: Theme.shadow-dialog;
     clip: true;
     accessible-role: groupbox;
 }

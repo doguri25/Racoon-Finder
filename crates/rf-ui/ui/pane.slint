@@ -107,7 +107,7 @@ export component FolderMenu inherits Rectangle {
     border-radius: Theme.radius;
     drop-shadow-blur: 16px;
     drop-shadow-offset-y: 4px;
-    drop-shadow-color: #00000033;
+    drop-shadow-color: Theme.shadow;
     accessible-role: groupbox;
     accessible-label: root.label;
 
@@ -1551,7 +1551,7 @@ export component Pane inherits Rectangle {
 
                 Text {
                     text: "이 폴더를 열 수 없습니다";
-                    font-size: 16px;
+                    font-size: Theme.font-heading;
                     font-weight: 700;
                     color: Theme.text;
                     horizontal-alignment: center;
