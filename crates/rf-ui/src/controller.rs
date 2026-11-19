@@ -3760,9 +3760,13 @@ impl Controller {
                 .invoke_show_item_menu(side_number(side), i32::try_from(row).unwrap_or(i32::MAX)),
             MenuShown::Folder(side) => window.invoke_show_blank_menu(side_number(side)),
             MenuShown::Apps(titles) => {
+                // App names keep their `&` in the system's menu.
                 ui_bridge::set_rows(
                     &self.open_with_apps,
-                    titles.into_iter().map(Into::into).collect(),
+                    titles
+                        .iter()
+                        .map(|title| ui_bridge::os_menu_title(title, Os::CURRENT).into())
+                        .collect(),
                 );
                 window.invoke_show_open_with();
             }

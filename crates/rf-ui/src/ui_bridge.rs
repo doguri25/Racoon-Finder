@@ -1630,13 +1630,29 @@ pub fn visit_rows(state: &AppState, way: Option<Way>) -> Vec<(VisitEntry, VPath)
 /// of a longer path is left out.
 const VISIT_PLACE_CHARS: usize = 48;
 
-/// The line of `path` in the visit history's menu ([`words::history_entry`]).
+/// The line of `path` in the visit history's menu ([`words::history_entry`]), as the menu of
+/// this system shows it ([`os_menu_title`]: a folder `R&D` keeps its `&`).
 fn visit_title(path: &VPath) -> String {
     let place = path
         .file_name()
         .and(path.parent())
         .map(|parent| short_path(&parent.to_string(), VISIT_PLACE_CHARS));
-    words::history_entry(&folder_label(path), place.as_deref())
+    os_menu_title(
+        &words::history_entry(&folder_label(path), place.as_deref()),
+        Os::CURRENT,
+    )
+}
+
+/// `title`, a menu item's title made of a name of the user's or the system's (a folder, an app),
+/// as a menu of `os` shows it as it is. On Windows and macOS Slint shows its menus as the
+/// system's (through muda), which take a single `&` for the mark of the item's key and drop it
+/// (`R&D` reads `RD`): each `&` is doubled there, which they show as one. Linux shows Slint's own
+/// menu, which shows the text as it is.
+pub fn os_menu_title(title: &str, os: Os) -> String {
+    match os {
+        Os::Windows | Os::MacOs => title.replace('&', "&&"),
+        Os::Other => title.to_owned(),
+    }
 }
 
 /// A property of the window's words (the `Tr` global, `ui/tr.slint`): the key of its message in
@@ -4259,6 +4275,44 @@ mod tests {
         assert_eq!(way_of(-1), None);
         // A root is in no folder: its name alone.
         assert_eq!(words::history_entry("C:", None), "C:");
+    }
+
+    #[test]
+    fn a_name_in_an_os_menu_keeps_its_ampersand() {
+        use crate::history::Way;
+        use crate::state::AppState;
+
+        // What muda does to a title on macOS (its `strip_mnemonic`); Windows draws `&&` as `&`.
+        let shown = |title: &str| {
+            title
+                .replace("&&", "\u{0}")
+                .replace('&', "")
+                .replace('\u{0}', "&")
+        };
+        for name in ["R&D", "Tom & Jerry", "a&&b", "&", "plain"] {
+            for os in [Os::Windows, Os::MacOs] {
+                assert_eq!(shown(&os_menu_title(name, os)), name, "{name} on {os:?}");
+            }
+            // Linux shows Slint's own menu, which shows the text as it is.
+            assert_eq!(os_menu_title(name, Os::Other), name);
+        }
+        assert_eq!(os_menu_title("R&D", Os::Windows), "R&&D");
+        // The visit history's line of a folder R&D, on this system.
+        let at = |name: &str| VPath::local(std::env::temp_dir().join(name)).expect("a local path");
+        let (mut state, _) = AppState::new(at("R&D"), at("b"), None);
+        state.go_to(at("c"));
+        let [(line, path)] = visit_rows(&state, Some(Way::Back))
+            .try_into()
+            .expect("one line");
+        assert_eq!(path, at("R&D"));
+        let place = short_path(
+            &at("R&D").parent().expect("a folder").to_string(),
+            VISIT_PLACE_CHARS,
+        );
+        assert_eq!(
+            line.title.as_str(),
+            os_menu_title(&words::history_entry("R&D", Some(&place)), Os::CURRENT)
+        );
     }
 
     #[test]
