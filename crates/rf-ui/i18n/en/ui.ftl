@@ -14,7 +14,7 @@ toolbar-visits = Recent Locations
 toolbar-delete = Delete
 toolbar-select = Select
 toolbar-view = View
-toolbar-filter = Filter this folder
+toolbar-filter = Filter
 
 ## Commands: the toolbar and the menus of items and folders
 
@@ -299,7 +299,7 @@ conflict-size-label = Size
 conflict-modified-label = Modified
 conflict-question = What do you want to do?
 conflict-choice-keep-both = Keep Both
-conflict-apply-all = Do this for the remaining conflicts
+conflict-apply-all = Do this for the rest
 conflict-cancel-job = Cancel Job
 
 ## The picker
@@ -367,7 +367,7 @@ pattern-example-regex = e.g. ^IMG_\d+\.jpe?g$
 pattern-field = Pattern
 pattern-syntax = Pattern Type
 pattern-wildcards = Wildcards
-pattern-regex = Regular Expression
+pattern-regex = Regex
 pattern-ignore-case = Ignore case
 # The name of the choice of how the matching items join the selection.
 pattern-mode = Matching Items

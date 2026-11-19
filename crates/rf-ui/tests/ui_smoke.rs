@@ -5866,6 +5866,135 @@ fn the_view_menu_fits_the_smallest_window_in_both_languages() {
     }
 }
 
+/// Each of `row`, in this order, starts where the one before it ends or after, and all of them
+/// lie inside `frame` with `pad` to spare at its sides: the words of a row of a dialog show
+/// whole, side by side.
+fn lies_in_a_row(frame: &ElementHandle, row: &[ElementHandle], pad: f32, what: &str) {
+    let left = |element: &ElementHandle| element.absolute_position().x;
+    let right = |element: &ElementHandle| left(element) + element.size().width;
+    let named = |element: &ElementHandle| element.accessible_label().unwrap_or_default();
+    let first = row.first().expect("a row");
+    let last = row.last().expect("a row");
+    assert!(
+        left(first) >= left(frame) + pad - 0.5 && right(last) <= right(frame) - pad + 0.5,
+        "{what}: {:?} to {:?} is {}..{}, the dialog {}..{}",
+        named(first),
+        named(last),
+        left(first),
+        right(last),
+        left(frame),
+        right(frame)
+    );
+    for pair in row.windows(2) {
+        assert!(
+            right(&pair[0]) <= left(&pair[1]) + 0.5,
+            "{what}: {:?} runs into {:?}",
+            named(&pair[0]),
+            named(&pair[1])
+        );
+    }
+}
+
+/// The words of the dialogs in English (I18N-01), longer than the Korean ones, lie in the
+/// smallest window at the largest look (THEME-07): the choices of the pattern window, the foot
+/// of the conflict window with the items left, the picker's conflict policy and the buttons of
+/// the properties window lie inside their dialogs, side by side; in Korean too. The rule is
+/// checked, no width. The testing backend's text is narrower than a real font's (Inter's 130 %
+/// under Xvfb ran "Regular Expression" past the pattern window, which this did not see): it
+/// catches a row that grows past its dialog by far; screenshots under Xvfb look at the rest
+/// (docs/i18n.md).
+#[test]
+fn the_dialogs_hold_their_words_in_both_languages_at_the_largest_look() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    window.set_density(2);
+    window.set_font_scale(130);
+    for lang in [Lang::Ko, Lang::En] {
+        let words = Localizer::new(lang);
+        ui_bridge::speak_in(&window, &words);
+        let say = |key: &str| words.text(key, &[]);
+        let one = |label: &str, role| {
+            labelled(&window, label, role)
+                .pop()
+                .unwrap_or_else(|| panic!("{lang:?}: no {label:?}"))
+        };
+        let show = |kind| {
+            window.set_dialog(kind);
+            slint::platform::update_timers_and_animations();
+        };
+
+        window.set_pattern_view(pattern_view("", "", true));
+        show(DialogKind::Pattern);
+        let frame = one(&say("pattern-title"), AccessibleRole::Groupbox);
+        let row = [
+            one(&say("pattern-wildcards"), AccessibleRole::RadioButton),
+            one(&say("pattern-regex"), AccessibleRole::RadioButton),
+            one(&say("pattern-ignore-case"), AccessibleRole::Checkbox),
+        ];
+        lies_in_a_row(&frame, &row, 24.0, &format!("{lang:?} pattern"));
+        let row = [
+            one(&say("pattern-replace"), AccessibleRole::RadioButton),
+            one(&say("pattern-add"), AccessibleRole::RadioButton),
+        ];
+        lies_in_a_row(&frame, &row, 24.0, &format!("{lang:?} pattern mode"));
+        show(DialogKind::None);
+
+        let items_left = words.text("job-items-left", &[("count", rf_ui::i18n::count(12))]);
+        window.set_conflict_view(ConflictView {
+            items_left: items_left.clone().into(),
+            ..conflict_view()
+        });
+        show(DialogKind::Conflict);
+        let frame = one("같은 이름의 파일이 이미 있습니다", AccessibleRole::Groupbox);
+        let row = [
+            one(&say("conflict-apply-all"), AccessibleRole::Checkbox),
+            one(&items_left, AccessibleRole::Text),
+            one(&say("conflict-cancel-job"), AccessibleRole::Button),
+            one(&say("common-continue"), AccessibleRole::Button),
+        ];
+        lies_in_a_row(&frame, &row, 28.0, &format!("{lang:?} conflict"));
+        show(DialogKind::None);
+
+        window.set_pick_view(pick_view());
+        show(DialogKind::Pick);
+        let frame = one("어디로 이동할까요?", AccessibleRole::Groupbox);
+        let mut row = vec![one(&say("pick-on-conflict"), AccessibleRole::RadioGroup)];
+        row.extend(
+            [
+                "pick-choice-ask",
+                "policy-overwrite",
+                "policy-skip",
+                "pick-choice-rename",
+                "policy-if-newer",
+                "policy-if-size-differs",
+            ]
+            .map(|key| one(&say(key), AccessibleRole::RadioButton)),
+        );
+        // The track, then its segments inside it, in order.
+        lies_in_a_row(&frame, &row[..1], 24.0, &format!("{lang:?} picker"));
+        lies_in_a_row(
+            &row[0],
+            &row[1..],
+            0.0,
+            &format!("{lang:?} picker's policies"),
+        );
+        show(DialogKind::None);
+
+        window.set_properties_view(PropertiesView {
+            system: true,
+            ..properties_view(false, -1)
+        });
+        show(DialogKind::Properties);
+        let frame = one(&say("properties-window"), AccessibleRole::Groupbox);
+        let row = [
+            one(&say("command-system-properties"), AccessibleRole::Button),
+            one(&say("common-close"), AccessibleRole::Button),
+        ];
+        lies_in_a_row(&frame, &row, 20.0, &format!("{lang:?} properties"));
+        show(DialogKind::None);
+    }
+}
+
 /// The default layout, as Rust sets it back after a checkable item of the 보기 menu flipped
 /// its own mark.
 fn default_layout(window: &MainWindow) {

@@ -506,7 +506,7 @@ error-ask-retry-once = Retry works on one item at a time
 job-items-left = { $count ->
         [one] 1 item
        *[other] { $count } items
-    } left in this job
+    } left
 
 ## Quitting while jobs run, and the jobs the last run did not finish
 
