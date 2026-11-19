@@ -525,6 +525,7 @@ export component ChoiceRow inherits Rectangle {
             overflow: elide;
         }
     }
+    if Theme.marks && !root.enabled: DashedFrame { }
 
     touch := TouchArea {
         enabled: root.enabled;

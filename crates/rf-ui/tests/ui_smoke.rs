@@ -385,6 +385,61 @@ fn high_contrast_badges_cut_and_hidden_rows_and_frames_what_is_off() {
     assert_eq!((badges().len(), frames()), (0, 0), "dark");
 }
 
+/// In high contrast a choice that is off has a dashed frame in the place of its solid one: a
+/// file meeting a folder of its name offers no overwrite of any kind. Light and dark draw none.
+#[test]
+fn high_contrast_frames_the_choices_that_are_off_with_dashes() {
+    let window = window();
+    window.set_conflict_view(ConflictView {
+        can_overwrite: false,
+        existing_dir: true,
+        newer_hint: "".into(),
+        size_hint: "".into(),
+        newer_overwrites: false,
+        size_overwrites: false,
+        ..conflict_view()
+    });
+    window.set_dialog(DialogKind::Conflict);
+    slint::platform::update_timers_and_animations();
+    let off = [
+        "덮어쓰기",
+        "더 새 파일만 덮어쓰기",
+        "크기가 다를 때만 덮어쓰기",
+    ];
+    let on = ["건너뛰기", "이름 바꿔 둘 다 두기"];
+    let row = |label: &str| labelled(&window, label, AccessibleRole::RadioButton).remove(0);
+    // A dashed frame lies on the row: its place and its size are the row's.
+    let framed = |label: &str| {
+        let row = row(label);
+        let (at, size) = (row.absolute_position(), row.size());
+        ElementHandle::find_by_element_type_name(&window, "DashedFrame").any(|frame| {
+            let (frame_at, frame_size) = (frame.absolute_position(), frame.size());
+            (frame_at.x - at.x).abs() < 0.5
+                && (frame_at.y - at.y).abs() < 0.5
+                && (frame_size.width - size.width).abs() < 0.5
+                && (frame_size.height - size.height).abs() < 0.5
+        })
+    };
+    for label in off {
+        assert_eq!(row(label).accessible_enabled(), Some(false), "{label}");
+    }
+    let none = |theme: &str| {
+        for label in off.iter().chain(&on) {
+            assert!(!framed(label), "{theme}: {label}");
+        }
+    };
+    none("light");
+    ui_bridge::show_theme(&window, &theme::Builtin::HighContrast.tokens());
+    for label in off {
+        assert!(framed(label), "a dashed frame on {label}");
+    }
+    for label in on {
+        assert!(!framed(label), "no dashed frame on {label}");
+    }
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    none("dark");
+}
+
 #[test]
 fn a_held_key_reaches_rust_as_repeated() {
     let window = window();
