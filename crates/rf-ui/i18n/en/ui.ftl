@@ -49,7 +49,7 @@ command-delete-permanently = Delete Permanently
 command-properties = Properties
 # The system's (Windows' Properties, Finder's Get Info).
 command-system-properties = { $os ->
-        [windows] Open Windows Properties
+        [windows] Properties in File Explorer
         [macos] Get Info in Finder
        *[other] Open System Properties
     }
@@ -89,33 +89,18 @@ path-form-url = File URL
 
 column-name = Name
 column-size = Size
-column-modified = { $os ->
-        [windows] Date modified
-       *[other] Date Modified
-    }
-column-created = { $os ->
-        [windows] Date created
-       *[other] Date Created
-    }
+column-modified = Date Modified
+column-created = Date Created
 column-kind = { $os ->
         [macos] Kind
        *[other] Type
     }
 column-extension = Extension
 column-attributes = Attributes
-column-accessed = { $os ->
-        [windows] Date accessed
-       *[other] Date Accessed
-    }
+column-accessed = Date Accessed
 column-path = Path
-column-original = { $os ->
-        [windows] Original location
-       *[other] Original Location
-    }
-column-deleted = { $os ->
-        [windows] Date deleted
-       *[other] Date Deleted
-    }
+column-original = Original Location
+column-deleted = Date Deleted
 
 ## The View menu
 
@@ -185,7 +170,7 @@ view-tab-move-right = Move Tab Right
 view-settings = Settings
 view-drop-move = On Drop: Move
 view-drop-copy = On Drop: Copy
-view-drop-system = On Drop: As the System Does
+view-drop-system = On Drop: System Default
 view-drop-ask = On Drop: Ask Each Time
 view-show-thumbnails = Show Thumbnails
 view-long-press = Long Press Opens Menu
@@ -236,7 +221,7 @@ pane-link = { $os ->
 list-items = Items
 list-select-all = Select All Items
 # What a screen reader hears after the name.
-row-cut = Cut
+row-cut = Cut item
 
 ## Tabs
 
@@ -286,3 +271,117 @@ tray-quit = { $os ->
         [windows] Exit
        *[other] Quit
     }
+
+## The language, in View ▸ Theme (it changes at the next start). The names of the languages are
+## in their own language, whatever the window's.
+
+view-language-system = Language: Use System Setting
+view-language-ko = Language: 한국어
+view-language-en = Language: English
+
+## Buttons the dialogs share
+
+common-cancel = Cancel
+common-ok = OK
+common-continue = Continue
+
+## What to do about a name that is taken: the conflict window's choices, the picker's policies
+
+policy-overwrite = Overwrite
+policy-skip = Skip
+policy-if-newer = Overwrite If Newer
+policy-if-size-differs = Overwrite If Size Differs
+
+## The name conflict window (check boxes and hints in sentence case, as both systems write them)
+
+conflict-newer-badge = Newer
+conflict-size-label = Size
+conflict-modified-label = Modified
+conflict-question = What do you want to do?
+conflict-choice-keep-both = Keep Both
+conflict-apply-all = Do this for the remaining conflicts
+conflict-cancel-job = Cancel Job
+
+## The picker
+
+# The name of the choice between moving and copying.
+pick-mode = Action
+pick-mode-move = Move
+pick-mode-copy = Copy
+pick-target = Destination
+pick-target-hint = Type a folder path
+pick-filter = Filter by folder name
+pick-tree = Destination Folders
+pick-quick = Quick Destinations
+pick-on-conflict = If a Name Is Taken
+pick-choice-ask = Ask
+pick-choice-rename = Keep Both
+# The heading before them and the line below say the rest (policy-if-newer).
+pick-choice-if-newer = If Newer
+pick-choice-if-size-differs = If Size Differs
+pick-follow-links = Copy what links point to
+
+## The properties window
+
+properties-window = Properties
+properties-stop = Stop
+properties-checksum = Checksum
+# The name of the list of checksums (for screen readers).
+properties-checksums = Checksums
+properties-algorithm = Algorithm
+properties-copy = Copy
+properties-copied = Copied
+properties-stop-hashing = Stop Calculating
+properties-compare = Compare
+properties-compare-hint = Paste a hash to compare
+
+## The job panel and its window
+
+job-panel-title = Jobs
+job-panel-speed = Speed Graph
+job-panel-pause = Pause
+job-panel-resume = Resume
+job-panel-cancel = Cancel
+# A waiting job a place forward in the queue. Screen readers hear -spoken (the toolbar has an Up too).
+job-panel-move-up = Up
+job-panel-move-up-spoken = Move Job Up
+job-panel-move-down = Down
+job-panel-move-down-spoken = Move Job Down
+job-panel-waiting = Waiting Jobs
+job-panel-expand = Show
+job-panel-collapse = Hide
+job-panel-clear = Clear
+job-panel-recent = Recently Finished
+job-panel-details = Details
+job-panel-save-log = Save Log…
+job-panel-history = Undo History
+# The row of the undo history the button acts on next.
+job-panel-next = Next
+job-window-empty = No jobs in progress
+
+## The dialogs
+
+pattern-title = Select by Pattern
+pattern-example-wildcards = e.g. *.jpg;*.png
+pattern-example-regex = e.g. ^IMG_\d+\.jpe?g$
+pattern-field = Pattern
+pattern-syntax = Pattern Type
+pattern-wildcards = Wildcards
+pattern-regex = Regular Expression
+pattern-ignore-case = Ignore case
+# The name of the choice of how the matching items join the selection.
+pattern-mode = Matching Items
+pattern-replace = Replace Selection
+pattern-add = Add to Selection
+pattern-select = Select
+# The window of the items that failed: only those are done again (XFER-09).
+failures-retry = Retry
+# The window that asks about each failure (XFER-09).
+error-ask-apply-all = Do the same for later errors
+error-ask-stop = Stop
+error-ask-skip = Skip
+error-ask-retry = Retry
+# The jobs the last run left unfinished.
+recovery-discard = Discard
+recovery-run-again = Run Again
+preflight-skip-blocked = Skip Blocked Items

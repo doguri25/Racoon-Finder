@@ -26,6 +26,8 @@ notice-folder-gone-sync-off =
 notice-start-folder-gone = 열려던 폴더를 찾을 수 없습니다: { $path }
 notice-background-failed = 시스템 자원이 부족해 일을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요
 notice-sort-failed = 이 폴더를 정렬하지 못해 이전 순서로 둡니다
+# 보기 ▸ 언어에서 다른 언어를 고른 뒤, 다음에 시작할 때의 언어로.
+notice-language-restart = 다시 시작하면 바뀝니다
 
 ## 폴더의 보기
 

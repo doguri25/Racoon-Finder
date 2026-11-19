@@ -9,3 +9,5 @@ crumb-subfolders = Subfolders of “{ $name }”
 row-select = Select { $name }
 # The hint under Quick Look. $key: the key that closes it (Space).
 quick-look-hint = ← → previous or next file · { $key } to close
+# The head of the job panel's Recently Finished. $count: how many jobs it lists.
+job-panel-recent-head = Recently Finished ({ $count })

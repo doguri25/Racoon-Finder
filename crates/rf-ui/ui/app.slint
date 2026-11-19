@@ -116,6 +116,8 @@ export component MainWindow inherits Window {
     in property <int> panel-button: -1;
     // The jobs that ended (최근 완료), and whether their lines show below its head.
     in property <[RecentRowView]> recent-rows;
+    // The head of 최근 완료, with how many jobs it lists (Rust words it).
+    in property <string> recent-title;
     in property <bool> recent-open;
     // 되돌리기 기록 (OPS-12): its head's words (empty while the history holds nothing), whether
     // its rows show, the rows and how many of them are heads.
@@ -164,6 +166,9 @@ export component MainWindow inherits Window {
     // 130) chosen in 보기 ▸ 테마 (THEME-07): the window asks for its tokens at them.
     in property <int> density: 1;
     in property <int> font-scale: 100;
+    // The language chosen in 보기 ▸ 테마 (0 시스템 설정 따르기, 1 한국어, 2 English; I18N-01), for
+    // its marks: the window speaks the one it started with until the next start.
+    in property <int> language-choice;
     in-out property <bool> show-hidden;
     in-out property <bool> show-extensions: true;
     // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
@@ -306,6 +311,8 @@ export component MainWindow inherits Window {
     // `font-scale`).
     callback density-chosen(density: int);
     callback font-scale-chosen(percent: int);
+    // A language was chosen in 보기 ▸ 테마 (the numbers of `language-choice`).
+    callback language-chosen(choice: int);
     // 보기 ▸ 설정 ▸ 끌어 놓기: … chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // 보기 ▸ 설정 ▸ 길게 누르기 시간 chose `ms` milliseconds.
@@ -1901,6 +1908,7 @@ export component MainWindow inherits Window {
                     // keep their room. The panel's own window shows more of them.
                     queue-lines: max(1, root.recent-lines - 1);
                     recent: root.recent-rows;
+                    recent-title: root.recent-title;
                     recent-open: root.recent-open;
                     recent-lines: root.recent-lines;
                     history-title: root.history-title;
@@ -2470,6 +2478,7 @@ export component MainWindow inherits Window {
             theme-choice: root.theme-choice;
             density: root.density;
             font-scale: root.font-scale;
+            language-choice: root.language-choice;
             show-hidden <=> root.show-hidden;
             show-extensions <=> root.show-extensions;
             show-tree <=> root.show-tree;
@@ -2509,6 +2518,9 @@ export component MainWindow inherits Window {
             }
             font-scale-chosen(percent) => {
                 root.font-scale-chosen(percent);
+            }
+            language-chosen(choice) => {
+                root.language-chosen(choice);
             }
             drag-default-chosen(choice) => {
                 root.drag-default-chosen(choice);

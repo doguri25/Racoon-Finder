@@ -27,6 +27,8 @@ notice-folder-gone-sync-off =
 notice-start-folder-gone = Can't find the folder to open: { $path }
 notice-background-failed = The system is low on resources, so the work couldn't start. Try again in a moment
 notice-sort-failed = Couldn't sort this folder, so it keeps its earlier order
+# After View ▸ Language chose another language, in the language of the next start.
+notice-language-restart = The language changes when you restart the app
 
 ## The view of a folder
 

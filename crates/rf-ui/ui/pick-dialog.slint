@@ -28,6 +28,7 @@ import { Icon } from "icons.slint";
 import { ToolButton, PrimaryButton, OutlineButton, DialogFrame, Field, Segment, SegmentTrack, CheckBox } from "widgets.slint";
 import { Sidebar, TreeRow } from "sidebar.slint";
 import { DialogKeys, Shortcuts } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 
 // One quick target, as Rust makes it.
 export struct PickTarget {
@@ -492,11 +493,11 @@ export component PickDialog inherits DialogFrame {
                     alignment: start;
 
                     SegmentTrack {
-                        label: "작업";
+                        label: Tr.pick-mode;
                         focused: root.stop == 3;
 
                         Segment {
-                            text: "이동";
+                            text: Tr.pick-mode-move;
                             chosen: root.view.is-move;
                             clicked => {
                                 root.mode-chosen(true);
@@ -504,7 +505,7 @@ export component PickDialog inherits DialogFrame {
                             }
                         }
                         Segment {
-                            text: "복사";
+                            text: Tr.pick-mode-copy;
                             chosen: !root.view.is-move;
                             clicked => {
                                 root.mode-chosen(false);
@@ -518,7 +519,7 @@ export component PickDialog inherits DialogFrame {
 
                     ToolButton {
                         icon: "close";
-                        label: "닫기";
+                        label: Tr.common-close;
                         clicked => {
                             root.cancelled();
                         }
@@ -533,7 +534,7 @@ export component PickDialog inherits DialogFrame {
                 Text {
                     horizontal-stretch: 0;
                     height: 36px;
-                    text: "대상 경로";
+                    text: Tr.pick-target;
                     color: Theme.text;
                     font-weight: 500;
                     vertical-alignment: center;
@@ -544,8 +545,8 @@ export component PickDialog inherits DialogFrame {
 
                     path := Field {
                         icon: "folder";
-                        label: "대상 경로";
-                        hint: "폴더 경로를 입력하세요";
+                        label: Tr.pick-target;
+                        hint: Tr.pick-target-hint;
                         key(event) => {
                             let step = DialogKeys.tab-step(event);
                             // Tab completes the folder's name first (not while a syllable is
@@ -583,7 +584,7 @@ export component PickDialog inherits DialogFrame {
                     alignment: start;
 
                     OutlineButton {
-                        text: "새 폴더";
+                        text: Tr.command-new-folder;
                         keys: Shortcuts.new-folder;
                         enabled: root.view.can-make-folder && !path.composing;
                         focused: root.stop == 2;
@@ -605,8 +606,8 @@ export component PickDialog inherits DialogFrame {
 
                     filter := Field {
                         icon: "search";
-                        label: "폴더 이름으로 거르기";
-                        hint: "폴더 이름으로 거르기";
+                        label: Tr.pick-filter;
+                        hint: Tr.pick-filter;
                         key(event) => {
                             if (event.text == Key.UpArrow || event.text == Key.DownArrow || DialogKeys.tab-step(event) != 0) {
                                 return root.key(event);
@@ -624,7 +625,7 @@ export component PickDialog inherits DialogFrame {
                         vertical-stretch: 1;
 
                         tree := Sidebar {
-                            label: "대상 폴더 트리";
+                            label: Tr.pick-tree;
                             rows: root.view.tree;
                             row-clicked(index) => {
                                 root.tree-clicked(index);
@@ -652,7 +653,7 @@ export component PickDialog inherits DialogFrame {
                     background: Theme.panel;
                     clip: true;
                     accessible-role: list;
-                    accessible-label: "빠른 대상";
+                    accessible-label: Tr.pick-quick;
 
                     quick := ScrollView {
                         x: 1px;
@@ -697,7 +698,7 @@ export component PickDialog inherits DialogFrame {
                 policy-measure := Text {
                     width: self.preferred-width;
                     color: transparent;
-                    text: "이름이 겹치면";
+                    text: Tr.pick-on-conflict;
                     font-weight: 500;
                     accessible-role: none;
                 }
@@ -706,7 +707,7 @@ export component PickDialog inherits DialogFrame {
                     spacing: 4px;
 
                     if !policy-box.inline: Text {
-                        text: "이름이 겹치면";
+                        text: Tr.pick-on-conflict;
                         color: Theme.text;
                         font-weight: 500;
                     }
@@ -716,7 +717,7 @@ export component PickDialog inherits DialogFrame {
                         if policy-box.inline: Text {
                             horizontal-stretch: 0;
                             height: 36px;
-                            text: "이름이 겹치면";
+                            text: Tr.pick-on-conflict;
                             color: Theme.text;
                             font-weight: 500;
                             vertical-alignment: center;
@@ -725,11 +726,11 @@ export component PickDialog inherits DialogFrame {
                             alignment: center;
 
                             policy-track := SegmentTrack {
-                                label: "이름이 겹치면";
+                                label: Tr.pick-on-conflict;
                                 focused: root.stop == 4;
 
                                 Segment {
-                                    text: "물어보기";
+                                    text: Tr.pick-choice-ask;
                                     chosen: root.view.policy == 0;
                                     clicked => {
                                         root.policy-chosen(0);
@@ -737,7 +738,7 @@ export component PickDialog inherits DialogFrame {
                                     }
                                 }
                                 Segment {
-                                    text: "덮어쓰기";
+                                    text: Tr.policy-overwrite;
                                     chosen: root.view.policy == 1;
                                     clicked => {
                                         root.policy-chosen(1);
@@ -745,7 +746,7 @@ export component PickDialog inherits DialogFrame {
                                     }
                                 }
                                 Segment {
-                                    text: "건너뛰기";
+                                    text: Tr.policy-skip;
                                     chosen: root.view.policy == 2;
                                     clicked => {
                                         root.policy-chosen(2);
@@ -753,7 +754,7 @@ export component PickDialog inherits DialogFrame {
                                     }
                                 }
                                 Segment {
-                                    text: "이름 바꾸기";
+                                    text: Tr.pick-choice-rename;
                                     chosen: root.view.policy == 3;
                                     clicked => {
                                         root.policy-chosen(3);
@@ -763,8 +764,8 @@ export component PickDialog inherits DialogFrame {
                                 // The two conditional overwrites: the heading before the track
                                 // and the line below it say the rest of their names.
                                 Segment {
-                                    text: "더 새 파일만";
-                                    label: "더 새 파일만 덮어쓰기";
+                                    text: Tr.pick-choice-if-newer;
+                                    label: Tr.policy-if-newer;
                                     chosen: root.view.policy == 4;
                                     clicked => {
                                         root.policy-chosen(4);
@@ -772,8 +773,8 @@ export component PickDialog inherits DialogFrame {
                                     }
                                 }
                                 Segment {
-                                    text: "크기가 다를 때만";
-                                    label: "크기가 다를 때만 덮어쓰기";
+                                    text: Tr.pick-choice-if-size-differs;
+                                    label: Tr.policy-if-size-differs;
                                     chosen: root.view.policy == 5;
                                     clicked => {
                                         root.policy-chosen(5);
@@ -821,7 +822,7 @@ export component PickDialog inherits DialogFrame {
                     alignment: center;
 
                     CheckBox {
-                        text: "링크는 가리키는 것을 복사";
+                        text: Tr.pick-follow-links;
                         checked: root.view.follow-links;
                         focused: root.stop == 5;
                         toggled => {
@@ -864,7 +865,7 @@ export component PickDialog inherits DialogFrame {
 
                     OutlineButton {
                         button-height: 40px;
-                        text: "취소";
+                        text: Tr.common-cancel;
                         focused: root.stop == 6;
                         clicked => {
                             root.cancelled();

@@ -1,6 +1,7 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
 // columns, which its column heads change too), the theme with the density and the size of the
-// text (테마 ▸, THEME-07), the hidden items and the extensions of
+// text (테마 ▸, THEME-07) and the language of the window (I18N-01, from the next start), the hidden
+// items and the extensions of
 // the names, the toolbar itself (LAY-10), the folder tree (폴더 트리 ▸, LAY-03: one shared tree,
 // a tree for each pane, or none, and F6 to it) and the preview panel, the layout and the commands
 // between the panes,
@@ -34,6 +35,9 @@ export component ViewMenu inherits ContextMenuArea {
     // 130) chosen (THEME-07).
     in property <int> density: 1;
     in property <int> font-scale: 100;
+    // The language chosen (0 시스템 설정 따르기, 1 한국어, 2 English; I18N-01): the window keeps
+    // the one it started with until the next start.
+    in property <int> language-choice;
     // The layout, the hidden items and the extensions, two-way with the window's. The folder
     // tree shows (`show-tree`) with a tree for each pane (`tree-per-pane`) or one shared tree.
     in-out property <bool> show-hidden;
@@ -80,6 +84,8 @@ export component ViewMenu inherits ContextMenuArea {
     // An item 표시 밀도: … or 글자 크기: … of 테마 chose `density` or `percent`.
     callback density-chosen(density: int);
     callback font-scale-chosen(percent: int);
+    // An item 언어: … of 테마 chose `choice` (the numbers of `language-choice`).
+    callback language-chosen(choice: int);
     // An item 끌어 놓기: … of 설정 chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // An item 길게 누르기 시간: … of 설정 chose `ms` milliseconds.
@@ -213,6 +219,7 @@ export component ViewMenu inherits ContextMenuArea {
     init => {
         root.mark-theme(root.theme-choice);
         root.mark-look(root.density, root.font-scale);
+        root.mark-language(root.language-choice);
         root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
     }
     changed theme-choice => {
@@ -252,6 +259,25 @@ export component ViewMenu inherits ContextMenuArea {
     function choose-font-scale(percent: int) {
         root.mark-look(root.density, percent);
         root.font-scale-chosen(percent);
+        root.done();
+    }
+
+    // The marks of 테마's languages, one at a time. An item marks itself, and Rust keeps the
+    // choice for the next start (and sets `language-choice` back).
+    private property <bool> system-language-mark: true;
+    private property <bool> korean-mark;
+    private property <bool> english-mark;
+    function mark-language(choice: int) {
+        root.system-language-mark = choice == 0;
+        root.korean-mark = choice == 1;
+        root.english-mark = choice == 2;
+    }
+    changed language-choice => {
+        root.mark-language(root.language-choice);
+    }
+    function choose-language(choice: int) {
+        root.mark-language(choice);
+        root.language-chosen(choice);
         root.done();
     }
 
@@ -918,6 +944,34 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.scale-130-mark;
                 activated => {
                     root.choose-font-scale(130);
+                }
+            }
+            // I18N-01: the language of the window, from the next start (a change without one is
+            // P1). Items of their own, as the density's, for the room of a 560px window: 설정 has
+            // none left. Each language is named in its own words (한국어, English).
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-language-system;
+                checkable: true;
+                checked <=> root.system-language-mark;
+                activated => {
+                    root.choose-language(0);
+                }
+            }
+            MenuItem {
+                title: Tr.view-language-ko;
+                checkable: true;
+                checked <=> root.korean-mark;
+                activated => {
+                    root.choose-language(1);
+                }
+            }
+            MenuItem {
+                title: Tr.view-language-en;
+                checkable: true;
+                checked <=> root.english-mark;
+                activated => {
+                    root.choose-language(2);
                 }
             }
         }

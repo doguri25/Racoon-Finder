@@ -68,7 +68,7 @@ pick-policy-if-size-differs =
     The contents of the replaced files can't be brought back.
 pick-policy-skip = Items whose name is taken are skipped
 pick-policy-auto-rename = When a name is taken, a number is added and both are kept
-pick-policy-ask = When a name is taken, you'll be asked then
+pick-policy-ask = You'll be asked about each name that's taken
 pick-no-match = No folder opened so far has a matching name
 
 ## Where to create links (PICK-09), where to take items out to
@@ -76,9 +76,9 @@ pick-no-match = No folder opened so far has a matching name
 pick-link-title = Where should the links be created?
 pick-link-confirm = Create Links Here
 # $kind: the kind of link (link-kind-*).
-pick-link-summary = { $kind } for { $count ->
-        [one] 1 item
-       *[other] { $count } items
+pick-link-summary = { $count ->
+        [one] { $kind } to 1 item
+       *[other] { $kind } to each of { $count } items
     }
 pick-restore-title = Restore To
 pick-restore-summary = { $count ->

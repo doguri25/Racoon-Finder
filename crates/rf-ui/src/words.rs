@@ -25,7 +25,7 @@ use rf_vfs::ShellPlace;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
-use crate::i18n::{Arg, OS_ARG, count, number, os_arg, t, t_static};
+use crate::i18n::{Arg, Lang, Localizer, OS_ARG, count, number, os_arg, t, t_static};
 use crate::jobs::JobRow;
 use crate::pattern::{MAX_PATTERN_CHARS, PatternError};
 use crate::pick::Validity;
@@ -212,6 +212,19 @@ pub fn row_select(name: &str) -> String {
 /// The hint under quick look: the arrow keys go to the next file, and `key` closes it.
 pub fn quick_look_hint(key: &str) -> String {
     t("quick-look-hint", &[("key", key.into())])
+}
+
+/// The head of the job panel's 최근 완료 (XFER-14), which lists `n` jobs that ended
+/// (`MainWindow.recent-title`, `JobWindow.recent-title`).
+pub fn recent_head(n: usize) -> String {
+    t("job-panel-recent-head", &[("count", count(n))])
+}
+
+/// The notice after 보기 ▸ 언어 chose a language other than the one the window speaks, in
+/// `next`, the language of the next start: the window keeps its words until then (I18N-01; a
+/// change without a restart is P1).
+pub fn language_restart(next: Lang) -> String {
+    Localizer::new(next).text("notice-language-restart", &[])
 }
 
 /// The notice of a drop the window did not make: the rows changed under the pointer (a
@@ -4660,9 +4673,29 @@ mod tests {
         }
     }
 
+    /// The Korean word of a new link's name, as the app gives it to rf-platform: a shortcut on
+    /// Windows, an alias on macOS (their names are the system's form with the word).
+    #[test]
+    fn a_new_shortcut_or_alias_is_named_with_the_korean_word() {
+        use std::ffi::OsStr;
+        let named = |target: &str, os| {
+            rf_platform::link_name(
+                OsStr::new(target),
+                LinkKind::Shortcut,
+                os,
+                link_name_word(os),
+            )
+        };
+        assert_eq!(
+            named("보고서.docx", Os::Windows),
+            "보고서.docx - 바로 가기.lnk"
+        );
+        assert_eq!(named("사진", Os::MacOs), "사진 별칭");
+    }
+
     #[test]
     fn grouped_counts_show_their_commas_and_give_english_its_plural() {
-        let en = crate::i18n::Localizer::new(crate::i18n::Lang::En);
+        let en = Localizer::new(Lang::En);
         let files = |n| en.text("properties-files", &[("files", grouped_count(n))]);
         assert_eq!(files(1), "1 file");
         assert_eq!(files(999), "999 files");

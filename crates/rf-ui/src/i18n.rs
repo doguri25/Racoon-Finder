@@ -105,6 +105,13 @@ pub fn start_language() -> Lang {
     let choice = rf_core::AppPaths::detect()
         .map(|paths| settings::peek_language(paths.config_dir()))
         .unwrap_or_default();
+    spoken_for(choice)
+}
+
+/// The language a start with the setting `choice` speaks, the system's language as it is now
+/// ([`pick`]): for the start, and for 보기 ▸ 테마's choice, which takes effect at the next one.
+/// The system's locale is read from the process or the system, not from a file.
+pub fn spoken_for(choice: LanguageChoice) -> Lang {
     pick(choice, sys_locale::get_locale().as_deref())
 }
 
@@ -1029,22 +1036,24 @@ mod tests {
             .collect()
     }
 
-    /// The Rust files under `dir`, but those of test, bench and example folders and of the
-    /// build's output.
+    /// The Rust files under `dir`, but those of a crate's test, bench and example folders (the
+    /// `tests`, `benches` and `examples` beside its `Cargo.toml`, which only Cargo's tests, benches
+    /// and examples build) and of the build's output. A folder of that name inside `src` is the
+    /// app's, unless a test-only module owns it (`no_hangul_string_literal_outside_tests`).
     fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
+        let crate_root = dir.join("Cargo.toml").is_file();
         for entry in entries {
             let path = entry.expect("an entry").path();
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned());
             if path.is_dir() {
-                if !matches!(
-                    name.as_deref(),
-                    Some("target" | "tests" | "benches" | "examples")
-                ) {
+                let cargo_s =
+                    crate_root && matches!(name.as_deref(), Some("tests" | "benches" | "examples"));
+                if name.as_deref() != Some("target") && !cargo_s {
                     rust_files(&path, out);
                 }
             } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -1079,13 +1088,28 @@ mod tests {
             "crates/rf-ui/src/words.rs",
             "crates/rf-ui/src/format.rs",
             "crates/rf-platform/src/links/mod.rs",
+            // A `tests` folder inside `src` is read; its module is the tests' (below).
+            "crates/rf-ui/src/state/tests/links.rs",
         ] {
             assert!(
                 names.iter().any(|name| name == reached),
                 "{reached}: {names:?}"
             );
         }
+        // Cargo's own tests, benches and examples are not.
+        for left_out in [
+            "crates/rf-ui/tests/ui_smoke.rs",
+            "crates/rf-vfs/benches",
+            "crates/rf-jobs/examples",
+        ] {
+            assert!(
+                !names.iter().any(|name| name.starts_with(left_out)),
+                "{left_out}"
+            );
+        }
         let mut test_files = Vec::new();
+        // The folders of test-only modules: every file in them is of the tests too.
+        let mut test_dirs = Vec::new();
         let mut found: Vec<(String, usize, String)> = Vec::new();
         let mut needed: Vec<(String, &str)> = Vec::new();
         for (path, name) in files.iter().zip(&names) {
@@ -1106,6 +1130,7 @@ mod tests {
                 for module in modules {
                     test_files.push(relative(&dir.join(format!("{module}.rs"))));
                     test_files.push(relative(&dir.join(&module).join("mod.rs")));
+                    test_dirs.push(format!("{}/", relative(&dir.join(&module))));
                 }
             }
             let allowed: Vec<(&str, (usize, usize))> = FIXTURES
@@ -1130,7 +1155,9 @@ mod tests {
                 }
             }
         }
-        found.retain(|(name, _, _)| !test_files.contains(name));
+        found.retain(|(name, _, _)| {
+            !test_files.contains(name) && !test_dirs.iter().any(|dir| name.starts_with(dir))
+        });
         assert!(
             found.is_empty(),
             "Hangul literals outside tests (move the words to crates/rf-ui/i18n): {found:#?}"
@@ -1621,6 +1648,10 @@ mod tests {
                     }
                     i += 1;
                 }
+            } else if let Some((decoded, after)) = slint_code_point(chars, i) {
+                // A character by its code point (`\u{D55C}`), as Slint reads it.
+                text.push(decoded);
+                i = after;
             } else if chars[i] == '\\' {
                 text.extend(chars.get(i..(i + 2).min(chars.len())).unwrap_or_default());
                 i += 2;
@@ -1633,38 +1664,43 @@ mod tests {
         i + 1
     }
 
-    /// The files whose words Task 10b moves to `Tr`, which still hold Hangul literals: each
-    /// must hold one, or its allowance goes.
-    const SLINT_NOT_YET: [&str; 6] = [
-        "conflict-dialog.slint",
-        "dialogs.slint",
-        "job-panel.slint",
-        "job-window.slint",
-        "pick-dialog.slint",
-        "properties.slint",
-    ];
+    /// The character the escape `\u{…}` of `chars` at `at` stands for, and where the escape
+    /// ends; `None` for any other text there, or a code point that is no character.
+    fn slint_code_point(chars: &[char], at: usize) -> Option<(char, usize)> {
+        if chars.get(at..at + 3)? != ['\\', 'u', '{'] {
+            return None;
+        }
+        let close = at + 3 + chars[at + 3..].iter().position(|&c| c == '}')?;
+        let digits: String = chars[at + 3..close].iter().collect();
+        let decoded = char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?;
+        Some((decoded, close + 1))
+    }
 
     /// The rule of I18N-01 for the screens: their words come from `Tr` (ui/tr.slint, filled from
-    /// `ui.ftl`), so no `.slint` file holds a Hangul string literal (comments may be Korean), but
-    /// those [`SLINT_NOT_YET`] allows. `tr.slint` has no values of its own either.
+    /// `ui.ftl`), so no `.slint` file holds a Hangul string literal (comments may be Korean).
+    /// `tr.slint` has no values of its own either.
     #[test]
     fn no_slint_file_holds_a_hangul_string_literal() {
         let files = slint_files();
         let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-        for reached in ["tr.slint", "app.slint", "view-menu.slint", "dialogs.slint"] {
+        for reached in [
+            "tr.slint",
+            "app.slint",
+            "view-menu.slint",
+            "dialogs.slint",
+            "pick-dialog.slint",
+            "conflict-dialog.slint",
+            "properties.slint",
+            "job-panel.slint",
+            "job-window.slint",
+        ] {
             assert!(names.contains(&reached), "{reached}: {names:?}");
         }
         let mut found = Vec::new();
-        let mut needed = Vec::new();
         for (name, text) in &files {
             let chars: Vec<char> = text.chars().collect();
             for (line, literal) in slint_literals(&chars) {
-                if !literal.chars().any(is_hangul) {
-                    continue;
-                }
-                if SLINT_NOT_YET.contains(&name.as_str()) {
-                    needed.push(name.as_str());
-                } else {
+                if literal.chars().any(is_hangul) {
                     found.push(format!("{name}:{line}: {literal:?}"));
                 }
             }
@@ -1674,12 +1710,6 @@ mod tests {
             "Hangul literals in the screens (give them a key in i18n/<language>/ui.ftl and \
              a property of Tr): {found:#?}"
         );
-        for name in SLINT_NOT_YET {
-            assert!(
-                needed.contains(&name),
-                "{name} holds no Hangul literal any more: take it out of SLINT_NOT_YET"
-            );
-        }
     }
 
     #[test]
@@ -1689,6 +1719,8 @@ mod tests {
             "/* \"블록\" */ text: \"보임\";\n",
             "label: \"‘\\{root.name}’ 하위\" + \"\\{Tr.a} · \\{f(\"안\")} 끝\";\n",
             "tip: @markdown(\"\\{Tr.b}\"); plain: \"\\\"따옴\\\"\";\n",
+            // A character by its code point is that character; `\\u` alone is not one.
+            "coded: \"\\u{D55C}\\u{AE00}\"; not: \"\\u{110000}\";\n",
         );
         let chars: Vec<char> = source.chars().collect();
         let shown: Vec<(usize, String)> = slint_literals(&chars);
@@ -1701,6 +1733,8 @@ mod tests {
                 (3, " ·  끝".to_owned()),
                 (4, String::new()),
                 (4, "\\\"따옴\\\"".to_owned()),
+                (5, "한글".to_owned()),
+                (5, "\\u{110000}".to_owned()),
             ]
         );
     }
@@ -1847,9 +1881,13 @@ mod tests {
             let chars: Vec<char> = source.chars().collect();
             let masked: String = scan(&chars).masked.into_iter().collect();
             for (component, maker) in MADE_BY {
-                let call = format!("{component}::new(");
+                // Called, or passed as a function (`repeat_with(MainWindow::new)`).
+                let call = format!("{component}::new");
                 for (at, _) in masked.match_indices(&call) {
-                    if masked[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                    let part_of_a_name = |c: char| c.is_alphanumeric() || c == '_';
+                    if masked[..at].ends_with(part_of_a_name)
+                        || masked[at + call.len()..].starts_with(part_of_a_name)
+                    {
                         continue;
                     }
                     let in_maker = *path == bridge
@@ -1874,7 +1912,8 @@ mod tests {
     /// The menus and buttons of the window that English messages name: the message, then the
     /// `Tr` keys of the path it names, joined by " ▸ ". The Korean message names the same path,
     /// so the window's titles and the messages agree in both languages.
-    const NAMED_IN_MESSAGES: [(&str, &[&str]); 4] = [
+    /// A message that names two things (자세히 in 최근 완료) has an entry for each.
+    const NAMED_IN_MESSAGES: [(&str, &[&str]); 11] = [
         (
             "tab-moved-to-hidden",
             &["toolbar-view", "view-layout", "view-dual-pane"],
@@ -1882,24 +1921,197 @@ mod tests {
         ("failure-original-folder-gone", &["command-restore-to"]),
         ("trash-place-unknown", &["command-restore-to"]),
         ("computer-drive-gone", &["command-refresh"]),
-    ];
-
-    /// What messages name that Task 10b's files still title with a Hangul literal: the message,
-    /// the file, the literal. Once the file titles it from `Tr`, its entry goes to
-    /// [`NAMED_IN_MESSAGES`].
-    const NAMED_NOT_YET: [(&str, &str, &str); 4] = [
-        (
-            "tray-all-done-with-failures",
-            "job-panel.slint",
-            "최근 완료",
-        ),
-        ("tray-all-done-with-failures", "job-panel.slint", "자세히"),
-        ("pattern-uncounted", "dialogs.slint", "선택"),
-        ("removal-with-jobs", "dialogs.slint", "취소"),
+        ("tray-all-done-with-failures", &["job-panel-recent"]),
+        ("tray-all-done-with-failures", &["job-panel-details"]),
+        ("pattern-uncounted", &["pattern-select"]),
+        ("removal-with-jobs", &["common-cancel"]),
+        ("error-ask-retry-once", &["error-ask-retry"]),
+        ("job-panel-recent-head", &["job-panel-recent"]),
+        ("drop-badge-link", &["command-create-link"]),
     ];
 
     /// Messages whose " ▸ " path is the system's own settings, not the app's menus.
     const NAMES_THE_SYSTEM_S: [&str; 1] = ["shell-finder-not-allowed"];
+
+    /// The keys of `ui.ftl` whose words are the titles of menus and their items: those the
+    /// screens give a menu or an item as its `title` (or a list of them as `titles`), alone or
+    /// with its key (`Shortcuts.titled(Tr.…, …)`), in any of the screens.
+    fn menu_title_keys() -> BTreeSet<String> {
+        let mut keys = BTreeSet::new();
+        for (name, text) in slint_files() {
+            if name == "tr.slint" {
+                continue;
+            }
+            for line in text.lines() {
+                let code = line.split("//").next().unwrap_or_default();
+                let titled = ["title:", "titles:"].iter().any(|word| {
+                    code.match_indices(word).any(|(at, _)| {
+                        !code[..at].ends_with(|c: char| c.is_alphanumeric() || c == '-')
+                    })
+                });
+                if !titled {
+                    continue;
+                }
+                for (at, _) in code.match_indices("Tr.") {
+                    let key: String = code[at + 3..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect();
+                    keys.insert(key);
+                }
+            }
+        }
+        keys
+    }
+
+    /// The words of `key` in `words` on `os`, with a dummy for each argument it takes.
+    fn said_with_dummies(
+        words: &Localizer,
+        all: &BTreeMap<String, BTreeSet<String>>,
+        key: &str,
+        os: Os,
+    ) -> String {
+        let mut args: Vec<Arg<'_>> = all[key]
+            .iter()
+            .map(|name| (name.as_str(), FluentValue::from("x")))
+            .collect();
+        args.push((OS_ARG, os_arg(os)));
+        words.text(key, &args)
+    }
+
+    /// English menus are in title case on every system (I18N-01): each word of a menu's or an
+    /// item's title starts with a capital, but the short words inside it (to, in, by, …) and a
+    /// unit (ms). A word after a colon starts a title of its own (`Text Size: 90%`). Words of
+    /// other scripts (한국어) have no case. The column heads are among them: they are the items
+    /// of Sort By, Then By, Columns and the heads' menu.
+    #[test]
+    fn english_menus_are_in_title_case() {
+        const SHORT: [&str; 18] = [
+            "a", "an", "the", "and", "but", "or", "nor", "for", "to", "of", "in", "on", "at", "by",
+            "as", "with", "from", "if",
+        ];
+        const UNITS: [&str; 1] = ["ms"];
+        let keys = menu_title_keys();
+        for reached in [
+            "view-sort",
+            "column-modified",
+            "column-original",
+            "path-form-full",
+            "view-language-en",
+            "tray-quit",
+        ] {
+            assert!(
+                keys.contains(reached),
+                "{reached} is not a menu's title: {keys:?}"
+            );
+        }
+        let english = Localizer::new(Lang::En);
+        let all = messages(Lang::En);
+        let mut wrong = Vec::new();
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            for key in &keys {
+                let title = said_with_dummies(&english, &all, key, os);
+                let mut first = true;
+                for word in title.split(' ') {
+                    let letters = word.trim_start_matches(|c: char| !c.is_alphanumeric());
+                    let lower = letters.starts_with(|c: char| c.is_ascii_lowercase());
+                    let bare = letters.trim_end_matches(|c: char| !c.is_alphanumeric());
+                    if lower && (first || !SHORT.contains(&bare)) && !UNITS.contains(&bare) {
+                        wrong.push(format!("{key} ({os:?}): {title:?}"));
+                        break;
+                    }
+                    first = word.ends_with(':');
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "titles not in title case: {wrong:#?}");
+    }
+
+    /// What English messages say that is the name of a menu, an item or a button, but is not:
+    /// the message, and the key of the title its words happen to be.
+    const NOT_A_MENU_NAME: [(&str, &str); 2] = [
+        // Windows' own Settings, and macOS's System Settings.
+        ("link-needs-privilege", "view-settings"),
+        ("shell-finder-not-allowed", "view-settings"),
+    ];
+
+    /// Every menu or item an English message names is listed in [`NAMED_IN_MESSAGES`], also
+    /// where no " ▸ " path shows it: a title of two words or more anywhere in a message, and a
+    /// title of one word capitalized inside a sentence (`Open Details in …`). A message that is
+    /// a title of its own (a button of the same name) names nothing.
+    #[test]
+    fn every_menu_name_in_an_english_message_is_listed() {
+        let english = Localizer::new(Lang::En);
+        let all = messages(Lang::En);
+        let ui = messages_in(Lang::En, |area| area == "ui");
+        let mut titles = menu_title_keys();
+        titles.extend(
+            NAMED_IN_MESSAGES
+                .iter()
+                .flat_map(|(_, path)| path.iter().map(|key| (*key).to_owned())),
+        );
+        let mut unlisted = Vec::new();
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            let shown: Vec<(&String, String)> = titles
+                .iter()
+                .map(|key| {
+                    let text = said_with_dummies(&english, &all, key, os);
+                    (key, text.trim_end_matches('…').to_owned())
+                })
+                .filter(|(_, text)| text.chars().any(|c| c.is_ascii_alphabetic()))
+                .collect();
+            for key in all.keys().filter(|key| !ui.contains_key(*key)) {
+                let whole = said_with_dummies(&english, &all, key, os);
+                // The names listed for it are named there: what is left of the message is
+                // looked at (another title of the same words, `Details` of the View menu or of
+                // the job panel, is the same name).
+                let mut text = whole.clone();
+                let mut named_here: Vec<String> = NAMED_IN_MESSAGES
+                    .iter()
+                    .filter(|(named, _)| named == key)
+                    .flat_map(|(_, path)| path.iter())
+                    .map(|title| said_with_dummies(&english, &all, title, os))
+                    .collect();
+                named_here.sort_by_key(|title| std::cmp::Reverse(title.len()));
+                for title in &named_here {
+                    text = text.replace(title.as_str(), "□");
+                }
+                for (title_key, title) in &shown {
+                    if NOT_A_MENU_NAME.contains(&(key.as_str(), title_key.as_str())) {
+                        continue;
+                    }
+                    if whole == *title || whole.trim_end_matches('…') == title.as_str() {
+                        continue;
+                    }
+                    let one_word = !title.contains(' ');
+                    let named = text.match_indices(title.as_str()).any(|(at, _)| {
+                        let before = &text[..at];
+                        let after = &text[at + title.len()..];
+                        let whole = !before.ends_with(char::is_alphanumeric)
+                            && !after.starts_with(char::is_alphanumeric);
+                        let opens_a_sentence = before
+                            .trim_end_matches(' ')
+                            .chars()
+                            .last()
+                            .is_none_or(|c| matches!(c, '.' | ':' | '!' | '?' | '\n' | '·'));
+                        whole && !(one_word && opens_a_sentence)
+                    });
+                    if named {
+                        unlisted.push(format!(
+                            "{key} ({os:?}) names {title_key} {title:?}: {whole:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        unlisted.sort();
+        unlisted.dedup();
+        assert!(
+            unlisted.is_empty(),
+            "English messages that name a menu, an item or a button: list each in \
+             NAMED_IN_MESSAGES (or NOT_A_MENU_NAME if it is not that name): {unlisted:#?}"
+        );
+    }
 
     /// Every menu name an English message quotes is the title of that menu in the window, as is
     /// its Korean name in the Korean message, on every system.
@@ -1943,25 +2155,6 @@ mod tests {
                     "{key} names a menu: list it in NAMED_IN_MESSAGES ({text:?})"
                 );
             }
-        }
-        // The names in 10b's files: still literals there, and in the Korean messages.
-        let files = slint_files();
-        for (message, file, title) in NAMED_NOT_YET {
-            assert!(
-                said(&korean, message, Os::Other).contains(title),
-                "{message}"
-            );
-            let (_, text) = files
-                .iter()
-                .find(|(name, _)| name == file)
-                .unwrap_or_else(|| panic!("no {file}"));
-            let chars: Vec<char> = text.chars().collect();
-            assert!(
-                slint_literals(&chars)
-                    .iter()
-                    .any(|(_, literal)| literal == title),
-                "{file} titles {title:?} from Tr now: move {message} to NAMED_IN_MESSAGES"
-            );
         }
     }
 }

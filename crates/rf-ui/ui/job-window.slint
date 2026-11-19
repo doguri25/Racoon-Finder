@@ -19,6 +19,7 @@
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { JobPanel, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
+import { Tr } from "tr.slint";
 
 export component JobWindow inherits Window {
     in property <string> window-title;
@@ -36,6 +37,8 @@ export component JobWindow inherits Window {
     in property <int> panel-line: -1;
     in property <int> panel-button: -1;
     in property <[RecentRowView]> recent-rows;
+    // The head of 최근 완료, with how many jobs it lists (Rust words it).
+    in property <string> recent-title;
     in property <bool> recent-open;
     in property <string> history-title;
     in property <bool> history-open;
@@ -127,7 +130,7 @@ export component JobWindow inherits Window {
         if root.nothing: Text {
             width: parent.width;
             height: parent.height;
-            text: "진행 중인 작업이 없습니다";
+            text: Tr.job-window-empty;
             color: Theme.muted;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -142,6 +145,7 @@ export component JobWindow inherits Window {
             queue: root.job-queue;
             queue-lines: root.lines;
             recent: root.recent-rows;
+            recent-title: root.recent-title;
             recent-open: root.recent-open;
             recent-lines: root.lines;
             history-title: root.history-title;

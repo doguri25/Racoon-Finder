@@ -1875,6 +1875,8 @@ fn the_recent_list_shows_its_head_and_opens_to_its_lines() {
         recent_row("복사했습니다", false),
     ]));
     window.set_recent_rows(ModelRc::from(Rc::clone(&rows)));
+    // Its head, as Rust words it with the count.
+    window.set_recent_title(rf_ui::words::recent_head(2).into());
     assert_eq!(
         labelled(&window, "최근 완료 2개", AccessibleRole::Text).len(),
         1
@@ -3175,15 +3177,16 @@ fn the_theme_follows_the_view_menu() {
         click("테마");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
     };
-    // The theme's mark, the toolbar's, and 테마's density and size of text (보통, 100%).
-    assert_eq!(open_themes(), 4);
+    // The theme's mark, the toolbar's, and 테마's density, size of text (보통, 100%) and
+    // language (시스템 설정 따르기, I18N-01).
+    assert_eq!(open_themes(), 5);
     // Choosing the theme that is chosen keeps its mark.
     click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2, 3, 2, 2]);
-    assert_eq!(open_themes(), 4);
+    assert_eq!(open_themes(), 5);
     click("어둡게");
     window.set_show_hidden(true);
-    assert_eq!(open_themes(), 5);
+    assert_eq!(open_themes(), 6);
     click("어둡게");
     button[0].invoke_accessible_default_action();
     click("숨김 파일 보기");
@@ -6658,6 +6661,7 @@ fn the_job_panel_goes_to_a_window_of_its_own_and_back() {
     window.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     window.set_job_queue(ModelRc::from(Rc::clone(&queue)));
     window.set_recent_rows(ModelRc::from(Rc::clone(&recent)));
+    window.set_recent_title(rf_ui::words::recent_head(1).into());
     let in_main = |label: &str, role| labelled(&window, label, role).len();
     assert_eq!(in_main("복사 중", AccessibleRole::Text), 1);
     assert_eq!(in_main("일시정지", AccessibleRole::Button), 2);
@@ -6669,6 +6673,7 @@ fn the_job_panel_goes_to_a_window_of_its_own_and_back() {
     own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     own.set_job_queue(ModelRc::from(Rc::clone(&queue)));
     own.set_recent_rows(ModelRc::from(Rc::clone(&recent)));
+    own.set_recent_title(rf_ui::words::recent_head(1).into());
     let record = calls.clone();
     own.on_job_pause(move |i| record.note(format!("own pause {i}")));
     let record = calls.clone();
@@ -6821,6 +6826,7 @@ fn the_job_window_at_its_smallest_holds_the_panel_with_every_list_open() {
         recent_row("복사했습니다", false),
         recent_row("이동했습니다", false),
     ]))));
+    own.set_recent_title(rf_ui::words::recent_head(2).into());
     own.set_recent_open(true);
     own.set_history_title("되돌리기 기록 1개".into());
     own.set_history_open(true);

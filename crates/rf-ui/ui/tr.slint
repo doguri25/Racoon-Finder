@@ -222,4 +222,100 @@ export global Tr {
     in property <string> tray-resume-all;
     in property <string> tray-pause-all;
     in property <string> tray-quit;
+
+    // The language, in View ▸ Theme.
+    in property <string> view-language-system;
+    in property <string> view-language-ko;
+    in property <string> view-language-en;
+
+    // Buttons the dialogs share.
+    in property <string> common-cancel;
+    in property <string> common-ok;
+    in property <string> common-continue;
+
+    // What to do about a name that is taken: the conflict window's and the picker's.
+    in property <string> policy-overwrite;
+    in property <string> policy-skip;
+    in property <string> policy-if-newer;
+    in property <string> policy-if-size-differs;
+
+    // The name conflict window.
+    in property <string> conflict-newer-badge;
+    in property <string> conflict-size-label;
+    in property <string> conflict-modified-label;
+    in property <string> conflict-question;
+    in property <string> conflict-choice-keep-both;
+    in property <string> conflict-apply-all;
+    in property <string> conflict-cancel-job;
+
+    // The destination picker.
+    in property <string> pick-mode;
+    in property <string> pick-mode-move;
+    in property <string> pick-mode-copy;
+    in property <string> pick-target;
+    in property <string> pick-target-hint;
+    in property <string> pick-filter;
+    in property <string> pick-tree;
+    in property <string> pick-quick;
+    in property <string> pick-on-conflict;
+    in property <string> pick-choice-ask;
+    in property <string> pick-choice-rename;
+    in property <string> pick-choice-if-newer;
+    in property <string> pick-choice-if-size-differs;
+    in property <string> pick-follow-links;
+
+    // The properties window.
+    in property <string> properties-window;
+    in property <string> properties-stop;
+    in property <string> properties-checksum;
+    in property <string> properties-checksums;
+    in property <string> properties-algorithm;
+    in property <string> properties-copy;
+    in property <string> properties-copied;
+    in property <string> properties-stop-hashing;
+    in property <string> properties-compare;
+    in property <string> properties-compare-hint;
+
+    // The job panel, and its own window.
+    in property <string> job-panel-title;
+    in property <string> job-panel-speed;
+    in property <string> job-panel-pause;
+    in property <string> job-panel-resume;
+    in property <string> job-panel-cancel;
+    in property <string> job-panel-move-up;
+    in property <string> job-panel-move-up-spoken;
+    in property <string> job-panel-move-down;
+    in property <string> job-panel-move-down-spoken;
+    in property <string> job-panel-waiting;
+    in property <string> job-panel-expand;
+    in property <string> job-panel-collapse;
+    in property <string> job-panel-clear;
+    in property <string> job-panel-recent;
+    in property <string> job-panel-details;
+    in property <string> job-panel-save-log;
+    in property <string> job-panel-history;
+    in property <string> job-panel-next;
+    in property <string> job-window-empty;
+
+    // The dialogs.
+    in property <string> pattern-title;
+    in property <string> pattern-example-wildcards;
+    in property <string> pattern-example-regex;
+    in property <string> pattern-field;
+    in property <string> pattern-syntax;
+    in property <string> pattern-wildcards;
+    in property <string> pattern-regex;
+    in property <string> pattern-ignore-case;
+    in property <string> pattern-mode;
+    in property <string> pattern-replace;
+    in property <string> pattern-add;
+    in property <string> pattern-select;
+    in property <string> failures-retry;
+    in property <string> error-ask-apply-all;
+    in property <string> error-ask-stop;
+    in property <string> error-ask-skip;
+    in property <string> error-ask-retry;
+    in property <string> recovery-discard;
+    in property <string> recovery-run-again;
+    in property <string> preflight-skip-blocked;
 }

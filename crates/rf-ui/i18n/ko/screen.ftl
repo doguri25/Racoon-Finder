@@ -7,3 +7,5 @@ crumb-subfolders = ‘{ $name }’ 하위 폴더
 row-select = { $name } 선택
 # 빠른 보기 아래의 안내. $key: 빠른 보기를 닫는 키(Space).
 quick-look-hint = ← → 이전·다음 파일 · { $key } 닫기
+# 작업 패널의 최근 완료 머리. $count: 끝난 작업의 수.
+job-panel-recent-head = 최근 완료 { $count }개

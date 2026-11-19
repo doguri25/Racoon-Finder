@@ -15,8 +15,9 @@ use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
+use crate::i18n;
 use crate::pane::ancestors;
-use crate::settings::{Density, FontScale, Found, Look, Settings, ThemeChoice};
+use crate::settings::{Density, FontScale, Found, LanguageChoice, Look, Settings, ThemeChoice};
 use crate::state::{Placement, Screen, placement};
 use crate::ui_bridge::post;
 use crate::words;
@@ -257,6 +258,26 @@ pub(crate) fn density_of(density: i32) -> Option<Density> {
         0 => Some(Density::Compact),
         1 => Some(Density::Normal),
         2 => Some(Density::Roomy),
+        _ => None,
+    }
+}
+
+/// The number 보기 ▸ 테마 uses for the language `choice` (`language-choice` of the window): 0
+/// 시스템 설정 따르기, 1 한국어, 2 English.
+pub(crate) fn language_number(choice: LanguageChoice) -> i32 {
+    match choice {
+        LanguageChoice::System => 0,
+        LanguageChoice::Ko => 1,
+        LanguageChoice::En => 2,
+    }
+}
+
+/// The language of 보기 ▸ 테마's number `choice`.
+pub(crate) fn language_of(choice: i32) -> Option<LanguageChoice> {
+    match choice {
+        0 => Some(LanguageChoice::System),
+        1 => Some(LanguageChoice::Ko),
+        2 => Some(LanguageChoice::En),
         _ => None,
     }
 }
@@ -655,6 +676,26 @@ impl Controller {
             own.set_theme_choice(theme_number(theme));
         }
         self.plan_save();
+    }
+
+    /// The language chosen in 보기 ▸ 테마 (I18N-01): the settings keep it, and the next start
+    /// speaks it; the windows keep their words until then (a change without a restart is P1).
+    /// Where the next start would speak another language than this run, a notice says that it
+    /// changes at the restart, in the words of that language: whoever chose it reads it, and
+    /// the words of this run may be the ones the system picked for them.
+    pub(super) fn choose_language(&self, choice: LanguageChoice) {
+        let before = std::mem::replace(&mut self.settings.borrow_mut().language, choice);
+        if let Some(window) = self.window.upgrade() {
+            window.set_language_choice(language_number(choice));
+        }
+        if choice == before {
+            return;
+        }
+        self.plan_save();
+        let next = i18n::spoken_for(choice);
+        if next != i18n::lang() {
+            self.notice(&words::language_restart(next));
+        }
     }
 
     /// The density chosen in 보기 ▸ 테마 (THEME-07): every window takes its tokens at it at once

@@ -14,6 +14,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { PrimaryButton, OutlineButton, CheckBox, ChoiceRow, DialogFrame } from "widgets.slint";
 import { DialogKeys } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 
 export struct ConflictView {
     // A new question gets a new number, which resets the choice.
@@ -102,7 +103,7 @@ component Card inherits Rectangle {
                 background: Theme.selection;
 
                 newer-text := Text {
-                    text: "더 최근";
+                    text: Tr.conflict-newer-badge;
                     font-size: Theme.font-small;
                     font-weight: 500;
                     color: Theme.text;
@@ -145,7 +146,7 @@ component Card inherits Rectangle {
                 Text {
                     // 80px, or the label's own width with a larger size of text (THEME-07).
                     width: max(80px, self.preferred-width);
-                    text: "크기";
+                    text: Tr.conflict-size-label;
                     font-size: Theme.font-note;
                     color: Theme.muted;
                 }
@@ -160,7 +161,7 @@ component Card inherits Rectangle {
                 Text {
                     // 80px, or the label's own width with a larger size of text (THEME-07).
                     width: max(80px, self.preferred-width);
-                    text: "수정한 날짜";
+                    text: Tr.conflict-modified-label;
                     font-size: Theme.font-note;
                     color: Theme.muted;
                 }
@@ -193,7 +194,7 @@ component AnswerRow inherits HorizontalLayout {
         alignment: center;
 
         CheckBox {
-            text: "남은 충돌에도 같은 선택 적용";
+            text: Tr.conflict-apply-all;
             checked: root.apply-all;
             focused: root.on-button == 0;
             toggled => {
@@ -215,7 +216,7 @@ component AnswerRow inherits HorizontalLayout {
 
         OutlineButton {
             button-height: 40px;
-            text: "작업 취소";
+            text: Tr.conflict-cancel-job;
             focused: root.on-button == 1;
             clicked => {
                 root.cancel();
@@ -227,7 +228,7 @@ component AnswerRow inherits HorizontalLayout {
 
         PrimaryButton {
             button-height: 40px;
-            text: root.overwrites-this ? "덮어쓰기" : "계속";
+            text: root.overwrites-this ? Tr.policy-overwrite : Tr.common-continue;
             focused: root.on-button == 2;
             clicked => {
                 root.answer();
@@ -434,16 +435,16 @@ export component ConflictDialog inherits DialogFrame {
                 choices := VerticalLayout {
                     spacing: 4px;
                     accessible-role: radio-group;
-                    accessible-label: "어떻게 할까요?";
+                    accessible-label: Tr.conflict-question;
 
                     Text {
-                        text: "어떻게 할까요?";
+                        text: Tr.conflict-question;
                         font-weight: 500;
                         color: Theme.text;
                     }
                     if !root.view.restore: ChoiceRow {
                         min-height: root.row-height;
-                        text: "덮어쓰기";
+                        text: Tr.policy-overwrite;
                         hint: root.view.overwrite-hint;
                         enabled: root.view.can-overwrite;
                         chosen: root.choice == 0;
@@ -454,7 +455,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                     ChoiceRow {
                         min-height: root.row-height;
-                        text: "건너뛰기";
+                        text: Tr.policy-skip;
                         hint: root.view.skip-hint;
                         chosen: root.choice == 1;
                         clicked => {
@@ -464,7 +465,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                     ChoiceRow {
                         min-height: root.row-height;
-                        text: "이름 바꿔 둘 다 두기";
+                        text: Tr.conflict-choice-keep-both;
                         hint: root.view.rename-hint;
                         chosen: root.choice == 2;
                         clicked => {
@@ -474,7 +475,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                     if !root.view.restore: ChoiceRow {
                         min-height: root.row-height;
-                        text: "더 새 파일만 덮어쓰기";
+                        text: Tr.policy-if-newer;
                         hint: root.view.newer-hint;
                         enabled: root.view.can-overwrite;
                         chosen: root.choice == 3;
@@ -485,7 +486,7 @@ export component ConflictDialog inherits DialogFrame {
                     }
                     if !root.view.restore: ChoiceRow {
                         min-height: root.row-height;
-                        text: "크기가 다를 때만 덮어쓰기";
+                        text: Tr.policy-if-size-differs;
                         hint: root.view.size-hint;
                         enabled: root.view.can-overwrite;
                         chosen: root.choice == 4;

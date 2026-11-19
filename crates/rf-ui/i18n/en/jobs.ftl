@@ -251,26 +251,32 @@ tray-ask-menu-bar = Keep the jobs going in the menu bar until they finish?
 #
 # In job-items-done and job-items-partly-done, $work may also be drag: a move made by dragging.
 
+# Links say "created", as links-made does.
 job-items-done =
-    { $count ->
-        [one] 1 item
-       *[other] { $count } items
-    } { $work ->
-        [copy] copied
-        [move] moved
-        [trash] moved to the { $os ->
-            [windows] Recycle Bin
-           *[other] Trash
+    { $work ->
+        [link] Links created for { $count ->
+            [one] 1 item
+           *[other] { $count } items
         }
-        [delete] deleted
-        [rename] renamed
-        [create] created
-        [link] linked
-        [restore] restored
-        [undo] undone
-        [redo] redone
-        [drag] moved
-       *[other] done
+       *[other] { $count ->
+            [one] 1 item
+           *[other] { $count } items
+        } { $work ->
+            [copy] copied
+            [move] moved
+            [trash] moved to the { $os ->
+                [windows] Recycle Bin
+               *[other] Trash
+            }
+            [delete] deleted
+            [rename] renamed
+            [create] created
+            [restore] restored
+            [undo] undone
+            [redo] redone
+            [drag] moved
+           *[other] done
+        }
     }
 job-items-skipped = { $count ->
         [one] 1 item
@@ -376,10 +382,10 @@ job-stopped =
     } stopped
 job-stopped-failed = { $count } failed
 job-stopped-left = { $count ->
-        [one] The 1 item left was
-       *[other] The { $count } items left were
-    } not processed
-job-stopped-left-unknown = The items left were not processed
+        [one] the 1 item left wasn't processed
+       *[other] the { $count } items left weren't processed
+    }
+job-stopped-left-unknown = the items left weren't processed
 # The first line of the window of failed items: the job stopped at its last item.
 job-stopped-note-last =
     { $work ->

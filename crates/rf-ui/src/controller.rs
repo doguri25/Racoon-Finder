@@ -143,7 +143,9 @@ use matcher::Matcher;
 use newest::Outcome;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, WindowKept, logical, look_for, wait_for};
-pub(crate) use persist::{density_number, density_of, theme_number, theme_of};
+pub(crate) use persist::{
+    density_number, density_of, language_number, language_of, theme_number, theme_of,
+};
 pub use previewer::Previewer;
 use properties::{Hasher, Measurer};
 use sorter::Sorter;
@@ -332,6 +334,7 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     window.set_theme_choice(theme_number(settings.theme));
     window.set_density(density_number(settings.density));
     window.set_font_scale(i32::from(settings.font_scale.percent()));
+    window.set_language_choice(language_number(settings.language));
     window.invoke_show_theme();
     // The layout of the last run from the start, before the panes' folders are known.
     show_layout(window, session.layout, false);
@@ -626,6 +629,11 @@ fn connect_look(window: &MainWindow) {
     window.on_font_scale_chosen(|percent| {
         if let Some(scale) = FontScale::of_percent(i64::from(percent)) {
             with(|c| c.choose_font_scale(scale));
+        }
+    });
+    window.on_language_chosen(|choice| {
+        if let Some(language) = language_of(choice) {
+            with(|c| c.choose_language(language));
         }
     });
 }
@@ -1511,6 +1519,9 @@ struct PanelPlace {
 /// What the job panel shows besides the rows of its models, in either of its places.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct PanelShown {
+    /// The head of 최근 완료, with how many jobs it lists ([`words::recent_head`]); empty while
+    /// it lists none.
+    recent_title: SharedString,
     /// 최근 완료 shows its lines.
     recent_open: bool,
     /// The head of 되돌리기 기록, empty while the history holds nothing; whether its rows show;
@@ -1609,6 +1620,7 @@ macro_rules! panel_host {
             }
 
             fn show_panel(&self, shown: &PanelShown) {
+                self.set_recent_title(shown.recent_title.clone());
                 self.set_recent_open(shown.recent_open);
                 self.set_history_title(shown.history_title.clone());
                 self.set_history_open(shown.history_open);
@@ -4030,15 +4042,17 @@ impl Controller {
         menu.set_can_undo(state.can_undo());
         menu.set_can_redo(state.can_redo());
         window.set_notice_action_live(state.toast_button_live());
+        let recent = state.recent_rows();
         ui_bridge::set_rows(
             &self.panel.recent,
-            state
-                .recent_rows()
-                .iter()
-                .map(ui_bridge::recent_row_view)
-                .collect(),
+            recent.iter().map(ui_bridge::recent_row_view).collect(),
         );
         let mut shown = self.panel.shown.borrow().clone();
+        shown.recent_title = if recent.is_empty() {
+            SharedString::new()
+        } else {
+            words::recent_head(recent.len()).into()
+        };
         shown.recent_open = state.recent_open();
         if history {
             self.show_history(state, &mut shown);
@@ -4777,6 +4791,62 @@ mod tests {
             rf_platform::desktop::high_contrast(),
         );
         assert_eq!(ui_bridge::shown_theme(&window), system);
+        drop(controller);
+        assert!(jobs.close_down(Duration::from_secs(10)));
+    }
+
+    /// 보기 ▸ 테마's languages (I18N-01): the choice is kept in the settings for the next start
+    /// and marked in the menu; where the next start speaks another language than this run, a
+    /// notice says that it changes then, in the words of that language. The window keeps its own
+    /// words meanwhile.
+    #[test]
+    fn a_language_chosen_waits_for_the_next_start_and_says_so_in_its_words() {
+        use crate::i18n::{Lang, Localizer};
+        use crate::settings::LanguageChoice;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let window = ui_bridge::new_main_window().expect("the window");
+        window.show().expect("it shows");
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
+        let saver = Saver::new(dir.path().join("config"), true);
+        let controller = Controller::new(&window, jobs.clone(), Settings::default(), saver);
+        let restart = Localizer::new(Lang::En).text("notice-language-restart", &[]);
+        assert_eq!(restart, "The language changes when you restart the app");
+        let notices = |text: &str| {
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&window, text).count()
+        };
+        // The tests' run speaks Korean: English waits for the restart, and says so in English.
+        controller.choose_language(LanguageChoice::En);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(controller.settings.borrow().language, LanguageChoice::En);
+        assert_eq!(window.get_language_choice(), 2);
+        assert!(notices(&restart) > 0, "the notice in English");
+        assert_eq!(notices("다시 시작하면 바뀝니다"), 0);
+        assert_eq!(
+            ui_bridge::spoken(&window)
+                .iter()
+                .find(|(key, _)| *key == "command-new-folder")
+                .map(|(_, text)| text.to_string())
+                .as_deref(),
+            Some("새 폴더"),
+            "the window keeps its words"
+        );
+        // Korean again: the next start speaks what this run does, and nothing is said.
+        controller.choose_language(LanguageChoice::Ko);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(controller.settings.borrow().language, LanguageChoice::Ko);
+        assert_eq!(window.get_language_choice(), 1);
+        assert_eq!(notices("다시 시작하면 바뀝니다"), 0);
+        // The menu's numbers and the choices are one to one.
+        for choice in [
+            LanguageChoice::System,
+            LanguageChoice::Ko,
+            LanguageChoice::En,
+        ] {
+            assert_eq!(language_of(language_number(choice)), Some(choice));
+        }
+        assert_eq!(language_of(3), None);
         drop(controller);
         assert!(jobs.close_down(Duration::from_secs(10)));
     }

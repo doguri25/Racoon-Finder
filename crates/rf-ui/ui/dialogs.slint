@@ -15,6 +15,7 @@ import { Theme } from "theme.slint";
 import { PrimaryButton, OutlineButton, DialogFrame, CheckBox, Segment, SegmentTrack } from "widgets.slint";
 import { Icon } from "icons.slint";
 import { DialogKeys } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 
 export struct NameView {
     // A new number for each item the window names: it starts again (the Tab of a rename moves
@@ -287,7 +288,7 @@ export component NameDialog inherits DialogFrame {
                 padding-top: Theme.gap-s;
 
                 OutlineButton {
-                    text: "취소";
+                    text: Tr.common-cancel;
                     focused: root.on-button == 0;
                     clicked => {
                         root.cancelled();
@@ -295,7 +296,7 @@ export component NameDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "확인";
+                    text: Tr.common-ok;
                     enabled: root.view.ok-enabled && !root.composing;
                     focused: root.on-button == 1;
                     clicked => {
@@ -334,7 +335,7 @@ export component PatternDialog inherits DialogFrame {
 
     width: 480px;
     height: layout.preferred-height;
-    accessible-label: "패턴으로 선택";
+    accessible-label: Tr.pattern-title;
 
     init => {
         input.text = root.view.initial;
@@ -409,7 +410,7 @@ export component PatternDialog inherits DialogFrame {
             spacing: Theme.gap-m;
 
             Heading {
-                text: "패턴으로 선택";
+                text: Tr.pattern-title;
             }
             Rectangle {
                 height: 38px;
@@ -423,7 +424,7 @@ export component PatternDialog inherits DialogFrame {
                     width: parent.width - 20px;
                     height: parent.height;
                     accessible-role: none;
-                    text: root.view.regex ? "예: ^IMG_\\d+\\.jpe?g$" : "예: *.jpg;*.png";
+                    text: root.view.regex ? Tr.pattern-example-regex : Tr.pattern-example-wildcards;
                     color: Theme.faint;
                     vertical-alignment: center;
                 }
@@ -437,7 +438,7 @@ export component PatternDialog inherits DialogFrame {
                     vertical-alignment: center;
                     single-line: true;
                     accessible-role: text-input;
-                    accessible-label: "패턴";
+                    accessible-label: Tr.pattern-field;
                     edited => {
                         root.edited(self.text);
                     }
@@ -470,11 +471,11 @@ export component PatternDialog inherits DialogFrame {
                 spacing: Theme.gap-l;
 
                 SegmentTrack {
-                    label: "패턴 형식";
+                    label: Tr.pattern-syntax;
                     focused: root.stop == 0;
 
                     Segment {
-                        text: "와일드카드";
+                        text: Tr.pattern-wildcards;
                         chosen: !root.view.regex;
                         clicked => {
                             root.syntax-chosen(false);
@@ -482,7 +483,7 @@ export component PatternDialog inherits DialogFrame {
                         }
                     }
                     Segment {
-                        text: "정규식";
+                        text: Tr.pattern-regex;
                         chosen: root.view.regex;
                         clicked => {
                             root.syntax-chosen(true);
@@ -491,7 +492,7 @@ export component PatternDialog inherits DialogFrame {
                     }
                 }
                 CheckBox {
-                    text: "대소문자 무시";
+                    text: Tr.pattern-ignore-case;
                     checked: root.view.ignore-case;
                     focused: root.stop == 1;
                     toggled => {
@@ -504,11 +505,11 @@ export component PatternDialog inherits DialogFrame {
                 alignment: start;
 
                 SegmentTrack {
-                    label: "고른 항목";
+                    label: Tr.pattern-mode;
                     focused: root.stop == 2;
 
                     Segment {
-                        text: "선택 바꾸기";
+                        text: Tr.pattern-replace;
                         chosen: !root.view.add;
                         clicked => {
                             root.mode-chosen(false);
@@ -516,7 +517,7 @@ export component PatternDialog inherits DialogFrame {
                         }
                     }
                     Segment {
-                        text: "선택에 더하기";
+                        text: Tr.pattern-add;
                         chosen: root.view.add;
                         clicked => {
                             root.mode-chosen(true);
@@ -551,7 +552,7 @@ export component PatternDialog inherits DialogFrame {
                 padding-top: Theme.gap-s;
 
                 OutlineButton {
-                    text: "취소";
+                    text: Tr.common-cancel;
                     focused: root.stop == 3;
                     clicked => {
                         root.cancelled();
@@ -559,7 +560,7 @@ export component PatternDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "선택";
+                    text: Tr.pattern-select;
                     enabled: root.can-select;
                     focused: root.stop == 4;
                     clicked => {
@@ -802,7 +803,7 @@ export component ConfirmDialog inherits DialogFrame {
                 padding-top: Theme.gap-s;
 
                 OutlineButton {
-                    text: "취소";
+                    text: Tr.common-cancel;
                     focused: root.on-button == 0;
                     clicked => {
                         root.cancelled();
@@ -903,7 +904,7 @@ export component MessageDialog inherits DialogFrame {
                 spacing: Theme.gap-s;
 
                 if root.view.retry: OutlineButton {
-                    text: "다시 시도";
+                    text: Tr.failures-retry;
                     focused: root.on-button == 1;
                     clicked => {
                         root.retried();
@@ -911,7 +912,7 @@ export component MessageDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "확인";
+                    text: Tr.common-ok;
                     focused: root.on-button == 0;
                     clicked => {
                         root.closed();
@@ -1034,7 +1035,7 @@ export component ErrorDialog inherits DialogFrame {
 
                 CheckBox {
                     horizontal-stretch: 0;
-                    text: "남은 오류에도 같은 선택";
+                    text: Tr.error-ask-apply-all;
                     checked: root.apply-all;
                     focused: root.on-button == 0;
                     toggled => {
@@ -1060,14 +1061,14 @@ export component ErrorDialog inherits DialogFrame {
                 spacing: Theme.gap-s;
 
                 OutlineButton {
-                    text: "중단";
+                    text: Tr.error-ask-stop;
                     focused: root.on-button == 1;
                     clicked => {
                         root.press(1);
                     }
                 }
                 OutlineButton {
-                    text: "건너뛰기";
+                    text: Tr.error-ask-skip;
                     focused: root.on-button == 2;
                     clicked => {
                         root.press(2);
@@ -1075,7 +1076,7 @@ export component ErrorDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "다시 시도";
+                    text: Tr.error-ask-retry;
                     enabled: root.can-retry;
                     focused: root.on-button == 3;
                     clicked => {
@@ -1195,7 +1196,7 @@ export component RecoveryDialog inherits DialogFrame {
                                 alignment: center;
 
                                 OutlineButton {
-                                    text: "버리기";
+                                    text: Tr.recovery-discard;
                                     focused: root.on-button == i * 2;
                                     clicked => {
                                         root.chosen(i, false);
@@ -1207,7 +1208,7 @@ export component RecoveryDialog inherits DialogFrame {
 
                                 PrimaryButton {
                                     button-height: 36px;
-                                    text: "다시 실행";
+                                    text: Tr.recovery-run-again;
                                     focused: root.on-button == i * 2 + 1;
                                     clicked => {
                                         root.chosen(i, true);
@@ -1228,7 +1229,7 @@ export component RecoveryDialog inherits DialogFrame {
                 alignment: end;
 
                 OutlineButton {
-                    text: "닫기";
+                    text: Tr.common-close;
                     focused: root.on-button == root.view.rows.length * 2;
                     clicked => {
                         root.closed();
@@ -1307,14 +1308,14 @@ export component PreflightDialog inherits DialogFrame {
                 spacing: Theme.gap-s;
 
                 OutlineButton {
-                    text: "취소";
+                    text: Tr.common-cancel;
                     focused: root.on-button == 0;
                     clicked => {
                         root.answered(2);
                     }
                 }
                 if root.view.has-blocked: OutlineButton {
-                    text: "막힌 항목 건너뛰기";
+                    text: Tr.preflight-skip-blocked;
                     focused: root.on-button == 1;
                     clicked => {
                         root.answered(1);
@@ -1322,7 +1323,7 @@ export component PreflightDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "계속";
+                    text: Tr.common-continue;
                     focused: root.on-button == 2;
                     clicked => {
                         root.answered(0);
@@ -1440,7 +1441,7 @@ export component NoticeWindow inherits Window {
 
                 PrimaryButton {
                     button-height: 36px;
-                    text: "확인";
+                    text: Tr.common-ok;
                     focused: true;
                     clicked => {
                         root.closed();

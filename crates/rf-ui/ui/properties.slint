@@ -25,6 +25,7 @@ import { PrimaryButton, OutlineButton, DialogFrame, Segment, SegmentTrack, Progr
 import { DialogKeys } from "shortcuts.slint";
 import { ListScroll } from "list-parts.slint";
 import { PreviewFont } from "preview.slint";
+import { Tr } from "tr.slint";
 
 // A fact of the window: what it is, and its value.
 export struct FactRow {
@@ -176,7 +177,7 @@ component HashLine inherits Rectangle {
         if root.line.done: OutlineButton {
             y: (parent.height - self.height) / 2;
             button-height: 30px;
-            text: root.line.copied ? "복사함" : "복사";
+            text: root.line.copied ? Tr.properties-copied : Tr.properties-copy;
             focused: root.focused;
             clicked => {
                 root.copy();
@@ -212,7 +213,7 @@ export component PropertiesDialog inherits DialogFrame {
     property <length> row-height: Theme.row-height + 8px;
 
     height: min(layout.preferred-height, root.room);
-    accessible-label: "속성";
+    accessible-label: Tr.properties-window;
 
     init => {
         keys.focus();
@@ -416,7 +417,7 @@ export component PropertiesDialog inherits DialogFrame {
                 }
                 if root.view.counting: OutlineButton {
                     button-height: 30px;
-                    text: "중지";
+                    text: Tr.properties-stop;
                     focused: root.stop == 0;
                     clicked => {
                         root.count-stopped();
@@ -433,12 +434,12 @@ export component PropertiesDialog inherits DialogFrame {
 
                 Text {
                     width: FactsColumn.label;
-                    text: "체크섬";
+                    text: Tr.properties-checksum;
                     color: Theme.muted;
                     vertical-alignment: center;
                 }
                 if root.view.hashable: SegmentTrack {
-                    label: "알고리즘";
+                    label: Tr.properties-algorithm;
                     focused: root.stop == 1;
 
                     for name[i] in Algorithms.names: Segment {
@@ -470,7 +471,7 @@ export component PropertiesDialog inherits DialogFrame {
                 preferred-height: root.listed ? min(root.view.hashes.length, 6) * root.row-height + 4px : 0px;
                 max-height: root.listed ? root.view.hashes.length * root.row-height + 4px : 0px;
                 vertical-stretch: 1;
-                accessible-label: "체크섬";
+                accessible-label: Tr.properties-checksums;
 
                 for hash[i] in root.view.hashes: HashLine {
                     line: hash;
@@ -500,7 +501,7 @@ export component PropertiesDialog inherits DialogFrame {
                 }
                 if root.view.hashing: OutlineButton {
                     button-height: 30px;
-                    text: "계산 중지";
+                    text: Tr.properties-stop-hashing;
                     focused: root.stop == 3;
                     clicked => {
                         root.hashes-stopped();
@@ -518,13 +519,13 @@ export component PropertiesDialog inherits DialogFrame {
 
                     Text {
                         width: FactsColumn.label;
-                        text: "비교";
+                        text: Tr.properties-compare;
                         color: Theme.muted;
                         vertical-alignment: center;
                     }
                     compare := Field {
-                        hint: "붙여넣은 해시와 비교";
-                        label: "비교";
+                        hint: Tr.properties-compare-hint;
+                        label: Tr.properties-compare;
                         edited(text) => {
                             root.compare-edited(text);
                         }
@@ -588,7 +589,7 @@ export component PropertiesDialog inherits DialogFrame {
                 // Finder's 정보 가져오기.
                 if root.view.system: OutlineButton {
                     button-height: 36px;
-                    text: "OS 속성 창 열기";
+                    text: Tr.command-system-properties;
                     focused: root.stop == 5;
                     clicked => {
                         root.system-properties();
@@ -599,7 +600,7 @@ export component PropertiesDialog inherits DialogFrame {
                 }
                 PrimaryButton {
                     button-height: 36px;
-                    text: "닫기";
+                    text: Tr.common-close;
                     focused: root.stop == 6;
                     clicked => {
                         root.cancelled();

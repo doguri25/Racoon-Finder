@@ -25,6 +25,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { ProgressBar, OutlineButton } from "widgets.slint";
+import { Tr } from "tr.slint";
 
 // The box the line of a job's speed graph is drawn in, in the units of the line's points, a
 // pixel each on screen: the row's `Path` has this viewbox and this size, and Rust reads it here
@@ -110,6 +111,8 @@ export component JobPanel inherits Rectangle {
     // How many of them show at once; the list scrolls for the others.
     in property <int> queue-lines: 3;
     in property <[RecentRowView]> recent;
+    // The head of 최근 완료, with how many jobs it lists (Rust words it: a count).
+    in property <string> recent-title;
     in property <bool> recent-open;
     // How many lines of 최근 완료 show at once; the list scrolls for the others.
     in property <int> recent-lines: 3;
@@ -160,7 +163,7 @@ export component JobPanel inherits Rectangle {
 
     background: Theme.panel;
     accessible-role: groupbox;
-    accessible-label: "작업";
+    accessible-label: Tr.job-panel-title;
 
     // The keys on a job that waits, or on a line of 최근 완료, that does not show: its list
     // scrolls to it.
@@ -245,7 +248,7 @@ export component JobPanel inherits Rectangle {
                             border-radius: Theme.radius;
                             background: Theme.raised;
                             accessible-role: AccessibleRole.image;
-                            accessible-label: "속도 그래프";
+                            accessible-label: Tr.job-panel-speed;
 
                             Path {
                                 x: JobGraph.pad-x;
@@ -278,7 +281,7 @@ export component JobPanel inherits Rectangle {
                             OutlineButton {
                                 button-height: 44px;
                                 min-width: 88px;
-                                text: row.paused ? "계속" : "일시정지";
+                                text: row.paused ? Tr.job-panel-resume : Tr.job-panel-pause;
                                 focused: root.focus-line == i && root.focus-button == 0;
                                 clicked => {
                                     if (row.paused) {
@@ -294,7 +297,7 @@ export component JobPanel inherits Rectangle {
 
                             OutlineButton {
                                 button-height: 44px;
-                                text: "취소";
+                                text: Tr.job-panel-cancel;
                                 focused: root.focus-line == i && root.focus-button == 1;
                                 clicked => {
                                     root.cancel(i);
@@ -331,7 +334,7 @@ export component JobPanel inherits Rectangle {
             content-width: self.visible-width;
             content-height: root.queue.length * root.queue-height;
             accessible-role: list;
-            accessible-label: "대기 중인 작업";
+            accessible-label: Tr.job-panel-waiting;
 
             for row[i] in root.queue: Rectangle {
                 y: i * root.queue-height;
@@ -364,7 +367,7 @@ export component JobPanel inherits Rectangle {
                         OutlineButton {
                             button-height: 30px;
                             min-width: 88px;
-                            text: row.paused ? "계속" : "일시정지";
+                            text: row.paused ? Tr.job-panel-resume : Tr.job-panel-pause;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 0;
                             clicked => {
                                 if (row.paused) {
@@ -381,7 +384,7 @@ export component JobPanel inherits Rectangle {
 
                         OutlineButton {
                             button-height: 30px;
-                            text: "취소";
+                            text: Tr.job-panel-cancel;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 1;
                             clicked => {
                                 root.cancel(root.rows.length + i);
@@ -394,8 +397,8 @@ export component JobPanel inherits Rectangle {
 
                         OutlineButton {
                             button-height: 30px;
-                            text: "위로";
-                            spoken: "작업 순서 위로";
+                            text: Tr.job-panel-move-up;
+                            spoken: Tr.job-panel-move-up-spoken;
                             keys: Shortcuts.move-job-up;
                             enabled: row.can-up;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 2;
@@ -410,8 +413,8 @@ export component JobPanel inherits Rectangle {
 
                         OutlineButton {
                             button-height: 30px;
-                            text: "아래로";
-                            spoken: "작업 순서 아래로";
+                            text: Tr.job-panel-move-down;
+                            spoken: Tr.job-panel-move-down-spoken;
                             keys: Shortcuts.move-job-down;
                             enabled: row.can-down;
                             focused: root.focus-line == root.rows.length + i && root.focus-button == 3;
@@ -441,14 +444,14 @@ export component JobPanel inherits Rectangle {
 
                 Text {
                     horizontal-stretch: 1;
-                    text: "최근 완료 \{root.recent.length}개";
+                    text: root.recent-title;
                     font-weight: 600;
                     color: Theme.muted;
                     vertical-alignment: center;
                 }
                 OutlineButton {
                     button-height: 28px;
-                    text: root.recent-open ? "접기" : "펼치기";
+                    text: root.recent-open ? Tr.job-panel-collapse : Tr.job-panel-expand;
                     focused: root.focus-line == root.head-line && root.focus-button == 0;
                     clicked => {
                         root.recent-toggled();
@@ -456,7 +459,7 @@ export component JobPanel inherits Rectangle {
                 }
                 OutlineButton {
                     button-height: 28px;
-                    text: "지우기";
+                    text: Tr.job-panel-clear;
                     focused: root.focus-line == root.head-line && root.focus-button == 1;
                     clicked => {
                         root.recent-cleared();
@@ -478,7 +481,7 @@ export component JobPanel inherits Rectangle {
             content-width: self.visible-width;
             content-height: root.recent.length * root.recent-height;
             accessible-role: list;
-            accessible-label: "최근 완료";
+            accessible-label: Tr.job-panel-recent;
 
             for entry[i] in root.recent: Rectangle {
                 y: i * root.recent-height;
@@ -535,7 +538,7 @@ export component JobPanel inherits Rectangle {
 
                         OutlineButton {
                             button-height: 30px;
-                            text: "자세히";
+                            text: Tr.job-panel-details;
                             focused: root.focus-line == root.head-line + 1 + i && root.focus-button == 0;
                             clicked => {
                                 root.recent-details(i);
@@ -548,7 +551,7 @@ export component JobPanel inherits Rectangle {
 
                         OutlineButton {
                             button-height: 30px;
-                            text: "로그 저장…";
+                            text: Tr.job-panel-save-log;
                             focused: root.focus-line == root.head-line + 1 + i && root.focus-button == (entry.details ? 1 : 0);
                             clicked => {
                                 root.recent-save(i);
@@ -583,7 +586,7 @@ export component JobPanel inherits Rectangle {
                 }
                 OutlineButton {
                     button-height: 28px;
-                    text: root.history-open ? "접기" : "펼치기";
+                    text: root.history-open ? Tr.job-panel-collapse : Tr.job-panel-expand;
                     focused: root.focus-line == root.history-head-line && root.focus-button == 0;
                     clicked => {
                         root.history-toggled();
@@ -605,7 +608,7 @@ export component JobPanel inherits Rectangle {
             content-width: self.visible-width;
             content-height: root.history-content;
             accessible-role: list;
-            accessible-label: "되돌리기 기록";
+            accessible-label: Tr.job-panel-history;
 
             for entry[i] in root.history: Rectangle {
                 // The keys are on this row: it scrolls into view.
@@ -655,7 +658,7 @@ export component JobPanel inherits Rectangle {
 
                             if entry.next && !entry.dimmed: Text {
                                 horizontal-stretch: 0;
-                                text: "다음";
+                                text: Tr.job-panel-next;
                                 font-size: Theme.font-small;
                                 font-weight: 700;
                                 color: Theme.accent;

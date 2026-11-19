@@ -243,3 +243,116 @@ tray-open-window = 창 열기
 tray-resume-all = 모두 계속
 tray-pause-all = 모두 일시정지
 tray-quit = 끝내기
+
+## 보기 ▸ 테마의 언어 (다시 시작하면 바뀐다). 언어의 이름은 어느 언어로든 그 언어로 쓴다.
+
+view-language-system = 언어: 시스템 설정 따르기
+view-language-ko = 언어: 한국어
+view-language-en = 언어: English
+
+## 대화상자들이 함께 쓰는 단추
+
+common-cancel = 취소
+common-ok = 확인
+common-continue = 계속
+
+## 이름이 겹칠 때 할 일: 충돌 창의 선택과 위치 고르기 창의 정책
+
+policy-overwrite = 덮어쓰기
+policy-skip = 건너뛰기
+policy-if-newer = 더 새 파일만 덮어쓰기
+policy-if-size-differs = 크기가 다를 때만 덮어쓰기
+
+## 이름 충돌 창
+
+conflict-newer-badge = 더 최근
+conflict-size-label = 크기
+conflict-modified-label = 수정한 날짜
+conflict-question = 어떻게 할까요?
+conflict-choice-keep-both = 이름 바꿔 둘 다 두기
+conflict-apply-all = 남은 충돌에도 같은 선택 적용
+conflict-cancel-job = 작업 취소
+
+## 위치 고르기 창
+
+# 이동/복사 고르기의 이름.
+pick-mode = 작업
+pick-mode-move = 이동
+pick-mode-copy = 복사
+pick-target = 대상 경로
+pick-target-hint = 폴더 경로를 입력하세요
+pick-filter = 폴더 이름으로 거르기
+pick-tree = 대상 폴더 트리
+pick-quick = 빠른 대상
+pick-on-conflict = 이름이 겹치면
+pick-choice-ask = 물어보기
+pick-choice-rename = 이름 바꾸기
+# 앞의 "이름이 겹치면"과 아래 줄이 나머지를 말한다(policy-if-newer).
+pick-choice-if-newer = 더 새 파일만
+pick-choice-if-size-differs = 크기가 다를 때만
+pick-follow-links = 링크는 가리키는 것을 복사
+
+## 속성 창
+
+properties-window = 속성
+properties-stop = 중지
+properties-checksum = 체크섬
+# 체크섬 목록의 이름(화면 읽기 프로그램).
+properties-checksums = 체크섬
+properties-algorithm = 알고리즘
+properties-copy = 복사
+properties-copied = 복사함
+properties-stop-hashing = 계산 중지
+properties-compare = 비교
+properties-compare-hint = 붙여넣은 해시와 비교
+
+## 작업 패널과 그 창
+
+job-panel-title = 작업
+job-panel-speed = 속도 그래프
+job-panel-pause = 일시정지
+job-panel-resume = 계속
+job-panel-cancel = 취소
+# 기다리는 작업을 대기열에서 한 자리 앞으로. 화면 읽기 프로그램은 -spoken을 듣는다(도구 모음에도 위로가 있다).
+job-panel-move-up = 위로
+job-panel-move-up-spoken = 작업 순서 위로
+job-panel-move-down = 아래로
+job-panel-move-down-spoken = 작업 순서 아래로
+job-panel-waiting = 대기 중인 작업
+job-panel-expand = 펼치기
+job-panel-collapse = 접기
+job-panel-clear = 지우기
+job-panel-recent = 최근 완료
+job-panel-details = 자세히
+job-panel-save-log = 로그 저장…
+job-panel-history = 되돌리기 기록
+# 되돌리기 기록에서 단추가 다음에 할 줄.
+job-panel-next = 다음
+job-window-empty = 진행 중인 작업이 없습니다
+
+## 대화상자
+
+pattern-title = 패턴으로 선택
+pattern-example-wildcards = 예: *.jpg;*.png
+pattern-example-regex = 예: ^IMG_\d+\.jpe?g$
+pattern-field = 패턴
+pattern-syntax = 패턴 형식
+pattern-wildcards = 와일드카드
+pattern-regex = 정규식
+pattern-ignore-case = 대소문자 무시
+# 맞는 항목을 선택과 어떻게 합칠지 고르기의 이름.
+pattern-mode = 고른 항목
+pattern-replace = 선택 바꾸기
+pattern-add = 선택에 더하기
+pattern-select = 선택
+# 처리하지 못한 항목의 창: 실패한 항목만 다시 한다(XFER-09).
+failures-retry = 다시 시도
+# 파일마다 묻는 창(XFER-09).
+error-ask-apply-all = 남은 오류에도 같은 선택
+error-ask-stop = 중단
+error-ask-skip = 건너뛰기
+error-ask-retry = 다시 시도
+# 지난번에 끝나지 않은 작업.
+recovery-discard = 버리기
+recovery-run-again = 다시 실행
+preflight-skip-blocked = 막힌 항목 건너뛰기
