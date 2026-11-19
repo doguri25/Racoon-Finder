@@ -109,6 +109,13 @@ pub struct TrashItem {
 
 /// What identifies an item of the trash beyond its place, read when the trash is listed and
 /// again right before the item is acted on: a reused name cannot match it.
+///
+/// What still matches is an item that is deleted and another made in its place within one tick
+/// of the file system's change clock (1 to 4 ms on ext4 before Linux 6.13, which hands a freed
+/// inode number out again at once), with the same size and a record of the same bytes. That
+/// needs a program racing the trash within milliseconds; no person can list, delete and make an
+/// item again that fast. Moving the old item away keeps its inode in use, so an item put in its
+/// place has another one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TrashStamp {
     /// The volume and file IDs of the item itself, without following a link (`st_dev` and
@@ -117,6 +124,10 @@ pub struct TrashStamp {
     pub identity: Option<(u64, u128)>,
     /// When the item itself last changed state (`st_ctime`, seconds and nanoseconds), on Unix.
     pub changed: Option<(i64, i64)>,
+    /// The size of the item itself (`st_size` of the item, not of what a link leads to; on
+    /// Windows the `$R…` item's), which `symlink_metadata` gives at no extra cost.
+    #[serde(default)]
+    pub size: Option<u64>,
     /// A digest (64-bit FNV-1a) of the bytes of the trash's record of the item: its `$I…` file on
     /// Windows, its `.trashinfo` file in a freedesktop trash (which holds its `Path=` and
     /// `DeletionDate=`). `None` without a readable one, and on macOS, which keeps none.
@@ -164,13 +175,11 @@ pub(crate) fn stamp_of(location: &Path, record: Option<&[u8]>) -> Result<TrashSt
         Some((meta.ctime(), meta.ctime_nsec()))
     };
     #[cfg(not(unix))]
-    let changed = {
-        let _ = meta;
-        None
-    };
+    let changed = None;
     Ok(TrashStamp {
         identity,
         changed,
+        size: Some(meta.len()),
         record: record.map(digest),
     })
 }
@@ -569,6 +578,25 @@ mod tests {
         assert_eq!(item.name, OsString::from("문서 a.txt"));
         assert_eq!(item.id, TrashId::of(&location));
         assert_eq!((item.original, item.deleted, item.size), (None, None, None));
+    }
+
+    /// An item rewritten in place keeps its identity, and on a coarse clock its change time,
+    /// but not its size.
+    #[test]
+    fn a_stamp_holds_the_size_of_the_item_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a");
+        std::fs::write(&file, "abc").unwrap();
+        let before = stamp_of(&file, None).unwrap();
+        std::fs::write(&file, "abcde").unwrap();
+        let after = stamp_of(&file, None).unwrap();
+        assert_eq!((before.size, after.size), (Some(3), Some(5)));
+        assert_eq!(before.identity, after.identity);
+        assert_ne!(before, after);
+        assert_eq!(
+            stamp_of(&file, Some(b"x")).unwrap().record,
+            Some(digest(b"x"))
+        );
     }
 
     #[test]

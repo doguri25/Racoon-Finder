@@ -878,7 +878,9 @@ mod tests {
             "[Trash Info]\nPath=/etc/passwd\n",
         )
         .unwrap();
-        std::fs::remove_file(&b.location).unwrap();
+        // Swapped the way another program would: the old `b` moved out of the trash (its inode
+        // stays in use) and another, of another size, put in its place.
+        std::fs::rename(&b.location, home.join("old-b.txt")).unwrap();
         std::fs::write(&b.location, "other").unwrap();
         for stale in [&a, &b] {
             let error = trash.delete_forever(stale).unwrap_err();

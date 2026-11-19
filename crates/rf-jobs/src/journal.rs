@@ -1507,6 +1507,7 @@ mod tests {
         let stamp = rf_platform::TrashStamp {
             identity: Some((1, u128::from(u64::MAX) + 7)),
             changed: Some((1_700_000_000, 123)),
+            size: Some(5),
             record: Some(0xfeed),
         };
         let record = UndoRecord::Trashed {
@@ -1519,7 +1520,7 @@ mod tests {
         let spec = JobSpec::Undo(record);
         pinned(
             &spec,
-            r#"{"Undo":{"Trashed":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt","stamp":{"identity":[1,18446744073709551622],"changed":[1700000000,123],"record":65261}}]}}}"#,
+            r#"{"Undo":{"Trashed":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt","stamp":{"identity":[1,18446744073709551622],"changed":[1700000000,123],"size":5,"record":65261}}]}}}"#,
         );
         let (h, thread) = JournalHandle::spawn(
             t.path().to_path_buf(),

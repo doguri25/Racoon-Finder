@@ -114,6 +114,7 @@ fn a_trash_record_without_a_stamp_still_undoes_by_its_place() {
             stamp: Some(rf_platform::TrashStamp {
                 identity: Some((7, 9)),
                 changed: Some((1, 2)),
+                size: Some(1),
                 record: None,
             }),
         }],
