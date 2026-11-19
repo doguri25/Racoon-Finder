@@ -273,7 +273,7 @@ component Tile inherits Rectangle {
     // A cut or hidden item, besides its strength, in a theme with marks: a badge on the lower
     // right corner of its icon or picture.
     if Theme.marks && (root.item.cut || root.item.hidden): StateBadge {
-        width: max(12px, min(28px, root.icon-size * 0.3));
+        width: max(16px, min(28px, root.icon-size * 0.3));
         height: self.width;
         x: (root.big ? (root.width - root.icon-size) / 2 : 8px + root.check-room) + root.icon-size - self.width + 3px;
         y: (root.big ? 8px : (root.height - root.icon-size) / 2) + root.icon-size - self.height + 3px;

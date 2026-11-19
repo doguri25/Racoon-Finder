@@ -541,10 +541,10 @@ component TreeItem inherits Rectangle {
         if Theme.marks && root.item.selected: SelectedMark { }
         // A hidden folder, besides its strength, in a theme with marks: a badge on its icon.
         if Theme.marks && root.item.hidden: StateBadge {
-            x: 24px + root.indent + 9px;
-            y: (parent.height - 18px) / 2 + 8px;
-            width: 12px;
-            height: 12px;
+            x: 24px + root.indent + 6px;
+            y: (parent.height - 18px) / 2 + 5px;
+            width: 16px;
+            height: 16px;
             name: "hidden";
         }
 

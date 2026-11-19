@@ -346,9 +346,10 @@ fn high_contrast_badges_cut_and_hidden_rows_and_frames_what_is_off() {
         rows: ModelRc::from(rows),
         ..PaneView::default()
     });
-    let badges = || -> Vec<f32> {
+    // Each badge's top and side.
+    let badges = || -> Vec<(f32, f32)> {
         ElementHandle::find_by_element_type_name(&window, "StateBadge")
-            .map(|badge| badge.absolute_position().y)
+            .map(|badge| (badge.absolute_position().y, badge.size().width))
             .collect()
     };
     let frames = || ElementHandle::find_by_element_type_name(&window, "DashedFrame").count();
@@ -360,23 +361,26 @@ fn high_contrast_badges_cut_and_hidden_rows_and_frames_what_is_off() {
 
     let high = theme::Builtin::HighContrast.tokens();
     ui_bridge::show_theme(&window, &high);
-    // One badge for each of the three dimmed rows, on its own row.
-    let rows_at: Vec<f32> = ["cut.txt", ".hidden", "both"]
+    // One badge for each of the three dimmed rows, within its own row, and large enough that
+    // its glyph reads (at 12 px the crossed eye was a blot).
+    let rows_at: Vec<(f32, f32)> = ["cut.txt", ".hidden", "both"]
         .iter()
         .map(|name| {
-            labelled(&window, name, AccessibleRole::ListItem)[0]
-                .absolute_position()
-                .y
+            let row = labelled(&window, name, AccessibleRole::ListItem).remove(0);
+            (row.absolute_position().y, row.size().height)
         })
         .collect();
     let shown = badges();
     assert_eq!(shown.len(), 3, "{shown:?}");
-    for row in rows_at {
+    for (row, height) in rows_at {
         assert!(
-            shown.iter().any(|y| *y > row && *y < row + 32.0),
-            "a badge on the row at {row}: {shown:?}"
+            shown
+                .iter()
+                .any(|(y, side)| *y > row && y + side <= row + height),
+            "a badge within the row at {row}: {shown:?}"
         );
     }
+    assert!(shown.iter().all(|(_, side)| *side >= 16.0), "{shown:?}");
     assert!((strength("cut.txt") - high.dim_cut).abs() < 0.01);
     assert!((strength(".hidden") - high.dim_hidden).abs() < 0.01);
     // The toolbar of a fresh window has buttons that are off (뒤로, 앞으로, 되돌리기).

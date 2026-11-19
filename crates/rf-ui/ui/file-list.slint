@@ -516,12 +516,12 @@ export component FileList inherits Rectangle {
                             // A selected row, besides its color, in a theme with marks.
                             if Theme.marks && row.selected: SelectedMark { }
                             // A cut or hidden row, besides its strength, in a theme with marks: a
-                            // badge on the corner of its icon.
+                            // badge on the corner of its icon, 16 px so that its glyph reads.
                             if Theme.marks && (row.cut || row.hidden): StateBadge {
-                                x: head.pad + root.check-room + 9px;
-                                y: (parent.height - 18px) / 2 + 8px;
-                                width: 12px;
-                                height: 12px;
+                                x: head.pad + root.check-room + 6px;
+                                y: (parent.height - 18px) / 2 + 5px;
+                                width: 16px;
+                                height: 16px;
                                 name: row.cut ? "cut" : "hidden";
                             }
                         }
