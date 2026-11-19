@@ -5,6 +5,9 @@
 scheme = "light"
 icon-style = "line"
 marks = false
+# How strong a cut item and a hidden item show (their opacity).
+dim-cut = 0.4
+dim-hidden = 0.5
 
 [color]
 bg = "#F6F7F9"
@@ -13,7 +16,9 @@ raised = "#F0F2F5"
 text = "#1C2024"
 muted = "#5C6370"
 faint = "#8A919C"
+disabled = "#8A919C"
 border = "#E1E4E8"
+pressed = "#E1E4E8"
 folder = "#B7791F"
 # The folder amber, for icons only: on the panel it is 3.6:1, enough for a graphic (3:1) but
 # not for text (4.5:1); a warning's text stays `text`.

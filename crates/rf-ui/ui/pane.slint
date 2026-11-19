@@ -274,7 +274,7 @@ component StripButton inherits Rectangle {
     width: 26px;
     height: 26px;
     border-radius: 6px;
-    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.label;
     accessible-description: root.keys;
@@ -329,7 +329,7 @@ component TabButton inherits Rectangle {
     horizontal-stretch: 0;
     border-top-left-radius: Theme.radius;
     border-top-right-radius: Theme.radius;
-    background: root.tab.active ? Theme.panel : touch.has-hover ? Theme.border : transparent;
+    background: root.tab.active ? Theme.panel : touch.has-hover ? Theme.pressed : transparent;
     accessible-role: AccessibleRole.tab;
     accessible-label: root.tab.title;
     accessible-description: root.tab.pinned ? "고정된 탭" : "";
@@ -494,7 +494,7 @@ component ChevronButton inherits Rectangle {
     width: 16px;
     height: 24px;
     border-radius: 4px;
-    background: root.open || touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: root.open || touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => {
@@ -530,7 +530,7 @@ component CrumbButton inherits Rectangle {
     height: 28px;
     horizontal-stretch: 0;
     border-radius: 6px;
-    background: touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => {
@@ -1585,7 +1585,7 @@ export component Pane inherits Rectangle {
                         border-width: 1px;
                         border-color: Theme.border;
                         border-radius: Theme.radius;
-                        background: retry-touch.pressed ? Theme.border : retry-touch.has-hover ? Theme.raised : transparent;
+                        background: retry-touch.pressed ? Theme.pressed : retry-touch.has-hover ? Theme.raised : transparent;
                         accessible-role: button;
                         accessible-label: "다시 시도";
                         accessible-action-default => {

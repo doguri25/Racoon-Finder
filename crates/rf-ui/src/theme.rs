@@ -5,14 +5,15 @@
 //! what each means.
 //!
 //! [`parse`] takes a file only whole: every key must be there, each with a value of its kind
-//! (a color `#RRGGBB` or `#RRGGBBAA`, a size above 0 and under its cap, a font name, one of a
-//! few words, true or false), and a key it does not know is refused too, so that a typo shows
+//! (a color `#RRGGBB` or `#RRGGBBAA`, a size or a strength within its bounds, a font name, one
+//! of a few words, true or false), and a key it does not know is refused too, so that a typo shows
 //! instead of leaving a token at some default. The error names the key. A file that is refused
 //! changes nothing: the theme shown stays (THEME-05's rule, for the import that comes later).
 //!
 //! [`builtin`] picks the theme of a [`ThemeChoice`]: 시스템 설정 따르기 takes 고대비 while the
 //! system asks for high contrast, else 어둡게 or 밝게 as the system's own colors are.
 
+use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
 use crate::settings::ThemeChoice;
@@ -70,10 +71,14 @@ pub struct Colors {
     pub text: Rgba,
     /// Second text: sizes, dates, hints.
     pub muted: Rgba,
-    /// What cannot be used now.
+    /// Hints and placeholders, and what is dimmed in a tree.
     pub faint: Rgba,
+    /// The text and icons of a control that cannot be used now (a button, a choice, a target).
+    pub disabled: Rgba,
     /// Lines between parts, and frames.
     pub border: Rgba,
+    /// Under a pressed button, an open menu's button, a hovered tab or segment.
+    pub pressed: Rgba,
     /// The folders' icons.
     pub folder: Rgba,
     /// The icon of what warns (an overwrite); the words beside it stay `text`.
@@ -108,7 +113,7 @@ pub struct Colors {
 
 impl Colors {
     /// Every color with its key, in the order of `[color]`.
-    pub fn named(&self) -> [(&'static str, Rgba); 23] {
+    pub fn named(&self) -> [(&'static str, Rgba); 25] {
         [
             ("bg", self.bg),
             ("panel", self.panel),
@@ -116,7 +121,9 @@ impl Colors {
             ("text", self.text),
             ("muted", self.muted),
             ("faint", self.faint),
+            ("disabled", self.disabled),
             ("border", self.border),
+            ("pressed", self.pressed),
             ("folder", self.folder),
             ("warning", self.warning),
             ("accent", self.accent),
@@ -183,8 +190,12 @@ pub struct Tokens {
     pub dark: bool,
     pub icon_style: IconStyle,
     /// What the colors tell is also told by a shape (`marks`): a bar beside a selected item,
-    /// a heavier frame around the chosen one of a set, a frame around a dialog (고대비).
+    /// a badge on a cut or hidden item's icon, a dashed frame around a disabled control, a
+    /// heavier frame around the chosen one of a set, a frame around a dialog (고대비).
     pub marks: bool,
+    /// How strong a cut item shows (`dim-cut`, its opacity), and a hidden one (`dim-hidden`).
+    pub dim_cut: f32,
+    pub dim_hidden: f32,
     pub color: Colors,
     pub font: Fonts,
     pub size: Sizes,
@@ -220,7 +231,7 @@ impl ThemeError {
 }
 
 /// The keys of `[theme]`.
-const THEME_KEYS: &[&str] = &["scheme", "icon-style", "marks"];
+const THEME_KEYS: &[&str] = &["scheme", "icon-style", "marks", "dim-cut", "dim-hidden"];
 /// The keys of `[color]`.
 const COLOR_KEYS: &[&str] = &[
     "bg",
@@ -229,7 +240,9 @@ const COLOR_KEYS: &[&str] = &[
     "text",
     "muted",
     "faint",
+    "disabled",
     "border",
+    "pressed",
     "folder",
     "warning",
     "accent",
@@ -262,14 +275,16 @@ const SIZE_KEYS: &[&str] = &[
     "radius-large",
 ];
 
-/// The largest font size a theme may give, in logical pixels.
-pub const MAX_FONT: f32 = 72.0;
-/// The largest gap.
-pub const MAX_GAP: f32 = 64.0;
-/// The largest row height.
-pub const MAX_ROW_HEIGHT: f32 = 128.0;
-/// The largest corner radius.
-pub const MAX_RADIUS: f32 = 64.0;
+/// The font sizes a theme may give, in logical pixels: from what still reads to what still fits.
+pub const FONT_SIZES: RangeInclusive<f32> = 8.0..=72.0;
+/// The gaps.
+pub const GAPS: RangeInclusive<f32> = 1.0..=64.0;
+/// The row heights: a row holds an icon and a line of text.
+pub const ROW_HEIGHTS: RangeInclusive<f32> = 16.0..=128.0;
+/// The corner radii.
+pub const RADII: RangeInclusive<f32> = 1.0..=64.0;
+/// The strengths of a dimmed item: it stays in sight.
+pub const DIMS: RangeInclusive<f32> = 0.2..=1.0;
 /// The longest font name, in characters.
 pub const MAX_FONT_NAME: usize = 100;
 
@@ -294,6 +309,8 @@ pub fn parse(text: &str) -> Result<Tokens, ThemeError> {
             &[("line", IconStyle::Line), ("bold", IconStyle::Bold)],
         )?,
         marks: theme.flag("marks")?,
+        dim_cut: theme.number("dim-cut", &DIMS)?,
+        dim_hidden: theme.number("dim-hidden", &DIMS)?,
         color: Colors {
             bg: color.color("bg")?,
             panel: color.color("panel")?,
@@ -301,7 +318,9 @@ pub fn parse(text: &str) -> Result<Tokens, ThemeError> {
             text: color.color("text")?,
             muted: color.color("muted")?,
             faint: color.color("faint")?,
+            disabled: color.color("disabled")?,
             border: color.color("border")?,
+            pressed: color.color("pressed")?,
             folder: color.color("folder")?,
             warning: color.color("warning")?,
             accent: color.color("accent")?,
@@ -323,21 +342,21 @@ pub fn parse(text: &str) -> Result<Tokens, ThemeError> {
             ui: font.family("ui")?,
             list: font.family("list")?,
             mono: font.family("mono")?,
-            small: font.size("small", MAX_FONT)?,
-            note: font.size("note", MAX_FONT)?,
-            body: font.size("body", MAX_FONT)?,
-            app_name: font.size("app-name", MAX_FONT)?,
-            heading: font.size("heading", MAX_FONT)?,
-            title: font.size("title", MAX_FONT)?,
+            small: font.number("small", &FONT_SIZES)?,
+            note: font.number("note", &FONT_SIZES)?,
+            body: font.number("body", &FONT_SIZES)?,
+            app_name: font.number("app-name", &FONT_SIZES)?,
+            heading: font.number("heading", &FONT_SIZES)?,
+            title: font.number("title", &FONT_SIZES)?,
         },
         size: Sizes {
-            gap_xs: size.size("gap-xs", MAX_GAP)?,
-            gap_s: size.size("gap-s", MAX_GAP)?,
-            gap_m: size.size("gap-m", MAX_GAP)?,
-            gap_l: size.size("gap-l", MAX_GAP)?,
-            row_height: size.size("row-height", MAX_ROW_HEIGHT)?,
-            radius: size.size("radius", MAX_RADIUS)?,
-            radius_large: size.size("radius-large", MAX_RADIUS)?,
+            gap_xs: size.number("gap-xs", &GAPS)?,
+            gap_s: size.number("gap-s", &GAPS)?,
+            gap_m: size.number("gap-m", &GAPS)?,
+            gap_l: size.number("gap-l", &GAPS)?,
+            row_height: size.number("row-height", &ROW_HEIGHTS)?,
+            radius: size.number("radius", &RADII)?,
+            radius_large: size.number("radius-large", &RADII)?,
         },
     })
 }
@@ -394,21 +413,26 @@ impl Section {
             .ok_or_else(|| self.invalid(key, "a color (#RRGGBB or #RRGGBBAA)"))
     }
 
-    /// A size in logical pixels, above 0 and at most `max`: a whole number or a decimal one.
-    fn size(&mut self, key: &str, max: f32) -> Result<f32, ThemeError> {
+    /// A number within `bounds` (a size in logical pixels, or a strength): a whole number or a
+    /// decimal one.
+    fn number(&mut self, key: &str, bounds: &RangeInclusive<f32>) -> Result<f32, ThemeError> {
         let value = self.value(key)?;
         #[expect(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
-            reason = "a size is checked against a cap far below where f32 loses whole pixels"
+            reason = "a number is checked against bounds far below where f32 loses whole pixels"
         )]
-        let size = match value {
+        let number = match value {
             toml::Value::Integer(number) => Some(number as f32),
             toml::Value::Float(number) => Some(number as f32),
             _ => None,
         };
-        size.filter(|size| size.is_finite() && *size > 0.0 && *size <= max)
-            .ok_or_else(|| self.invalid(key, format!("a size above 0 and at most {max}")))
+        number
+            .filter(|number| bounds.contains(number))
+            .ok_or_else(|| {
+                let (low, high) = (bounds.start(), bounds.end());
+                self.invalid(key, format!("a number from {low} to {high}"))
+            })
     }
 
     /// A font family's name, empty for the system's: at most [`MAX_FONT_NAME`] characters, no
@@ -598,7 +622,10 @@ mod tests {
             ("text", "#1C2024", "#E7E9EC"),
             ("muted", "#5C6370", "#A0A7B1"),
             ("faint", "#8A919C", "#7D848E"),
+            // `disabled` was `faint` and `pressed` was `border` where the screens used them.
+            ("disabled", "#8A919C", "#7D848E"),
             ("border", "#E1E4E8", "#2C3036"),
+            ("pressed", "#E1E4E8", "#2C3036"),
             ("folder", "#B7791F", "#E0A84A"),
             ("warning", "#B7791F", "#E0A84A"),
             ("on-accent", "#FFFFFF", "#0E1A33"),
@@ -626,8 +653,8 @@ mod tests {
         assert_eq!(light.color.selection, mix(base, white, 0.12));
         let dark_selection = mix(mix(base, white, 0.65), hex("#1D2024"), 0.22);
         assert_eq!(dark.color.selection, dark_selection);
-        // Every color is counted above: 21 by their values, the accent and the selection.
-        assert_eq!(light.color.named().len(), 23);
+        // Every color is counted above: 23 by their values, the accent and the selection.
+        assert_eq!(light.color.named().len(), 25);
         for tokens in [&light, &dark] {
             // The sizes: theme.slint's, and the literals of the screens (13, 15 and 16 px).
             let f = &tokens.font;
@@ -645,9 +672,11 @@ mod tests {
                 (4.0, 8.0, 12.0, 16.0)
             );
             assert_eq!((s.row_height, s.radius, s.radius_large), (32.0, 8.0, 12.0));
-            // Thin icons and no shapes beside the colors, as before.
+            // Thin icons and no shapes beside the colors, as before; cut items at 40 %, hidden
+            // ones at half strength (the opacities the lists and the tree had).
             assert_eq!(tokens.icon_style, IconStyle::Line);
             assert!(!tokens.marks);
+            assert_eq!((tokens.dim_cut, tokens.dim_hidden), (0.4, 0.5));
         }
         assert!(!light.dark);
         assert!(dark.dark);
@@ -726,10 +755,12 @@ mod tests {
     }
 
     #[test]
-    fn a_size_below_zero_zero_or_past_its_cap_is_refused_and_named() {
+    fn a_size_below_its_floor_or_past_its_cap_is_refused_and_named() {
         for (from, to, key) in [
             ("row-height = 32", "row-height = -32", "size.row-height"),
             ("row-height = 32", "row-height = 0", "size.row-height"),
+            ("row-height = 32", "row-height = 15", "size.row-height"),
+            ("row-height = 32", "row-height = 0.001", "size.row-height"),
             ("row-height = 32", "row-height = 129", "size.row-height"),
             ("row-height = 32", "row-height = nan", "size.row-height"),
             (
@@ -739,17 +770,35 @@ mod tests {
             ),
             ("body = 14", "body = 400", "font.body"),
             ("body = 14", "body = -14.5", "font.body"),
+            ("body = 14", "body = 7.5", "font.body"),
+            ("small = 12", "small = 0.1", "font.small"),
             ("radius = 8", "radius = 1e9", "size.radius"),
+            ("radius = 8", "radius = 0.5", "size.radius"),
             ("gap-l = 16", "gap-l = 65", "size.gap-l"),
+            ("gap-xs = 4", "gap-xs = 0.2", "size.gap-xs"),
+            ("dim-cut = 0.4", "dim-cut = 0", "theme.dim-cut"),
+            ("dim-cut = 0.4", "dim-cut = 0.1", "theme.dim-cut"),
+            ("dim-hidden = 0.5", "dim-hidden = 1.5", "theme.dim-hidden"),
+            (
+                "dim-hidden = 0.5",
+                "dim-hidden = \"half\"",
+                "theme.dim-hidden",
+            ),
         ] {
             let error = parse(&light_with(from, to)).expect_err(to);
             assert_eq!(error.key(), Some(key), "{to}: {error}");
         }
-        // A decimal size and the caps themselves are taken.
+        // A decimal size, the floors and the caps themselves are taken.
         let tokens = parse(&light_with("body = 14", "body = 13.5")).expect("taken");
         assert!((tokens.font.body - 13.5).abs() < f32::EPSILON);
         let tokens = parse(&light_with("row-height = 32", "row-height = 128")).expect("taken");
-        assert!((tokens.size.row_height - MAX_ROW_HEIGHT).abs() < f32::EPSILON);
+        assert!((tokens.size.row_height - ROW_HEIGHTS.end()).abs() < f32::EPSILON);
+        let tokens = parse(&light_with("row-height = 32", "row-height = 16")).expect("taken");
+        assert!((tokens.size.row_height - ROW_HEIGHTS.start()).abs() < f32::EPSILON);
+        let tokens = parse(&light_with("small = 12", "small = 8")).expect("taken");
+        assert!((tokens.font.small - FONT_SIZES.start()).abs() < f32::EPSILON);
+        let tokens = parse(&light_with("dim-hidden = 0.5", "dim-hidden = 1")).expect("taken");
+        assert!((tokens.dim_hidden - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -820,21 +869,112 @@ mod tests {
             ("on the accent", c.on_accent, c.accent, 7.0),
             ("a selected item's text", c.text, c.selection, 7.0),
             ("a selected item's muted text", c.muted, c.selection, 7.0),
+            ("a selected item's faint text", c.faint, c.selection, 7.0),
+            (
+                "text on a pressed button or a hovered tab",
+                c.text,
+                c.pressed,
+                7.0,
+            ),
+            ("muted text on a hovered segment", c.muted, c.pressed, 7.0),
             ("a notice", c.toast_text, c.toast_bg, 7.0),
             ("a notice's action", c.toast_link, c.toast_bg, 7.0),
+            (
+                "a notice's pressed action",
+                c.toast_link,
+                over(c.toast_pressed, c.toast_bg),
+                7.0,
+            ),
             ("the accent's ring and drop frame", c.accent, c.panel, 7.0),
-            ("what cannot be used", c.faint, c.panel, 4.5),
+            ("hints", c.faint, c.panel, 7.0),
+            ("what cannot be used", c.disabled, c.panel, 4.5),
             ("the folders' icons", c.folder, c.panel, 3.0),
             ("a warning's icon", c.warning, c.panel, 3.0),
             ("lines and frames", c.border, c.panel, 3.0),
-            ("a disabled button's text", c.faint, c.border, 3.0),
         ] {
             let ratio = contrast(front, back);
             assert!(ratio >= least, "{what}: {ratio:.2}:1 < {least}:1");
         }
+        // What cannot be used is a clear step down from what can (the dashed frame tells it
+        // too): at least as far from the text as in the dark theme.
+        let step = contrast(c.text, c.disabled);
+        let dark = Builtin::Dark.tokens();
+        let dark_step = contrast(dark.color.text, dark.color.disabled);
+        assert!(
+            step >= 3.0 && step >= dark_step,
+            "{step:.2}:1, dark {dark_step:.2}:1"
+        );
+        // A cut and a hidden item stay readable at their strength, on the pane and selected.
+        for (what, dim) in [("cut", tokens.dim_cut), ("hidden", tokens.dim_hidden)] {
+            for (name, front) in [("name", c.text), ("columns", c.muted)] {
+                for (on, back) in [("pane", c.panel), ("selection", c.selection)] {
+                    let ratio = contrast(faded(front, back, dim), back);
+                    assert!(ratio >= 7.0, "{what} {name} on the {on}: {ratio:.2}:1");
+                }
+            }
+            let ratio = contrast(faded(c.faint, c.panel, dim), c.panel);
+            assert!(ratio >= 4.5, "{what} hint: {ratio:.2}:1");
+        }
         assert!(tokens.dark, "the system's widgets are drawn dark on it");
         assert!(tokens.marks, "shapes mark what the colors tell");
         assert_eq!(tokens.icon_style, IconStyle::Bold);
+    }
+
+    /// `front` drawn at `opacity` over `back`, as the screens blend a dimmed item.
+    fn faded(front: Rgba, back: Rgba, opacity: f32) -> Rgba {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a mix of two channels stays within 0..=255"
+        )]
+        let channel =
+            |f: u8, b: u8| (f32::from(f) * opacity + f32::from(b) * (1.0 - opacity)).round() as u8;
+        Rgba::rgb(
+            channel(front.red, back.red),
+            channel(front.green, back.green),
+            channel(front.blue, back.blue),
+        )
+    }
+
+    /// The translucent color `top` laid over `back`.
+    fn over(top: Rgba, back: Rgba) -> Rgba {
+        faded(
+            Rgba::rgb(top.red, top.green, top.blue),
+            back,
+            f32::from(top.alpha) / 255.0,
+        )
+    }
+
+    /// The light and dark themes dim cut and hidden items as before (their contrast is what it
+    /// was; only the high contrast theme promises 7:1 for them).
+    #[test]
+    fn light_and_dark_dim_cut_and_hidden_items_as_before() {
+        // Name and columns × cut and hidden × on the pane and selected: the ratios of 0.4.0,
+        // less 0.05 for the rounding of the blend.
+        let before = [
+            (
+                Builtin::Light,
+                [2.39, 2.32, 3.15, 3.05, 1.75, 1.69, 2.09, 1.99],
+            ),
+            (
+                Builtin::Dark,
+                [3.24, 2.78, 4.31, 3.49, 2.15, 1.88, 2.68, 2.22],
+            ),
+        ];
+        for (theme, floors) in before {
+            let tokens = theme.tokens();
+            let c = &tokens.color;
+            let mut at = 0;
+            for front in [c.text, c.muted] {
+                for dim in [tokens.dim_cut, tokens.dim_hidden] {
+                    for back in [c.panel, c.selection] {
+                        let ratio = contrast(faded(front, back, dim), back);
+                        assert!(ratio >= floors[at], "{theme:?} {at}: {ratio:.3}");
+                        at += 1;
+                    }
+                }
+            }
+        }
     }
 
     /// `text` with its string literals and comments blanked out, for the look below.
@@ -882,13 +1022,20 @@ mod tests {
     }
 
     /// The tokens are the source of the screens' text sizes and colors (the plan's "테마 토큰이
-    /// 화면 크기의 원본"): no .slint file but theme.slint writes a font size in pixels or a
-    /// color in hex. A literal that had to stay would be named here with its reason; none does.
+    /// 화면 크기의 원본"): no .slint file but theme.slint writes a length in a font size (in any
+    /// unit, also in one branch of a condition) or a color of its own (hex, `rgb()`, `rgba()`,
+    /// `hsv()`, `Colors.…`). A literal that had to stay would be named here with its reason;
+    /// none does.
     #[test]
     fn the_screens_take_their_font_sizes_and_colors_from_the_theme() {
         const ALLOWED: &[(&str, &str, &str)] = &[];
-        let size = regex::Regex::new(r"font-size\s*:\s*-?[0-9.]+\s*px").expect("a pattern");
-        let color = regex::Regex::new(r"#[0-9A-Fa-f]{3,8}\b").expect("a pattern");
+        // A length literal anywhere in the value of a `font-size` (up to its `;`).
+        let size = regex::Regex::new(r"font-size\s*:[^;]*?[0-9.]+\s*(px|phx|pt|rem|cm|mm|in)\b")
+            .expect("a pattern");
+        let color = regex::Regex::new(
+            r"#[0-9A-Fa-f]{3,8}\b|(^|[^\w-])(rgb|rgba|argb|hsv|hsva)\s*\(|\bColors\.",
+        )
+        .expect("a pattern");
         let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
         let mut files: Vec<_> = std::fs::read_dir(&folder)
             .expect("the screens' folder")
@@ -923,12 +1070,17 @@ mod tests {
             }
         }
         assert_eq!(found, Vec::<String>::new());
-        // The look itself finds them, and skips what only a string or a comment says.
-        let sample =
-            "a { font-size: 13px; c: #FFFFFF33; }\n// #123456 font-size: 1px\nt: \"#ABCDEF\";";
+        // The look itself finds them, and skips what only a string or a comment says and the
+        // tokens' own names.
+        let sample = "a { font-size: 13px; c: #FFFFFF33; }\n// #123456 font-size: 1px\n\
+                      t: \"#ABCDEF\";\n\
+                      b { font-size: x ? 16px : Theme.font-body; d: rgb(1, 2, 3); }\n\
+                      c { font-size: 1.1rem; e: Colors.red; f: hsv(1, 1, 1); g: rgba(0,0,0,1); }\n\
+                      h { font-size: 10pt; default-font-size: 12phx; }\n\
+                      i { font-size: Theme.font-small; color: Theme.text; v: x.to-hsv().value; }";
         let code = code_of(sample);
-        assert_eq!(size.find_iter(&code).count(), 1);
-        assert_eq!(color.find_iter(&code).count(), 1);
+        assert_eq!(size.find_iter(&code).count(), 5, "{code}");
+        assert_eq!(color.find_iter(&code).count(), 5, "{code}");
     }
 
     #[test]

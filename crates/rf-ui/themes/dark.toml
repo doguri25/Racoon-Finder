@@ -5,6 +5,9 @@
 scheme = "dark"
 icon-style = "line"
 marks = false
+# How strong a cut item and a hidden item show (their opacity).
+dim-cut = 0.4
+dim-hidden = 0.5
 
 [color]
 bg = "#15171A"
@@ -13,7 +16,9 @@ raised = "#24282D"
 text = "#E7E9EC"
 muted = "#A0A7B1"
 faint = "#7D848E"
+disabled = "#7D848E"
 border = "#2C3036"
+pressed = "#2C3036"
 folder = "#E0A84A"
 warning = "#E0A84A"
 # The light theme's accent lifted toward white (35%), so that it reads on the dark panels.

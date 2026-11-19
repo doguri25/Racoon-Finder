@@ -13,19 +13,28 @@ export global Theme {
     // dark under it.
     in property <bool> dark: false;
     // What the colors tell is also told by a shape (`marks`, the high contrast theme's): a bar
-    // beside a selected item (`SelectedMark`), a heavier frame around the chosen one of a set,
-    // a frame around a dialog.
+    // beside a selected item (`SelectedMark`), a badge on a cut or hidden item's icon
+    // (`StateBadge`), a dashed frame around a control that cannot be used now (`DashedFrame`), a
+    // heavier frame around the chosen one of a set, a frame around a dialog.
     in property <bool> marks: false;
     // How much heavier than the mockup's 1.8 px the icons' lines are (`icon-style`).
     in property <float> icon-weight: 1;
+    // How strong a cut item and a hidden item show (their opacity).
+    in property <float> dim-cut: 0.4;
+    in property <float> dim-hidden: 0.5;
 
     in property <color> bg: #F6F7F9;
     in property <color> panel: #FFFFFF;
     in property <color> raised: #F0F2F5;
     in property <color> text: #1C2024;
     in property <color> muted: #5C6370;
+    // Hints and placeholders, and what is dimmed in a tree.
     in property <color> faint: #8A919C;
+    // The text and icons of a control that cannot be used now.
+    in property <color> disabled: #8A919C;
     in property <color> border: #E1E4E8;
+    // Under a pressed button, an open menu's button, a hovered tab or segment.
+    in property <color> pressed: #E1E4E8;
     in property <color> folder: #B7791F;
     // What warns (an overwrite): for icons only; a warning's text stays `text`.
     in property <color> warning: #B7791F;
@@ -93,5 +102,46 @@ export component SelectedMark inherits Rectangle {
         height: root.foot ? 3px : max(8px, root.height - 12px);
         border-radius: 1.5px;
         background: Theme.accent;
+    }
+}
+
+// A frame of short dashes around a control that cannot be used now, while the theme has `marks`:
+// its dimmer color is not all that tells it. It fills the control; the control shows it only
+// then (`if Theme.marks && !root.enabled: …`).
+export component DashedFrame inherits Rectangle {
+    // The dashes' color.
+    in property <brush> line: Theme.disabled;
+    private property <length> dash: 3px;
+    private property <length> step: 6px;
+    private property <int> across: max(1, floor((root.width - root.dash) / root.step) + 1);
+    private property <int> down: max(1, floor((root.height - root.dash) / root.step) + 1);
+
+    for i in root.across: Rectangle {
+        x: i * root.step;
+        y: 0px;
+        width: root.dash;
+        height: 1px;
+        background: root.line;
+    }
+    for i in root.across: Rectangle {
+        x: i * root.step;
+        y: root.height - 1px;
+        width: root.dash;
+        height: 1px;
+        background: root.line;
+    }
+    for i in root.down: Rectangle {
+        x: 0px;
+        y: i * root.step;
+        width: 1px;
+        height: root.dash;
+        background: root.line;
+    }
+    for i in root.down: Rectangle {
+        x: root.width - 1px;
+        y: i * root.step;
+        width: 1px;
+        height: root.dash;
+        background: root.line;
     }
 }

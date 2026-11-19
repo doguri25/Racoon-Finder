@@ -992,8 +992,14 @@ export component MainWindow inherits Window {
     private property <color> widget-background: Palette.background;
     private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
     public function show-theme() {
+        // Following the system, its scheme comes first, so that `system-dark` is the system's.
+        if (root.theme-choice == 0) {
+            Palette.color-scheme = ColorScheme.unknown;
+        }
         Theme.pick(root.theme-choice, root.system-dark);
-        Palette.color-scheme = root.theme-choice == 0 ? ColorScheme.unknown : Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        if (root.theme-choice != 0) {
+            Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        }
     }
     changed system-dark => {
         root.show-theme();

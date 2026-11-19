@@ -4,7 +4,7 @@
 // (`focused`). A toolbar button shows its name and the key of its command (`keys`, KEY-03) in a
 // tooltip, and gives the key to screen readers as its description.
 
-import { Theme } from "theme.slint";
+import { Theme, DashedFrame } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 
@@ -25,7 +25,7 @@ export component ToolButton inherits Rectangle {
     width: 32px;
     height: 32px;
     border-radius: Theme.radius;
-    background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.label;
     accessible-description: root.keys;
@@ -38,8 +38,10 @@ export component ToolButton inherits Rectangle {
 
     Icon {
         name: root.icon;
-        color: root.enabled ? Theme.text : Theme.faint;
+        color: root.enabled ? Theme.text : Theme.disabled;
     }
+    // Off, in a theme with marks: a dashed frame besides the dimmer color.
+    if Theme.marks && !root.enabled: DashedFrame { }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -74,7 +76,7 @@ export component TextButton inherits Rectangle {
     height: 32px;
     horizontal-stretch: 0;
     border-radius: Theme.radius;
-    background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.text;
     accessible-description: root.keys;
@@ -96,14 +98,16 @@ export component TextButton inherits Rectangle {
             width: 18px;
             height: 18px;
             name: root.icon;
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: root.enabled ? Theme.text : Theme.disabled;
         }
         if !root.compact || root.icon == "": Text {
             text: root.text;
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: root.enabled ? Theme.text : Theme.disabled;
             vertical-alignment: center;
         }
     }
+    // Off, in a theme with marks: a dashed frame besides the dimmer color.
+    if Theme.marks && !root.enabled: DashedFrame { }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -131,7 +135,9 @@ export component PrimaryButton inherits Rectangle {
     height: root.button-height;
     horizontal-stretch: 0;
     border-radius: Theme.radius;
-    background: !root.enabled ? Theme.border : touch.pressed ? Theme.accent.darker(0.2) : touch.has-hover ? Theme.accent.darker(0.1) : Theme.accent;
+    // Off: grey, or in a theme with marks no fill and a dashed frame (the grey would leave its
+    // text little contrast there).
+    background: !root.enabled ? (Theme.marks ? transparent : Theme.border) : touch.pressed ? Theme.accent.darker(0.2) : touch.has-hover ? Theme.accent.darker(0.1) : Theme.accent;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -148,11 +154,12 @@ export component PrimaryButton inherits Rectangle {
 
         Text {
             text: root.text;
-            color: root.enabled ? Theme.on-accent : Theme.faint;
+            color: root.enabled ? Theme.on-accent : Theme.disabled;
             font-weight: 600;
             vertical-alignment: center;
         }
     }
+    if Theme.marks && !root.enabled: DashedFrame { }
 
     if root.focused: Rectangle {
         x: -3px;
@@ -351,10 +358,11 @@ export component OutlineButton inherits Rectangle {
     height: root.button-height;
     min-width: 64px;
     horizontal-stretch: 0;
-    border-width: root.focused ? 2px : 1px;
+    // Off, in a theme with marks: a dashed frame in the place of the solid one.
+    border-width: Theme.marks && !root.enabled ? 0px : root.focused ? 2px : 1px;
     border-color: root.focused ? Theme.accent : Theme.border;
     border-radius: 10px;
-    background: !root.enabled ? transparent : touch.pressed ? Theme.border : touch.has-hover ? Theme.raised : transparent;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.raised : transparent;
     accessible-role: button;
     accessible-label: root.spoken;
     accessible-description: root.keys;
@@ -373,10 +381,11 @@ export component OutlineButton inherits Rectangle {
         Text {
             accessible-role: none;
             text: root.text;
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: root.enabled ? Theme.text : Theme.disabled;
             vertical-alignment: center;
         }
     }
+    if Theme.marks && !root.enabled: DashedFrame { }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -465,8 +474,9 @@ export component ChoiceRow inherits Rectangle {
     callback clicked();
 
     min-height: 48px;
-    // The chosen one's frame is heavier too in a theme with marks.
-    border-width: Theme.marks && root.chosen ? 2px : 1px;
+    // The chosen one's frame is heavier too in a theme with marks, and one that is off has a
+    // dashed frame in the place of the solid one.
+    border-width: Theme.marks && root.chosen ? 2px : Theme.marks && !root.enabled ? 0px : 1px;
     border-radius: 10px;
     border-color: root.chosen ? Theme.accent : Theme.border;
     background: root.chosen ? Theme.selection : touch.has-hover && root.enabled ? Theme.raised : transparent;
@@ -495,14 +505,14 @@ export component ChoiceRow inherits Rectangle {
                 height: 18px;
                 border-radius: 9px;
                 border-width: root.chosen ? 5px : 1.5px;
-                border-color: root.chosen ? Theme.accent : root.enabled ? Theme.muted : Theme.faint;
+                border-color: root.chosen ? Theme.accent : root.enabled ? Theme.muted : Theme.disabled;
             }
         }
         Text {
             accessible-role: none;
             text: root.text;
             font-weight: 500;
-            color: root.enabled ? Theme.text : Theme.faint;
+            color: root.enabled ? Theme.text : Theme.disabled;
             vertical-alignment: center;
         }
         Text {
@@ -510,7 +520,7 @@ export component ChoiceRow inherits Rectangle {
             horizontal-stretch: 1;
             text: root.hint;
             font-size: Theme.font-note;
-            color: root.enabled ? Theme.muted : Theme.faint;
+            color: root.enabled ? Theme.muted : Theme.disabled;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -537,7 +547,7 @@ export component Segment inherits Rectangle {
     min-width: shown.preferred-width + 24px;
     horizontal-stretch: 0;
     border-radius: 6px;
-    background: root.chosen ? Theme.panel : touch.has-hover ? Theme.border : transparent;
+    background: root.chosen ? Theme.panel : touch.has-hover ? Theme.pressed : transparent;
     drop-shadow-blur: root.chosen ? 3px : 0px;
     drop-shadow-color: Theme.shadow-small;
     // The chosen part has a frame in a theme with marks, where its color and shadow may not

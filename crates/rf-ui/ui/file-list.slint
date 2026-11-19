@@ -14,7 +14,7 @@
 
 import { ListView } from "std-widgets.slint";
 import { Theme, SelectedMark } from "theme.slint";
-import { Icon } from "icons.slint";
+import { Icon, StateBadge } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
@@ -459,12 +459,13 @@ export component FileList inherits Rectangle {
                                 }
                             }
 
-                            // Hidden items show at half strength, cut ones fainter still. Its
-                            // least width is the row's (a ListView's content is as wide as its
-                            // rows' least width, which a row takes from such a child).
+                            // Hidden items show dimmed, cut ones dimmer still (the theme's
+                            // strengths). Its least width is the row's (a ListView's content is
+                            // as wide as its rows' least width, which a row takes from such a
+                            // child).
                             Rectangle {
                                 min-width: head.content-width;
-                                opacity: row.cut ? 0.4 : row.hidden ? 0.5 : 1;
+                                opacity: row.cut ? Theme.dim-cut : row.hidden ? Theme.dim-hidden : 1;
 
                                 Icon {
                                     x: head.pad + root.check-room;
@@ -514,6 +515,15 @@ export component FileList inherits Rectangle {
                             }
                             // A selected row, besides its color, in a theme with marks.
                             if Theme.marks && row.selected: SelectedMark { }
+                            // A cut or hidden row, besides its strength, in a theme with marks: a
+                            // badge on the corner of its icon.
+                            if Theme.marks && (row.cut || row.hidden): StateBadge {
+                                x: head.pad + root.check-room + 9px;
+                                y: (parent.height - 18px) / 2 + 8px;
+                                width: 12px;
+                                height: 12px;
+                                name: row.cut ? "cut" : "hidden";
+                            }
                         }
                     }
                 }

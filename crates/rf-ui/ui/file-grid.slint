@@ -23,7 +23,7 @@
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { Theme, SelectedMark } from "theme.slint";
-import { Icon } from "icons.slint";
+import { Icon, StateBadge } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
@@ -155,9 +155,9 @@ component Tile inherits Rectangle {
         }
     }
 
-    // Hidden items show at half strength, cut ones fainter still.
+    // Hidden items show dimmed, cut ones dimmer still (the theme's strengths).
     Rectangle {
-        opacity: root.item.cut ? 0.4 : root.item.hidden ? 0.5 : 1;
+        opacity: root.item.cut ? Theme.dim-cut : root.item.hidden ? Theme.dim-hidden : 1;
 
         if !root.pictured: Icon {
             x: root.big ? (parent.width - self.width) / 2 : 8px + root.check-room;
@@ -269,6 +269,15 @@ component Tile inherits Rectangle {
     // A selected item, besides its color, in a theme with marks: along the foot of a large one.
     if Theme.marks && root.item.selected: SelectedMark {
         foot: root.big;
+    }
+    // A cut or hidden item, besides its strength, in a theme with marks: a badge on the lower
+    // right corner of its icon or picture.
+    if Theme.marks && (root.item.cut || root.item.hidden): StateBadge {
+        width: max(12px, min(28px, root.icon-size * 0.3));
+        height: self.width;
+        x: (root.big ? (root.width - root.icon-size) / 2 : 8px + root.check-room) + root.icon-size - self.width + 3px;
+        y: (root.big ? 8px : (root.height - root.icon-size) / 2) + root.icon-size - self.height + 3px;
+        name: root.item.cut ? "cut" : "hidden";
     }
 }
 

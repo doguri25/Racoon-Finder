@@ -175,7 +175,7 @@ component TargetItem inherits Rectangle {
                 width: 20px;
                 height: 20px;
                 name: "folder";
-                color: root.item.enabled ? Theme.folder : Theme.faint;
+                color: root.item.enabled ? Theme.folder : Theme.disabled;
             }
             VerticalLayout {
                 alignment: center;
@@ -184,7 +184,7 @@ component TargetItem inherits Rectangle {
                 Text {
                     accessible-role: none;
                     text: root.item.label;
-                    color: root.item.enabled ? Theme.text : Theme.faint;
+                    color: root.item.enabled ? Theme.text : Theme.disabled;
                     font-weight: root.item.selected ? 600 : 400;
                     overflow: elide;
                 }
@@ -192,7 +192,7 @@ component TargetItem inherits Rectangle {
                     accessible-role: none;
                     text: root.item.note;
                     font-size: Theme.font-small;
-                    color: root.item.enabled ? Theme.muted : Theme.faint;
+                    color: root.item.enabled ? Theme.muted : Theme.disabled;
                     overflow: elide;
                 }
             }

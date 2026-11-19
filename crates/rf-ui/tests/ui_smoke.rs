@@ -23,7 +23,7 @@ use rf_ui::theme;
 use rf_ui::tree::Tree;
 use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, RowSlot, TreeRows};
 use rf_ui::{
-    ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow,
+    ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow, FileRow,
     FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, IconLines, ItemMenu, JobGraph,
     JobRowView, JobTray, JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
     PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
@@ -150,7 +150,8 @@ fn a_theme_chosen_shows_at_once_in_every_window() {
     ui_bridge::follow_theme(&notice);
     own.show().expect("the job window shows");
     notice.show().expect("the notice shows");
-    for choice in [2, 3, 1, 0, 3, 2] {
+    // From each theme of its own back to the system's, too (어둡게 → 시스템, 고대비 → 시스템).
+    for choice in [2, 0, 3, 0, 1, 0, 3, 2] {
         window.set_theme_choice(choice);
         own.set_theme_choice(choice);
         notice.set_theme_choice(choice);
@@ -271,6 +272,68 @@ fn high_contrast_marks_the_selected_rows_with_a_shape_too() {
     ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
     window.set_left_pane(models.view(&pane, true));
     assert_eq!(marks(), 0, "dark");
+}
+
+/// In a theme with marks, a cut or a hidden row has a badge on its icon besides its strength,
+/// which stays readable (the theme's `dim-cut` and `dim-hidden`), and a control that cannot be
+/// used now has a dashed frame besides its dimmer color.
+#[test]
+fn high_contrast_badges_cut_and_hidden_rows_and_frames_what_is_off() {
+    let window = window();
+    let file = |name: &str, cut: bool, hidden: bool| FileRow {
+        name: name.into(),
+        icon: "file".into(),
+        cut,
+        hidden,
+        ..FileRow::default()
+    };
+    let rows = Rc::new(slint::VecModel::from(vec![
+        file("cut.txt", true, false),
+        file(".hidden", false, true),
+        file("both", true, true),
+        file("plain.txt", false, false),
+    ]));
+    window.set_left_pane(PaneView {
+        rows: ModelRc::from(rows),
+        ..PaneView::default()
+    });
+    let badges = || -> Vec<f32> {
+        ElementHandle::find_by_element_type_name(&window, "StateBadge")
+            .map(|badge| badge.absolute_position().y)
+            .collect()
+    };
+    let frames = || ElementHandle::find_by_element_type_name(&window, "DashedFrame").count();
+    let strength = |name: &str| labelled(&window, name, AccessibleRole::Text)[0].computed_opacity();
+    assert_eq!((badges().len(), frames()), (0, 0), "light");
+    assert!((strength("cut.txt") - 0.4).abs() < 0.01);
+    assert!((strength(".hidden") - 0.5).abs() < 0.01);
+    assert!((strength("plain.txt") - 1.0).abs() < 0.01);
+
+    let high = theme::Builtin::HighContrast.tokens();
+    ui_bridge::show_theme(&window, &high);
+    // One badge for each of the three dimmed rows, on its own row.
+    let rows_at: Vec<f32> = ["cut.txt", ".hidden", "both"]
+        .iter()
+        .map(|name| {
+            labelled(&window, name, AccessibleRole::ListItem)[0]
+                .absolute_position()
+                .y
+        })
+        .collect();
+    let shown = badges();
+    assert_eq!(shown.len(), 3, "{shown:?}");
+    for row in rows_at {
+        assert!(
+            shown.iter().any(|y| *y > row && *y < row + 32.0),
+            "a badge on the row at {row}: {shown:?}"
+        );
+    }
+    assert!((strength("cut.txt") - high.dim_cut).abs() < 0.01);
+    assert!((strength(".hidden") - high.dim_hidden).abs() < 0.01);
+    // The toolbar of a fresh window has buttons that are off (뒤로, 앞으로, 되돌리기).
+    assert!(frames() > 0, "dashed frames on the buttons that are off");
+    ui_bridge::show_theme(&window, &theme::Builtin::Dark.tokens());
+    assert_eq!((badges().len(), frames()), (0, 0), "dark");
 }
 
 #[test]

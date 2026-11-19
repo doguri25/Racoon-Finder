@@ -1743,6 +1743,8 @@ where
         dark,
         icon_style,
         marks,
+        dim_cut,
+        dim_hidden,
         color,
         font,
         size,
@@ -1750,6 +1752,8 @@ where
     shown.set_dark(*dark);
     shown.set_marks(*marks);
     shown.set_icon_weight(icon_style.weight());
+    shown.set_dim_cut(*dim_cut);
+    shown.set_dim_hidden(*dim_hidden);
     let c = |rgba: Rgba| slint::Color::from_argb_u8(rgba.alpha, rgba.red, rgba.green, rgba.blue);
     shown.set_bg(c(color.bg));
     shown.set_panel(c(color.panel));
@@ -1757,7 +1761,9 @@ where
     shown.set_text(c(color.text));
     shown.set_muted(c(color.muted));
     shown.set_faint(c(color.faint));
+    shown.set_disabled(c(color.disabled));
     shown.set_border(c(color.border));
+    shown.set_pressed(c(color.pressed));
     shown.set_folder(c(color.folder));
     shown.set_warning(c(color.warning));
     shown.set_accent(c(color.accent));
@@ -1814,6 +1820,8 @@ where
             IconStyle::Line
         },
         marks: shown.get_marks(),
+        dim_cut: shown.get_dim_cut(),
+        dim_hidden: shown.get_dim_hidden(),
         color: Colors {
             bg: c(shown.get_bg()),
             panel: c(shown.get_panel()),
@@ -1821,7 +1829,9 @@ where
             text: c(shown.get_text()),
             muted: c(shown.get_muted()),
             faint: c(shown.get_faint()),
+            disabled: c(shown.get_disabled()),
             border: c(shown.get_border()),
+            pressed: c(shown.get_pressed()),
             folder: c(shown.get_folder()),
             warning: c(shown.get_warning()),
             accent: c(shown.get_accent()),

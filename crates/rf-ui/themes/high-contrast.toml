@@ -6,6 +6,10 @@
 scheme = "dark"
 icon-style = "bold"
 marks = true
+# Cut and hidden items stay readable (7:1 and more, on black and on the selection); a badge on
+# their icon tells them apart.
+dim-cut = 0.8
+dim-hidden = 0.9
 
 [color]
 bg = "#000000"
@@ -14,19 +18,25 @@ raised = "#262626"
 text = "#FFFFFF"
 muted = "#E0E0E0"
 faint = "#BDBDBD"
-# 3.7:1 on black, enough for a line; dark enough that the faint text of a disabled button reads on
-# it (3:1).
+# A clear step down from the white of what can be used (3.5:1), still 6:1 on black; a dashed
+# frame marks the control too.
+disabled = "#8A8A8A"
+# 3.7:1 on black, enough for a line.
 border = "#666666"
+# Under the pointer's press, an open menu's button and a hovered tab or segment: the text on it
+# stays at 7:1 and more.
+pressed = "#3A3A3A"
 folder = "#FFB347"
 warning = "#FFB347"
 accent = "#FFE500"
 on-accent = "#000000"
-# Dark olive: the text (10:1) and the muted text (7.8:1) of a selected item stay readable on it.
-selection = "#4D4000"
+# Dark olive: the text (14:1), the muted text (11:1) and the faint text (7.5:1) of a selected item
+# stay readable on it, dimmed too; the bar beside a selected item tells it.
+selection = "#332B00"
 # The notices are white, so that they stand out of the black window.
 toast-bg = "#FFFFFF"
 toast-text = "#000000"
-toast-link = "#0000CC"
+toast-link = "#0000C0"
 toast-hover = "#0000001F"
 toast-pressed = "#00000033"
 shadow = "#00000033"
