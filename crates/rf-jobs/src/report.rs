@@ -480,12 +480,13 @@ impl JobReport {
 ///   ([`retry_helps`]): asked for by itself, such an item would either fail again as it did,
 ///   or not be refused any more and have done to it what the job refused to do (what the job
 ///   copied copied once more below a link loop, a mounted volume emptied).
-/// - A delete retries the paths that failed, with the same method and error policy. A
-///   trash is never turned into a permanent delete here. The UI may offer one, and only
-///   for a failure of kind [`ErrorKind::Unsupported`] (the trash refused the item) and
-///   only after the user has said yes: it then sets `DeleteSpec::method` itself on the
-///   spec this gives. A folder a permanent delete kept because of a failure below it is
-///   not in the retry.
+/// - A delete retries the paths that failed, with the same method and error policy, but
+///   not a failure no retry can help, nor an item too deep ([`retry_delete`]): a mount point
+///   in a deleted folder (`OtherVolume`) stays out of the retry. A trash is never turned
+///   into a permanent delete here. The UI may offer one, and only for a failure of kind
+///   [`ErrorKind::Unsupported`] (the trash refused the item) and only after the user has
+///   said yes: it then sets `DeleteSpec::method` itself on the spec this gives. A folder a
+///   permanent delete kept because of a failure below it is not in the retry.
 /// - A delete of copies retries each copy that failed, or that something below it failed
 ///   in, with what its copy job left: it is looked at again before it goes. The retry is
 ///   `DeleteCopiesSpec::resumed`, since this run may have deleted part of a copied folder.
@@ -563,7 +564,7 @@ fn retry_links(links: &[(VPath, VPath, LinkKind)], failed: &[ItemFailure]) -> Op
 }
 
 /// Whether trying the item of `failure` again, by itself, can come to anything in a transfer
-/// that treats links as `symlinks` says. It cannot for an item the job refused because of
+/// that treats links as `symlinks` says (and, with more, in a delete: [`retry_delete`]). It cannot for an item the job refused because of
 /// where it lies among the others, which a retry no longer sees, so that the retry would do
 /// what the job refused to:
 ///
@@ -629,10 +630,20 @@ fn retry_transfer(spec: &TransferSpec, failed: &[ItemFailure]) -> Option<JobSpec
     }))
 }
 
+/// The delete of the paths of `failed` that a retry can help, each once. A delete never
+/// follows a link, so the rule is that of a transfer that copies links as links
+/// ([`retry_helps`]): a folder on another volume (`OtherVolume`), above all, is never asked
+/// for, since by itself it would have no folder above it to be on another volume than, and the
+/// retry would empty the volume mounted there. For one reason more, too: `TooDeep`. A folder
+/// that deep is refused before its volume is looked at, so it may be such a mount point.
 fn retry_delete(spec: &DeleteSpec, failed: &[ItemFailure]) -> Option<JobSpec> {
     let mut seen = HashSet::new();
     let paths: Vec<VPath> = failed
         .iter()
+        .filter(|failure| {
+            retry_helps(failure, SymlinkMode::CopyLink)
+                && failure.reason != Some(FailureReason::TooDeep)
+        })
         .filter_map(|failure| failure.source.as_ref())
         .filter(|path| seen.insert(*path))
         .cloned()

@@ -258,3 +258,142 @@ fn a_file_name_with_control_characters_cannot_split_a_log_record() {
     );
     assert!(lines[4].starts_with(&failure), "{}", lines[4]);
 }
+
+/// The failure of a delete at `stage` of the item `path`, for `reason`: a delete names the item
+/// by its source alone.
+fn delete_failure(
+    path: &std::path::Path,
+    stage: Stage,
+    reason: Option<FailureReason>,
+) -> ItemFailure {
+    ItemFailure {
+        source: Some(v(path)),
+        target: None,
+        stage,
+        kind: rf_core::ErrorKind::Unsupported,
+        message: String::new(),
+        reason,
+    }
+}
+
+/// The paths of the delete `retry` is, with its method and its error policy.
+fn deleted(
+    retry: Option<JobSpec>,
+) -> (
+    Vec<rf_core::VPath>,
+    rf_jobs::DeleteMethod,
+    rf_jobs::ErrorPolicy,
+) {
+    match retry {
+        Some(JobSpec::Delete(retry)) => (retry.paths, retry.method, retry.errors),
+        other => panic!("a delete: {other:?}"),
+    }
+}
+
+#[test]
+fn retrying_a_delete_never_enters_another_volume() {
+    use rf_jobs::{DeleteMethod, DeleteSpec, ErrorPolicy};
+    let f = fx();
+    let below = |name: &str| f.src.join("dir").join(name);
+    // A folder deleted for good holds a mount point, a pipe, a folder too deep and a file that
+    // could not go. Asked for by itself, the mount point would have no folder above it to be
+    // on another volume than, so a retry would empty the volume mounted there.
+    let failed = [
+        delete_failure(
+            &below("mnt"),
+            Stage::Delete,
+            Some(FailureReason::OtherVolume),
+        ),
+        delete_failure(&below("locked"), Stage::Delete, None),
+        delete_failure(
+            &below("fifo"),
+            Stage::Delete,
+            Some(FailureReason::NotARegularFile),
+        ),
+        delete_failure(
+            &below("inside"),
+            Stage::Plan,
+            Some(FailureReason::IntoItself),
+        ),
+        delete_failure(&below("loop"), Stage::Plan, Some(FailureReason::LinkLoop)),
+        // Its volume is never looked at: the depth is checked first.
+        delete_failure(&below("deep"), Stage::Plan, Some(FailureReason::TooDeep)),
+    ];
+    for method in [DeleteMethod::Trash, DeleteMethod::Permanent] {
+        let job = JobSpec::Delete(DeleteSpec {
+            paths: vec![v(f.src.join("dir"))],
+            method,
+            errors: ErrorPolicy::Continue,
+        });
+        assert_eq!(
+            deleted(retry_spec(&job, &failed)),
+            (vec![v(below("locked"))], method, ErrorPolicy::Continue)
+        );
+        // With nothing else to try again, there is no retry at all.
+        for reason in [
+            FailureReason::OtherVolume,
+            FailureReason::IntoItself,
+            FailureReason::NotARegularFile,
+            FailureReason::LinkLoop,
+            FailureReason::TooDeep,
+        ] {
+            let only = [delete_failure(&below("x"), Stage::Delete, Some(reason))];
+            assert_eq!(retry_spec(&job, &only), None, "{method:?}");
+        }
+    }
+}
+
+#[test]
+fn retrying_a_delete_redoes_only_what_failed() {
+    use rf_jobs::{DeleteMethod, DeleteSpec, ErrorPolicy};
+    let f = fx();
+    for name in ["ok", "kept"] {
+        std::fs::write(f.src.join(name), name).unwrap();
+    }
+    // A real delete for good: "ok" goes, "gone" is not there.
+    let job = JobSpec::Delete(DeleteSpec {
+        paths: vec![v(f.src.join("ok")), v(f.src.join("gone"))],
+        method: DeleteMethod::Permanent,
+        errors: ErrorPolicy::Continue,
+    });
+    let rep = run(&job);
+    assert!(!f.src.join("ok").exists());
+    assert_eq!(
+        deleted(rep.retry_spec()),
+        (
+            vec![v(f.src.join("gone"))],
+            DeleteMethod::Permanent,
+            ErrorPolicy::Continue
+        )
+    );
+    // Each method and policy is kept, a path is asked for once however often it failed, and
+    // a warning is no failure.
+    for (method, errors) in [
+        (DeleteMethod::Trash, ErrorPolicy::Continue),
+        (DeleteMethod::Trash, ErrorPolicy::Ask),
+        (DeleteMethod::Permanent, ErrorPolicy::Abort),
+    ] {
+        let job = JobSpec::Delete(DeleteSpec {
+            paths: vec![
+                v(f.src.join("ok")),
+                v(f.src.join("kept")),
+                v(f.src.join("b")),
+            ],
+            method,
+            errors,
+        });
+        let failed = [
+            delete_failure(&f.src.join("kept"), Stage::Delete, None),
+            delete_failure(&f.src.join("b"), Stage::Plan, None),
+            delete_failure(&f.src.join("kept"), Stage::Delete, None),
+        ];
+        assert_eq!(
+            deleted(retry_spec(&job, &failed)),
+            (
+                vec![v(f.src.join("kept")), v(f.src.join("b"))],
+                method,
+                errors
+            )
+        );
+    }
+}
