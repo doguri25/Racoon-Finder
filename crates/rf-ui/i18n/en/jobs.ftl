@@ -94,7 +94,7 @@ job-cancelled =
         [restore] Restoring
         [undo] Undo
         [redo] Redo
-       *[other] The job
+       *[other] Job
     } cancelled
 job-aborted =
     { $work ->
@@ -143,7 +143,7 @@ job-progress-items = { $done } / { $total } { $total ->
 # $speed: a size (48 MB).
 job-speed = { $speed }/s
 # $time: one of duration-*.
-job-time-left = About { $time } left
+job-time-left = about { $time } left
 job-progress-queued = { $count ->
         [one] 1 job
        *[other] { $count } jobs
@@ -239,7 +239,7 @@ job-notice-done-with-errors =
 ## The tray (XFER-15); on macOS it is the menu bar.
 
 tray-all-done = All jobs are finished, so the app has quit.
-tray-all-done-with-failures = Some items couldn't be processed, so the window is open again. Details in Recently Finished lists them.
+tray-all-done-with-failures = Some items couldn't be processed, so the window is open again. Open Details in Recently Finished to see them.
 tray-unavailable = Couldn't make the tray icon, so the window stays open
 tray-continue = Continue in Tray
 tray-continue-menu-bar = Continue in Menu Bar

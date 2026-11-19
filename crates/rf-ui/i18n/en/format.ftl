@@ -45,8 +45,8 @@ duration-hours-minutes = { $hours ->
 
 kind-app = Application
 kind-folder = { $os ->
-        [macos] Folder
-       *[other] File folder
+        [windows] File folder
+       *[other] Folder
     }
 kind-link = { $os ->
         [windows] Shortcut

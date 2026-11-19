@@ -40,7 +40,7 @@ removal-save-pending = The settings were still being saved, so the settings fold
 removal-step-bundle = Move the app to the Trash: { $path }
 removal-menu = Remove { $app } Completely…
 removal-title = Remove { $app } Completely
-removal-message = This removes { $app } from this computer. The settings, caches and logs below and the system changes the app recorded go, and last the app is moved to the Trash (you are told if it can't be). Deleted data can't be brought back.
+removal-message = This removes { $app } from this computer: the settings, caches and logs below and the system changes the app recorded are deleted, and then the app itself is moved to the Trash (you'll be told if it can't be). Deleted data can't be brought back.
 removal-backup-label = Back up the settings to the Documents folder
 # $file: the name of the backup file.
 removal-backup-note = With the backup on, the settings are copied to { $file } in the Documents folder before anything is deleted. A file of that name is not replaced: the copy takes another name. If the backup fails, nothing is deleted.

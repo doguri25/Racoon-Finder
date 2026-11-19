@@ -28,11 +28,11 @@ error-cannot-transfer = Can't copy or move: { $reason }
 ## Why a job refused an item (words::failure_reason)
 
 failure-into-itself = A folder can't be copied or moved into itself
-failure-no-target-folder = The target is a drive itself, so nothing can take its place
+failure-no-target-folder = The target is a whole drive, so the item can't be put there
 failure-target-not-a-folder = The target is not a folder
 failure-too-deep = Skipped: it is too deep inside folders
 failure-link-loop = The link points back to a folder that holds it, so it can't be followed
-failure-too-many-links = Too many links lead on to each other to follow
+failure-too-many-links = The link leads through too many other links to follow
 failure-link-changed = The link changed while it was followed
 failure-absolute-link = Links in this location can't be followed
 failure-not-a-regular-file = Skipped: it is a special file, such as a device or a pipe

@@ -11,7 +11,7 @@ tree-links-unexamined = Some links were not checked
 # Under the list of the address bar: how many folders it leaves out.
 tree-more-folders = and { $count } more
 drop-moved = The list changed, so the drop would land elsewhere. Drag the items again
-notice-system-menu-moved = The list changed, so the command chosen in the Windows menu was not run. Open the menu again and choose
+notice-system-menu-moved = The list changed, so the command chosen in the Windows menu was not run. Open the menu again and choose a command
 # $to: parent (the folder above) or home (the home folder).
 notice-folder-gone =
     The folder “{ $name }” is gone, so the pane went to { $to ->
@@ -32,18 +32,33 @@ notice-sort-failed = Couldn't sort this folder, so it keeps its earlier order
 
 column-name = Name
 column-size = Size
-column-modified = Date Modified
-column-created = Date Created
+column-modified = { $os ->
+        [windows] Date modified
+       *[other] Date Modified
+    }
+column-created = { $os ->
+        [windows] Date created
+       *[other] Date Created
+    }
 column-kind = { $os ->
         [macos] Kind
        *[other] Type
     }
 column-extension = Extension
 column-attributes = Attributes
-column-accessed = Date Accessed
+column-accessed = { $os ->
+        [windows] Date accessed
+       *[other] Date Accessed
+    }
 column-path = Path
-column-original = Original Location
-column-deleted = Date Deleted
+column-original = { $os ->
+        [windows] Original location
+       *[other] Original Location
+    }
+column-deleted = { $os ->
+        [windows] Date deleted
+       *[other] Date Deleted
+    }
 
 ## The view of a folder
 
@@ -66,7 +81,7 @@ view-not-kept = The path is too long to remember the view of this folder
 ## Selecting
 
 select-no-extension = “{ $name }” has no extension
-pattern-uncounted = Couldn't count the items. Select picks the matches when you press it
+pattern-uncounted = Couldn't count the matches. Press Select to select them anyway
 pattern-count = { $count ->
         [one] 1 match
        *[other] { $count } matches
