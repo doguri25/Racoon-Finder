@@ -220,9 +220,9 @@ pub fn recent_head(n: usize) -> String {
     t("job-panel-recent-head", &[("count", count(n))])
 }
 
-/// The notice after 보기 ▸ 언어 chose a language other than the one the window speaks, in
-/// `next`, the language of the next start: the window keeps its words until then (I18N-01; a
-/// change without a restart is P1).
+/// The notice after an item 언어: … at the end of 보기 ▸ 테마 chose a language other than the one
+/// the window speaks, in `next`, the language of the next start: the window keeps its words until
+/// then (I18N-01; a change without a restart is P1).
 pub fn language_restart(next: Lang) -> String {
     Localizer::new(next).text("notice-language-restart", &[])
 }
