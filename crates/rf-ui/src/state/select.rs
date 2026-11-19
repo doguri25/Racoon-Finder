@@ -237,7 +237,7 @@ impl AppState {
         };
         let Some(wanted) = file_extension(entry).map(|extension| folded(extension, Os::CURRENT))
         else {
-            let name = entry.name.to_string_lossy();
+            let name = entry.shown_name().to_string_lossy();
             return vec![Effect::Notice(words::no_extension(&name))];
         };
         let (selection, rows) = self.tab_mut(side).selection_mut();
@@ -428,9 +428,10 @@ impl AppState {
                 .position(tab)
                 .map(|index| &self.panes[side].tabs()[index])
                 .map(|tab| {
+                    // The names the rows show (an item of the trash by the name it had).
                     tab.visible()
                         .iter()
-                        .map(|entry| entry.name.clone())
+                        .map(|entry| entry.shown_name().to_os_string())
                         .collect()
                 })
                 .unwrap_or_default();
@@ -505,9 +506,7 @@ impl AppState {
                 .map(OsString::as_os_str)
                 .collect();
             let (selection, rows) = self.panes[side].tabs_mut()[index].selection_mut();
-            selection.select_where(rows, choice.add, |_, row| {
-                names.contains(row.name.as_os_str())
-            });
+            selection.select_where(rows, choice.add, |_, row| names.contains(row.shown_name()));
         }
         self.pattern.last = choice;
         if matches!(self.modal, Some(Modal::Pattern(_))) {

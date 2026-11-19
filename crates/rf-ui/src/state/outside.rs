@@ -337,6 +337,10 @@ impl AppState {
         let Some(first) = sources.first() else {
             return Hover::NoPaths;
         };
+        // The 휴지통 of the sidebar takes this window's rows alone.
+        if self.trash_spot(spot) {
+            return Hover::Refused(Validity::ForeignToTrash);
+        }
         if let Some(refused) = refusal(sources, &folder) {
             return Hover::Refused(refused);
         }

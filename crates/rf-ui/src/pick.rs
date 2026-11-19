@@ -99,6 +99,9 @@ pub enum Validity {
     /// A place of the shell (휴지통, 내 PC, NAV-16): a list that nothing is copied or moved
     /// into. (A drop on the 휴지통 of the sidebar sends the items to the trash instead.)
     ShellPlace,
+    /// The 휴지통 of the sidebar, under a drag of another app: it takes this window's rows alone
+    /// (that app sends its own items to the trash).
+    ForeignToTrash,
     /// The location is read-only: a warning, the job may still fail.
     NotWritable,
     /// The files need more room than is free there: a warning. With folders among the items

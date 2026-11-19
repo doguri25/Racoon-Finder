@@ -1040,8 +1040,9 @@ impl AppState {
     /// roots of the folder tree, which starts again from them, closed, and finds the folder it
     /// follows again; and of the picker's tree (without the places of the shell, which take no
     /// items), when a picker is open. The well-known folders are the favorites the sidebar lists
-    /// until the user edits the list; after that the user's own come in their place. A tab that
-    /// shows 내 PC lists the drives again.
+    /// until the user edits the list; after that the user's own come in their place. The same
+    /// places found again keep the trees as they are, with their new spaces. A tab that shows
+    /// 내 PC lists the drives again.
     pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
         self.kept.known = places
             .iter()
@@ -1049,12 +1050,21 @@ impl AppState {
             .cloned()
             .collect();
         let drives = places.iter().filter(|place| !place.kind.is_favorite());
-        self.places = self
+        let new: Vec<Place> = self
             .shown_favorites()
             .into_iter()
             .chain(drives.cloned())
             .collect();
-        let mut effects = self.reroot_places();
+        // The same places found again (F5 in 내 PC) take their new spaces, and the trees stay as
+        // the user opened them; other places start them again.
+        let root = |place: &Place| (place.label.clone(), place.path.clone(), place.kind);
+        let same = new.iter().map(root).eq(self.places.iter().map(root));
+        self.places = new;
+        let mut effects = if same {
+            Vec::new()
+        } else {
+            self.reroot_places()
+        };
         effects.extend(self.relist_shell(rf_vfs::ShellPlace::Computer));
         effects
     }

@@ -981,3 +981,147 @@ fn a_place_of_the_shell_lists_no_folders_in_the_address_bar() {
     state.list_computer(request.generation);
     assert_eq!(state.open_subfolders(LEFT, 0), []);
 }
+
+#[test]
+fn the_selection_tools_go_by_the_names_the_trash_shows() {
+    let mut state = in_trash(&[
+        item("a.txt", Some("docs"), Some(1)),
+        item("b.md", Some("docs"), Some(1)),
+        item("README", Some("docs"), Some(1)),
+    ]);
+    // 패턴으로 선택…: `a*` is the item that was called a.txt, not its id.
+    press(&mut state, "s", CTRL);
+    let effects = state.pattern_edited("a*");
+    let request = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::MatchNames(request) => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the names are matched");
+    state.pattern_confirmed("a*");
+    state.pattern_matched(request.run(&|| true).expect("not stopped"));
+    let tab = state.panes()[LEFT].active_tab();
+    let chosen: Vec<&std::ffi::OsStr> = tab
+        .selection()
+        .indices(tab.visible())
+        .into_iter()
+        .map(|row| tab.visible()[row].shown_name())
+        .collect();
+    assert_eq!(chosen, ["a.txt"]);
+    // 같은 확장자 선택 on a row without one says the name it shows.
+    choose(&mut state, "README");
+    let effects = press(&mut state, "S", CTRL_SHIFT).expect("taken");
+    assert_eq!(notices(&effects), [words::no_extension("README").as_str()]);
+}
+
+#[test]
+fn no_refusal_shows_under_an_open_window() {
+    let mut state = in_trash(&[item("a.txt", Some("docs"), Some(1))]);
+    choose(&mut state, "a.txt");
+    state.trash_command("delete-from-trash");
+    assert!(matches!(state.modal(), Some(Modal::Confirm(_))));
+    for effects in [
+        state.new_file(),
+        state.paste_from_menu(false),
+        state.copy_paths_as(PathForm::of_key(Os::CURRENT)),
+        state.folder_properties(),
+        state.folder_terminal(),
+        state.favorite_add_selected(),
+    ] {
+        assert_eq!(effects, []);
+    }
+}
+
+#[test]
+fn another_app_s_drag_over_the_sidebar_s_trash_is_told_why_it_is_refused() {
+    let mut state = ready(vec![], vec![]);
+    let [my_pc, bin] = shell_places();
+    state.set_places(&[my_pc, drive("시스템 디스크", "root", 50, 100), bin]);
+    let dropped = rf_platform::dnd::DroppedItems {
+        paths: vec![
+            folder("x")
+                .join("a.txt")
+                .expect("a name")
+                .as_local()
+                .expect("a local path")
+                .to_path_buf(),
+        ],
+        ..rf_platform::dnd::DroppedItems::default()
+    };
+    let hover = state.outside_hover(
+        Some(DropSpot::Tree { tree: 0, row: 2 }),
+        &dropped,
+        DragMods::default(),
+        rf_platform::dnd::Effects::ALL,
+    );
+    assert_eq!(hover, Hover::Refused(crate::pick::Validity::ForeignToTrash));
+    assert_eq!(
+        words::drop_refused(crate::pick::Validity::ForeignToTrash),
+        "여기에 놓을 수 없습니다: 다른 앱에서 끌어 온 항목은 그 앱에서 휴지통으로 보내세요"
+    );
+    // 내 PC says what it says of a list of the shell.
+    let hover = state.outside_hover(
+        Some(DropSpot::Tree { tree: 0, row: 0 }),
+        &dropped,
+        DragMods::default(),
+        rf_platform::dnd::Effects::ALL,
+    );
+    assert_eq!(hover, Hover::Refused(crate::pick::Validity::ShellPlace));
+}
+
+#[test]
+fn finding_the_same_drives_again_keeps_the_sidebar_as_it_was() {
+    let mut state = ready(vec![], vec![]);
+    let home = Place {
+        label: "홈".to_owned(),
+        path: folder("home"),
+        kind: PlaceKind::Favorite(rf_platform::KnownFolder::Home),
+        space: None,
+    };
+    let [my_pc, bin] = shell_places();
+    let places = |available: u64| {
+        vec![
+            home.clone(),
+            my_pc.clone(),
+            drive("시스템 디스크", "root", available, 100),
+            bin.clone(),
+        ]
+    };
+    state.set_places(&places(50));
+    // The home folder opens in the sidebar.
+    let request = state.toggle_tree_row(0, 0);
+    let request = the_load_children(&request);
+    state.loaded(LoadEvent::Listed {
+        generation: request.generation,
+        entries: vec![dir("docs")],
+    });
+    let open = state.tree().rows().len();
+    assert_eq!(open, 5);
+    // F5 in 내 PC finds the same places, with another free space: the tree stays open.
+    state.set_places(&places(40));
+    assert_eq!(state.tree().rows().len(), open);
+    let space = state
+        .places()
+        .iter()
+        .find(|place| place.kind == PlaceKind::Drive)
+        .and_then(|place| place.space);
+    assert_eq!(space.map(|space| space.available), Some(40));
+    // Other drives start the tree again.
+    let mut more = places(40);
+    more.insert(3, drive("USB", "usb", 1, 2));
+    state.set_places(&more);
+    assert_eq!(state.tree().rows().len(), 5);
+    assert!(!state.tree().rows()[0].expanded);
+}
+
+/// The one listing of a tree's node among `effects`.
+fn the_load_children(effects: &[Effect]) -> LoadRequest {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::LoadChildren(request) => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a listing of a node: {effects:?}"))
+}

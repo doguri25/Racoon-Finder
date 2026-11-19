@@ -2559,7 +2559,9 @@ pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> S
         Validity::IntoSource => "옮기는 항목 안이라 고를 수 없음".to_owned(),
         Validity::SameFolder => "원래 있던 폴더라 고를 수 없음".to_owned(),
         Validity::NotAFolder => "폴더를 찾을 수 없어 고를 수 없음".to_owned(),
-        Validity::ShellPlace => "휴지통과 내 PC에는 넣을 수 없음".to_owned(),
+        Validity::ShellPlace | Validity::ForeignToTrash => {
+            "휴지통과 내 PC에는 넣을 수 없음".to_owned()
+        }
         Validity::NotWritable => "읽기 전용 위치라 작업이 실패할 수 있습니다".to_owned(),
         Validity::NotEnoughSpace { need, available } => format!(
             "공간이 부족할 수 있습니다: 필요 {}{}, 남은 공간 {}",
@@ -2802,6 +2804,7 @@ pub fn drop_refused(validity: Validity) -> String {
         Validity::SameFolder => "항목이 이미 이 폴더에 있습니다",
         Validity::NotAFolder => "폴더가 아닙니다",
         Validity::ShellPlace => "휴지통 목록과 내 PC에는 항목을 넣을 수 없습니다",
+        Validity::ForeignToTrash => "다른 앱에서 끌어 온 항목은 그 앱에서 휴지통으로 보내세요",
         // A place that takes them with a warning is no refusal.
         Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => {
             return "여기에 놓을 수 없습니다".to_owned();

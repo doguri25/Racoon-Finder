@@ -222,9 +222,14 @@ impl AppState {
     }
 
     /// The notice of `what` in pane `side` when it shows a place of the shell, for a command
-    /// that does not go through the keys (a menu's, a toolbar's); `None` for a folder.
+    /// that does not go through the keys (a menu's, a toolbar's); `None` for a folder. While a
+    /// window shows over the main one, or the app ends, the command does nothing there, and says
+    /// nothing under the window (as the keys do then).
     pub(super) fn blocked_in_shell(&self, side: usize, what: Blocked) -> Option<Vec<Effect>> {
         let place = self.shell_place_of(side)?;
+        if self.modal.is_some() || self.quitting {
+            return Some(Vec::new());
+        }
         Some(vec![Effect::Notice(words::shell_blocked(place, what))])
     }
 

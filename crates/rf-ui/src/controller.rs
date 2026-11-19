@@ -2178,6 +2178,10 @@ impl Controller {
     /// folders are known.
     fn set_places(&self, found: &[Place]) {
         found.clone_into(&mut self.places.borrow_mut());
+        // The same places found again keep the trees, whose rows show the new spaces.
+        for rows in &self.tree_rows {
+            rows.invalidate();
+        }
         self.update(|state| state.set_places(found));
     }
 
