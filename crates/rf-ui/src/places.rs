@@ -22,9 +22,9 @@ pub enum PlaceKind {
     /// A folder the user keeps under "즐겨찾기" (NAV-05), once they have edited the list: added,
     /// dropped in, renamed or moved.
     Kept,
-    /// A drive or mounted volume, under "이 PC".
+    /// A drive or mounted volume, under "드라이브".
     Drive,
-    /// A place of the shell (NAV-16): 내 PC, first under "이 PC", or 휴지통, after the drives.
+    /// A place of the shell (NAV-16): 내 PC, first under "드라이브", or 휴지통, after the drives.
     /// It is a list, not a folder of the tree: it has no folders below it.
     Shell(ShellPlace),
 }
@@ -49,7 +49,7 @@ pub fn shell_places() -> [Place; 2] {
 
 /// The position among the `rows` of the sidebar's folder tree, whose roots are `places`, where
 /// the group "최근 폴더" shows: right before the first row of a place that is no favorite (the
-/// drives, under "이 PC"), else after the last row. The group is made of rows that are no folders
+/// drives, under "드라이브"), else after the last row. The group is made of rows that are no folders
 /// of the tree, so the tree's own rows keep their numbers and the window's list has the group's
 /// rows between them.
 pub fn recent_slot(rows: &[TreeRowData], places: &[Place]) -> usize {

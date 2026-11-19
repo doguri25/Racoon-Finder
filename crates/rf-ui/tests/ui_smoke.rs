@@ -1745,7 +1745,7 @@ fn the_tree_shows_places_and_folders() {
     window.set_tree(ModelRc::from(Rc::clone(&rows)));
 
     assert_eq!(labelled(&window, "즐겨찾기", AccessibleRole::Text).len(), 1);
-    assert_eq!(labelled(&window, "이 PC", AccessibleRole::Text).len(), 1);
+    assert_eq!(labelled(&window, "드라이브", AccessibleRole::Text).len(), 1);
     let drive = labelled(&window, &disk_label, AccessibleRole::ListItem);
     assert_eq!(
         drive[0].accessible_description().as_deref(),
@@ -10855,7 +10855,7 @@ fn the_sidebar_lists_the_computer_before_the_drives_and_the_trash_after_them() {
     window.set_tree(ModelRc::from(Rc::clone(&rows)));
     // One head over 내 PC and the drives; none over 휴지통.
     assert_eq!(labelled(&window, "즐겨찾기", AccessibleRole::Text).len(), 1);
-    assert_eq!(labelled(&window, "이 PC", AccessibleRole::Text).len(), 1);
+    assert_eq!(labelled(&window, "드라이브", AccessibleRole::Text).len(), 1);
     let mut drawn: Vec<(usize, String)> = window
         .root_element()
         .query_descendants()

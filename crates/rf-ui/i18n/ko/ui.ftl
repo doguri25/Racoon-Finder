@@ -227,7 +227,8 @@ sidebar-move-down = 아래로
 sidebar-add-current = 현재 폴더를 즐겨찾기에 추가
 sidebar-add-this = 이 폴더를 즐겨찾기에 추가
 sidebar-favorites = 즐겨찾기
-sidebar-this-pc = 이 PC
+# 내 PC와 드라이브 위의 머리 (내 PC 줄과 같은 말이 되지 않게).
+sidebar-drives = 드라이브
 # 즐겨찾기 사이에 끌어 놓을 자리의 표시.
 sidebar-insert-here = 끼워 넣을 자리
 

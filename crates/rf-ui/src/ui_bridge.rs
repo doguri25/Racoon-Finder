@@ -1016,7 +1016,7 @@ impl Model for TreeRows {
     }
 }
 
-/// The section of the sidebar a place of `kind` is in: "즐겨찾기" for the favorites, "이 PC" for
+/// The section of the sidebar a place of `kind` is in: "즐겨찾기" for the favorites, "드라이브" for
 /// 내 PC and the drives; 휴지통 after them, under no head of its own.
 fn section_of(kind: PlaceKind) -> SectionHead {
     match kind {
@@ -1039,7 +1039,7 @@ fn place_icon(kind: PlaceKind) -> &'static str {
 
 /// The sidebar rows of the tree rows `rows`, whose roots are `places` in order, each with its
 /// node. A place shows whether it is a drive, and a drive how full it is; the first favorite
-/// carries the head "즐겨찾기" and the first place after them of 내 PC and the drives "이 PC"
+/// carries the head "즐겨찾기" and the first place after them of 내 PC and the drives "드라이브"
 /// ([`section_of`]); 휴지통 comes last, under no head. A row shows a chevron when it has
 /// folders below it, or may have.
 pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow)> {

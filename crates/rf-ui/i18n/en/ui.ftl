@@ -248,11 +248,8 @@ sidebar-move-down = Move Down
 sidebar-add-current = Add Current Folder to Favorites
 sidebar-add-this = Add This Folder to Favorites
 sidebar-favorites = Favorites
-sidebar-this-pc = { $os ->
-        [windows] This PC
-        [macos] Locations
-       *[other] Devices
-    }
+# The head over This PC (or Computer) and the drives: not the name of its first row.
+sidebar-drives = Drives
 # Where a dragged favorite would go, between the others.
 sidebar-insert-here = Insertion Point
 

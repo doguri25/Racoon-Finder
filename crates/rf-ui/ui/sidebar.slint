@@ -1,6 +1,6 @@
 // The sidebar: a folder tree, the shared one or a pane's own (LAY-03; `TreeBox`, at the end,
 // is one with the keys it takes). Its roots are the places, the user's folders under
-// "즐겨찾기", 내 PC and the drives under "이 PC", and 휴지통 last (NAV-16); each folder opens
+// "즐겨찾기", 내 PC and the drives under "드라이브", and 휴지통 last (NAV-16); each folder opens
 // into its folders, listed the first time it opens (내 PC and 휴지통 are lists, with no folders
 // below them). A drop on 휴지통 sends the dragged rows to the trash. The rows are a virtualized ListView, so a folder with hundreds of subfolders
 // scrolls as freely as one with a few. The main window's tree takes dragged rows into the
@@ -25,7 +25,7 @@ import { ScrollCue, EdgeScroll } from "widgets.slint";
 import { Tr } from "tr.slint";
 
 // The head above a row: the first favorite starts "즐겨찾기", the first of 내 PC and the drives
-// "이 PC"; 휴지통 comes after them under no head.
+// "드라이브"; 휴지통 comes after them under no head.
 export enum SectionHead {
     none,
     favorites,
@@ -261,7 +261,7 @@ component TreeItem inherits Rectangle {
     if root.item.head != SectionHead.none: Text {
         x: 18px;
         y: root.head-height - self.height - 4px;
-        text: root.item.head == SectionHead.favorites ? Tr.sidebar-favorites : Tr.sidebar-this-pc;
+        text: root.item.head == SectionHead.favorites ? Tr.sidebar-favorites : Tr.sidebar-drives;
         font-size: Theme.font-small;
         font-weight: 700;
         color: Theme.muted;
