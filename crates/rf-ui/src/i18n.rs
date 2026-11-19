@@ -991,6 +991,152 @@ mod tests {
     }
 
     #[test]
+    fn english_says_the_notices_refusals_and_properties_whole() {
+        let en = Localizer::new(Lang::En);
+        let on = |os| (OS_ARG, os_arg(os));
+        let work = |work: &'static str| ("work", FluentValue::from(work));
+        // Plurals, and the trash as the system names it.
+        assert_eq!(
+            en.text("job-items-done", &[work("copy"), ("count", count(1))]),
+            "1 item copied"
+        );
+        assert_eq!(
+            en.text(
+                "job-items-done",
+                &[work("trash"), ("count", count(3)), on(Os::Windows)]
+            ),
+            "3 items moved to the Recycle Bin"
+        );
+        assert_eq!(
+            en.text(
+                "job-items-partly-done",
+                &[
+                    work("drag"),
+                    ("count", number(3)),
+                    ("done", number(1)),
+                    ("skipped", number(2))
+                ]
+            ),
+            "1 of 3 items moved · 2 skipped"
+        );
+        assert_eq!(
+            en.text("trash-refused", &[("count", count(1)), on(Os::MacOs)]),
+            "The Trash didn't take 1 item.\nPermanently delete it? This can't be undone."
+        );
+        assert_eq!(
+            en.text("copies-delete", &[("count", count(2))]),
+            "Permanently delete 2 copies? This can't be undone."
+        );
+        assert_eq!(
+            en.text(
+                "job-stopped-note-left",
+                &[work("copy"), ("count", number(1))]
+            ),
+            "Copying stopped at the items below, and the 1 item after them was not processed. \
+             To finish, start copying again."
+        );
+        assert_eq!(
+            en.text("trash-empty-title", &[on(Os::Windows)]),
+            "Empty Recycle Bin"
+        );
+        assert_eq!(
+            en.text("trash-empty-title", &[on(Os::Other)]),
+            "Empty Trash"
+        );
+        // What can't be done in a place of the shell, and why a drop or a folder is refused.
+        let blocked = |place: &'static str, what: &'static str, os| {
+            en.text(
+                "shell-blocked",
+                &[("place", place.into()), ("what", what.into()), on(os)],
+            )
+        };
+        assert_eq!(
+            blocked("trash", "new_folder", Os::Windows),
+            "Can't create a folder in the Recycle Bin. Items there can be restored or deleted \
+             permanently."
+        );
+        assert_eq!(
+            blocked("computer", "paste", Os::MacOs),
+            "Can't paste in Computer. Open a drive to do it there."
+        );
+        assert_eq!(
+            en.text("drop-refused-same-folder", &[]),
+            "Can't drop here: the items are already in this folder"
+        );
+        assert_eq!(
+            en.text("pick-problem-shell-place", &[on(Os::Windows)]),
+            "Nothing can be put in the Recycle Bin or This PC"
+        );
+        assert_eq!(
+            en.text(
+                "pick-problem-space-at-least",
+                &[("need", "3 MB".into()), ("available", "1 MB".into())]
+            ),
+            "There may not be enough space: at least 3 MB needed, 1 MB free"
+        );
+        // English names the item, never uses the Korean particle.
+        let conflict = |ko_final: &'static str| {
+            [
+                ("name", FluentValue::from("photos")),
+                ("folder", FluentValue::from("C:\\Backup")),
+                ("ko-final", FluentValue::from(ko_final)),
+            ]
+        };
+        assert_eq!(
+            en.text("conflict-description", &conflict("yes")),
+            "“photos” already exists in C:\\Backup."
+        );
+        let ko = Localizer::new(Lang::Ko);
+        assert_eq!(
+            ko.text("conflict-description", &conflict("yes")),
+            "‘photos’이 C:\\Backup 에 이미 있습니다."
+        );
+        assert_eq!(
+            ko.text("conflict-description", &conflict("no")),
+            "‘photos’가 C:\\Backup 에 이미 있습니다."
+        );
+        // The labels of the properties window.
+        let label = |key: &str, os| en.text(key, &[on(os)]);
+        assert_eq!(label("fact-kind", Os::MacOs), "Kind");
+        assert_eq!(label("fact-kind", Os::Windows), "Type");
+        for (key, text) in [
+            ("fact-place", "Location"),
+            ("fact-size", "Size"),
+            ("fact-contents", "Contains"),
+            ("fact-link-target", "Link Target"),
+            ("fact-created", "Created"),
+            ("fact-modified", "Modified"),
+            ("fact-accessed", "Accessed"),
+            ("fact-attributes", "Attributes"),
+            ("attribute-read-only", "Read-only"),
+            ("attribute-none", "None"),
+        ] {
+            assert_eq!(label(key, Os::Other), text, "{key}");
+        }
+        assert_eq!(
+            en.text(
+                "properties-files-and-folders",
+                &[("files", number(1)), ("folders", number(678))]
+            ),
+            "1 file, 678 folders"
+        );
+        // A date before today, and the word of a new shortcut's name.
+        assert_eq!(
+            en.text(
+                "history-time-day",
+                &[
+                    ("month", number(10)),
+                    ("day", number(30)),
+                    ("time", "14:32".into())
+                ]
+            ),
+            "Oct 30, 14:32"
+        );
+        assert_eq!(en.text("link-name-shortcut", &[]), "Shortcut");
+        assert_eq!(en.text("link-name-alias", &[]), "alias");
+    }
+
+    #[test]
     fn every_key_the_moved_code_asks_for_is_in_both_languages() {
         let ko = messages(Lang::Ko);
         let en = messages(Lang::En);

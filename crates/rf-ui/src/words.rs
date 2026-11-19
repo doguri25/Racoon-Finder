@@ -4612,4 +4612,44 @@ mod tests {
         assert_eq!(link_elsewhere(true), "링크가 폴더를 가리키지 않습니다");
         assert_eq!(link_elsewhere(false), "링크가 파일을 가리키지 않습니다");
     }
+
+    #[test]
+    fn the_particle_follows_how_a_name_is_read() {
+        let particle = |name: &str| {
+            let words = conflict_description(name, "x");
+            let quoted = format!("‘{name}’");
+            words
+                .strip_prefix(quoted.as_str())
+                .and_then(|rest| rest.chars().next())
+                .unwrap_or_else(|| panic!("{words}"))
+        };
+        // The last syllable, with or without a final consonant: 가 is the first of a run of 28.
+        for (name, after) in [("가", '가'), ("각", '이'), ("힣", '이'), ("해", '가')] {
+            assert_eq!(particle(name), after, "{name}");
+        }
+        // Digits and Latin letters by their Korean names.
+        for (digit, after) in ('0'..='9').zip("이이가이가가이이이가".chars()) {
+            assert_eq!(particle(&format!("v{digit}")), after, "{digit}");
+        }
+        for letter in ['l', 'M', 'n', 'R'] {
+            assert_eq!(particle(&format!("a{letter}")), '이', "{letter}");
+        }
+        for name in ["ab", "aZ", "", "🦝", "日本"] {
+            assert_eq!(particle(name), '가', "{name}");
+        }
+    }
+
+    #[test]
+    fn grouped_counts_show_their_commas_and_give_english_its_plural() {
+        let en = crate::i18n::Localizer::new(crate::i18n::Lang::En);
+        let files = |n| en.text("properties-files", &[("files", grouped_count(n))]);
+        assert_eq!(files(1), "1 file");
+        assert_eq!(files(999), "999 files");
+        assert_eq!(files(1000), "1,000 files");
+        assert_eq!(files(12_345), "12,345 files");
+        // Korean shows the same digits.
+        assert_eq!(chosen_kinds(12_345, 0), "파일 12,345개");
+        assert_eq!(chosen_kinds(0, 999), "폴더 999개");
+        assert_eq!(contents(1, 1000), "파일 1개, 폴더 1,000개");
+    }
 }
