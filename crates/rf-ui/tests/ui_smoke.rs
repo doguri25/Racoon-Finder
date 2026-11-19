@@ -10728,3 +10728,396 @@ fn a_place_of_the_shell_has_no_folders_button_in_its_path_row() {
         1
     );
 }
+
+/// The tokens of the light theme at `density` and `scale` (THEME-07), as a window shows them.
+fn scaled_light(density: Density, scale: FontScale) -> theme::Tokens {
+    theme::scaled(theme::Builtin::Light.tokens(), density, scale)
+}
+
+/// The looks the tests of THEME-07 go through: the normal one, the two ends, the one whose row
+/// is its text's floor, and roomy rows of small text.
+const LOOKS: [(Density, FontScale); 5] = [
+    (Density::Normal, FontScale::Normal),
+    (Density::Compact, FontScale::Smaller),
+    (Density::Compact, FontScale::Largest),
+    (Density::Roomy, FontScale::Largest),
+    (Density::Roomy, FontScale::Smaller),
+];
+
+/// THEME-07: what Rust takes from the rows of 자세히 follows the theme's row height, not a fixed
+/// 32 px: how many rows a page key moves (`page-rows`) and the row under a point (`spot-at`, which
+/// a drop of another app, a long press and the wheel's zoom ask); the rows and the column heads
+/// are that high, and the first row on screen follows a scroll by it.
+#[test]
+fn the_rows_on_screen_and_the_row_under_a_point_follow_the_row_height() {
+    let window = window();
+    let models = PaneModels::default();
+    let pane = listed_pane(
+        (0..80)
+            .map(|i| entry(&format!("f{i:02}.txt"), EntryKind::File, 10))
+            .collect(),
+    );
+    window.set_left_pane(models.view(&pane, true));
+    for (density, scale) in LOOKS {
+        let what = format!("{density:?} {scale:?}");
+        let tokens = scaled_light(density, scale);
+        let row = tokens.size.row_height;
+        ui_bridge::show_theme(&window, &tokens);
+        slint::platform::update_timers_and_animations();
+        let first = labelled(&window, "f00.txt", AccessibleRole::ListItem).remove(0);
+        let second = labelled(&window, "f01.txt", AccessibleRole::ListItem).remove(0);
+        assert_eq!(first.size().height, row, "{what}: a row");
+        let top = first.absolute_position().y;
+        assert_eq!(
+            second.absolute_position().y - top,
+            row,
+            "{what}: the next row"
+        );
+        let head = element_of(&window, "FileList::head", false);
+        assert_eq!(head.size().height, row, "{what}: the column heads");
+        let list = element_of(&window, "FileList::list", false);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a list is a few hundred pixels high"
+        )]
+        let fit = (list.size().height / row).floor() as i32;
+        assert!(fit >= 5, "{what}: {fit}");
+        assert_eq!(window.get_page_rows(), fit, "{what}: a page");
+        // The row under a point: in the middle of a row, and on either side of its lower edge.
+        let x = first.absolute_position().x + 60.0;
+        for k in [0_i32, 1, 4, fit - 1] {
+            #[expect(clippy::cast_precision_loss, reason = "a few rows")]
+            let edge = top + row * (k + 1) as f32;
+            for (y, index) in [(edge - row / 2.0, k), (edge - 1.0, k), (edge + 1.0, k + 1)] {
+                let found = window.invoke_spot_at(x, y);
+                assert!(found.found, "{what}: {y}");
+                assert_eq!(found.index, index, "{what}: at {y}");
+            }
+        }
+    }
+}
+
+/// THEME-07: the items of 목록 and the small icons are rows of the list (its row height less
+/// 2px, an item taking all but its gap), and the names under the larger icons and the tiles' lines
+/// grow with the size of the text; at 보통 and 100 % they are as before. Rust's reckoning of how
+/// many a row holds (its widths) stays the screen's.
+#[test]
+fn the_items_of_the_icon_views_follow_the_row_height_and_the_size_of_the_text() {
+    let window = window();
+    let models = PaneModels::default();
+    let mut pane = listed_pane(
+        (0..12)
+            .map(|i| entry(&format!("p{i:02}.png"), EntryKind::File, 10))
+            .collect(),
+    );
+    let item =
+        |window: &MainWindow| labelled(window, "p00.png", AccessibleRole::ListItem).remove(0);
+    for (density, scale) in LOOKS {
+        let what = format!("{density:?} {scale:?}");
+        let tokens = scaled_light(density, scale);
+        ui_bridge::show_theme(&window, &tokens);
+        let row = tokens.size.row_height;
+        let two_lines = 2.0 * theme::line(tokens.font.body);
+        let grow = (two_lines - 42.0).max(0.0);
+        let three_lines = theme::line(tokens.font.body) + 2.0 * theme::line(tokens.font.small);
+        let tiles_grow = (three_lines - 57.0).max(0.0);
+        for (mode, height) in [
+            (ViewMode::List, row - 4.0),
+            (ViewMode::SmallIcons, row - 6.0),
+            (ViewMode::MediumIcons, 108.0 + grow),
+            (ViewMode::LargeIcons, 152.0 + grow),
+            (ViewMode::ExtraLargeIcons, 216.0 + grow),
+            (ViewMode::thumbnails(DEFAULT_THUMB_SIZE), 248.0 + grow),
+            (ViewMode::Tiles, 60.0 + tiles_grow),
+        ] {
+            pane.active_tab_mut().set_view(FolderView {
+                mode,
+                ..FolderView::default()
+            });
+            window.set_left_pane(models.view(&pane, true));
+            slint::platform::update_timers_and_animations();
+            assert_eq!(item(&window).size().height, height, "{what} {mode:?}");
+        }
+    }
+    // At 보통 and 100 % the heights are those before the tokens: 30 − 4, 30 − 2, 112 − 4, …
+    ui_bridge::show_theme(&window, &scaled_light(Density::Normal, FontScale::Normal));
+    pane.active_tab_mut().set_view(FolderView {
+        mode: ViewMode::MediumIcons,
+        ..FolderView::default()
+    });
+    window.set_left_pane(models.view(&pane, true));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(item(&window).size().height, 108.0);
+}
+
+/// The plan's 900×560 rule at the largest look (THEME-07): at 넉넉하게 and 130 % the main
+/// window's essential controls (the toolbar's buttons and field, both panes' tabs, path rows,
+/// lists and status lines, the sidebar) lie inside the smallest window, and the lists keep room
+/// for rows.
+#[test]
+fn the_main_window_s_controls_lie_inside_900_by_560_at_the_largest_look() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    let models = PaneModels::default();
+    let pane = listed_pane(
+        (0..30)
+            .map(|i| entry(&format!("f{i:02}.txt"), EntryKind::File, 10))
+            .collect(),
+    );
+    window.set_left_pane(models.view(&pane, true));
+    window.set_right_pane(models.view(&pane, false));
+    for (density, scale) in [
+        (Density::Roomy, FontScale::Largest),
+        (Density::Compact, FontScale::Largest),
+        (Density::Compact, FontScale::Smaller),
+    ] {
+        let what = format!("{density:?} {scale:?}");
+        let tokens = scaled_light(density, scale);
+        ui_bridge::show_theme(&window, &tokens);
+        slint::platform::update_timers_and_animations();
+        for label in ["뒤로", "앞으로", "위로"] {
+            let button = labelled(&window, label, AccessibleRole::Button).remove(0);
+            inside_the_smallest_window(&button, &format!("{what}: {label}"));
+        }
+        for label in [
+            "새 폴더",
+            "복사…",
+            "이동…",
+            "삭제",
+            "이름 바꾸기",
+            "되돌리기",
+            "선택",
+            "보기",
+        ] {
+            let buttons = labelled(&window, label, AccessibleRole::Button);
+            assert!(!buttons.is_empty(), "{what}: {label}");
+            for button in &buttons {
+                inside_the_smallest_window(button, &format!("{what}: {label}"));
+            }
+        }
+        let filter = labelled(&window, "이 폴더에서 거르기", AccessibleRole::TextInput).remove(0);
+        inside_the_smallest_window(&filter, &format!("{what}: the filter"));
+        let sidebar = ElementHandle::find_by_accessible_label(&window, "폴더 트리")
+            .next()
+            .expect("the sidebar");
+        inside_the_smallest_window(&sidebar, &format!("{what}: the sidebar"));
+        panes_keep_their_parts_in_the_smallest_window(&window, &tokens, &what);
+    }
+}
+
+/// `element` lies inside a 900×560 window, and is not empty.
+fn inside_the_smallest_window(element: &ElementHandle, what: &str) {
+    let (at, size) = (element.absolute_position(), element.size());
+    assert!(
+        at.x >= 0.0
+            && at.y >= 0.0
+            && at.x + size.width <= 900.0
+            && at.y + size.height <= 560.0
+            && size.width > 0.0
+            && size.height > 0.0,
+        "{what} at {at:?} {size:?}"
+    );
+}
+
+/// Both panes of a 900×560 window at `tokens` lie inside it with their tabs, column heads, a
+/// list of at least five rows whose first row is in sight, and room for the status line.
+fn panes_keep_their_parts_in_the_smallest_window(
+    window: &MainWindow,
+    tokens: &theme::Tokens,
+    what: &str,
+) {
+    for side in ["왼쪽 패널", "오른쪽 패널"] {
+        let (at, size) = shown_pane(window, side);
+        assert!(
+            at.x >= 0.0 && at.y >= 0.0 && at.x + size.width <= 900.0,
+            "{what}: {side}"
+        );
+        assert!(
+            at.y + size.height <= 560.0,
+            "{what}: {side} {at:?} {size:?}"
+        );
+    }
+    let tabs = labelled(window, "listed", AccessibleRole::Tab);
+    assert_eq!(tabs.len(), 2, "{what}");
+    for tab in &tabs {
+        inside_the_smallest_window(tab, &format!("{what}: a tab"));
+    }
+    for right in [false, true] {
+        let list = element_of(window, "FileList::list", right);
+        inside_the_smallest_window(&list, &format!("{what}: a list"));
+        assert!(
+            list.size().height >= 5.0 * tokens.size.row_height,
+            "{what}: a list {}px high",
+            list.size().height
+        );
+        // The status line under the list.
+        let bottom = list.absolute_position().y + list.size().height;
+        assert!(
+            bottom + 24.0 <= 560.0,
+            "{what}: no room for the status line"
+        );
+        let head = element_of(window, "FileList::head", right);
+        inside_the_smallest_window(&head, &format!("{what}: the column heads"));
+    }
+    // A row is as wide as its columns, which may reach past its pane (the list scrolls
+    // sideways): its top and bottom, and its start, are inside.
+    let rows = labelled(window, "f00.txt", AccessibleRole::ListItem);
+    assert_eq!(rows.len(), 2, "{what}");
+    for row in &rows {
+        let (at, size) = (row.absolute_position(), row.size());
+        assert!(
+            at.x >= 0.0 && at.x + 100.0 <= 900.0 && at.y >= 0.0 && at.y + size.height <= 560.0,
+            "{what}: the first row at {at:?} {size:?}"
+        );
+    }
+}
+
+/// THEME-07 at 900×560: at 넉넉하게 and 130 % the conflict window's content is taller than the
+/// window may be: it scrolls, its buttons stay at its foot inside the window, and the keys on the
+/// buttons bring the end of the choices into sight above them. At 보통 and 100 % nothing of that
+/// shows: one row of buttons, in the content.
+#[test]
+fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
+    let bottom = |element: &ElementHandle| element.absolute_position().y + element.size().height;
+    let inside =
+        |element: &ElementHandle| element.absolute_position().y >= 0.0 && bottom(element) <= 560.0;
+    // A window of its own for each look (the backend is set up once, by the first).
+    let first = std::cell::Cell::new(true);
+    let open = |density: Density, scale: FontScale| {
+        let window = if first.replace(false) {
+            window()
+        } else {
+            let window = MainWindow::new().expect("MainWindow builds");
+            window.show().expect("the window shows");
+            window
+        };
+        window.window().set_size(LogicalSize::new(900.0, 560.0));
+        window.set_conflict_view(conflict_view());
+        ui_bridge::show_theme(&window, &scaled_light(density, scale));
+        window.set_dialog(DialogKind::Conflict);
+        slint::platform::update_timers_and_animations();
+        window
+    };
+    let normal = open(Density::Normal, FontScale::Normal);
+    for label in ["작업 취소", "계속"] {
+        let buttons = labelled(&normal, label, AccessibleRole::Button);
+        assert_eq!(buttons.len(), 1, "{label}");
+        assert!(inside(&buttons[0]), "{label}");
+    }
+
+    let window = open(Density::Roomy, FontScale::Largest);
+    for label in ["작업 취소", "계속"] {
+        let buttons = labelled(&window, label, AccessibleRole::Button);
+        assert!(
+            buttons.iter().any(&inside),
+            "{label}: {:?}",
+            buttons
+                .iter()
+                .map(|button| (button.absolute_position(), button.size()))
+                .collect::<Vec<_>>()
+        );
+    }
+    // The content goes past the window: the last choice is below the buttons' row at first.
+    let last = || {
+        labelled(
+            &window,
+            "크기가 다를 때만 덮어쓰기",
+            AccessibleRole::RadioButton,
+        )
+        .remove(0)
+    };
+    // Where the title is; none once it is scrolled out of the dialog's sight.
+    let title = || {
+        labelled(
+            &window,
+            "같은 이름의 파일이 이미 있습니다",
+            AccessibleRole::Text,
+        )
+        .first()
+        .map(|text| text.absolute_position().y)
+    };
+    let foot = labelled(&window, "계속", AccessibleRole::Button)
+        .into_iter()
+        .find(|button| inside(button))
+        .expect("the buttons at the foot");
+    let foot_top = foot.absolute_position().y;
+    assert!(
+        bottom(&last()) > foot_top,
+        "the content scrolls: {}",
+        bottom(&last())
+    );
+    assert!(title().is_some_and(|y| y >= 0.0), "{:?}", title());
+    // Tab puts the keys on the box, and the end of the content comes up above the buttons.
+    press(&window, Key::Tab);
+    slint::platform::update_timers_and_animations();
+    assert!(
+        bottom(&last()) <= foot_top,
+        "{} below the buttons at {foot_top}",
+        bottom(&last())
+    );
+    assert!(last().absolute_position().y >= 0.0);
+    assert!(
+        title().is_none_or(|y| y < 0.0),
+        "scrolled past the title: {:?}",
+        title()
+    );
+    // Back on the choices (Tab past the buttons), the top shows again.
+    for _ in 0..3 {
+        press(&window, Key::Tab);
+    }
+    slint::platform::update_timers_and_animations();
+    assert!(title().is_some_and(|y| y >= 0.0), "{:?}", title());
+}
+
+/// THEME-07 at 900×560: the picker's choice of what a name conflict does lies beside its heading
+/// where the two fit (보통 and 100 %), and under it where they do not (넉넉하게 and 130 %), so
+/// that its last choice stays inside the dialog.
+#[test]
+fn the_picker_s_conflict_choice_goes_under_its_heading_where_it_does_not_fit_beside_it() {
+    let first = std::cell::Cell::new(true);
+    for (density, scale, beside) in [
+        (Density::Normal, FontScale::Normal, true),
+        (Density::Roomy, FontScale::Largest, false),
+        (Density::Compact, FontScale::Smaller, true),
+    ] {
+        let what = format!("{density:?} {scale:?}");
+        let window = if first.replace(false) {
+            window()
+        } else {
+            let window = MainWindow::new().expect("MainWindow builds");
+            window.show().expect("the window shows");
+            window
+        };
+        window.window().set_size(LogicalSize::new(900.0, 560.0));
+        ui_bridge::show_theme(&window, &scaled_light(density, scale));
+        window.set_pick_view(pick_view());
+        window.set_dialog(DialogKind::Pick);
+        slint::platform::update_timers_and_animations();
+        let heading = labelled(&window, "이름이 겹치면", AccessibleRole::Text).remove(0);
+        let first_choice = labelled(&window, "물어보기", AccessibleRole::RadioButton).remove(0);
+        let last = labelled(
+            &window,
+            "크기가 다를 때만 덮어쓰기",
+            AccessibleRole::RadioButton,
+        )
+        .remove(0);
+        let dialog = ElementHandle::find_by_element_type_name(&window, "PickDialog")
+            .next()
+            .expect("the picker");
+        let right = dialog.absolute_position().x + dialog.size().width;
+        assert!(
+            last.absolute_position().x + last.size().width <= right - 20.0,
+            "{what}: the last choice ends at {} of {right}",
+            last.absolute_position().x + last.size().width
+        );
+        let (h_at, h_size) = (heading.absolute_position(), heading.size());
+        let c_at = first_choice.absolute_position();
+        if beside {
+            assert!(c_at.x > h_at.x + h_size.width, "{what}: beside");
+            assert!(c_at.y < h_at.y + h_size.height, "{what}: on its line");
+        } else {
+            assert!(c_at.y >= h_at.y + h_size.height, "{what}: under it");
+            assert!((c_at.x - h_at.x).abs() < 8.0, "{what}: under its start");
+        }
+    }
+}

@@ -155,7 +155,9 @@ export component FileHead inherits Rectangle {
     // so that what is right of the border stays where it is.
     in-out property <length> scroll-x;
 
-    height: 32px;
+    // A row of the list, as high as the rows under it (the theme's row height, at the density
+    // chosen, THEME-07).
+    height: Theme.row-height;
     clip: true;
 
     // Column geometry, shared by the heads and the rows. The columns are placed by hand, not

@@ -145,13 +145,17 @@ export component JobPanel inherits Rectangle {
 
     // The line of the head of 최근 완료: after the rows of the jobs, running and waiting.
     private property <int> head-line: root.rows.length + root.queue.length;
-    private property <length> queue-height: 44px;
-    private property <length> recent-height: 52px;
+    // The rows follow the theme (THEME-07): a waiting job's line is the theme's row height and
+    // 12px more (its buttons); a finished job's two lines, and an undo list's, 20px more, and at
+    // least what the two lines take with 12px around them; at 보통 and 100 % 44 and 52.
+    private property <length> queue-height: Theme.row-height + 12px;
+    private property <length> recent-height: max(Theme.row-height + 20px, Theme.line(Theme.font-body) + Theme.line(Theme.font-small) + 12px);
     // The line of the head of 되돌리기 기록: after the jobs' rows, the head of 최근 완료 and its
     // lines while they show.
     private property <int> history-head-line: root.head-line + (root.recent.length > 0 ? 1 + (root.recent-open ? root.recent.length : 0) : 0);
-    private property <length> history-row-height: 52px;
-    private property <length> history-head-height: 28px;
+    private property <length> history-row-height: root.recent-height;
+    // A head of the undo list: a line of small text with 10px around it (28px at 12px text).
+    private property <length> history-head-height: max(28px, Theme.line(Theme.font-small) + 10px);
     private property <length> history-content: (root.history.length - root.history-heads) * root.history-row-height + root.history-heads * root.history-head-height;
 
     background: Theme.panel;

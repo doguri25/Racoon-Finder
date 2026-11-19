@@ -119,7 +119,12 @@ component TargetItem inherits Rectangle {
     // The row became the target: where it is in the list, for the list to bring it into view.
     callback chosen(top: length, bottom: length);
 
-    private property <length> head-height: root.item.head == "" ? 0px : root.index == 0 ? 28px : 38px;
+    // A group's head: a line of small text with 10px around it at the top (28px at 12px text),
+    // 10px more under another group; and the target's two lines, 48px at 보통 and 100 %, the
+    // theme's row height and 16px more, and at least what the two lines take with 8px (THEME-07).
+    private property <length> first-head: max(28px, Theme.line(Theme.font-small) + 10px);
+    private property <length> head-height: root.item.head == "" ? 0px : root.index == 0 ? root.first-head : root.first-head + 10px;
+    private property <length> body-height: max(Theme.row-height + 16px, Theme.line(Theme.font-body) + Theme.line(Theme.font-small) + 8px);
     private property <bool> selected: root.item.selected;
     changed selected => {
         if (root.selected) {
@@ -127,7 +132,7 @@ component TargetItem inherits Rectangle {
         }
     }
 
-    height: root.head-height + 50px;
+    height: root.head-height + root.body-height + 2px;
 
     if root.item.head != "": Text {
         x: 14px;
@@ -142,7 +147,7 @@ component TargetItem inherits Rectangle {
         x: 6px;
         y: root.head-height;
         width: parent.width - 12px;
-        height: 48px;
+        height: root.body-height;
         border-radius: Theme.radius;
         background: root.item.selected ? Theme.selection : touch.has-hover && root.item.enabled ? Theme.raised : transparent;
         accessible-role: list-item;
@@ -681,81 +686,104 @@ export component PickDialog inherits DialogFrame {
                 background: Theme.border;
             }
 
-            // What a name conflict does (a log never goes over a file: no such row for it).
-            if !root.view.for-log: HorizontalLayout {
-                spacing: 12px;
+            // What a name conflict does (a log never goes over a file: no such row for it). The
+            // heading goes above the track where the two do not fit side by side (a larger size
+            // of text in a narrow window, THEME-07).
+            if !root.view.for-log: policy-box := Rectangle {
+                property <bool> inline: policy-measure.preferred-width + 12px + policy-track.preferred-width <= self.width;
 
-                Text {
-                    horizontal-stretch: 0;
-                    height: 36px;
+                // The heading's width, for `inline`.
+                policy-measure := Text {
+                    visible: false;
                     text: "이름이 겹치면";
-                    color: Theme.text;
                     font-weight: 500;
-                    vertical-alignment: center;
+                    accessible-role: none;
                 }
+
                 VerticalLayout {
-                    alignment: center;
+                    spacing: 4px;
 
-                    SegmentTrack {
-                        label: "이름이 겹치면";
-                        focused: root.stop == 4;
+                    if !policy-box.inline: Text {
+                        text: "이름이 겹치면";
+                        color: Theme.text;
+                        font-weight: 500;
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
 
-                        Segment {
-                            text: "물어보기";
-                            chosen: root.view.policy == 0;
-                            clicked => {
-                                root.policy-chosen(0);
-                                filter.take-focus();
+                        if policy-box.inline: Text {
+                            horizontal-stretch: 0;
+                            height: 36px;
+                            text: "이름이 겹치면";
+                            color: Theme.text;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+
+                            policy-track := SegmentTrack {
+                                label: "이름이 겹치면";
+                                focused: root.stop == 4;
+
+                                Segment {
+                                    text: "물어보기";
+                                    chosen: root.view.policy == 0;
+                                    clicked => {
+                                        root.policy-chosen(0);
+                                        filter.take-focus();
+                                    }
+                                }
+                                Segment {
+                                    text: "덮어쓰기";
+                                    chosen: root.view.policy == 1;
+                                    clicked => {
+                                        root.policy-chosen(1);
+                                        filter.take-focus();
+                                    }
+                                }
+                                Segment {
+                                    text: "건너뛰기";
+                                    chosen: root.view.policy == 2;
+                                    clicked => {
+                                        root.policy-chosen(2);
+                                        filter.take-focus();
+                                    }
+                                }
+                                Segment {
+                                    text: "이름 바꾸기";
+                                    chosen: root.view.policy == 3;
+                                    clicked => {
+                                        root.policy-chosen(3);
+                                        filter.take-focus();
+                                    }
+                                }
+                                // The two conditional overwrites: the heading before the track
+                                // and the line below it say the rest of their names.
+                                Segment {
+                                    text: "더 새 파일만";
+                                    label: "더 새 파일만 덮어쓰기";
+                                    chosen: root.view.policy == 4;
+                                    clicked => {
+                                        root.policy-chosen(4);
+                                        filter.take-focus();
+                                    }
+                                }
+                                Segment {
+                                    text: "크기가 다를 때만";
+                                    label: "크기가 다를 때만 덮어쓰기";
+                                    chosen: root.view.policy == 5;
+                                    clicked => {
+                                        root.policy-chosen(5);
+                                        filter.take-focus();
+                                    }
+                                }
                             }
                         }
-                        Segment {
-                            text: "덮어쓰기";
-                            chosen: root.view.policy == 1;
-                            clicked => {
-                                root.policy-chosen(1);
-                                filter.take-focus();
-                            }
-                        }
-                        Segment {
-                            text: "건너뛰기";
-                            chosen: root.view.policy == 2;
-                            clicked => {
-                                root.policy-chosen(2);
-                                filter.take-focus();
-                            }
-                        }
-                        Segment {
-                            text: "이름 바꾸기";
-                            chosen: root.view.policy == 3;
-                            clicked => {
-                                root.policy-chosen(3);
-                                filter.take-focus();
-                            }
-                        }
-                        // The two conditional overwrites: the heading before the track and the
-                        // line below it say the rest of their names.
-                        Segment {
-                            text: "더 새 파일만";
-                            label: "더 새 파일만 덮어쓰기";
-                            chosen: root.view.policy == 4;
-                            clicked => {
-                                root.policy-chosen(4);
-                                filter.take-focus();
-                            }
-                        }
-                        Segment {
-                            text: "크기가 다를 때만";
-                            label: "크기가 다를 때만 덮어쓰기";
-                            chosen: root.view.policy == 5;
-                            clicked => {
-                                root.policy-chosen(5);
-                                filter.take-focus();
-                            }
+                        Rectangle {
+                            horizontal-stretch: 1;
                         }
                     }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
                 }
             }
 

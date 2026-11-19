@@ -142,7 +142,8 @@ component Card inherits Rectangle {
 
             Row {
                 Text {
-                    width: 80px;
+                    // 80px, or the label's own width with a larger size of text (THEME-07).
+                    width: max(80px, self.preferred-width);
                     text: "크기";
                     font-size: Theme.font-note;
                     color: Theme.muted;
@@ -156,7 +157,8 @@ component Card inherits Rectangle {
             }
             Row {
                 Text {
-                    width: 80px;
+                    // 80px, or the label's own width with a larger size of text (THEME-07).
+                    width: max(80px, self.preferred-width);
                     text: "수정한 날짜";
                     font-size: Theme.font-note;
                     color: Theme.muted;
@@ -167,6 +169,67 @@ component Card inherits Rectangle {
                     color: Theme.text;
                     overflow: elide;
                 }
+            }
+        }
+    }
+}
+
+// The foot of the dialog: "남은 충돌에도 같은 선택 적용", how many items are left, 작업 취소 and
+// the main button, which says whether this file is overwritten.
+component AnswerRow inherits HorizontalLayout {
+    in property <bool> apply-all;
+    in property <string> items-left;
+    // Where the keys are, as the dialog's `on-button`.
+    in property <int> on-button;
+    in property <bool> overwrites-this;
+    callback toggle-all();
+    callback cancel();
+    callback answer();
+
+    spacing: 12px;
+
+    VerticalLayout {
+        alignment: center;
+
+        CheckBox {
+            text: "남은 충돌에도 같은 선택 적용";
+            checked: root.apply-all;
+            focused: root.on-button == 0;
+            toggled => {
+                root.toggle-all();
+            }
+        }
+    }
+    if root.items-left != "": Text {
+        text: root.items-left;
+        font-size: Theme.font-small;
+        color: Theme.faint;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+    }
+    VerticalLayout {
+        alignment: center;
+
+        OutlineButton {
+            button-height: 40px;
+            text: "작업 취소";
+            focused: root.on-button == 1;
+            clicked => {
+                root.cancel();
+            }
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+
+        PrimaryButton {
+            button-height: 40px;
+            text: root.overwrites-this ? "덮어쓰기" : "계속";
+            focused: root.on-button == 2;
+            clicked => {
+                root.answer();
             }
         }
     }
@@ -191,11 +254,18 @@ export component ConflictDialog inherits DialogFrame {
     // Where the keys are: -1 the choices, 0 the box, 1 작업 취소, 2 the main button. A new
     // question starts again on the choices.
     private property <int> on-button: -1;
-    // Five choices, where the mockup had three of 48px: closer, to fit the window.
-    private property <length> row-height: 36px;
+    // Five choices, where the mockup had three of 48px: closer, to fit the window. A row of the
+    // list and 4px more (36px at 보통, THEME-07); a choice with its hint takes what it needs.
+    private property <length> row-height: Theme.row-height + 4px;
     private property <int> serial: root.view.serial;
     changed serial => {
         root.on-button = -1;
+    }
+    // The content is taller than the dialog (THEME-07): it scrolls, under its buttons.
+    private property <bool> overflowing: flick.content-height > flick.height;
+    // The part the keys are on comes into sight, where the dialog scrolls.
+    changed on-button => {
+        flick.content-y = root.on-button < 0 ? 0px : min(0px, flick.height - flick.content-height);
     }
 
     width: 760px;
@@ -275,184 +345,210 @@ export component ConflictDialog inherits DialogFrame {
             reject
         }
 
-        VerticalLayout {
-            padding-left: 28px;
-            padding-right: 28px;
-            padding-top: 20px;
-            padding-bottom: 20px;
-            spacing: 12px;
+        // The dialog scrolls where its content is taller than the dialog may be (a larger
+        // density or size of text in a small window, THEME-07; the wheel and a touch drag scroll
+        // it), with a bar at its right edge that says so, and its buttons stay at its foot; the
+        // keys bring the part they are on into sight: the top while they are on the choices, the
+        // end (the warning above the buttons) on the box and the buttons. Where it fits (at 보통
+        // and 100 %), nothing of this shows.
+        flick := Flickable {
+            content-width: self.width;
+            content-height: max(self.height, body.preferred-height);
 
-            VerticalLayout {
-                spacing: 4px;
-
-                Text {
-                    text: root.view.title;
-                    font-size: Theme.font-title;
-                    font-weight: 700;
-                    color: Theme.text;
-                }
-                Text {
-                    text: root.view.description;
-                    color: Theme.muted;
-                    wrap: word-wrap;
-                }
-            }
-
-            HorizontalLayout {
-                spacing: 12px;
-
-                Card {
-                    horizontal-stretch: 1;
-                    raised: true;
-                    label: root.view.incoming-label;
-                    name: root.view.incoming-name;
-                    place: root.view.incoming-place;
-                    size: root.view.incoming-size;
-                    time: root.view.incoming-time;
-                    newer: root.view.incoming-newer;
-                    is-dir: root.view.incoming-dir;
-                }
-                Card {
-                    horizontal-stretch: 1;
-                    label: root.view.existing-label;
-                    name: root.view.existing-name;
-                    place: root.view.existing-place;
-                    size: root.view.existing-size;
-                    time: root.view.existing-time;
-                    newer: root.view.existing-newer;
-                    is-dir: root.view.existing-dir;
-                }
-            }
-
-            VerticalLayout {
-                spacing: 4px;
-                accessible-role: radio-group;
-                accessible-label: "어떻게 할까요?";
-
-                Text {
-                    text: "어떻게 할까요?";
-                    font-weight: 500;
-                    color: Theme.text;
-                }
-                if !root.view.restore: ChoiceRow {
-                    min-height: root.row-height;
-                    text: "덮어쓰기";
-                    hint: root.view.overwrite-hint;
-                    enabled: root.view.can-overwrite;
-                    chosen: root.choice == 0;
-                    clicked => {
-                        root.pick(0);
-                        keys.focus();
-                    }
-                }
-                ChoiceRow {
-                    min-height: root.row-height;
-                    text: "건너뛰기";
-                    hint: root.view.skip-hint;
-                    chosen: root.choice == 1;
-                    clicked => {
-                        root.pick(1);
-                        keys.focus();
-                    }
-                }
-                ChoiceRow {
-                    min-height: root.row-height;
-                    text: "이름 바꿔 둘 다 두기";
-                    hint: root.view.rename-hint;
-                    chosen: root.choice == 2;
-                    clicked => {
-                        root.pick(2);
-                        keys.focus();
-                    }
-                }
-                if !root.view.restore: ChoiceRow {
-                    min-height: root.row-height;
-                    text: "더 새 파일만 덮어쓰기";
-                    hint: root.view.newer-hint;
-                    enabled: root.view.can-overwrite;
-                    chosen: root.choice == 3;
-                    clicked => {
-                        root.pick(3);
-                        keys.focus();
-                    }
-                }
-                if !root.view.restore: ChoiceRow {
-                    min-height: root.row-height;
-                    text: "크기가 다를 때만 덮어쓰기";
-                    hint: root.view.size-hint;
-                    enabled: root.view.can-overwrite;
-                    chosen: root.choice == 4;
-                    clicked => {
-                        root.pick(4);
-                        keys.focus();
-                    }
-                }
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
-                min-height: 20px;
-
-                if root.warning != "": Text {
-                    y: 0;
-                    width: parent.width;
-                    text: root.warning;
-                    color: Theme.text;
-                    font-weight: 500;
-                    wrap: word-wrap;
-                }
-            }
-
-            HorizontalLayout {
+            body := VerticalLayout {
+                width: flick.content-width;
+                height: flick.content-height;
+                padding-left: 28px;
+                padding-right: 28px;
+                padding-top: 20px;
+                padding-bottom: 20px;
                 spacing: 12px;
 
                 VerticalLayout {
-                    alignment: center;
+                    spacing: 4px;
 
-                    CheckBox {
-                        text: "남은 충돌에도 같은 선택 적용";
-                        checked: root.apply-all;
-                        focused: root.on-button == 0;
-                        toggled => {
-                            root.toggle-all();
+                    Text {
+                        text: root.view.title;
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.view.description;
+                        color: Theme.muted;
+                        wrap: word-wrap;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+
+                    Card {
+                        horizontal-stretch: 1;
+                        raised: true;
+                        label: root.view.incoming-label;
+                        name: root.view.incoming-name;
+                        place: root.view.incoming-place;
+                        size: root.view.incoming-size;
+                        time: root.view.incoming-time;
+                        newer: root.view.incoming-newer;
+                        is-dir: root.view.incoming-dir;
+                    }
+                    Card {
+                        horizontal-stretch: 1;
+                        label: root.view.existing-label;
+                        name: root.view.existing-name;
+                        place: root.view.existing-place;
+                        size: root.view.existing-size;
+                        time: root.view.existing-time;
+                        newer: root.view.existing-newer;
+                        is-dir: root.view.existing-dir;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    accessible-role: radio-group;
+                    accessible-label: "어떻게 할까요?";
+
+                    Text {
+                        text: "어떻게 할까요?";
+                        font-weight: 500;
+                        color: Theme.text;
+                    }
+                    if !root.view.restore: ChoiceRow {
+                        min-height: root.row-height;
+                        text: "덮어쓰기";
+                        hint: root.view.overwrite-hint;
+                        enabled: root.view.can-overwrite;
+                        chosen: root.choice == 0;
+                        clicked => {
+                            root.pick(0);
+                            keys.focus();
+                        }
+                    }
+                    ChoiceRow {
+                        min-height: root.row-height;
+                        text: "건너뛰기";
+                        hint: root.view.skip-hint;
+                        chosen: root.choice == 1;
+                        clicked => {
+                            root.pick(1);
+                            keys.focus();
+                        }
+                    }
+                    ChoiceRow {
+                        min-height: root.row-height;
+                        text: "이름 바꿔 둘 다 두기";
+                        hint: root.view.rename-hint;
+                        chosen: root.choice == 2;
+                        clicked => {
+                            root.pick(2);
+                            keys.focus();
+                        }
+                    }
+                    if !root.view.restore: ChoiceRow {
+                        min-height: root.row-height;
+                        text: "더 새 파일만 덮어쓰기";
+                        hint: root.view.newer-hint;
+                        enabled: root.view.can-overwrite;
+                        chosen: root.choice == 3;
+                        clicked => {
+                            root.pick(3);
+                            keys.focus();
+                        }
+                    }
+                    if !root.view.restore: ChoiceRow {
+                        min-height: root.row-height;
+                        text: "크기가 다를 때만 덮어쓰기";
+                        hint: root.view.size-hint;
+                        enabled: root.view.can-overwrite;
+                        chosen: root.choice == 4;
+                        clicked => {
+                            root.pick(4);
                             keys.focus();
                         }
                     }
                 }
-                if root.view.items-left != "": Text {
-                    text: root.view.items-left;
-                    font-size: Theme.font-small;
-                    color: Theme.faint;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-                VerticalLayout {
-                    alignment: center;
 
-                    OutlineButton {
-                        button-height: 40px;
-                        text: "작업 취소";
-                        focused: root.on-button == 1;
-                        clicked => {
-                            root.cancelled();
-                        }
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 20px;
+
+                    if root.warning != "": Text {
+                        y: 0;
+                        width: parent.width;
+                        text: root.warning;
+                        color: Theme.text;
+                        font-weight: 500;
+                        wrap: word-wrap;
                     }
                 }
-                VerticalLayout {
-                    alignment: center;
 
-                    PrimaryButton {
-                        button-height: 40px;
-                        text: root.overwrites-this ? "덮어쓰기" : "계속";
-                        focused: root.on-button == 2;
-                        clicked => {
-                            root.answered(root.choice, root.apply-all);
-                        }
+                AnswerRow {
+                    apply-all: root.apply-all;
+                    items-left: root.view.items-left;
+                    on-button: root.on-button;
+                    overwrites-this: root.overwrites-this;
+                    toggle-all => {
+                        root.toggle-all();
+                        keys.focus();
+                    }
+                    cancel => {
+                        root.cancelled();
+                    }
+                    answer => {
+                        root.answered(root.choice, root.apply-all);
                     }
                 }
             }
+        }
+
+        // Where the dialog scrolls, its row of buttons stays at its foot, over the content that
+        // scrolls under it (the row in the content lies under this one once it is scrolled to
+        // the end).
+        if root.overflowing: Rectangle {
+            y: root.height - self.height;
+            height: 20px + 40px + 12px;
+            background: Theme.panel;
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+            AnswerRow {
+                x: 28px;
+                y: 12px;
+                width: parent.width - 56px;
+                height: 40px;
+                apply-all: root.apply-all;
+                items-left: root.view.items-left;
+                on-button: root.on-button;
+                overwrites-this: root.overwrites-this;
+                toggle-all => {
+                    root.toggle-all();
+                    keys.focus();
+                }
+                cancel => {
+                    root.cancelled();
+                }
+                answer => {
+                    root.answered(root.choice, root.apply-all);
+                }
+            }
+        }
+
+        // The bar that says the dialog scrolls, beside the part that does.
+        if root.overflowing: Rectangle {
+            private property <length> room: root.height - 72px - 8px;
+
+            x: root.width - 7px;
+            y: 4px + (self.room - self.height) * (-flick.content-y / max(1px, flick.content-height - flick.height));
+            width: 4px;
+            height: max(24px, self.room * flick.height / flick.content-height);
+            border-radius: 2px;
+            background: Theme.muted;
         }
     }
 }

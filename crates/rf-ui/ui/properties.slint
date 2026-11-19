@@ -87,7 +87,8 @@ export global Algorithms {
 
 // The width of the facts' labels.
 global FactsColumn {
-    out property <length> label: 96px;
+    // 96px at 14px text, grown with the size of the text (THEME-07).
+    out property <length> label: max(96px, 96px * Theme.font-body / 14px);
 }
 
 // A file's row among the checksums: its name (of several), its checksum in a fixed width font
@@ -102,7 +103,8 @@ component HashLine inherits Rectangle {
     in property <string> algorithm;
     callback copy();
 
-    height: 40px;
+    // A row of the list and 8px more, for its 복사 button (THEME-07; 40px at 보통).
+    height: Theme.row-height + 8px;
     border-radius: 6px;
     background: root.current ? Theme.selection : transparent;
     accessible-role: list-item;
@@ -206,7 +208,8 @@ export component PropertiesDialog inherits DialogFrame {
     property <int> cursor-row: 0;
     // The checksums show: there is a file, and an algorithm is chosen.
     property <bool> listed: root.view.hashable && root.view.algorithm >= 0;
-    property <length> row-height: 40px;
+    // A checksum's row (`HashLine`).
+    property <length> row-height: Theme.row-height + 8px;
 
     height: min(layout.preferred-height, root.room);
     accessible-label: "속성";

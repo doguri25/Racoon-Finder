@@ -737,7 +737,8 @@ component SizeSlider inherits Rectangle {
                 }
             }
             Text {
-                width: 44px;
+                // Room for "512px", grown with the size of the text (44px at 12px, THEME-07).
+                width: max(44px, 44px * Theme.font-small / 12px);
                 text: "\{root.size}px";
                 font-size: Theme.font-small;
                 color: Theme.muted;

@@ -195,18 +195,20 @@ impl ViewMode {
         }
     }
 
-    /// The room of one item in the views that lay the items out in rows (the icons, the
-    /// thumbnails, the tiles), in logical pixels, as the screen gives it (`FileGrid`): its width
-    /// and its height, of which the item takes all but a 4 px gap. `None` for 자세히 and 목록.
-    pub fn cell(self) -> Option<(u32, u32)> {
+    /// The width of the room of one item in the views that lay the items out in rows (the
+    /// icons, the thumbnails, the tiles), in logical pixels, as the screen gives it
+    /// (`FileGrid`), of which the item takes all but a 4 px gap. `None` for 자세히 and 목록. Its
+    /// height is the screen's alone: it follows the theme's row height and size of text
+    /// (THEME-07), and nothing here reckons with it.
+    pub fn cell_width(self) -> Option<u32> {
         match self {
-            ViewMode::SmallIcons => Some((200, 30)),
-            ViewMode::MediumIcons => Some((104, 112)),
-            ViewMode::LargeIcons => Some((136, 156)),
-            ViewMode::ExtraLargeIcons => Some((184, 220)),
-            // The picture with 12 px on each side, and two lines of the name under it.
-            ViewMode::Thumbnails { size } => Some((size + 24, size + 60)),
-            ViewMode::Tiles => Some((TILE_WIDTH, 64)),
+            ViewMode::SmallIcons => Some(200),
+            ViewMode::MediumIcons => Some(104),
+            ViewMode::LargeIcons => Some(136),
+            ViewMode::ExtraLargeIcons => Some(184),
+            // The picture with 12 px on each side.
+            ViewMode::Thumbnails { size } => Some(size + 24),
+            ViewMode::Tiles => Some(TILE_WIDTH),
             ViewMode::Details | ViewMode::List => None,
         }
     }
@@ -241,7 +243,7 @@ pub struct GridShape {
 /// and the scroll bar's room, at least one. `None` for 자세히 and 목록, which are no rows of
 /// items.
 pub fn grid_shape(mode: ViewMode, width: u32, count: usize) -> Option<GridShape> {
-    let (cell, _) = mode.cell()?;
+    let cell = mode.cell_width()?;
     let room = width.saturating_sub(2 * GRID_PAD + GRID_BAR);
     let per_row = usize::try_from(room / cell).unwrap_or(usize::MAX).max(1);
     Some(GridShape {
