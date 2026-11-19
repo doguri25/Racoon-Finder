@@ -25,10 +25,12 @@ use std::time::SystemTime;
 use rf_core::{Entry, EntryKind, Error, ErrorKind, Os, VPath};
 use rf_jobs::{CopyFound, CreatedItem};
 use rf_vfs::{
-    CancelToken, Capabilities, Change, NameFolding, Provider, SortSpec, Vfs, VisibilityFilter,
-    WatchEvent, WatchHandle, fold_name, name_text, sort_by_name, sort_entries,
+    CancelToken, Capabilities, Change, NameFolding, Provider, ShellPlace, SortSpec, TrashItem, Vfs,
+    VisibilityFilter, WatchEvent, WatchHandle, fold_name, name_text, sort_by_name, sort_entries,
+    trash_entry,
 };
 
+use crate::format::shell_place_at;
 use crate::pane::OpenAction;
 use crate::pick::TargetFacts;
 use crate::settings::Found;
@@ -151,6 +153,14 @@ pub enum LoadEvent {
     /// The bytes the user can still write on the folder's volume. Sent after `Listed`, and
     /// only when the provider can tell.
     Space { generation: u64, available: u64 },
+    /// The items of the trash, as its listing found them (`shell://trash`, NAV-16): the record
+    /// of each row of the `Listed` that follows, named by its id, with the stamp that a restore
+    /// or a delete for good checks before it acts (the item must still be the one the user saw).
+    /// Sent once, right before that `Listed`. The trash cannot be watched: no `Changes` follow.
+    TrashItems {
+        generation: u64,
+        items: Vec<TrashItem>,
+    },
     /// The folders a [`Loader::list_names`] found, in the natural order of their names: at most
     /// its request's `limit` of them, how many more folders there are, and whether links were
     /// left unexamined (past the limit, or past the most links a listing follows), which may
@@ -174,6 +184,7 @@ impl LoadEvent {
             | LoadEvent::Rescan { generation }
             | LoadEvent::Vanished { generation }
             | LoadEvent::Space { generation, .. }
+            | LoadEvent::TrashItems { generation, .. }
             | LoadEvent::Names { generation, .. } => *generation,
         }
     }
@@ -691,6 +702,9 @@ impl Worker {
             return self.send_names(provider.as_ref(), &path, generation, rule);
         }
         let live = self.mode == Mode::Live;
+        if live && shell_place_at(&path) == Some(ShellPlace::Trash) {
+            return self.send_trash(provider.as_ref(), generation, sort);
+        }
         if live {
             let watchable = provider.capabilities(&path).contains(Capabilities::WATCH);
             if self.cancel.is_cancelled() {
@@ -743,6 +757,37 @@ impl Worker {
                 },
             );
         }
+    }
+
+    /// The work of a [`Mode::Live`] request for the trash: its items, as one listing of the
+    /// trash finds them ([`Provider::trash_items`]), sent as [`LoadEvent::TrashItems`] and then as
+    /// their rows ([`rf_vfs::trash_entry`]) sorted by `sort`. No watch (the trash has none) and
+    /// no free space.
+    fn send_trash(&self, provider: &dyn Provider, generation: u64, sort: SortSpec) {
+        let listed = provider.trash_items();
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        let items = match listed {
+            Ok(items) => items,
+            Err(error) => {
+                let kind = error.kind();
+                return emit(&self.shared, LoadEvent::Failed { generation, kind });
+            }
+        };
+        let mut entries: Vec<Entry> = items.iter().map(trash_entry).collect();
+        sort_entries(&mut entries, &sort);
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        emit(&self.shared, LoadEvent::TrashItems { generation, items });
+        emit(
+            &self.shared,
+            LoadEvent::Listed {
+                generation,
+                entries,
+            },
+        );
     }
 
     /// The work of a [`Mode::Names`] request for `folder`: the names that `rule` keeps, sorted,

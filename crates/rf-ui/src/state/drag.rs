@@ -240,7 +240,8 @@ impl AppState {
     /// keyboard and the row the cursor. On a row that is not selected, or with Shift, it is
     /// the click ([`AppState::click_row`]) at once; on a selected row the selection stays,
     /// for a drag of all of it, and the click waits for [`AppState::release_row`]. Either way
-    /// the press readies a drag of the items that are then selected.
+    /// the press readies a drag of the items that are then selected, but in a list of the shell
+    /// (휴지통, 내 PC), whose rows are no items to drag.
     pub fn press_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
         self.activate(side);
         self.pending_click = None;
@@ -265,8 +266,11 @@ impl AppState {
         } else {
             self.click_row(side, row, ctrl, shift)
         };
+        // The rows of a list of the shell (the trash's items, the drives) go nowhere by a drag:
+        // the trash's come out with 복원 or 위치를 골라 꺼내기….
         self.drag = self
             .pick_request(side, TransferMode::Move)
+            .filter(|request| crate::tree::holds_folders(&request.from_dir))
             .map(|request| Drag {
                 id: next_generation(),
                 side,
@@ -386,9 +390,18 @@ impl AppState {
             return None;
         }
         let folder = self.spot_folder(spot);
+        let to_trash = self.trash_spot(spot);
         let drag = self.drag.as_mut().filter(|drag| drag.id == id && id != 0)?;
         drag.shown = None;
         let folder = folder?;
+        // The 휴지통 of the sidebar takes the items into the trash, as Delete does.
+        if to_trash {
+            drag.shown = Some(folder.clone());
+            return Some(DropOffer {
+                folder,
+                choice: DropChoice::Do(DropEffect::Move),
+            });
+        }
         let takes = *drag
             .takes
             .entry(folder.clone())
@@ -489,14 +502,37 @@ impl AppState {
         let live = self.modal.is_none() && !self.quitting;
         let Some(offer) = self.offer_with(id, spot, mods, allowed) else {
             // The window showed a folder that takes them, and the place holds one that does not.
-            return if shown.is_some() && live {
-                vec![Effect::Notice(words::drop_moved().to_owned())]
-            } else {
-                Vec::new()
-            };
+            if shown.is_some() && live {
+                return vec![Effect::Notice(words::drop_moved().to_owned())];
+            }
+            // A list of the shell takes nothing; the drop says why, as the hover did.
+            if live
+                && self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.id == id && id != 0)
+                && self
+                    .spot_folder(spot)
+                    .is_some_and(|folder| !crate::tree::holds_folders(&folder))
+            {
+                return vec![Effect::Notice(words::drop_refused(Validity::ShellPlace))];
+            }
+            return Vec::new();
         };
         if shown.is_some_and(|shown| shown != offer.folder) {
             return vec![Effect::Notice(words::drop_moved().to_owned())];
+        }
+        // On the 휴지통 of the sidebar: the trash takes them, by the rules of Delete (a place
+        // without a trash asks before a delete for good).
+        if self.trash_spot(spot) {
+            let Some(drag) = self.drag.take() else {
+                return Vec::new();
+            };
+            self.pending_click = None;
+            return vec![Effect::CheckTrash {
+                folder: drag.request.from_dir,
+                paths: drag.request.sources,
+            }];
         }
         let choice = if ask { asked(allowed) } else { offer.choice };
         let mode = match choice {
@@ -705,6 +741,22 @@ impl AppState {
             self.drag = None;
         }
         Vec::new()
+    }
+
+    /// Whether `spot` is the 휴지통 of the sidebar (a row of a tree whose place is the trash):
+    /// a drop there sends the items to the trash (NAV-16), unlike a drop on the trash's own list,
+    /// which takes nothing.
+    pub(super) fn trash_spot(&self, spot: DropSpot) -> bool {
+        let DropSpot::Tree { tree, row } = spot else {
+            return false;
+        };
+        self.trees
+            .get(tree)
+            .and_then(|shown| shown.node(shown.node_at(row)?))
+            .is_some_and(|node| {
+                node.root.is_some()
+                    && crate::format::shell_place_at(&node.path) == Some(rf_vfs::ShellPlace::Trash)
+            })
     }
 
     /// The folder a drop on `spot` puts the items into; `None` for a row or a tab that is not

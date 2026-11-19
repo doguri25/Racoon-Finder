@@ -41,6 +41,7 @@ mod session;
 mod shell;
 mod sidebar;
 mod tabs;
+mod trash;
 mod tray;
 mod trees;
 mod undo_list;

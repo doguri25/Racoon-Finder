@@ -38,7 +38,7 @@ use crate::dialogs::{Modal, NameDialog};
 use crate::format::folder_label;
 use crate::places::{Place, PlaceKind, recent_slot};
 use crate::settings::{Favorite, Settings};
-use crate::words;
+use crate::words::{self, Blocked};
 
 /// How many folders the group of recent folders keeps.
 pub const RECENT_FOLDERS: usize = 10;
@@ -126,9 +126,19 @@ impl Look {
 }
 
 impl AppState {
-    /// The places of the sidebar, in order: the favorites, then the drives.
+    /// The places of the sidebar, in order: the favorites, then 내 PC, the drives and 휴지통.
     pub fn places(&self) -> &[Place] {
         &self.places
+    }
+
+    /// The places that are the roots of the picker's tree, in order: those of the sidebar but
+    /// the places of the shell, into which nothing is copied or moved.
+    pub fn pick_places(&self) -> Vec<Place> {
+        self.places
+            .iter()
+            .filter(|place| crate::tree::holds_folders(&place.path))
+            .cloned()
+            .collect()
     }
 
     /// The favorites the user keeps, in order. Empty while the user has not edited the list
@@ -263,8 +273,9 @@ impl AppState {
         }
         let roots = super::pick::tree_roots(&self.places);
         let mut effects = self.with_tree(super::LEFT, |tree| tree.set_roots(roots.clone()));
-        effects.extend(self.with_tree(super::RIGHT, |tree| tree.set_roots(roots.clone())));
+        effects.extend(self.with_tree(super::RIGHT, |tree| tree.set_roots(roots)));
         if self.shown_picker().is_some() {
+            let roots = super::pick::pick_roots(&self.places);
             effects.extend(self.with_pick_tree(|tree| tree.set_roots(roots)));
         }
         effects
@@ -273,6 +284,13 @@ impl AppState {
     /// Keeps the folder `folder` as the last favorite (the menu's 현재 폴더를 즐겨찾기에 추가, a
     /// folder's 즐겨찾기에 추가). One that is among the favorites already says so.
     pub fn favorite_add(&mut self, folder: &VPath) -> Vec<Effect> {
+        // 휴지통 and 내 PC are places of the sidebar of their own, not folders to keep.
+        if let Some(place) = crate::format::shell_place_at(folder) {
+            return vec![Effect::Notice(words::shell_blocked(
+                place,
+                Blocked::Favorite,
+            ))];
+        }
         let list = self.shown_as_list();
         if let Some(there) = list
             .iter()
@@ -353,6 +371,9 @@ impl AppState {
     /// 즐겨찾기에 추가 in the menu of the folder item of the active pane: the folders of the
     /// items the menu is of are kept as favorites (one that is a favorite already says so).
     pub fn favorite_add_selected(&mut self) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Favorite) {
+            return refused;
+        }
         let folders: Vec<VPath> = self
             .target_entries(self.active)
             .into_iter()
@@ -646,6 +667,10 @@ impl AppState {
     }
 
     fn visit(&mut self, folder: &VPath) {
+        // 휴지통 and 내 PC are in the sidebar always: no recent folders of theirs.
+        if !crate::tree::holds_folders(folder) {
+            return;
+        }
         self.kept.recent.retain(|recent| recent != folder);
         self.kept.recent.insert(0, folder.clone());
         self.kept.recent.truncate(RECENT_FOLDERS);

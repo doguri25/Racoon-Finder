@@ -215,10 +215,11 @@ fn via_file_manager(local: &Path) -> io::Result<Option<PathBuf>> {
         .map(|moved| PathBuf::from(moved.to_string())))
 }
 
-/// The user's trash folders: `~/.Trash` first, then `<volume>/.Trashes/<uid>` of each folder of
-/// `/Volumes` that is another volume than `/` (which passes over the link to the system volume
-/// there) and has one. The home trash is given even when it does not exist. A trash folder that is
-/// itself a link is never one: it would make what it leads to the trash.
+/// The user's trash folders: `~/.Trash` first, then `<volume>/.Trashes/<uid>` of each other
+/// volume than `/` that the drives list (`crate::mounted_roots`, the folders of `/Volumes`, which
+/// passes over the link to the system volume there) and that has one. The home trash is given
+/// even when it does not exist. A trash folder that is itself a link is never one: it would make
+/// what it leads to the trash.
 fn trash_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = dirs::home_dir()
         .map(|home| home.join(".Trash"))
@@ -226,17 +227,14 @@ fn trash_dirs() -> Vec<PathBuf> {
         .into_iter()
         .collect();
     let uid = rustix::process::getuid().as_raw().to_string();
-    let system = std::fs::metadata("/").map(|meta| meta.dev()).ok();
-    let Ok(volumes) = std::fs::read_dir("/Volumes") else {
-        return dirs;
-    };
-    let mut others: Vec<PathBuf> = volumes
-        .flatten()
-        .filter(|volume| !volume.file_name().as_bytes().starts_with(b"."))
-        .filter(|volume| {
-            std::fs::metadata(volume.path()).is_ok_and(|meta| Some(meta.dev()) != system)
+    let mut others: Vec<PathBuf> = crate::mounted_roots()
+        .into_iter()
+        .filter(|root| matches!(root.kind, crate::RootKind::Volume(_)))
+        .filter_map(|root| {
+            root.path
+                .as_local()
+                .map(|volume| volume.join(".Trashes").join(&uid))
         })
-        .map(|volume| volume.path().join(".Trashes").join(&uid))
         .filter(|trash| std::fs::symlink_metadata(trash).is_ok_and(|meta| meta.is_dir()))
         .collect();
     others.sort();

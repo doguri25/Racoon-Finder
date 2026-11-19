@@ -18,6 +18,7 @@ use rf_jobs::{
 use rf_platform::dnd::DropEffect;
 use rf_platform::shell::App;
 use rf_platform::{KnownFolder, LinkKind};
+use rf_vfs::ShellPlace;
 
 use crate::format::{Rounding, format_size, format_size_rounded, short_path};
 use crate::hashing::HashFailure;
@@ -50,6 +51,8 @@ pub enum JobWork {
     Create,
     /// Making links (`JobSpec::MakeLink`).
     Link,
+    /// Putting items back from the trash (`JobSpec::RestoreFromTrash`, NAV-16).
+    Restore,
     /// An undo (`JobEngine::undo`).
     Undo,
     /// A redo (`JobEngine::redo`), which is an undo of the undo. Its spec is an undo spec too,
@@ -78,6 +81,7 @@ impl JobWork {
             JobKind::Create => JobWork::Create,
             JobKind::Link => JobWork::Link,
             JobKind::Undo => JobWork::Undo,
+            JobKind::Restore => JobWork::Restore,
             _ => JobWork::Other,
         }
     }
@@ -107,6 +111,7 @@ impl JobWork {
                 "링크 만들기를",
                 "링크 만들기",
             ),
+            JobWork::Restore => ("복원하는 중", "복원했", "복원을", "복원"),
             JobWork::Undo => ("되돌리는 중", "되돌렸", "되돌리기를", "되돌리기"),
             JobWork::Redo => (
                 "다시 실행하는 중",
@@ -235,7 +240,15 @@ pub fn column_title(column: Column) -> &'static str {
         Column::Attributes => "속성",
         Column::Accessed => "접근한 날짜",
         Column::Path => "경로",
+        Column::Original => "원래 위치",
+        Column::Deleted => "삭제한 날짜",
     }
+}
+
+/// The notice when a view of 내 PC is asked for that it does not have: it shows its drives as
+/// tiles only.
+pub fn computer_view_fixed() -> &'static str {
+    "내 PC는 드라이브를 타일로만 보여 줍니다"
 }
 
 /// The notice after 하위 폴더에 적용 in the folder `name`.
@@ -549,6 +562,15 @@ pub fn system_disk() -> &'static str {
     "시스템 디스크"
 }
 
+/// The name of a place of the shell, in the sidebar, a tab, the path row and the path field,
+/// which takes it typed back: `휴지통`, `내 PC`.
+pub fn shell_place(place: ShellPlace) -> &'static str {
+    match place {
+        ShellPlace::Trash => "휴지통",
+        ShellPlace::Computer => "내 PC",
+    }
+}
+
 /// Why a job refused an item, or part of one: one sentence for each rule of the jobs, or for
 /// a name or size the target cannot hold, the [`issue_kind`] fact and what it meant for the
 /// item (a rename or a create refuses every name with an issue, warnings too).
@@ -608,6 +630,13 @@ pub fn failure_reason(reason: &FailureReason) -> String {
             "링크가 바뀌었거나 다른 항목으로 대체되어 되돌리지 않았습니다"
         }
         FailureReason::TempLeftBehind => "임시 파일을 지우지 못해 남아 있습니다",
+        FailureReason::TrashItemChanged => {
+            "휴지통이 바뀌었습니다. 목록을 새로 고친 뒤 다시 해 주세요."
+        }
+        FailureReason::OriginalFolderGone => {
+            "원래 폴더가 없습니다. 위치를 골라 꺼내기…로 다른 폴더에 꺼낼 수 있습니다."
+        }
+        FailureReason::RestoreNeverReplaces => "복원은 그 자리에 있는 항목을 덮어쓰지 않습니다",
         FailureReason::Issue(issue) => {
             return format!("{}. {}", issue_kind(issue), refused_because(issue));
         }
@@ -1123,6 +1152,7 @@ pub fn job_report(
         JobWork::Rename => "이름 바꿈",
         JobWork::Create => "만듦",
         JobWork::Link => "링크 만듦",
+        JobWork::Restore => "복원",
         JobWork::Undo => "되돌림",
         JobWork::Redo => "다시 실행",
         JobWork::Other => "처리",
@@ -1940,6 +1970,144 @@ pub fn delete_permanently(count: usize) -> String {
     format!("항목 {count}개를 영구 삭제할까요?\n휴지통을 거치지 않으며 되돌릴 수 없습니다.")
 }
 
+/// The question before items of the trash are deleted for good (휴지통 ▸ 영구 삭제…, NAV-16):
+/// how many, their size when the trash knows it for every one, and that nothing brings them
+/// back.
+pub fn delete_from_trash(count: usize, size: Option<u64>) -> String {
+    format!(
+        "휴지통의 항목 {count}개{}를 영구 삭제할까요?\n되돌릴 수 없습니다.",
+        size_part(size)
+    )
+}
+
+/// The title and the button of the question before the trash is emptied.
+pub fn empty_trash_title() -> &'static str {
+    "휴지통 비우기"
+}
+
+/// The question before the trash is emptied (휴지통 비우기…): how many items it holds as the
+/// list was read for the question, their size when the trash knows it for every one, and that
+/// nothing brings them back.
+pub fn empty_trash(count: usize, size: Option<u64>) -> String {
+    format!(
+        "휴지통의 항목 {count}개{}를 모두 영구 삭제할까요?\n되돌릴 수 없습니다.",
+        size_part(size)
+    )
+}
+
+/// `(1.2 MB)` after a count, for a size that is known; nothing for one that is not.
+fn size_part(size: Option<u64>) -> String {
+    size.map(|size| format!("({})", format_size(size)))
+        .unwrap_or_default()
+}
+
+/// The notice when 휴지통 비우기… finds the trash empty.
+pub fn trash_already_empty() -> &'static str {
+    "휴지통이 비어 있습니다"
+}
+
+/// The notice when the trash could not be read for 휴지통 비우기…, with why.
+pub fn trash_unreadable(kind: ErrorKind) -> String {
+    format!("휴지통을 읽지 못했습니다: {}", error_kind(kind))
+}
+
+/// The notice when 복원 is asked for items whose original place the trash does not keep (macOS,
+/// or a record that cannot be read): only 위치를 골라 꺼내기… can take them out.
+pub fn restore_place_unknown() -> &'static str {
+    "원래 위치를 모르는 항목이 있어 복원할 수 없습니다. 위치를 골라 꺼내기…로 꺼내세요."
+}
+
+/// The notice after a restore that put every item back: how many, and where to (`to`, the name
+/// of the one folder they went into; none when they went to several, each to its own).
+pub fn restored(count: usize, to: Option<&str>) -> String {
+    match to {
+        Some(folder) => format!("항목 {count}개를 ‘{folder}’ 폴더로 복원했습니다"),
+        None => format!("항목 {count}개를 각각 원래 위치로 복원했습니다"),
+    }
+}
+
+/// The notice after a restore of which some items found their original folder gone: they stay
+/// in the trash, and the toast's button finds them another place.
+pub fn restore_folders_gone(count: usize) -> String {
+    format!("원래 폴더가 없어 항목 {count}개를 복원하지 못했습니다")
+}
+
+/// The label of the button that takes items out of the trash to a folder the user chooses.
+pub fn restore_elsewhere_action() -> &'static str {
+    "위치를 골라 꺼내기…"
+}
+
+/// The notice when an item of the trash is opened (Enter, a double click): it is opened once it
+/// is back.
+pub fn trash_item_not_opened() -> &'static str {
+    "휴지통 안의 항목은 열 수 없습니다. 먼저 복원하세요."
+}
+
+/// The notice when a drive of 내 PC cannot be opened: its row stands for no drive the sidebar
+/// knows (any more).
+pub fn drive_gone() -> &'static str {
+    "드라이브를 찾을 수 없습니다. 새로 고침(F5)으로 목록을 다시 읽으세요."
+}
+
+/// What a command could not do in a place of the shell (NAV-16): the trash and the computer are
+/// lists, not folders, and nothing is made, renamed, copied, read or moved in them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Blocked {
+    NewFolder,
+    NewFile,
+    Paste,
+    Rename,
+    Link,
+    Copy,
+    Cut,
+    Transfer,
+    CopyPath,
+    Properties,
+    OpenWith,
+    Terminal,
+    Preview,
+    Share,
+    Delete,
+    Favorite,
+}
+
+/// The notice when a command does nothing in the trash or the computer, and what is possible
+/// there: `휴지통에서는 새 폴더를 만들 수 없습니다. 항목은 복원하거나 영구 삭제할 수 있습니다.`
+pub fn shell_blocked(place: ShellPlace, what: Blocked) -> String {
+    let verb = match what {
+        Blocked::NewFolder => "새 폴더를 만들",
+        Blocked::NewFile => "새 파일을 만들",
+        Blocked::Paste => "붙여넣을",
+        Blocked::Rename => "이름을 바꿀",
+        Blocked::Link => "링크를 만들",
+        Blocked::Copy => "복사할",
+        Blocked::Cut => "잘라낼",
+        Blocked::Transfer => "복사하거나 옮길",
+        Blocked::CopyPath => "경로를 복사할",
+        Blocked::Properties => "속성을 볼",
+        Blocked::OpenWith => "다른 프로그램으로 열",
+        Blocked::Terminal => "터미널을 열",
+        Blocked::Preview => "미리 볼",
+        Blocked::Share => "공유할",
+        Blocked::Delete => "삭제할",
+        Blocked::Favorite => "즐겨찾기에 추가할",
+    };
+    let what_can = match place {
+        ShellPlace::Trash => "항목은 복원하거나 영구 삭제할 수 있습니다.",
+        ShellPlace::Computer => "드라이브를 열면 그 안에서 할 수 있습니다.",
+    };
+    format!(
+        "{}에서는 {verb} 수 없습니다. {what_can}",
+        shell_place(place)
+    )
+}
+
+/// What shows beside the pointer of a drag over the 휴지통 of the sidebar: a drop there sends
+/// the items to the trash.
+pub fn drop_to_trash() -> &'static str {
+    "휴지통으로 보내기"
+}
+
 /// The question when the folder's location has no trash (OPS-03): the items would go for
 /// good, which only the user may choose.
 pub fn trash_unavailable(count: usize) -> String {
@@ -2034,15 +2202,21 @@ impl CopyKept {
 
 /// The names of the items a confirmation is about: up to three, in quotes, and how many more.
 pub fn names_line(paths: &[VPath]) -> String {
+    let names: Vec<String> = paths.iter().map(name_of).collect();
+    shown_names_line(&names)
+}
+
+/// [`names_line`] of items by the names they show (an item of the trash by the name it had).
+pub fn shown_names_line(names: &[String]) -> String {
     const SHOWN: usize = 3;
-    let names: Vec<String> = paths
+    let shown: Vec<String> = names
         .iter()
         .take(SHOWN)
-        .map(|path| format!("‘{}’", name_of(path)))
+        .map(|name| format!("‘{name}’"))
         .collect();
-    let mut line = names.join(", ");
-    if paths.len() > SHOWN {
-        let _ = write!(line, " 외 {}개", paths.len() - SHOWN);
+    let mut line = shown.join(", ");
+    if names.len() > SHOWN {
+        let _ = write!(line, " 외 {}개", names.len() - SHOWN);
     }
     line
 }
@@ -2137,6 +2311,8 @@ pub fn skip_hint(kind: EntryKind, work: JobWork) -> String {
     let verb = match work {
         JobWork::Copy => "복사하지",
         JobWork::Move => "옮기지",
+        // It stays in the trash.
+        JobWork::Restore => return format!("이 {what}{particle} 휴지통에 그대로 둡니다"),
         _ => "가져오지",
     };
     format!("이 {what}{particle} {verb} 않습니다")
@@ -2147,6 +2323,7 @@ fn coming(work: JobWork) -> &'static str {
     match work {
         JobWork::Copy => "복사해 올",
         JobWork::Move => "옮겨 올",
+        JobWork::Restore => "복원할",
         // A job this window did not start.
         _ => "가져올",
     }
@@ -2189,6 +2366,8 @@ pub fn grouped(number: u64) -> String {
 pub fn overwrite_hint(can_overwrite: bool, work: JobWork) -> String {
     if can_overwrite {
         format!("있던 파일을 {} 파일로 바꿉니다", coming(work))
+    } else if work == JobWork::Restore {
+        failure_reason(&FailureReason::RestoreNeverReplaces)
     } else {
         "파일과 폴더는 서로 덮어쓸 수 없습니다".to_owned()
     }
@@ -2366,6 +2545,7 @@ pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> S
         Validity::IntoSource => "옮기는 항목 안이라 고를 수 없음".to_owned(),
         Validity::SameFolder => "원래 있던 폴더라 고를 수 없음".to_owned(),
         Validity::NotAFolder => "폴더를 찾을 수 없어 고를 수 없음".to_owned(),
+        Validity::ShellPlace => "휴지통과 내 PC에는 넣을 수 없음".to_owned(),
         Validity::NotWritable => "읽기 전용 위치라 작업이 실패할 수 있습니다".to_owned(),
         Validity::NotEnoughSpace { need, available } => format!(
             "공간이 부족할 수 있습니다: 필요 {}{}, 남은 공간 {}",
@@ -2520,6 +2700,22 @@ pub fn pick_link_confirm() -> &'static str {
     "여기에 링크 만들기"
 }
 
+/// The title of the picker that finds where items of the trash are taken out to
+/// (위치를 골라 꺼내기…).
+pub fn pick_restore_title() -> &'static str {
+    "위치를 골라 꺼내기"
+}
+
+/// The picker's line under its title when it finds where `count` items of the trash go.
+pub fn pick_restore_summary(count: usize) -> String {
+    format!("휴지통의 항목 {count}개")
+}
+
+/// The confirm button of the picker that takes items out of the trash.
+pub fn pick_restore_confirm() -> &'static str {
+    "여기로 꺼내기"
+}
+
 /// The picker's line under its title when it finds where `count` links of `kind` go.
 pub fn pick_link_summary(kind: LinkKind, count: usize, os: Os) -> String {
     format!("항목 {count}개의 {}", link_kind(kind, os))
@@ -2591,6 +2787,7 @@ pub fn drop_refused(validity: Validity) -> String {
         Validity::IntoSource => "끌고 있는 폴더 자신이거나 그 안입니다",
         Validity::SameFolder => "항목이 이미 이 폴더에 있습니다",
         Validity::NotAFolder => "폴더가 아닙니다",
+        Validity::ShellPlace => "휴지통 목록과 내 PC에는 항목을 넣을 수 없습니다",
         // A place that takes them with a warning is no refusal.
         Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => {
             return "여기에 놓을 수 없습니다".to_owned();
@@ -3620,13 +3817,14 @@ mod tests {
         assert_eq!(JobWork::of(&undo), JobWork::Undo);
     }
 
-    const WORKS: [JobWork; 9] = [
+    const WORKS: [JobWork; 10] = [
         JobWork::Copy,
         JobWork::Move,
         JobWork::Trash,
         JobWork::Delete,
         JobWork::Rename,
         JobWork::Create,
+        JobWork::Restore,
         JobWork::Undo,
         JobWork::Redo,
         JobWork::Other,

@@ -7052,6 +7052,7 @@ const ONE_FILE: MenuFacts = MenuFacts {
     one_folder: false,
     one_dir: false,
     one_item: true,
+    can_restore: false,
 };
 const ONE_PROGRAM: MenuFacts = MenuFacts {
     runnable: true,
@@ -7063,6 +7064,7 @@ const ONE_FOLDER: MenuFacts = MenuFacts {
     one_folder: true,
     one_dir: true,
     one_item: true,
+    can_restore: false,
 };
 const SEVERAL: MenuFacts = MenuFacts {
     one_file: false,
@@ -7070,6 +7072,7 @@ const SEVERAL: MenuFacts = MenuFacts {
     one_folder: false,
     one_dir: false,
     one_item: false,
+    can_restore: false,
 };
 
 /// Sets what the item menu offers, as `AppState::item_menu` says it.

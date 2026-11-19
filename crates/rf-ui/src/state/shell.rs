@@ -45,7 +45,7 @@ use rf_platform::shell::{App, AppVerb, Elevation, SystemMenuChoice, can_run_as_a
 
 use super::links::{LinkFacts, link_facts};
 use super::{AppState, Effect, RIGHT};
-use crate::words::{self, ShellAction};
+use crate::words::{self, Blocked, ShellAction};
 
 /// What a worker is to ask of the system (`crate::open::shell`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +154,7 @@ struct SystemAsked {
 /// What the item menu offers for the items it is for, besides what it always has.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "five items of a menu, each shown or not"
+    reason = "six items of a menu, each shown or not"
 )]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct MenuFacts {
@@ -169,6 +169,9 @@ pub struct MenuFacts {
     pub one_dir: bool,
     /// One item: OS 속성 창 열기.
     pub one_item: bool,
+    /// Items of the trash whose original places the trash keeps, all of them: 복원 (the trash's
+    /// item menu, NAV-16); 위치를 골라 꺼내기… is offered without it.
+    pub can_restore: bool,
 }
 
 /// What the item menu offers for `items`, on a system that runs a program as administrator or
@@ -191,6 +194,7 @@ pub fn menu_facts(items: &[(VPath, &Entry)], runs_as_admin: bool) -> MenuFacts {
         one_folder: matches!(entry.kind, EntryKind::Dir | EntryKind::Symlink),
         one_dir: entry.kind == EntryKind::Dir,
         one_item: true,
+        can_restore: false,
     }
 }
 
@@ -242,7 +246,8 @@ impl AppState {
     /// on there.
     pub(super) fn note_item_menu(&mut self, side: usize) {
         let entries = self.target_entries(side);
-        let menu = menu_facts(&entries, rf_platform::shell::RUNS_AS_ADMIN);
+        let mut menu = menu_facts(&entries, rf_platform::shell::RUNS_AS_ADMIN);
+        menu.can_restore = self.can_restore(side);
         let links = link_facts(
             Os::CURRENT,
             &entries,
@@ -314,6 +319,9 @@ impl AppState {
     /// items (`blank`): the system's own menu of the same items (or folder), where that menu
     /// showed, in the active pane, which its choice has made active.
     pub fn more_options(&mut self, blank: bool) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Properties) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting || !self.shell.system_offered {
             return Vec::new();
         }
@@ -469,6 +477,9 @@ impl AppState {
     /// 공유… in the item menu (macOS): the system's picker of the ways to share the items a
     /// command acts on in the active pane, where the menu showed.
     pub fn share(&mut self) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Share) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }
@@ -516,7 +527,7 @@ impl AppState {
     }
 
     /// The app's item menu of pane `side` from the keys ([`AppState::context_menu`]).
-    fn app_menu(&mut self, side: usize) -> Vec<Effect> {
+    pub(super) fn app_menu(&mut self, side: usize) -> Vec<Effect> {
         let Some(row) = self.menu_row(side) else {
             self.shell.menu = MenuFacts::default();
             self.shell.links = LinkFacts::default();
@@ -644,6 +655,9 @@ impl AppState {
     /// 터미널에서 열기 in the menu of the part of a list without rows: a terminal in the
     /// folder the active pane shows, whatever is chosen.
     pub fn folder_terminal(&mut self) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Terminal) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }

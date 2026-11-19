@@ -341,6 +341,64 @@ fn sort_agrees_with_compare_entries() {
     }
 }
 
+/// An item of the trash: named by its id, shown by the name it had, from `origin`, trashed at
+/// second `deleted`.
+fn trashed(id: &str, label: &str, origin: Option<&str>, deleted: Option<u64>) -> Entry {
+    let mut entry = f(id);
+    entry.label = Some(label.into());
+    entry.origin = origin.map(std::path::PathBuf::from);
+    entry.deleted = deleted.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
+    entry
+}
+
+#[test]
+fn items_named_by_an_id_sort_by_the_name_they_show_their_origin_and_deletion() {
+    let items = || {
+        vec![
+            trashed("$R3", "b10.txt", Some("/home/u/docs"), Some(30)),
+            trashed("$R1", "B2.txt", None, None),
+            trashed("$R2", "a.txt", Some("/home/u/Downloads"), Some(10)),
+            trashed("$R4", "a.txt", Some("/home/u/docs10"), Some(20)),
+        ]
+    };
+    // By the name shown, naturally and ignoring case; the ids break the tie of two `a.txt`.
+    assert_eq!(
+        sorted(items(), SortSpec::default()),
+        ["$R2", "$R4", "$R1", "$R3"]
+    );
+    // By the folder they came from, an unknown one first, in natural order (docs before
+    // docs10, Downloads after both).
+    assert_eq!(
+        sorted(items(), spec(by(SortKey::Origin, Ascending), true)),
+        ["$R1", "$R3", "$R4", "$R2"]
+    );
+    assert_eq!(
+        sorted(items(), spec(by(SortKey::Origin, Descending), true)),
+        ["$R2", "$R4", "$R3", "$R1"]
+    );
+    // By the time they were trashed, an unknown time first.
+    assert_eq!(
+        sorted(items(), spec(by(SortKey::Deleted, Ascending), true)),
+        ["$R1", "$R2", "$R4", "$R3"]
+    );
+    // The extension is the name's, not the id's.
+    let mut kinds = vec![trashed("x.bin", "photo.png", None, None), f("a.txt")];
+    sort_entries(&mut kinds, &spec(by(SortKey::Extension, Ascending), true));
+    assert_eq!(names(&kinds), ["x.bin", "a.txt"]);
+    // The sort agrees with the single comparison.
+    for key in [Name, SortKey::Origin, SortKey::Deleted] {
+        let sort_spec = spec(by(key, Ascending), false);
+        let mut ordered = items();
+        sort_entries(&mut ordered, &sort_spec);
+        assert!(
+            ordered
+                .windows(2)
+                .all(|pair| compare_entries(&pair[0], &pair[1], &sort_spec) != Ordering::Greater),
+            "{key:?}"
+        );
+    }
+}
+
 #[test]
 fn visibility_filter_follows_explorer_rules() {
     let mk = |n: &str, a: Attributes| {

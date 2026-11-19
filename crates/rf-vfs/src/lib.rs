@@ -24,7 +24,7 @@ pub use registry::Vfs;
 pub use rf_platform::{DataRanges, DiskSpace, RootKind, TrashId, TrashItem, TrashStamp};
 pub use shell::{
     Drive, DriveRow, DriveSource, ShellColumn, ShellPlace, ShellProvider, SystemDrives,
-    SystemTrash, TrashRow, TrashSource,
+    SystemTrash, TrashRow, TrashSource, drive_name, trash_entry,
 };
 pub use sort::{SortBy, SortKey, SortOrder, SortSpec, compare_entries, sort_by_name, sort_entries};
 pub use watch::{Change, MAX_PENDING_CHANGES, WATCH_DEBOUNCE, WatchEvent, WatchHandle, WatchSink};

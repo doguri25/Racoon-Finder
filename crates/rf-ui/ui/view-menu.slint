@@ -119,6 +119,8 @@ export component ViewMenu inherits ContextMenuArea {
         root.mark-sort-4 = root.view.sort-key == 4;
         root.mark-sort-5 = root.view.sort-key == 5;
         root.mark-sort-7 = root.view.sort-key == 7;
+        root.mark-sort-9 = root.view.sort-key == 9;
+        root.mark-sort-10 = root.view.sort-key == 10;
         root.mark-ascending = root.view.sort-ascending;
         root.mark-descending = !root.view.sort-ascending;
         root.mark-then-none = root.view.then-key < 0;
@@ -129,6 +131,8 @@ export component ViewMenu inherits ContextMenuArea {
         root.mark-then-4 = root.view.then-key == 4;
         root.mark-then-5 = root.view.then-key == 5;
         root.mark-then-7 = root.view.then-key == 7;
+        root.mark-then-9 = root.view.then-key == 9;
+        root.mark-then-10 = root.view.then-key == 10;
         root.mark-then-ascending = root.view.then-key >= 0 && root.view.then-ascending;
         root.mark-then-descending = root.view.then-key >= 0 && !root.view.then-ascending;
         root.mark-col-1 = root.view.shows[1];
@@ -139,6 +143,8 @@ export component ViewMenu inherits ContextMenuArea {
         root.mark-col-6 = root.view.shows[6];
         root.mark-col-7 = root.view.shows[7];
         root.mark-col-8 = root.view.shows[8];
+        root.mark-col-9 = root.view.shows[9];
+        root.mark-col-10 = root.view.shows[10];
     }
 
     private property <bool> mark-mode-0;
@@ -157,6 +163,8 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> mark-sort-4;
     private property <bool> mark-sort-5;
     private property <bool> mark-sort-7;
+    private property <bool> mark-sort-9;
+    private property <bool> mark-sort-10;
     private property <bool> mark-ascending;
     private property <bool> mark-descending;
     private property <bool> mark-then-none;
@@ -167,6 +175,8 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> mark-then-4;
     private property <bool> mark-then-5;
     private property <bool> mark-then-7;
+    private property <bool> mark-then-9;
+    private property <bool> mark-then-10;
     private property <bool> mark-then-ascending;
     private property <bool> mark-then-descending;
     private property <bool> mark-col-1;
@@ -177,6 +187,8 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> mark-col-6;
     private property <bool> mark-col-7;
     private property <bool> mark-col-8;
+    private property <bool> mark-col-9;
+    private property <bool> mark-col-10;
 
     private property <bool> system-mark: true;
     private property <bool> light-mark;
@@ -260,8 +272,10 @@ export component ViewMenu inherits ContextMenuArea {
     private property <bool> tab-pinned: root.view.tabs[root.view.active-tab].pinned;
 
     Menu {
+        // 내 PC shows its drives as tiles, in their order, and nothing else (NAV-16).
         Menu {
             title: "보기 방식";
+            enabled: root.view.place != 2;
 
             // The thumbnails at a size of their own (NAV-06), the slider in the status bar. No
             // key, as 특대 and 타일 (keyboard.md).
@@ -371,6 +385,7 @@ export component ViewMenu inherits ContextMenuArea {
         // of the key that sorts already), the second key and its direction, folders first.
         Menu {
             title: "정렬";
+            enabled: root.view.place != 2;
 
             MenuItem {
                 title: "이름";
@@ -390,7 +405,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "수정한 날짜";
                 checkable: true;
                 checked <=> root.mark-sort-2;
@@ -399,7 +414,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "만든 날짜";
                 checkable: true;
                 checked <=> root.mark-sort-4;
@@ -408,7 +423,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "접근한 날짜";
                 checkable: true;
                 checked <=> root.mark-sort-7;
@@ -432,6 +447,25 @@ export component ViewMenu inherits ContextMenuArea {
                 checked <=> root.mark-sort-5;
                 activated => {
                     root.sort(5, false);
+                    root.done();
+                }
+            }
+            // The trash's (NAV-16): where an item was, and when it was trashed.
+            if root.view.place == 1: MenuItem {
+                title: "원래 위치";
+                checkable: true;
+                checked <=> root.mark-sort-9;
+                activated => {
+                    root.sort(9, false);
+                    root.done();
+                }
+            }
+            if root.view.place == 1: MenuItem {
+                title: "삭제한 날짜";
+                checkable: true;
+                checked <=> root.mark-sort-10;
+                activated => {
+                    root.sort(10, false);
                     root.done();
                 }
             }
@@ -492,7 +526,7 @@ export component ViewMenu inherits ContextMenuArea {
                         root.done();
                     }
                 }
-                MenuItem {
+                if root.view.place == 0: MenuItem {
                     title: "수정한 날짜";
                     checkable: true;
                     checked <=> root.mark-then-2;
@@ -502,7 +536,7 @@ export component ViewMenu inherits ContextMenuArea {
                         root.done();
                     }
                 }
-                MenuItem {
+                if root.view.place == 0: MenuItem {
                     title: "만든 날짜";
                     checkable: true;
                     checked <=> root.mark-then-4;
@@ -512,7 +546,7 @@ export component ViewMenu inherits ContextMenuArea {
                         root.done();
                     }
                 }
-                MenuItem {
+                if root.view.place == 0: MenuItem {
                     title: "접근한 날짜";
                     checkable: true;
                     checked <=> root.mark-then-7;
@@ -539,6 +573,26 @@ export component ViewMenu inherits ContextMenuArea {
                     enabled: root.view.sort-key != 5;
                     activated => {
                         root.sort-then(5);
+                        root.done();
+                    }
+                }
+                if root.view.place == 1: MenuItem {
+                    title: "원래 위치";
+                    checkable: true;
+                    checked <=> root.mark-then-9;
+                    enabled: root.view.sort-key != 9;
+                    activated => {
+                        root.sort-then(9);
+                        root.done();
+                    }
+                }
+                if root.view.place == 1: MenuItem {
+                    title: "삭제한 날짜";
+                    checkable: true;
+                    checked <=> root.mark-then-10;
+                    enabled: root.view.sort-key != 10;
+                    activated => {
+                        root.sort-then(10);
                         root.done();
                     }
                 }
@@ -583,6 +637,26 @@ export component ViewMenu inherits ContextMenuArea {
             title: "열";
             enabled: root.view.mode == 0;
 
+            // The trash's (NAV-16): where an item was, and when it was trashed.
+            if root.view.place == 1: MenuItem {
+                title: "원래 위치";
+                checkable: true;
+                checked <=> root.mark-col-9;
+                activated => {
+                    root.column-toggled(9);
+                    root.done();
+                }
+            }
+            if root.view.place == 1: MenuItem {
+                title: "삭제한 날짜";
+                checkable: true;
+                checked <=> root.mark-col-10;
+                activated => {
+                    root.column-toggled(10);
+                    root.done();
+                }
+            }
+
             MenuItem {
                 title: "크기";
                 checkable: true;
@@ -592,7 +666,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "수정한 날짜";
                 checkable: true;
                 checked <=> root.mark-col-2;
@@ -601,7 +675,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "만든 날짜";
                 checkable: true;
                 checked <=> root.mark-col-4;
@@ -610,7 +684,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "접근한 날짜";
                 checkable: true;
                 checked <=> root.mark-col-7;
@@ -637,7 +711,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "속성";
                 checkable: true;
                 checked <=> root.mark-col-6;
@@ -646,7 +720,7 @@ export component ViewMenu inherits ContextMenuArea {
                     root.done();
                 }
             }
-            MenuItem {
+            if root.view.place == 0: MenuItem {
                 title: "경로";
                 checkable: true;
                 checked <=> root.mark-col-8;

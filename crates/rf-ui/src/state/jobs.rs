@@ -20,7 +20,6 @@ use rf_core::{EntryKind, ErrorKind, Os, VPath};
 use rf_jobs::{
     DeleteMethod, DeleteSpec, ErrorPolicy, FailureReason, ItemFailure, JobEvent, JobReport,
     JobSpec, LanePolicy, Outcome, Stage, TransferMode, TransferOptions, TransferSpec, UndoRecord,
-    retry_spec,
 };
 use rf_vfs::{NameFolding, fold_name};
 
@@ -35,7 +34,7 @@ use crate::loader::LoadRequest;
 use crate::pane::{LoadStatus, Pane, Tab};
 use crate::resolver::{Asked, Question, SKIP_ERROR};
 use crate::settings::OnError;
-use crate::words::{self, JobWork};
+use crate::words::{self, Blocked, JobWork};
 
 impl AppState {
     /// Copies or moves the items of pane `side` (the selected rows, or the cursor's row) into
@@ -515,7 +514,9 @@ impl AppState {
                 self.close();
                 self.copies_confirmed(spec, record)
             }
-            ConfirmPurpose::DeletePermanently(_) => {
+            ConfirmPurpose::DeletePermanently(_)
+            | ConfirmPurpose::DeleteFromTrash(_)
+            | ConfirmPurpose::EmptyTrash => {
                 let spec = confirm.job();
                 self.close();
                 spec.map(|spec| submit(spec, None)).into_iter().collect()
@@ -579,6 +580,11 @@ impl AppState {
         self.close();
         // Once for each job, whichever window of it the press came from.
         if !self.retried_jobs.insert(job) {
+            return Vec::new();
+        }
+        // What deletes for good is asked about again, the items named: it cannot be undone.
+        if let JobSpec::DeleteFromTrash { items } = spec {
+            self.open(Modal::Confirm(Confirm::delete_from_trash(items)));
             return Vec::new();
         }
         vec![submit(spec, None)]
@@ -688,6 +694,7 @@ impl AppState {
                 self.open(Modal::Failures(failures));
                 Vec::new()
             }
+            ToastAction::RestoreElsewhere(items) => self.restore_elsewhere_items(items),
         }
     }
 
@@ -701,7 +708,7 @@ impl AppState {
             Some((_, ToastAction::Undo(record))) => {
                 !self.jobs.undo_running() && self.history.top.as_ref() == Some(record)
             }
-            Some((_, ToastAction::Details(_))) => true,
+            Some((_, ToastAction::Details(_) | ToastAction::RestoreElsewhere(_))) => true,
         }
     }
 
@@ -822,6 +829,7 @@ impl AppState {
         let dragged = self.dragged_moves.remove(&report.id);
         let touched = touched_folders(&report.spec, &report.outputs);
         let mut effects = self.folders_changed(&touched);
+        effects.extend(self.trash_changed(&report.spec));
         // A move a paste submitted empties the clipboard once it has moved everything.
         effects.extend(self.paste_ended(&report));
         let pasted_in = self.pasted_in(&report);
@@ -948,6 +956,10 @@ impl AppState {
         if matches!(work, JobWork::Create | JobWork::Rename) {
             return Effect::Notice(words::name_refused(work, failures[0]));
         }
+        // A restore that found original folders gone offers another place for those items.
+        if let Some(toast) = self.restore_toast(report) {
+            return toast;
+        }
         // One link that could not be made says why in the notice itself.
         if work == JobWork::Link && failures.len() == 1 {
             return Effect::Notice(words::link_refused(failures[0]));
@@ -1021,6 +1033,8 @@ impl AppState {
                 (text, report.undo.clone().map(ToastAction::Undo))
             }
             (Outcome::Completed, JobWork::Redo) => (words::outcome(Outcome::Completed, work), None),
+            // Where the items went, with the undo that sends them back to the trash.
+            (Outcome::Completed, JobWork::Restore) => return self.restore_toast(report),
             (Outcome::Aborted, _) => (words::outcome(Outcome::Aborted, work), None),
             _ => return None,
         };
@@ -1125,6 +1139,7 @@ impl AppState {
         let label = match &action {
             Some(ToastAction::Undo(_)) => words::undo_action(),
             Some(ToastAction::Details(_)) => words::details_action(),
+            Some(ToastAction::RestoreElsewhere(_)) => words::restore_elsewhere_action(),
             None => "",
         };
         self.toast = action.map(|action| (token, action));
@@ -1185,6 +1200,9 @@ impl AppState {
     /// numbered name when the name is taken, as it makes a new folder. No key: neither File
     /// Explorer nor Finder has one.
     pub fn new_file(&mut self) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::NewFile) {
+            return refused;
+        }
         if self.quitting {
             return Vec::new();
         }
@@ -1283,19 +1301,31 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 
 /// What 다시 시도 of the window of the failed items of `report` submits (XFER-09): for a copy or
 /// a move, the transfer of the failed items alone, with the mode, the targets and the policies
-/// of the job they come from (`rf_jobs::retry_spec`). `None` for another kind of job, and for a
-/// transfer none of whose failures can be tried again (a source that could not be removed
-/// after its copy was in place, a link that leads back to its own folder).
+/// of the job they come from; for a restore from the trash, a delete from it and its emptying,
+/// the items that failed, as the trash's list showed them (`JobReport::retry_spec`; a delete for
+/// good asks again before it goes, [`AppState::failures_retried`]). `None` for another kind of
+/// job, and for one none of whose failures can be tried again (a source that could not be
+/// removed after its copy was in place, a link that leads back to its own folder, an item of the
+/// trash that changed since it was listed, an emptying the system did at once).
 ///
 /// `None` too for a job that was stopped (`Outcome::Aborted`): the items it never came to are
 /// no failures, and the report does not name them (it counts them at most), so a retry would
 /// redo the failed item alone and look as if it had finished the job. The window says that
 /// the job was stopped instead ([`stopped_note`]).
 pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
-    if !matches!(report.spec, JobSpec::Transfer(_)) || report.outcome == Outcome::Aborted {
+    let retried = matches!(
+        report.spec,
+        JobSpec::Transfer(_)
+            | JobSpec::RestoreFromTrash { .. }
+            | JobSpec::DeleteFromTrash { .. }
+            | JobSpec::EmptyTrash
+    );
+    if !retried || report.outcome == Outcome::Aborted {
         return None;
     }
-    let spec = retry_spec(&report.spec, &report.failures)?;
+    // The report's own retry: an emptying of the trash tries again the items it listed and could
+    // not delete, never what was trashed since (and one the system did at once, none).
+    let spec = report.retry_spec()?;
     Some(Retry {
         job: report.id,
         spec,

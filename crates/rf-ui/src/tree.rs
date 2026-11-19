@@ -33,6 +33,14 @@ use rf_vfs::{SortSpec, VisibilityFilter, sort_entries};
 use crate::loader::LoadRequest;
 use crate::pane::{next_generation, search_key};
 
+/// Whether `path` is a folder whose folders the tree shows below it: every folder but a place of
+/// the shell (`shell://trash`, `shell://computer`, NAV-16), which is a root without a chevron
+/// and is never listed by the tree (the trash's items are not its folders, and a drive of the
+/// computer is a root of its own).
+pub fn holds_folders(path: &VPath) -> bool {
+    rf_vfs::ShellPlace::of(path).is_none()
+}
+
 /// A node's place in its [`Tree`]; it stays the same until [`Tree::set_roots`] starts a new
 /// tree.
 pub type NodeId = usize;
@@ -158,8 +166,11 @@ impl Tree {
         self.roots.clear();
         for (index, (label, path)) in roots.into_iter().enumerate() {
             self.roots.push(self.nodes.len());
+            // A place of the shell is a list, with no folders below it: never listed here.
+            let children = (!holds_folders(&path)).then(Vec::new);
             self.nodes.push(TreeNode {
                 root: Some(index),
+                children,
                 ..TreeNode::new(path, label, 0, None, Attributes::empty())
             });
         }
@@ -354,7 +365,9 @@ impl Tree {
             .into_iter()
             .filter(|&id| {
                 let node = &self.nodes[id];
-                node.path == *path && (node.children.is_some() || node.failed || node.loading)
+                node.path == *path
+                    && holds_folders(path)
+                    && (node.children.is_some() || node.failed || node.loading)
             })
             .partition(|&id| self.nodes[id].loading);
         self.behind.extend(loading);
@@ -392,7 +405,10 @@ impl Tree {
             .into_iter()
             .filter(|&id| {
                 let node = &self.nodes[id];
-                node.path == *path && node.children.is_some() && !node.loading
+                node.path == *path
+                    && holds_folders(path)
+                    && node.children.is_some()
+                    && !node.loading
             })
             .collect();
         ids.into_iter().map(|id| self.list(id)).collect()

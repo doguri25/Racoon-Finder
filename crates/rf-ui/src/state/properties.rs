@@ -35,6 +35,7 @@ use crate::pane::next_generation;
 use crate::properties::{
     CountStatus, HashStatus, Item, MeasureItem, MeasureNews, MeasureRequest, Properties, Tally,
 };
+use crate::words::Blocked;
 
 /// What the window has besides itself.
 #[derive(Debug, Default)]
@@ -61,6 +62,9 @@ impl AppState {
     /// 속성 in the menu of the part of a list without rows: the properties window for the
     /// folder the active pane shows, whatever is chosen in it, as File Explorer's.
     pub fn folder_properties(&mut self) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Properties) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }

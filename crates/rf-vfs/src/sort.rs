@@ -1,6 +1,7 @@
 //! Sorting of directory entries.
 //!
-//! Names compare with the OS natural order (`rf_platform::NaturalKey`). The OS rules are not
+//! An entry sorts by the name it shows ([`Entry::shown_name`]: the name the trash kept for an
+//! item named by its id there). Names compare with the OS natural order (`rf_platform::NaturalKey`). The OS rules are not
 //! guaranteed to be total orders, and since Rust 1.81 `slice::sort_by` may panic on one, so
 //! every sort here goes through `stable_order_by`, a merge sort that never panics.
 
@@ -31,6 +32,11 @@ pub enum SortKey {
     /// missing for every file of a file system or none, an access time is missing here and there,
     /// and those files would otherwise hide the ones used last at the top of a descending sort.
     Accessed,
+    /// The folder an item of the trash came from, or a drive's top folder ([`Entry::origin`]),
+    /// in the natural order of its path; an unknown one sorts first.
+    Origin,
+    /// When an item of the trash was trashed ([`Entry::deleted`]); an unknown time sorts first.
+    Deleted,
 }
 
 /// Which way a key sorts.
@@ -75,15 +81,22 @@ impl Default for SortSpec {
 
 /// What comparing an entry needs besides the entry itself, built once per entry.
 struct Keys {
+    /// The name it shows ([`Entry::shown_name`]).
     name: NaturalKey,
     /// The lowercase extension of a file; empty for one without, and for any other kind.
     extension: String,
+    /// The folder it came from, when it has one ([`Entry::origin`]).
+    origin: Option<NaturalKey>,
 }
 
 impl Keys {
     fn new(entry: &Entry) -> Keys {
         Keys {
-            name: NaturalKey::new(&entry.name),
+            name: NaturalKey::new(entry.shown_name()),
+            origin: entry
+                .origin
+                .as_deref()
+                .map(|origin| NaturalKey::new(origin.as_os_str())),
             extension: entry
                 .file_extension()
                 .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -125,6 +138,13 @@ fn compare_by(by: SortBy, a: (&Entry, &Keys), b: (&Entry, &Keys)) -> Ordering {
             .then_with(|| keys_a.extension.cmp(&keys_b.extension)),
         SortKey::Created => entry_a.created.cmp(&entry_b.created),
         SortKey::Extension => keys_a.extension.cmp(&keys_b.extension),
+        SortKey::Origin => match (&keys_a.origin, &keys_b.origin) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(a), Some(b)) => a.compare(b),
+        },
+        SortKey::Deleted => entry_a.deleted.cmp(&entry_b.deleted),
         // Compared above, with the unknown times kept last.
         SortKey::Accessed => Ordering::Equal,
     };

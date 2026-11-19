@@ -1,11 +1,14 @@
-//! The places of the sidebar: the user's well-known folders and the drives.
+//! The places of the sidebar: the user's well-known folders, the drives, and the places of the
+//! shell, 내 PC and 휴지통 (NAV-16, [`shell_places`]).
 //!
-//! Both lists ask the system (the shell's known folders on Windows, the file system for the
-//! drives and their free space), which can block on a slow or sleeping drive, so the functions
-//! here are called on a worker thread, never on the UI thread.
+//! The first two lists ask the system (the shell's known folders on Windows, the file system
+//! for the drives and their free space), which can block on a slow or sleeping drive, so the
+//! functions here are called on a worker thread, never on the UI thread. The places of the
+//! shell are known without a look.
 
 use rf_core::VPath;
-use rf_platform::{DiskSpace, KnownFolder};
+use rf_platform::{DiskSpace, KnownFolder, RootKind};
+use rf_vfs::ShellPlace;
 
 use crate::tree::TreeRowData;
 use crate::words;
@@ -21,6 +24,9 @@ pub enum PlaceKind {
     Kept,
     /// A drive or mounted volume, under "이 PC".
     Drive,
+    /// A place of the shell (NAV-16): 내 PC, first under "이 PC", or 휴지통, after the drives.
+    /// It is a list, not a folder of the tree: it has no folders below it.
+    Shell(ShellPlace),
 }
 
 impl PlaceKind {
@@ -28,6 +34,17 @@ impl PlaceKind {
     pub fn is_favorite(self) -> bool {
         matches!(self, PlaceKind::Favorite(_) | PlaceKind::Kept)
     }
+}
+
+/// 내 PC and 휴지통 as places of the sidebar: the first goes before the drives, the second after
+/// them ([`AppState::set_places`](crate::state::AppState::set_places)).
+pub fn shell_places() -> [Place; 2] {
+    [ShellPlace::Computer, ShellPlace::Trash].map(|place| Place {
+        label: words::shell_place(place).to_owned(),
+        path: place.path(),
+        kind: PlaceKind::Shell(place),
+        space: None,
+    })
 }
 
 /// The position among the `rows` of the sidebar's folder tree, whose roots are `places`, where
@@ -74,25 +91,18 @@ pub fn favorites() -> Vec<Place> {
         .collect()
 }
 
-/// The drives, each with its space from [`rf_platform::disk_space`]. Blocks; call it on a
-/// worker thread.
-///
-/// - Windows: every drive letter whose root can be read, named by [`words::drive_letter`].
-/// - macOS: `/` as [`words::system_disk`], then the folders of `/Volumes` that are other
-///   volumes than `/` (which skips the link to the system volume there).
-/// - Linux: `/` as [`words::system_disk`], then the folders of `/media/*`, `/run/media/*` and
-///   `/mnt` that are other volumes than `/`, each volume once, under its folder's name.
-///
-/// Folders whose names start with a dot (`/Volumes/.timemachine`) are the system's own and
-/// are left out.
+/// The drives, each with its space from [`rf_platform::disk_space`], as
+/// [`rf_platform::mounted_roots`] lists them (see there for the order and what is left out):
+/// a Windows drive under [`words::drive_letter`], `/` under [`words::system_disk`], another
+/// volume under the name of the folder it is mounted on. Blocks; call it on a worker thread.
 pub fn drives() -> Vec<Place> {
-    imp::drive_roots()
+    rf_platform::mounted_roots()
         .into_iter()
-        .map(|(label, path)| {
-            let space = rf_platform::disk_space(&path).ok();
+        .map(|root| {
+            let space = rf_platform::disk_space(&root.path).ok();
             Place {
-                label,
-                path,
+                label: drive_label(&root.kind),
+                path: root.path,
                 kind: PlaceKind::Drive,
                 space,
             }
@@ -100,97 +110,12 @@ pub fn drives() -> Vec<Place> {
         .collect()
 }
 
-#[cfg(windows)]
-mod imp {
-    use rf_core::VPath;
-
-    use crate::words;
-
-    /// The readable drive letters, as labels and roots.
-    pub(super) fn drive_roots() -> Vec<(String, VPath)> {
-        ('A'..='Z')
-            .filter_map(|letter| {
-                let root = format!("{letter}:\\");
-                std::fs::metadata(&root).ok()?;
-                Some((words::drive_letter(letter), VPath::local(&root).ok()?))
-            })
-            .collect()
-    }
-}
-
-#[cfg(unix)]
-mod imp {
-    use std::collections::HashSet;
-    use std::os::unix::fs::MetadataExt;
-    use std::path::{Path, PathBuf};
-
-    use rf_core::VPath;
-
-    use crate::words;
-
-    /// The folders that may hold other volumes than `/`, as globs of one or two levels.
-    #[cfg(target_os = "macos")]
-    const MOUNT_FOLDERS: &[(&str, usize)] = &[("/Volumes", 1)];
-    #[cfg(not(target_os = "macos"))]
-    const MOUNT_FOLDERS: &[(&str, usize)] = &[("/media", 2), ("/run/media", 2), ("/mnt", 1)];
-
-    /// `/` and the volumes mounted on the folders of [`MOUNT_FOLDERS`], as labels and roots.
-    pub(super) fn drive_roots() -> Vec<(String, VPath)> {
-        let mut roots = Vec::new();
-        let mut seen = HashSet::new();
-        let root = Path::new("/");
-        if let Ok(meta) = std::fs::metadata(root) {
-            seen.insert(meta.dev());
-        }
-        if let Ok(path) = VPath::local(root) {
-            roots.push((words::system_disk().to_owned(), path));
-        }
-        for &(base, depth) in MOUNT_FOLDERS {
-            for folder in folders_at(Path::new(base), depth) {
-                // A folder on the device of a volume already listed is no mount of its own;
-                // the device also tells a volume reached under two paths.
-                let Ok(meta) = std::fs::metadata(&folder) else {
-                    continue;
-                };
-                if !meta.is_dir() || !seen.insert(meta.dev()) {
-                    continue;
-                }
-                let label = folder
-                    .file_name()
-                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-                if let Ok(path) = VPath::local(&folder) {
-                    roots.push((label, path));
-                }
-            }
-        }
-        roots
-    }
-
-    /// The folders `depth` levels below `base`, sorted by path, without those whose names
-    /// start with a dot.
-    pub(super) fn folders_at(base: &Path, depth: usize) -> Vec<PathBuf> {
-        let mut level = vec![base.to_path_buf()];
-        for _ in 0..depth {
-            level = level
-                .iter()
-                .filter_map(|folder| std::fs::read_dir(folder).ok())
-                .flatten()
-                .filter_map(Result::ok)
-                .filter(|child| !child.file_name().as_encoded_bytes().starts_with(b"."))
-                .map(|child| child.path())
-                .collect();
-        }
-        level.sort();
-        level
-    }
-}
-
-#[cfg(not(any(windows, unix)))]
-mod imp {
-    use rf_core::VPath;
-
-    pub(super) fn drive_roots() -> Vec<(String, VPath)> {
-        Vec::new()
+/// The name the window gives a drive of `kind`.
+pub fn drive_label(kind: &RootKind) -> String {
+    match kind {
+        RootKind::System => words::system_disk().to_owned(),
+        RootKind::Letter(letter) => words::drive_letter(*letter),
+        RootKind::Volume(name) => name.to_string_lossy().into_owned(),
     }
 }
 
@@ -225,18 +150,12 @@ mod tests {
         assert_eq!(expected[0].kind, PlaceKind::Favorite(KnownFolder::Home));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn mount_folders_skip_dot_folders() {
-        let t = tempfile::tempdir().expect("a temporary folder");
-        for name in ["user/USB", "user/.hidden", ".timemachine/x", "Data"] {
-            std::fs::create_dir_all(t.path().join(name)).expect("a folder");
-        }
-        assert_eq!(
-            imp::folders_at(t.path(), 1),
-            [t.path().join("Data"), t.path().join("user")]
-        );
-        assert_eq!(imp::folders_at(t.path(), 2), [t.path().join("user/USB")]);
+    fn drives_are_named_by_their_kind() {
+        assert_eq!(drive_label(&RootKind::System), "시스템 디스크");
+        assert_eq!(drive_label(&RootKind::Letter('C')), "로컬 디스크 (C:)");
+        assert_eq!(drive_label(&RootKind::Letter('D')), "드라이브 (D:)");
+        assert_eq!(drive_label(&RootKind::Volume("USB".into())), "USB");
     }
 
     #[cfg(target_os = "linux")]

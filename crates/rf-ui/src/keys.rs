@@ -181,6 +181,9 @@ pub enum Command {
     SameFolderInOther,
     /// Going into a folder in one pane goes into the folder of the same name in the other.
     SyncNavigation,
+    /// 내 PC in the active pane (NAV-16): Finder's 이동 ▸ 컴퓨터, ⇧⌘C, on macOS; File Explorer
+    /// and Linux have no key for it, nor any system for the trash.
+    GoComputer,
     /// Text typed with no Ctrl, Alt or Meta: go to the first row whose name starts with what was
     /// typed (NAV-14). Joining presses that come within a second is the caller's job. A lone
     /// Space is [`Command::QuickLook`] in the tables, and types only while a name is being typed
@@ -1027,6 +1030,8 @@ static MACOS: &[(Chord, Command)] = &[
     // macOS has no key for the item menu; ⌃↩ goes with the ⌃-click that opens it, and neither
     // Finder nor macOS takes it.
     (k(Key::Return, CTL), C::ContextMenu),
+    // Finder's 이동 ▸ 컴퓨터.
+    (c('c', CMD_SHIFT), C::GoComputer),
 ];
 
 #[cfg(test)]
@@ -1304,8 +1309,7 @@ mod tests {
             (text("l"), CMD),
             (text("d"), CMD),
             (text("e"), CMD),
-            // ⇧⌘C goes to the computer, ⇧⌘O to the documents.
-            (text("C"), CMD_SHIFT),
+            // ⇧⌘O goes to the documents.
             (text("O"), CMD_SHIFT),
         ];
         for (text, mods) in mac_none {
@@ -1317,6 +1321,9 @@ mod tests {
         }
         // ⌘Y is Quick Look in Finder, not Redo.
         assert_eq!(command_for("y", CMD, Os::MacOs), Some(C::QuickLook));
+        // ⇧⌘C goes to the computer, as Finder's 이동 ▸ 컴퓨터; no other system has a key for it.
+        assert_eq!(command_for("C", CMD_SHIFT, Os::MacOs), Some(C::GoComputer));
+        assert_eq!(shortcut(&C::GoComputer, Os::Windows), None);
         // ⌘↓ opens and ⌘↑ goes up in Finder; Ctrl+↓ and Ctrl+↑ move the cursor alone in File
         // Explorer.
         assert_eq!(

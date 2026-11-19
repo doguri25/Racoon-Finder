@@ -40,7 +40,7 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 
 use rf_core::{ErrorKind, Os, VPath};
-use rf_vfs::VisibilityFilter;
+use rf_vfs::{ShellPlace, VisibilityFilter};
 
 use super::{AppState, Effect, Layout, load};
 use crate::dialogs::Modal;
@@ -504,6 +504,9 @@ fn percent_decode(text: &str, os: Os) -> Option<String> {
 /// path is read as one of this system (`VPath::parse`).
 pub fn read_typed(text: &str, os: Os, var: &dyn Fn(&str) -> Option<String>) -> Typed {
     let text = text.trim();
+    if let Some(place) = shell_place_named(text) {
+        return Typed::Folder(place.path());
+    }
     let path = match read_file_url(text, os) {
         Some(FileUrl::Path(path)) => path,
         Some(FileUrl::Remote) => return Typed::Remote,
@@ -517,6 +520,25 @@ pub fn read_typed(text: &str, os: Os, var: &dyn Fn(&str) -> Option<String>) -> T
         Ok(path) => Typed::Folder(path),
         Err(_) => Typed::Invalid,
     }
+}
+
+/// The place of the shell `text` names, as the path field shows it or as its address (NAV-16):
+/// `휴지통` or `shell://trash`, `내 PC` or `shell://computer`, ignoring the spaces and the case of
+/// the letters (`내pc`).
+pub fn shell_place_named(text: &str) -> Option<ShellPlace> {
+    let folded: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    ShellPlace::ALL.into_iter().find(|&place| {
+        let shown: String = words::shell_place(place)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect();
+        folded == shown || folded == place.path().to_uri()
+    })
 }
 
 /// `text` split after its last separator on `os` (the separator stays with the first part):
@@ -973,7 +995,8 @@ fn take_names(names: &mut Names, cursor: &mut Option<usize>, event: LoadEvent) {
         | LoadEvent::Changes { .. }
         | LoadEvent::Rescan { .. }
         | LoadEvent::Vanished { .. }
-        | LoadEvent::Space { .. } => return,
+        | LoadEvent::Space { .. }
+        | LoadEvent::TrashItems { .. } => return,
     };
     *cursor = kept.and_then(|name| names.rows().iter().position(|each| each.name == name));
 }

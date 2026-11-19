@@ -78,13 +78,14 @@ mod select;
 mod shell;
 mod sidebar;
 mod tabs;
+mod trash;
 mod tray;
 mod undo_list;
 mod view;
 
 pub use address::{
     Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
-    is_remote_url, read_file_url, read_typed, split_last,
+    is_remote_url, read_file_url, read_typed, shell_place_named, split_last,
 };
 pub use clipboard::{
     CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
@@ -109,6 +110,7 @@ pub use preview::{
 pub use removal::{RemovalStop, RemovalWork};
 pub use select::{MATCH_STRETCH, MatchRequest, Matched, SelectState};
 pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
+pub use trash::{TRASH_COMMANDS, changes_trash, computer_entries, place_capabilities};
 pub use tray::TrayCommand;
 pub use undo_list::{HistoryLine, HistoryView};
 pub use view::{
@@ -317,6 +319,36 @@ pub enum Effect {
     SaveLog { report: SharedReport, folder: VPath },
     /// A step of removing the app, on a worker thread ([`RemovalWork`]).
     Removal(RemovalWork),
+    /// Find the places of the sidebar again on a worker thread (the well-known folders and the
+    /// drives, `crate::places`), then call [`AppState::set_places`]: F5 in 내 PC, whose list is
+    /// the sidebar's drives.
+    FindPlaces,
+}
+
+/// The pane of `saved`, its tabs pinned as they were and the one that showed showing, at
+/// `default` when it kept no tab; the requests of their listings go to `effects`.
+fn restored_pane(
+    saved: SessionPane,
+    default: VPath,
+    filter: VisibilityFilter,
+    effects: &mut Vec<Effect>,
+) -> Pane {
+    let SessionPane {
+        tabs,
+        active,
+        pinned,
+    } = saved;
+    let mut tabs = tabs.into_iter();
+    let (mut pane, request) = Pane::new(tabs.next().unwrap_or(default), filter);
+    effects.push(Effect::Load(request));
+    for tab in tabs {
+        effects.push(Effect::Load(pane.add_tab(tab)));
+    }
+    for (tab, pinned) in pane.tabs_mut().iter_mut().zip(pinned) {
+        tab.set_pinned(pinned);
+    }
+    pane.select_tab(active.min(pane.tabs().len() - 1));
+    pane
 }
 
 /// Makes each tab of `waiting` stand in at home for its folder of the last run
@@ -339,6 +371,9 @@ pub enum ToastAction {
     Undo(UndoRecord),
     /// Show the items the job could not process.
     Details(Failures),
+    /// Take these items out of the trash to a folder the user chooses (위치를 골라 꺼내기…): a
+    /// restore found their original folders gone.
+    RestoreElsewhere(Vec<rf_vfs::TrashItem>),
 }
 
 /// The window's state on the UI thread: two panes, the one with the keyboard, whether hidden
@@ -511,6 +546,9 @@ pub struct AppState {
     /// A job that ended while the window was hidden left items it could not process: once the
     /// last one has ended, the window comes back rather than the app ending (module `tray`).
     background_failed: bool,
+    /// The listing of the trash that 휴지통 비우기… waits for, by its generation, to ask with
+    /// the items as they are then (module `trash`).
+    pending_empty: Option<u64>,
 }
 
 impl AppState {
@@ -539,24 +577,8 @@ impl AppState {
         };
         let [left_saved, right_saved] = session.panes;
         let mut effects = Vec::new();
-        let mut panes = [(left_saved, left), (right_saved, right)].map(|(saved, default)| {
-            let SessionPane {
-                tabs,
-                active,
-                pinned,
-            } = saved;
-            let mut tabs = tabs.into_iter();
-            let (mut pane, request) = Pane::new(tabs.next().unwrap_or(default), filter);
-            effects.push(Effect::Load(request));
-            for tab in tabs {
-                effects.push(Effect::Load(pane.add_tab(tab)));
-            }
-            for (tab, pinned) in pane.tabs_mut().iter_mut().zip(pinned) {
-                tab.set_pinned(pinned);
-            }
-            pane.select_tab(active.min(pane.tabs().len() - 1));
-            pane
-        });
+        let mut panes = [(left_saved, left), (right_saved, right)]
+            .map(|(saved, default)| restored_pane(saved, default, filter, &mut effects));
         stand_in(&mut panes, waiting);
         let state = AppState {
             panes,
@@ -631,6 +653,7 @@ impl AppState {
             tray: false,
             background: false,
             background_failed: false,
+            pending_empty: None,
         };
         (state, effects)
     }
@@ -755,8 +778,24 @@ impl AppState {
         if !matches!(command, Command::TypeToSelect(_)) {
             self.tab_mut(side).end_typing();
         }
+        // A list of the shell (휴지통, 내 PC) does some commands its own way, and refuses those
+        // its capabilities leave out, saying why.
+        let shell = self.shell_refusal(side, &command);
+        let effects = shell.unwrap_or_else(|| self.command(side, command, mods, paging, now));
+        Some(effects)
+    }
+
+    /// [`AppState::key`]'s `command` in pane `side`, as it does it in a folder.
+    fn command(
+        &mut self,
+        side: usize,
+        command: Command,
+        mods: Mods,
+        paging: Paging,
+        now: Instant,
+    ) -> Vec<Effect> {
         let pick = pick_of(mods);
-        let effects = match command {
+        match command {
             // With one pane, Tab stays on it: the other is hidden.
             Command::SwitchPane => {
                 if self.layout.dual {
@@ -843,8 +882,8 @@ impl AppState {
             Command::RunAsAdmin => self.run_as_admin(side),
             Command::OpenTerminal => self.open_terminal(side),
             Command::SystemProperties => self.system_properties(side),
-        };
-        Some(effects)
+            Command::GoComputer => self.go_to(rf_vfs::ShellPlace::Computer.path()),
+        }
     }
 
     /// A left press anywhere in the window (or a finger's): the rename the name window applied
@@ -906,6 +945,9 @@ impl AppState {
     /// opens in its app, and a link is followed first.
     pub fn open_row(&mut self, side: usize, row: usize) -> Vec<Effect> {
         self.activate(side);
+        if let Some(place) = self.shell_place_of(side) {
+            return self.open_row_in_shell(side, row, place);
+        }
         let tab = self.tab_mut(side);
         match tab.open_target(row) {
             Some(OpenAction::Navigate(folder)) => {
@@ -993,10 +1035,13 @@ impl AppState {
         load(self.navigate_shown(side, folder))
     }
 
-    /// Makes `places` (the well-known folders, then the drives) the roots of the folder tree,
-    /// which starts again from them, closed, and finds the folder it follows again; and of the
-    /// picker's tree, when a picker is open. The well-known folders are the favorites the sidebar
-    /// lists until the user edits the list; after that the user's own come in their place.
+    /// Makes `places` (the well-known folders, then the others in their order: 내 PC, the
+    /// drives and 휴지통, as the controller finds them, [`crate::places::shell_places`]) the
+    /// roots of the folder tree, which starts again from them, closed, and finds the folder it
+    /// follows again; and of the picker's tree (without the places of the shell, which take no
+    /// items), when a picker is open. The well-known folders are the favorites the sidebar lists
+    /// until the user edits the list; after that the user's own come in their place. A tab that
+    /// shows 내 PC lists the drives again.
     pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
         self.kept.known = places
             .iter()
@@ -1009,7 +1054,9 @@ impl AppState {
             .into_iter()
             .chain(drives.cloned())
             .collect();
-        self.reroot_places()
+        let mut effects = self.reroot_places();
+        effects.extend(self.relist_shell(rf_vfs::ShellPlace::Computer));
+        effects
     }
 
     /// The free space of the drive at `path`, as a worker read it again
@@ -1192,9 +1239,10 @@ impl AppState {
                         .filter(|_| shows)
                         .map(|row| Effect::ScrollTo { side, row }),
                 );
-                // Navigation sync may wait for this listing.
+                // Navigation sync may wait for this listing, and so may 휴지통 비우기….
                 if finished {
                     effects.extend(self.sync_listed(generation));
+                    effects.extend(self.empty_listed(generation));
                 }
                 // The pattern window may select among its rows.
                 if new_rows {
@@ -1368,6 +1416,7 @@ impl AppState {
             | LoadEvent::Rescan { .. }
             | LoadEvent::Vanished { .. }
             | LoadEvent::Space { .. }
+            | LoadEvent::TrashItems { .. }
             | LoadEvent::Names { .. } => Vec::new(),
         };
         let mut effects = if in_picker {

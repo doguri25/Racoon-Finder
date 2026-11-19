@@ -42,7 +42,7 @@ use rf_platform::clipboard::{ClipboardFiles, DropEffect, is_device_path};
 use super::jobs::submit;
 use super::{AppState, Effect, Paging};
 use crate::keys::{Command, Mods};
-use crate::words;
+use crate::words::{self, Blocked};
 
 /// How the paths of items go to the clipboard as text (경로 복사, OPS-07).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -539,6 +539,9 @@ impl AppState {
     /// on (the cursor the user put there): a cursor the list placed is not, and the paste
     /// goes into the pane's folder then.
     pub fn paste_from_menu(&mut self, force_move: bool) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Paste) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }
@@ -759,6 +762,9 @@ impl AppState {
 
     /// 경로 복사 in `form` from a menu: the items of the active pane.
     pub fn copy_paths_as(&mut self, form: PathForm) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::CopyPath) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }

@@ -303,6 +303,10 @@ impl AppState {
     /// The item under the active pane's cursor, and what makes it the one it is.
     fn preview_target(&self) -> Option<(Target, Entry)> {
         let tab = self.tab(self.active);
+        // The rows of a list of the shell (the trash's items, the drives) are no files to read.
+        if !crate::tree::holds_folders(tab.location()) {
+            return None;
+        }
         let entry = tab.visible().get(tab.selection().cursor()?)?;
         let target = Target {
             path: tab.location().join(&entry.name).ok()?,

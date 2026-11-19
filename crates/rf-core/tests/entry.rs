@@ -78,3 +78,19 @@ fn attribute_bits_are_stable() {
     let hs = Attributes::HIDDEN | Attributes::SYSTEM;
     assert!(hs.contains(Attributes::HIDDEN) && !hs.contains(Attributes::READONLY));
 }
+
+#[test]
+fn a_label_is_the_name_shown_and_gives_the_extension() {
+    let mut e = Entry::new("file:%2F%2F%2Ftrash%2Ffiles%2Fa.2.txt", EntryKind::File);
+    assert_eq!(e.shown_name(), e.name.as_os_str());
+    assert_eq!(
+        (e.label.as_ref(), e.origin.as_ref(), e.deleted),
+        (None, None, None)
+    );
+    e.label = Some("보고서.md".into());
+    assert_eq!(e.shown_name(), "보고서.md");
+    assert_eq!(e.extension().and_then(|ext| ext.to_str()), Some("md"));
+    assert_eq!(e.file_extension().and_then(|ext| ext.to_str()), Some("md"));
+    // The name a path is made of stays the id.
+    assert!(e.name.to_string_lossy().starts_with("file:"));
+}

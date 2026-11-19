@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use rf_core::{Entry, EntryKind, ErrorKind, Os, VPath};
 use rf_vfs::{
-    Change, NameFolding, SortKey, SortSpec, VisibilityFilter, compare_entries, fold_name,
-    sort_entries,
+    Change, NameFolding, SortKey, SortSpec, TrashItem, VisibilityFilter, compare_entries,
+    fold_name, sort_entries,
 };
 
 use crate::history::{History, Way};
@@ -214,6 +214,13 @@ pub struct Tab {
     /// The folder of the last run that the tab shows home in place of, until it goes
     /// somewhere ([`Tab::stand_in_for`]).
     stands_in_for: Option<VPath>,
+    /// In the trash (`shell://trash`), the record of each row by its name (the item's id), as
+    /// the listing that gave the rows found it ([`LoadEvent::TrashItems`]): what a restore or a
+    /// delete for good of the row acts on, with the stamp that tells whether the trash still
+    /// holds that item. Empty elsewhere.
+    trash: HashMap<OsString, TrashItem>,
+    /// The records of the listing on its way, until its rows come.
+    incoming_trash: Option<HashMap<OsString, TrashItem>>,
 }
 
 impl Tab {
@@ -278,6 +285,8 @@ impl Tab {
             selection_epoch: 0,
             revealed: None,
             stands_in_for: None,
+            trash: HashMap::new(),
+            incoming_trash: None,
         }
     }
 
@@ -637,6 +646,28 @@ impl Tab {
         true
     }
 
+    /// Takes the records of the trash's items of request `generation`
+    /// ([`LoadEvent::TrashItems`]), which become the rows' records with the rows of the same
+    /// listing. `false`, and no change, for another request or a listing that has ended.
+    pub fn apply_trash_items(&mut self, generation: u64, items: Vec<TrashItem>) -> bool {
+        if !self.is_loading(generation) {
+            return false;
+        }
+        self.incoming_trash = Some(
+            items
+                .into_iter()
+                .map(|item| (OsString::from(item.id.as_str()), item))
+                .collect(),
+        );
+        true
+    }
+
+    /// The record of the trash's item that the row called `name` shows, as the listing of the
+    /// rows found it; `None` outside the trash, and for a name of no row.
+    pub fn trash_item(&self, name: &OsStr) -> Option<&TrashItem> {
+        self.trash.get(name)
+    }
+
     /// Takes the free space of the volume of request `generation`. `false`, and no change,
     /// for another request.
     pub fn apply_space(&mut self, generation: u64, available: u64) -> bool {
@@ -725,7 +756,7 @@ impl Tab {
         let row = self
             .visible
             .iter()
-            .position(|entry| search_key(&entry.name, Os::CURRENT).starts_with(&wanted))?;
+            .position(|entry| search_key(entry.shown_name(), Os::CURRENT).starts_with(&wanted))?;
         self.selection.click(row, &self.visible);
         Some(row)
     }
@@ -819,6 +850,7 @@ impl Tab {
         self.free = None;
         self.pending_select.clear();
         self.revealed = None;
+        self.trash.clear();
         self.start_request()
     }
 
@@ -832,6 +864,7 @@ impl Tab {
         self.requested_sort = self.view.sort;
         self.sorting = None;
         self.since_sort.clear();
+        self.incoming_trash = None;
         LoadRequest {
             generation: self.generation,
             path: self.location.clone(),
@@ -845,6 +878,10 @@ impl Tab {
     /// changes files acts on it ([`Selection::place_cursor`]).
     fn show_listing(&mut self, entries: Vec<Entry>) {
         self.all = entries;
+        // The rows of the trash and their records come of one listing.
+        if let Some(trash) = self.incoming_trash.take() {
+            self.trash = trash;
+        }
         let pending = std::mem::take(&mut self.pending);
         if !pending.is_empty() {
             merge_changes(&mut self.all, pending, self.shown_sort);
@@ -868,7 +905,7 @@ impl Tab {
             .filter(|entry| filter.is_visible(entry))
             .inspect(|_| unfiltered += 1)
             .filter(|entry| {
-                wanted.is_empty() || search_key(&entry.name, Os::CURRENT).contains(&wanted)
+                wanted.is_empty() || search_key(entry.shown_name(), Os::CURRENT).contains(&wanted)
             })
             .cloned()
             .collect();
@@ -1232,6 +1269,9 @@ impl Pane {
             }
             LoadEvent::Space { available, .. } => {
                 target.apply_space(generation, available);
+            }
+            LoadEvent::TrashItems { items, .. } => {
+                target.apply_trash_items(generation, items);
             }
             LoadEvent::Rescan { .. } => {
                 return Handled::Reload {

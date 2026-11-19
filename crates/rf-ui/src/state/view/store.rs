@@ -133,6 +133,10 @@ impl ViewStore {
     /// The view of `folder`, as its own, or the one it takes from above, or the default one
     /// (see the module's documentation). The entry it comes from counts as used.
     pub fn view_for(&mut self, folder: &VPath) -> FolderView {
+        // The computer has its one view.
+        if rf_vfs::ShellPlace::of(folder) == Some(rf_vfs::ShellPlace::Computer) {
+            return FolderView::computer();
+        }
         if let Some(at) = self.position(&self.key(folder)) {
             return self.touch(at).view.clone();
         }
@@ -145,7 +149,7 @@ impl ViewStore {
         });
         match found {
             Some(at) => self.touch(at).view.clone(),
-            None => FolderView::default(),
+            None => FolderView::default_for(folder),
         }
     }
 
@@ -200,9 +204,11 @@ impl ViewStore {
     }
 
     /// Whether a view of `folder` can be remembered: its `to_uri` is no longer than
-    /// [`MAX_FOLDER_URI`].
+    /// [`MAX_FOLDER_URI`], and it is not the computer (`shell://computer`), whose view is its own
+    /// ([`FolderView::computer`]).
     pub fn keeps(&self, folder: &VPath) -> bool {
         folder.to_uri().len() <= MAX_FOLDER_URI
+            && rf_vfs::ShellPlace::of(folder) != Some(rf_vfs::ShellPlace::Computer)
     }
 
     /// Whether `a` and `b` are one folder, as the store tells folders apart (ignoring case on

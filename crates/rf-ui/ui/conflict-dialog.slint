@@ -35,6 +35,9 @@ export struct ConflictView {
     existing-newer: bool,
     existing-dir: bool,
     can-overwrite: bool,
+    // A restore from the trash (NAV-16): it never replaces what is there, so the overwrites do
+    // not show; skipping, a numbered name and 작업 취소 are its choices.
+    restore: bool,
     overwrite-hint: string,
     // What skipping leaves out: "이 파일은 복사하지 않습니다".
     skip-hint: string,
@@ -331,7 +334,7 @@ export component ConflictDialog inherits DialogFrame {
                     font-weight: 500;
                     color: Theme.text;
                 }
-                ChoiceRow {
+                if !root.view.restore: ChoiceRow {
                     min-height: root.row-height;
                     text: "덮어쓰기";
                     hint: root.view.overwrite-hint;
@@ -362,7 +365,7 @@ export component ConflictDialog inherits DialogFrame {
                         keys.focus();
                     }
                 }
-                ChoiceRow {
+                if !root.view.restore: ChoiceRow {
                     min-height: root.row-height;
                     text: "더 새 파일만 덮어쓰기";
                     hint: root.view.newer-hint;
@@ -373,7 +376,7 @@ export component ConflictDialog inherits DialogFrame {
                         keys.focus();
                     }
                 }
-                ChoiceRow {
+                if !root.view.restore: ChoiceRow {
                     min-height: root.row-height;
                     text: "크기가 다를 때만 덮어쓰기";
                     hint: root.view.size-hint;

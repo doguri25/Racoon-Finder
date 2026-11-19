@@ -119,7 +119,11 @@ export component FileHead inherits Rectangle {
     // A click on the head's checkbox.
     callback all-toggled();
 
-    // The columns after the name, in their order, and which columns show by number (0 to 6),
+    // What the list shows (`PaneView.place`): 0 a folder, whose head's menu offers a folder's
+    // columns; 1 the trash, whose menu offers the trash's (원래 위치, 삭제한 날짜, 크기, 종류,
+    // 확장자, NAV-16).
+    in property <int> place;
+    // The columns after the name, in their order, and which columns show by number (0 to 10),
     // for the head's menu.
     in property <[ColumnView]> columns;
     in property <[bool]> shows;
@@ -203,8 +207,8 @@ export component FileHead inherits Rectangle {
         let base = root.columns[i].width;
         return i == root.drag-border ? base - root.drag-dx : base;
     }
-    // The room the first `k` columns after the name take, each with the gap before it (all
-    // eight of them: Rust's `Column::OPTIONAL`).
+    // The room the first `k` columns after the name take, each with the gap before it (as many
+    // as a view has at most: the eight of Rust's `Column::OPTIONAL`).
     pure function s(k: int) -> length {
         return (k > 0 ? root.gap + root.w(0) : 0px) + (k > 1 ? root.gap + root.w(1) : 0px) + (k > 2 ? root.gap + root.w(2) : 0px) + (k > 3 ? root.gap + root.w(3) : 0px) + (k > 4 ? root.gap + root.w(4) : 0px) + (k > 5 ? root.gap + root.w(5) : 0px) + (k > 6 ? root.gap + root.w(6) : 0px) + (k > 7 ? root.gap + root.w(7) : 0px);
     }
@@ -327,7 +331,11 @@ export component FileHead inherits Rectangle {
     private property <bool> mark-attributes;
     private property <bool> mark-accessed;
     private property <bool> mark-path;
+    private property <bool> mark-original;
+    private property <bool> mark-deleted;
     function show-head-menu(x: length, y: length) {
+        root.mark-original = root.shows[9];
+        root.mark-deleted = root.shows[10];
         root.mark-size = root.shows[1];
         root.mark-modified = root.shows[2];
         root.mark-kind = root.shows[3];
@@ -352,6 +360,23 @@ export component FileHead inherits Rectangle {
             enabled: false;
 
             Menu {
+                // The trash's (NAV-16): where an item was, and when it was trashed.
+                if root.place == 1: MenuItem {
+                    title: "원래 위치";
+                    checkable: true;
+                    checked <=> root.mark-original;
+                    activated => {
+                        root.column-toggled(9);
+                    }
+                }
+                if root.place == 1: MenuItem {
+                    title: "삭제한 날짜";
+                    checkable: true;
+                    checked <=> root.mark-deleted;
+                    activated => {
+                        root.column-toggled(10);
+                    }
+                }
                 MenuItem {
                     title: "크기";
                     checkable: true;
@@ -360,7 +385,7 @@ export component FileHead inherits Rectangle {
                         root.column-toggled(1);
                     }
                 }
-                MenuItem {
+                if root.place == 0: MenuItem {
                     title: "수정한 날짜";
                     checkable: true;
                     checked <=> root.mark-modified;
@@ -368,7 +393,7 @@ export component FileHead inherits Rectangle {
                         root.column-toggled(2);
                     }
                 }
-                MenuItem {
+                if root.place == 0: MenuItem {
                     title: "만든 날짜";
                     checkable: true;
                     checked <=> root.mark-created;
@@ -376,7 +401,7 @@ export component FileHead inherits Rectangle {
                         root.column-toggled(4);
                     }
                 }
-                MenuItem {
+                if root.place == 0: MenuItem {
                     title: "접근한 날짜";
                     checkable: true;
                     checked <=> root.mark-accessed;
@@ -400,7 +425,7 @@ export component FileHead inherits Rectangle {
                         root.column-toggled(5);
                     }
                 }
-                MenuItem {
+                if root.place == 0: MenuItem {
                     title: "속성";
                     checkable: true;
                     checked <=> root.mark-attributes;
@@ -410,7 +435,7 @@ export component FileHead inherits Rectangle {
                 }
                 // The folder of each item: one folder's on every row here, many once a view
                 // lists the items of many (search, a flat view).
-                MenuItem {
+                if root.place == 0: MenuItem {
                     title: "경로";
                     checkable: true;
                     checked <=> root.mark-path;

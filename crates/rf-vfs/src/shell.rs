@@ -290,14 +290,17 @@ impl ShellProvider {
     }
 }
 
-/// The name a drive's row has: its root as text that holds no `/`, as a `TrashId` is made.
-fn drive_name(root: &VPath) -> String {
+/// The name a drive's row has (`shell://computer/<name>`): its root as text that holds no `/`,
+/// as a `TrashId` is made.
+pub fn drive_name(root: &VPath) -> String {
     root.to_uri().replace('/', "%2F")
 }
 
-/// The entry of a trash item, named by its id: a folder or a file of its size, with the time it
-/// was trashed as its time.
-fn trash_entry(item: &TrashItem) -> Entry {
+/// The entry of a trash item, named by its id (`shell://trash/<id>`): a folder or a file of its
+/// size, that shows the name it had (`Entry::label`), the folder it came from
+/// (`Entry::origin`, when the trash keeps it) and when it was trashed (`Entry::deleted`). The
+/// trash keeps no other time of the item.
+pub fn trash_entry(item: &TrashItem) -> Entry {
     let kind = if item.is_dir {
         EntryKind::Dir
     } else {
@@ -305,14 +308,24 @@ fn trash_entry(item: &TrashItem) -> Entry {
     };
     let mut entry = Entry::new(item.id.as_str(), kind);
     entry.size = item.size.unwrap_or(0);
-    entry.modified = item.deleted;
+    entry.label = Some(item.name.clone());
+    entry.origin = item
+        .original
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    entry.deleted = item.deleted;
     entry
 }
 
-/// The entry of a drive row: a folder named by its path's last name.
+/// The entry of a drive row: a folder named by its path's last name ([`drive_name`]), whose top
+/// folder is its `Entry::origin`. The name a window shows for it is the window's to give
+/// (from `Drive::kind`).
 fn drive_entry(row: &DriveRow) -> Entry {
     let name = row.path.file_name().unwrap_or_default();
-    Entry::new(name, EntryKind::Dir)
+    let mut entry = Entry::new(name, EntryKind::Dir);
+    entry.origin = row.drive.root.as_local().map(Path::to_path_buf);
+    entry
 }
 
 /// `ErrorKind::NotFound` for `op` on `path`.
@@ -630,7 +643,13 @@ mod tests {
             let path = trash.join(&entry.name).unwrap();
             assert_eq!(shell.trash_item(&path).unwrap(), *item);
             assert_eq!(shell.stat(&path).unwrap(), *entry);
-            assert_eq!(entry.modified, item.deleted);
+            // It shows the name it had, from the folder it came from, and when it was trashed.
+            assert_eq!(entry.shown_name(), item.name.as_os_str());
+            assert_eq!(
+                entry.origin.as_deref(),
+                item.original.as_deref().and_then(Path::parent)
+            );
+            assert_eq!((entry.deleted, entry.modified), (item.deleted, None));
         }
         assert_eq!((entries[0].kind, entries[0].size), (EntryKind::File, 42));
         assert_eq!((entries[1].kind, entries[1].size), (EntryKind::Dir, 0));
@@ -715,6 +734,11 @@ mod tests {
         for (entry, row) in entries.iter().zip(&rows) {
             assert_eq!(computer.join(&entry.name).unwrap(), row.path);
             assert_eq!(entry.kind, EntryKind::Dir);
+            assert_eq!(entry.origin.as_deref(), row.drive.root.as_local());
+            assert_eq!(
+                entry.name.to_str(),
+                Some(drive_name(&row.drive.root).as_str())
+            );
             assert_eq!(shell.stat(&row.path).unwrap(), *entry);
             // Opened at its own root, not here.
             assert_eq!(

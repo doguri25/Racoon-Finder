@@ -34,10 +34,16 @@ export struct FileRow {
     accessed: string,
     // The folder the item is in (경로).
     path: string,
+    // Where an item of the trash was (원래 위치), and when it was trashed (삭제한 날짜).
+    original: string,
+    deleted: string,
     // The line icon of the row, in every view (`Icon.name`).
     icon: string,
     is-dir: bool,
     is-link: bool,
+    // A drive of 내 PC (NAV-16): how full it is (0..1), drawn as the sidebar's drive bar is, under
+    // its name in its tile, with its space line (`size`) under the bar; below 0 for no bar.
+    fill: float,
     selected: bool,
     hidden: bool,
     // Cut to the clipboard (Ctrl+X), until it is pasted, the cut is cancelled or the clipboard
@@ -83,15 +89,24 @@ export global Cells {
         if (id == 8) {
             return row.path;
         }
+        if (id == 9) {
+            return row.original;
+        }
+        if (id == 10) {
+            return row.deleted;
+        }
         return row.name;
     }
 }
 
 export component FileList inherits Rectangle {
     in property <[FileRow]> rows;
+    // What the list shows (`PaneView.place`): 0 a folder, 1 the trash, 2 the computer; its
+    // menus and its head's offer what that place has (NAV-16).
+    in property <int> place;
     // The keyboard cursor's row, or -1.
     in property <int> cursor: -1;
-    // The columns after the name, in their order, and which columns show by number (0 to 8),
+    // The columns after the name, in their order, and which columns show by number (0 to 10),
     // for the head's menu.
     in property <[ColumnView]> columns;
     in property <[bool]> shows;
@@ -293,6 +308,7 @@ export component FileList inherits Rectangle {
 
     VerticalLayout {
         head := FileHead {
+            place: root.place;
             checkboxes: root.checkboxes;
             select-state: root.select-state;
             all-toggled => {
@@ -344,6 +360,7 @@ export component FileList inherits Rectangle {
 
                 // The menu of the part of the list below the rows.
                 BlankMenu {
+                    place: root.place;
                     width: parent.width;
                     height: parent.height;
                     command(name) => {
@@ -398,6 +415,7 @@ export component FileList inherits Rectangle {
                                 }
 
                                 row-menu := RowMenu {
+                                    place: root.place;
                                     command(name) => {
                                         root.menu-command(name);
                                     }
@@ -554,6 +572,7 @@ export component FileList inherits Rectangle {
     }
 
     key-menus := KeyMenus {
+        place: root.place;
         x: 0px;
         y: 0px;
         command(name) => {

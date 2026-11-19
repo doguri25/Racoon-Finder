@@ -158,6 +158,23 @@ impl Jobs {
         on_event: impl Fn(JobEvent) + Send + 'static,
         on_question: impl Fn(Question) -> bool + Send + Sync + 'static,
     ) -> io::Result<Jobs> {
+        Jobs::start_with(
+            Vfs::with_local_and_shell(),
+            journal_dir,
+            on_event,
+            on_question,
+        )
+    }
+
+    /// [`Jobs::start`] with the engine reaching the files through `vfs`: the app's are the local
+    /// provider and the places of the shell (`Vfs::with_local_and_shell`), a test's a trash of
+    /// its own.
+    pub fn start_with(
+        vfs: Vfs,
+        journal_dir: &Path,
+        on_event: impl Fn(JobEvent) + Send + 'static,
+        on_question: impl Fn(Question) -> bool + Send + Sync + 'static,
+    ) -> io::Result<Jobs> {
         let (hand_over, handed) = mpsc::channel::<Receiver<JobEvent>>();
         std::thread::Builder::new()
             .name("rf-ui-jobs".to_owned())
@@ -170,8 +187,7 @@ impl Jobs {
                 }
             })?;
         let resolver = Arc::new(UiResolver::new(on_question));
-        let config = EngineConfig::new(Vfs::with_local(), Arc::clone(&resolver) as _)
-            .with_journal(journal_dir);
+        let config = EngineConfig::new(vfs, Arc::clone(&resolver) as _).with_journal(journal_dir);
         let lanes = Arc::clone(&config.lanes);
         let (engine, events) = JobEngine::start(config);
         // The bridge waits for it; it ends only after this.

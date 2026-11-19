@@ -5,7 +5,7 @@
 //! file IDs). The OS-specific reading of that data lives in `rf-platform`.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 bitflags::bitflags! {
@@ -70,10 +70,23 @@ pub struct Entry {
     pub attributes: Attributes,
     pub volume_id: Option<VolumeId>,
     pub file_id: Option<FileId>,
+    /// The name a list shows, sorts and filters the item by when it is not `name`: an item of a
+    /// place that names its items by an id rather than by a name of the file system (the trash,
+    /// `shell://trash/<id>`) shows the name it had, and a drive the name the window gives it.
+    /// `None` for an item of a folder, which shows its `name` ([`Entry::shown_name`]).
+    pub label: Option<OsString>,
+    /// The folder an item of such a place stands for: where a trashed item was before it was
+    /// trashed (원래 위치), or the top folder of a drive. `None` for an item of a folder, and for
+    /// a trashed item whose trash does not keep where it came from.
+    pub origin: Option<PathBuf>,
+    /// When the item was sent to the trash, for an item of the trash; `None` elsewhere, and
+    /// when the trash does not tell.
+    pub deleted: Option<SystemTime>,
 }
 
 impl Entry {
-    /// An entry with size 0, no times, no attributes and no IDs.
+    /// An entry with size 0, no times, no attributes, no IDs, and no label, origin or time of
+    /// deletion.
     pub fn new(name: impl Into<OsString>, kind: EntryKind) -> Entry {
         Entry {
             name: name.into(),
@@ -85,17 +98,25 @@ impl Entry {
             attributes: Attributes::empty(),
             volume_id: None,
             file_id: None,
+            label: None,
+            origin: None,
+            deleted: None,
         }
     }
 
-    /// The text after the last dot, for the extension column. Folders and
-    /// [`EntryKind::Other`] items have none, and neither do dot files (`.bashrc`) or names
-    /// ending in a dot (`a.`).
+    /// The name a list shows: its `label` when it has one, else its `name`.
+    pub fn shown_name(&self) -> &OsStr {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The text after the last dot of the name it shows ([`Entry::shown_name`]), for the
+    /// extension column. Folders and [`EntryKind::Other`] items have none, and neither do dot
+    /// files (`.bashrc`) or names ending in a dot (`a.`).
     pub fn extension(&self) -> Option<&OsStr> {
         if matches!(self.kind, EntryKind::Dir | EntryKind::Other) {
             return None;
         }
-        Path::new(&self.name)
+        Path::new(self.shown_name())
             .extension()
             .filter(|ext| !ext.is_empty())
     }

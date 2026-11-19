@@ -19,6 +19,7 @@ use rf_jobs::{
     IncompleteJob, Issue, IssueKind, ItemFailure, JobId, JobSpec, MTIME_TOLERANCE, PreflightAnswer,
     Severity, UndoRecord, decide, numbered_name,
 };
+use rf_vfs::TrashItem;
 
 use crate::pattern::{NamePattern, PatternError, PatternSyntax};
 use crate::pick::Picker;
@@ -446,6 +447,11 @@ pub enum ConfirmPurpose {
     /// 완전 삭제… was confirmed while jobs run: they stop for good if this is, and the removal
     /// waits if it is not. `backup`: the settings are copied first.
     RemoveAppWithJobs { backup: bool },
+    /// Delete these items of the trash for good (휴지통 ▸ 영구 삭제…), as the trash's list showed
+    /// them: each is deleted only while the trash holds that very item.
+    DeleteFromTrash(Vec<TrashItem>),
+    /// Empty the trash (휴지통 비우기…).
+    EmptyTrash,
 }
 
 /// A window that asks before something happens that cannot be taken back.
@@ -602,6 +608,49 @@ impl Confirm {
         }
     }
 
+    /// The question before `items` of the trash are deleted for good (휴지통 ▸ 영구 삭제…,
+    /// NAV-16): how many, their size when the trash knows it for each, their names, and that it
+    /// cannot be undone. Only its button deletes them, never Enter alone (`danger`).
+    pub fn delete_from_trash(items: Vec<TrashItem>) -> Confirm {
+        let names: Vec<String> = items
+            .iter()
+            .map(|item| item.name.to_string_lossy().into_owned())
+            .collect();
+        Confirm {
+            title: words::delete_permanently_title().to_owned(),
+            message: words::delete_from_trash(items.len(), total_size(&items)),
+            detail: words::shown_names_line(&names),
+            lines: Vec::new(),
+            question: String::new(),
+            ok: words::delete_permanently_button().to_owned(),
+            danger: true,
+            alt: String::new(),
+            check: String::new(),
+            checked: false,
+            purpose: ConfirmPurpose::DeleteFromTrash(items),
+        }
+    }
+
+    /// The question before the trash is emptied (휴지통 비우기…, NAV-16): how many items it holds
+    /// as `items` (a listing read for the question) show, their size when the trash knows it for
+    /// each, and that it cannot be undone. Only its button empties the trash, never Enter alone
+    /// (`danger`).
+    pub fn empty_trash(items: &[TrashItem]) -> Confirm {
+        Confirm {
+            title: words::empty_trash_title().to_owned(),
+            message: words::empty_trash(items.len(), total_size(items)),
+            detail: String::new(),
+            lines: Vec::new(),
+            question: String::new(),
+            ok: words::empty_trash_title().to_owned(),
+            danger: true,
+            alt: String::new(),
+            check: String::new(),
+            checked: false,
+            purpose: ConfirmPurpose::EmptyTrash,
+        }
+    }
+
     /// The job the confirmation asks for, if it asks for one. For the copies an undo could not
     /// trash, it is a delete of those copies that looks at each one and its original once more
     /// before it deletes it (`JobSpec::DeleteCopies`): one that changed after the question
@@ -610,12 +659,24 @@ impl Confirm {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
             ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
+            ConfirmPurpose::DeleteFromTrash(items) => Some(JobSpec::DeleteFromTrash {
+                items: items.clone(),
+            }),
+            ConfirmPurpose::EmptyTrash => Some(JobSpec::EmptyTrash),
             ConfirmPurpose::Quit
             | ConfirmPurpose::ApplyViewBelow { .. }
             | ConfirmPurpose::RemoveApp
             | ConfirmPurpose::RemoveAppWithJobs { .. } => None,
         }
     }
+}
+
+/// The size of `items` of the trash together, when the trash knows the size of every one (a
+/// trashed folder's is often not known); `None` otherwise.
+pub fn total_size(items: &[TrashItem]) -> Option<u64> {
+    items
+        .iter()
+        .try_fold(0u64, |sum, item| Some(sum.saturating_add(item.size?)))
 }
 
 /// The job that deletes `paths` for good, going on past an item that fails.
@@ -705,10 +766,19 @@ impl ConflictChoice {
 
 impl ConflictQuestion {
     /// Whether the overwrite choice is offered: a file and a folder never replace each other,
-    /// and two folders merge without a question.
+    /// two folders merge without a question, and a restore from the trash never replaces what
+    /// is there ([`ConflictQuestion::offers_overwrite`]).
     pub fn can_overwrite(&self) -> bool {
-        self.conflict.incoming.kind != EntryKind::Dir
+        self.offers_overwrite()
+            && self.conflict.incoming.kind != EntryKind::Dir
             && self.conflict.existing.kind != EntryKind::Dir
+    }
+
+    /// Whether the window shows the overwrites at all: not for a restore from the trash, which
+    /// never replaces anything (the engine refuses it, `RestoreNeverReplaces`): skip, a numbered
+    /// name or stopping the job are its choices.
+    pub fn offers_overwrite(&self) -> bool {
+        self.work != JobWork::Restore
     }
 
     /// Whether the item that would come was changed later than the one that is there (by more

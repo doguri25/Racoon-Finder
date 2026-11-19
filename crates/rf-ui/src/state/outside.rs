@@ -345,9 +345,14 @@ impl AppState {
     }
 }
 
-/// Why `folder` does not take `sources`: one of them is it or holds it, or all of them are in it
-/// already (DND-09: a drop back where they are does nothing).
+/// Why `folder` does not take `sources`: it is a place of the shell (the files of another app go
+/// to no list of the shell, not even to 휴지통: that app's own way deletes its files), one of
+/// them is it or holds it, or all of them are in it already (DND-09: a drop back where they are
+/// does nothing).
 fn refusal(sources: &[VPath], folder: &VPath) -> Option<Validity> {
+    if !crate::tree::holds_folders(folder) {
+        return Some(Validity::ShellPlace);
+    }
     if sources.iter().any(|source| folder.starts_with(source)) {
         return Some(Validity::IntoSource);
     }

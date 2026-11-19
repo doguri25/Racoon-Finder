@@ -33,7 +33,7 @@ use crate::dialogs::{
 };
 use crate::format::{
     attribute_letters, file_extension, file_icon, folder_label, format_size, format_time_in,
-    kind_label, short_path, shown_name,
+    kind_label, location_text, short_path, shown_name,
 };
 use crate::hashing::Algorithm;
 use crate::history::{HISTORY_KEY_MENU, HISTORY_MENU, Way};
@@ -160,6 +160,28 @@ impl PaneModels {
         self.rows.set_cut(names);
     }
 
+    /// Gives the rows of 내 PC the space of the drives among `places`, the sidebar's, while the
+    /// pane shows `folder` (none elsewhere): [`FileRows::set_drives`].
+    pub fn set_drives(&self, folder: &VPath, places: &[Place]) {
+        let drives = if crate::format::shell_place_at(folder) == Some(rf_vfs::ShellPlace::Computer)
+        {
+            places
+                .iter()
+                .filter(|place| place.kind == PlaceKind::Drive)
+                .map(|place| {
+                    let (info, fill) = place_space(place);
+                    (
+                        OsString::from(rf_vfs::drive_name(&place.path)),
+                        (SharedString::from(info), fill),
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        self.rows.set_drives(drives);
+    }
+
     /// The texts of `column` in `count` rows of the list from row `first` on, one a line, as
     /// the list shows them: what a double click on the column's border fits it to.
     pub fn column_texts(&self, column: Column, first: usize, count: usize) -> String {
@@ -220,7 +242,7 @@ impl PaneModels {
         set_rows(
             &self.shows,
             std::iter::once(Column::Name)
-                .chain(Column::OPTIONAL)
+                .chain(Column::offered(tab.location()).iter().copied())
                 .map(|column| (column.number(), view.shows(column)))
                 .fold(vec![false; Column::COUNT], |mut shows, (number, shown)| {
                     if let Some(slot) = usize::try_from(number).ok().and_then(|n| shows.get_mut(n))
@@ -235,7 +257,7 @@ impl PaneModels {
             tabs: ModelRc::from(Rc::clone(&self.tabs)),
             active_tab: i32::try_from(pane.active()).unwrap_or(0),
             crumbs: ModelRc::from(Rc::clone(&self.crumbs)),
-            path_text: tab.location().to_string().into(),
+            path_text: location_text(tab.location()).into(),
             rows: ModelRc::from(Rc::clone(&self.rows)),
             cursor: tab
                 .selection()
@@ -275,6 +297,7 @@ impl PaneModels {
             can_reopen: pane.can_reopen(),
             completion: FolderMenuView::default(),
             chevron: -1,
+            place: place_number(tab.location()),
         }
     }
 
@@ -374,6 +397,10 @@ pub struct FileRows {
     /// when it came (a count), at most [`SHOWN_THUMBS`].
     thumbs: RefCell<ShownThumbs>,
     thumbs_came: Cell<u64>,
+    /// The drives of 내 PC by the names of their rows: the space line and the used share each
+    /// row's bar shows (as the sidebar's, [`place_space`]); empty elsewhere
+    /// ([`FileRows::set_drives`]).
+    drives: RefCell<HashMap<OsString, (SharedString, f32)>>,
 }
 
 /// What a shown thumbnail was made for: the size asked, and the length and modification time the
@@ -466,6 +493,7 @@ impl Default for FileRows {
             on_screen: Cell::new((1, 0)),
             thumbs: RefCell::default(),
             thumbs_came: Cell::new(0),
+            drives: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -490,6 +518,16 @@ impl FileRows {
     /// [`FileRows::sync`] on, which tells the list of the rows that changed.
     pub fn set_cut(&self, names: HashSet<OsString>) {
         *self.cut.borrow_mut() = names;
+    }
+
+    /// Shows each row of 내 PC named in `drives` with its space line and the bar of how full the
+    /// drive is (its tile's second and third lines), and no row else; the rows are drawn again
+    /// when that changes (a job read the space again).
+    pub fn set_drives(&self, drives: HashMap<OsString, (SharedString, f32)>) {
+        if *self.drives.borrow() != drives {
+            *self.drives.borrow_mut() = drives;
+            self.notify.reset();
+        }
     }
 
     /// Makes the rows `entries`, in that order, selected as `selection` says and dimmed as
@@ -687,6 +725,8 @@ fn cell_text(row: &FileRow, column: Column) -> String {
         Column::Attributes => &row.attributes,
         Column::Accessed => &row.accessed,
         Column::Path => &row.path,
+        Column::Original => &row.original,
+        Column::Deleted => &row.deleted,
     }
     .to_string()
 }
@@ -709,6 +749,11 @@ impl Model for FileRows {
         );
         file.cut = shown.cut;
         file.path = self.parent.borrow().clone();
+        if let Some((info, fill)) = self.drives.borrow().get(&shown.entry.name) {
+            file.kind = SharedString::new();
+            file.size = info.clone();
+            file.fill = *fill;
+        }
         if let Some(folder) = self.folder.borrow().as_ref()
             && let Some((stamp, image, _)) =
                 self.thumbs.borrow().get(&folder.join(&shown.entry.name))
@@ -968,13 +1013,35 @@ impl Model for TreeRows {
     }
 }
 
+/// The section of the sidebar a place of `kind` is in: "즐겨찾기" for the favorites, "이 PC" for
+/// 내 PC and the drives; 휴지통 after them, under no head of its own.
+fn section_of(kind: PlaceKind) -> SectionHead {
+    match kind {
+        PlaceKind::Favorite(_) | PlaceKind::Kept => SectionHead::Favorites,
+        PlaceKind::Drive | PlaceKind::Shell(rf_vfs::ShellPlace::Computer) => SectionHead::Drives,
+        PlaceKind::Shell(rf_vfs::ShellPlace::Trash) => SectionHead::None,
+    }
+}
+
+/// The icon of the row of a place of `kind` (`Icon.name`): a drive's, 내 PC's screen, 휴지통's
+/// bin; a folder's for the others.
+fn place_icon(kind: PlaceKind) -> &'static str {
+    match kind {
+        PlaceKind::Drive => "drive",
+        PlaceKind::Shell(rf_vfs::ShellPlace::Computer) => "computer",
+        PlaceKind::Shell(rf_vfs::ShellPlace::Trash) => "delete",
+        PlaceKind::Favorite(_) | PlaceKind::Kept => "folder",
+    }
+}
+
 /// The sidebar rows of the tree rows `rows`, whose roots are `places` in order, each with its
 /// node. A place shows whether it is a drive, and a drive how full it is; the first favorite
-/// carries the head "즐겨찾기" and the first drive after them "이 PC". A row shows a chevron
-/// when it has folders below it, or may have.
+/// carries the head "즐겨찾기" and the first place after them of 내 PC and the drives "이 PC"
+/// ([`section_of`]); 휴지통 comes last, under no head. A row shows a chevron when it has
+/// folders below it, or may have.
 pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow)> {
-    // Whether the last place was a drive.
-    let mut last_drive = None;
+    // The section of the last place.
+    let mut last_section = None;
     // The last favorite's place in the list of favorites, to say which one is the last.
     let favorites = places
         .iter()
@@ -985,14 +1052,13 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
         .map(|(number, row)| {
             let place = row.root.and_then(|root| places.get(root));
             let is_drive = place.is_some_and(|place| place.kind == PlaceKind::Drive);
-            let head = match place {
-                Some(_) if last_drive == Some(is_drive) => SectionHead::None,
-                Some(_) if is_drive => SectionHead::Drives,
-                Some(_) => SectionHead::Favorites,
-                None => SectionHead::None,
+            let section = place.map(|place| section_of(place.kind));
+            let head = match section {
+                Some(section) if last_section != Some(section) => section,
+                _ => SectionHead::None,
             };
-            if place.is_some() {
-                last_drive = Some(is_drive);
+            if section.is_some() {
+                last_section = section;
             }
             // A favorite's place in the list: the places before it that are favorites.
             let favorite = row
@@ -1013,6 +1079,9 @@ pub fn tree_rows(rows: &[TreeRowData], places: &[Place]) -> Vec<(NodeId, TreeRow
                 head,
                 is_place: place.is_some(),
                 is_drive,
+                icon: place
+                    .map_or("folder", |place| place_icon(place.kind))
+                    .into(),
                 info: info.into(),
                 fill,
                 expandable,
@@ -1054,6 +1123,7 @@ pub fn found_rows(tree: &Tree, found: &[NodeId]) -> Vec<(NodeId, TreeRow)> {
                 head: SectionHead::None,
                 is_place: false,
                 is_drive: false,
+                icon: "folder".into(),
                 info: info.into(),
                 fill: 0.0,
                 expandable: false,
@@ -1176,6 +1246,13 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         accessed: time(entry.accessed),
         // The folder the row is in, which the list knows ([`FileRows::set_parent`]).
         path: SharedString::new(),
+        original: entry
+            .origin
+            .as_deref()
+            .map(|origin| origin.display().to_string())
+            .unwrap_or_default()
+            .into(),
+        deleted: time(entry.deleted),
         kind: kind_label(entry).into(),
         extension: file_extension(entry)
             .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -1185,6 +1262,8 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
         icon: file_icon(entry).into(),
         is_dir: entry.kind == EntryKind::Dir,
         is_link: entry.kind == EntryKind::Symlink,
+        // No bar; a drive of 내 PC has one ([`FileRows::set_drives`]).
+        fill: -1.0,
         selected,
         hidden: entry.attributes.contains(Attributes::HIDDEN),
         cut: false,
@@ -1218,6 +1297,16 @@ pub fn place_space(place: &Place) -> (String, f32) {
             (words::drive_space(space.available, space.total), fill)
         }
         _ => (String::new(), 0.0),
+    }
+}
+
+/// What the screen knows the place of `folder` by (`PaneView.place`): 0 a folder, 1 the trash,
+/// 2 the computer.
+pub fn place_number(folder: &VPath) -> i32 {
+    match rf_vfs::ShellPlace::of(folder) {
+        None => 0,
+        Some(rf_vfs::ShellPlace::Trash) => 1,
+        Some(rf_vfs::ShellPlace::Computer) => 2,
     }
 }
 
@@ -1636,6 +1725,7 @@ pub fn show_item_menu(window: &MainWindow, facts: MenuFacts) {
     menu.set_one_folder(facts.one_folder);
     menu.set_one_dir(facts.one_dir);
     menu.set_one_item(facts.one_item);
+    menu.set_can_restore(facts.can_restore);
 }
 
 /// Gives the item menu its 링크 만들기 ▸: the kinds of link `links` offers, named for `os`.
@@ -2135,6 +2225,11 @@ fn pick_words(picker: &Picker) -> (String, String, String) {
             words::pick_link_summary(*kind, request.sources.len(), Os::CURRENT),
             words::pick_link_confirm().to_owned(),
         ),
+        PickPurpose::Restore { items } => (
+            words::pick_restore_title().to_owned(),
+            words::pick_restore_summary(items.len()),
+            words::pick_restore_confirm().to_owned(),
+        ),
     }
 }
 
@@ -2420,6 +2515,7 @@ pub fn conflict_view(question: &ConflictQuestion, tz: &TimeZone) -> ConflictView
         existing_newer,
         existing_dir: conflict.existing.kind == EntryKind::Dir,
         can_overwrite,
+        restore: !question.offers_overwrite(),
         overwrite_hint: words::overwrite_hint(can_overwrite, question.work).into(),
         skip_hint: words::skip_hint(conflict.incoming.kind, question.work).into(),
         rename_hint: words::rename_hint(&question.numbered_name()).into(),
@@ -3341,6 +3437,8 @@ mod tests {
             SortKey::Created,
             SortKey::Extension,
             SortKey::Accessed,
+            SortKey::Origin,
+            SortKey::Deleted,
         ] {
             assert_eq!(sort_key(sort_column(key)), Some(key));
         }
@@ -3350,7 +3448,10 @@ mod tests {
         assert_eq!(sort_key(6), None);
         assert_eq!(sort_key(7), Some(SortKey::Accessed));
         assert_eq!(sort_key(8), None);
-        assert_eq!(sort_key(9), None);
+        // The trash's: where an item was, and when it was trashed.
+        assert_eq!(sort_key(9), Some(SortKey::Origin));
+        assert_eq!(sort_key(10), Some(SortKey::Deleted));
+        assert_eq!(sort_key(11), None);
         assert_eq!(sort_key(-1), None);
     }
 

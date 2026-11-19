@@ -5,7 +5,8 @@ import { Theme } from "theme.slint";
 
 export component Icon inherits Path {
     // One of: logo, back, forward, up, new-folder, copy, move, delete, rename, undo,
-    // list-view, select, search, folder, file, link, drive, star, plus, close, pause, play, check,
+    // list-view, select, search, folder, file, link, drive, computer, restore, star, plus, close,
+    // pause, play, check,
     // sort-up, sort-down, chevron-right, chevron-down, warning, pin, and the kinds of files of
     // the icon views: image, audio, video, archive, document, app. Anything else draws nothing.
     in property <string> name;
@@ -97,6 +98,14 @@ export component Icon inherits Path {
         }
         if (name == "drive") {
             return "M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z M7 14h.01M11 14h6";
+        }
+        if (name == "computer") {
+            // A screen on its stand: 내 PC.
+            return "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z M9 21h6M12 17v4";
+        }
+        if (name == "restore") {
+            // An arrow back up out of a tray: 복원.
+            return "M12 15V4M7.5 8.5L12 4l4.5 4.5 M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4";
         }
         if (name == "star") {
             return "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z";

@@ -126,7 +126,7 @@ impl AppState {
             ..VisibilityFilter::default()
         });
         self.open(Modal::Pick(Box::new(picker)));
-        let roots = tree_roots(&self.places);
+        let roots = pick_roots(&self.places);
         let mut effects = self.with_pick_tree(|tree| tree.set_roots(roots));
         if let Some(target) = target {
             effects.extend(self.choose(target, None));
@@ -211,6 +211,14 @@ impl AppState {
             let report = report.clone();
             self.close();
             return vec![Effect::SaveLog { report, folder }];
+        }
+        if let (PickPurpose::Restore { items }, Some(folder)) =
+            (&picker.purpose, picker.target.clone())
+        {
+            let (items, origin) = (items.clone(), picker.origin);
+            self.close();
+            self.remember_target(folder.clone());
+            return super::trash::restore_into(items, &folder, origin);
         }
         if let (PickPurpose::Link { kind }, Some(folder)) = (&picker.purpose, picker.target.clone())
         {
@@ -643,5 +651,15 @@ pub(super) fn tree_roots(places: &[Place]) -> Vec<(String, VPath)> {
     places
         .iter()
         .map(|place| (place.label.clone(), place.path.clone()))
+        .collect()
+}
+
+/// The roots of the picker's tree of `places`: the places but those of the shell (내 PC,
+/// 휴지통), into which nothing is copied or moved ([`AppState::pick_places`], whose order the
+/// picker's rows follow).
+pub(super) fn pick_roots(places: &[Place]) -> Vec<(String, VPath)> {
+    tree_roots(places)
+        .into_iter()
+        .filter(|(_, path)| crate::tree::holds_folders(path))
         .collect()
 }

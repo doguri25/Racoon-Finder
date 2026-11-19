@@ -227,7 +227,7 @@ export struct PaneView {
     thumb-size: int,
     // The columns of 자세히 after the name, in their order, and which columns show by number
     // (0 name, 1 size, 2 modified, 3 kind, 4 created, 5 extension, 6 attributes, 7 accessed,
-    // 8 path).
+    // 8 path, 9 original place, 10 deleted).
     columns: [ColumnView],
     shows: [bool],
     // The column the rows are sorted by first and its direction, the column of the second key
@@ -255,6 +255,9 @@ export struct PaneView {
     completion: FolderMenuView,
     // The piece of the path row whose `›` has its list of folders open, or -1.
     chevron: int,
+    // What the pane shows (NAV-16): 0 a folder, 1 the trash (its columns and menus: 복원,
+    // 영구 삭제…, 휴지통 비우기…), 2 the computer (its drives as tiles; no writing command).
+    place: int,
 }
 
 // Small square icon button inside a tab or a strip: its name and the key of its command
@@ -1428,6 +1431,7 @@ export component Pane inherits Rectangle {
             files := FileList {
                 visible: root.view.error == "" && root.view.mode == 0;
                 rows: root.view.mode == 0 ? root.view.rows : [];
+                place: root.view.place;
                 cursor: root.view.cursor;
                 columns: root.view.columns;
                 shows: root.view.shows;
@@ -1491,6 +1495,7 @@ export component Pane inherits Rectangle {
             grid := FileGrid {
                 visible: root.view.error == "" && root.view.mode != 0;
                 mode: root.view.mode;
+                place: root.view.place;
                 thumb-size: max(64, root.view.thumb-size) * 1px;
                 rows: root.view.mode != 0 ? root.view.rows : [];
                 cursor: root.view.cursor;

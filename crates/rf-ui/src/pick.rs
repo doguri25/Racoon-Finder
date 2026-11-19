@@ -96,6 +96,9 @@ pub enum Validity {
     IntoSource,
     /// The path is no folder, or nothing is there (any more).
     NotAFolder,
+    /// A place of the shell (휴지통, 내 PC, NAV-16): a list that nothing is copied or moved
+    /// into. (A drop on the 휴지통 of the sidebar sends the items to the trash instead.)
+    ShellPlace,
     /// The location is read-only: a warning, the job may still fail.
     NotWritable,
     /// The files need more room than is free there: a warning. With folders among the items
@@ -169,6 +172,9 @@ pub fn summary(req: &PickRequest) -> String {
 /// Paths are compared as they are spelled, name by name: a path typed in another letter case
 /// on a volume that ignores case is not caught here, and the job refuses it instead.
 pub fn validate(req: &PickRequest, target: &VPath, facts: Option<&TargetFacts>) -> Validity {
+    if !crate::tree::holds_folders(target) {
+        return Validity::ShellPlace;
+    }
     if req.sources.iter().any(|source| target.starts_with(source)) {
         return Validity::IntoSource;
     }
@@ -316,6 +322,11 @@ pub enum PickPurpose {
     /// copied, so the picker has no move/copy toggle and no conflict policy: a link never goes
     /// over an item, it is numbered.
     Link { kind: LinkKind },
+    /// The items of the trash its request names are taken out there, each under the name it
+    /// had (휴지통 ▸ 위치를 골라 꺼내기…, NAV-16): `items` as the trash's list showed them. A
+    /// restore never replaces anything, so the picker has no move/copy toggle and no conflict
+    /// policy: a name that is taken asks.
+    Restore { items: Vec<rf_vfs::TrashItem> },
 }
 
 /// The picker while it shows.
@@ -453,10 +464,15 @@ impl Picker {
         matches!(self.purpose, PickPurpose::Link { .. })
     }
 
+    /// Whether it takes items out of the trash.
+    pub fn for_restore(&self) -> bool {
+        matches!(self.purpose, PickPurpose::Restore { .. })
+    }
+
     /// Whether it has no move/copy toggle and no conflict policy: a log never goes over a file,
-    /// and a link is numbered when its name is taken.
+    /// a link is numbered when its name is taken, and a restore never replaces anything.
     pub fn without_options(&self) -> bool {
-        self.for_a_log() || self.for_links()
+        self.for_a_log() || self.for_links() || self.for_restore()
     }
 
     /// Whether 링크는 가리키는 것을 복사 shows: for a copy of items alone. A move takes the

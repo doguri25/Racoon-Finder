@@ -15,7 +15,7 @@ use rf_platform::{LinkKind, kinds_for, link_name};
 use super::jobs::submit;
 use super::{AppState, Effect, RIGHT};
 use crate::pick::{PickPurpose, Picker, quick_targets};
-use crate::words;
+use crate::words::{self, Blocked};
 
 /// One entry of 링크 만들기 ▸.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,6 +96,9 @@ impl AppState {
     /// pane: links to them in the folder it shows, or with `pick` (Shift held) in a folder the
     /// picker finds. An entry that is off says why and makes nothing.
     pub fn make_links(&mut self, index: usize, pick: bool) -> Vec<Effect> {
+        if let Some(refused) = self.blocked_in_shell(self.active, Blocked::Link) {
+            return refused;
+        }
         if self.modal.is_some() || self.quitting {
             return Vec::new();
         }

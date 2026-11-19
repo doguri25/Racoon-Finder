@@ -111,8 +111,8 @@ use crate::settings::{OnError, PickStart, Saver, Session, Settings, ThemeChoice,
 use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
-    MenuShown, Paging, PathForm, RIGHT, SavedPlace, Screen, ShellWork, Subfolders, TreeMode,
-    Unkept, dropped_effect, preview_width, start_folders,
+    MenuShown, Paging, PathForm, RIGHT, SavedPlace, Screen, ShellWork, Subfolders, TRASH_COMMANDS,
+    TreeMode, Unkept, dropped_effect, preview_width, start_folders,
 };
 use crate::ui_bridge::{
     self, PaneModels, PickModels, PreviewModels, PropertiesModels, RecentBlock, RecentFolder,
@@ -401,12 +401,28 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
         // Runs once the event loop does, that is, once the window is open.
         post(move |c| c.notice(&words::settings_backed_up(&backup)));
     }
+    find_places();
+    controller
+}
+
+/// Finds the places of the sidebar (the well-known folders and the drives) on a worker thread,
+/// and hands them to the controller: as the app starts, and for F5 in 내 PC.
+fn find_places() {
     spawn_worker("rf-ui-places", || {
-        let mut found = places::favorites();
-        found.extend(places::drives());
+        let found = found_places();
         post(move |c| c.set_places(&found));
     });
-    controller
+}
+
+/// The places of the sidebar, in its order: the well-known folders, 내 PC, the drives and
+/// 휴지통 (NAV-16). Blocks; call it on a worker thread.
+pub fn found_places() -> Vec<Place> {
+    let [computer, trash] = places::shell_places();
+    let mut found = places::favorites();
+    found.push(computer);
+    found.extend(places::drives());
+    found.push(trash);
+    found
 }
 
 /// The app's end when the event loop ends under the app, called from the loop's `exiting`
@@ -1319,6 +1335,10 @@ fn watch_winit_events(window: &MainWindow) {
             WinitEvent::Focused(false) => {
                 with(Controller::press_focus_lost);
             }
+            // The trash cannot be watched: it is listed again as the window comes to the front.
+            WinitEvent::Focused(true) => {
+                with(|c| c.update(AppState::window_focused));
+            }
             // The settings keep the window's place (LAY-07).
             WinitEvent::Moved(at) => {
                 let corner = (at.x, at.y);
@@ -1858,7 +1878,7 @@ impl Controller {
         set_first_drag_payloads(window);
         Controller {
             window: window.as_weak(),
-            loader: Loader::new(rf_vfs::Vfs::with_local()),
+            loader: Loader::new(rf_vfs::Vfs::with_local_and_shell()),
             jobs,
             state: RefCell::new(None),
             early: RefCell::new(Vec::new()),
@@ -3144,6 +3164,9 @@ impl Controller {
         if self.toggle_command(name) {
             return;
         }
+        if TRASH_COMMANDS.contains(&name) {
+            return self.update(|state| state.trash_command(name).unwrap_or_default());
+        }
         match name {
             "paste-into" => return self.update(|state| state.paste_from_menu(false)),
             "folder-properties" => return self.update(AppState::folder_properties),
@@ -3282,6 +3305,7 @@ impl Controller {
                 | Effect::KeepDropped { .. }
                 | Effect::FindExisting { .. }
                 | Effect::InspectTarget { .. }
+                | Effect::FindPlaces
                 | Effect::ReadSpace { .. } => self.on_worker(effect),
                 Effect::SaveLog { report, folder } => self.save_log(report, folder),
                 Effect::Quit => self.quit(),
@@ -3455,6 +3479,7 @@ impl Controller {
                 });
             }
             Effect::ReadSpace { tabs, drives } => self.read_space(tabs, drives),
+            Effect::FindPlaces => find_places(),
             Effect::CheckFolders(folders) => check_folders(folders),
             Effect::KeepDropped {
                 generation,
@@ -3677,6 +3702,7 @@ impl Controller {
             | Effect::Removal(_)
             | Effect::Notify(_)
             | Effect::ToTray
+            | Effect::FindPlaces
             | Effect::FromTray => {}
         }
     }
@@ -3786,6 +3812,7 @@ impl Controller {
                 let pane = &state.panes()[side];
                 self.panes[side].set_show_extensions(state.show_extensions());
                 self.panes[side].set_cut(state.cut_names(pane.active_tab().location()));
+                self.panes[side].set_drives(pane.active_tab().location(), state.places());
                 let mut view = self.panes[side].view_with(
                     pane,
                     side == state.active(),
@@ -4261,6 +4288,15 @@ impl Controller {
     fn list(&self, effect: Effect) {
         let loaded = |event: LoadEvent| post(move |c| c.loaded(event));
         let (generation, ticket) = match effect {
+            // 내 PC lists the sidebar's drives, which the state has: no look at the disks.
+            Effect::Load(request)
+                if crate::format::shell_place_at(&request.path)
+                    == Some(rf_vfs::ShellPlace::Computer) =>
+            {
+                let generation = request.generation;
+                post(move |c| c.update(|state| state.list_computer(generation)));
+                return;
+            }
             Effect::Load(request) => (request.generation, self.loader.request(request, loaded)),
             Effect::LoadChildren(request) => (
                 request.generation,
@@ -4313,7 +4349,7 @@ impl Controller {
                 picker,
                 state.pick_tree(),
                 found.as_deref(),
-                &self.places.borrow(),
+                &state.pick_places(),
             ));
         }
         // The picker goes under the other dialog before that one shows, and comes on top

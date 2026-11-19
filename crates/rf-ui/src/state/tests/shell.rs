@@ -82,6 +82,7 @@ fn the_item_menu_offers_what_the_items_take() {
             one_folder: false,
             one_dir: false,
             one_item: true,
+            can_restore: false,
         }
     );
     // A program runs as administrator where the system does that.
@@ -394,6 +395,7 @@ fn a_link_gets_what_a_file_and_a_folder_get_and_the_worker_finds_which() {
             one_folder: true,
             one_dir: false,
             one_item: true,
+            can_restore: false,
         }
     );
     choose(&mut state, &[link]);

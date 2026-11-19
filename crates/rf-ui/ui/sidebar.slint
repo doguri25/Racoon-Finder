@@ -1,7 +1,8 @@
 // The sidebar: a folder tree, the shared one or a pane's own (LAY-03; `TreeBox`, at the end,
 // is one with the keys it takes). Its roots are the places, the user's folders under
-// "즐겨찾기" and the drives under "이 PC"; each opens into its folders, listed the first time
-// it opens. The rows are a virtualized ListView, so a folder with hundreds of subfolders
+// "즐겨찾기", 내 PC and the drives under "이 PC", and 휴지통 last (NAV-16); each folder opens
+// into its folders, listed the first time it opens (내 PC and 휴지통 are lists, with no folders
+// below them). A drop on 휴지통 sends the dragged rows to the trash. The rows are a virtualized ListView, so a folder with hundreds of subfolders
 // scrolls as freely as one with a few. The main window's tree takes dragged rows into the
 // folder of the row under the pointer (`accepts-drops`), tells where the pointer is
 // (`DragPointer`), and scrolls under a drag held near its top or bottom (DND-08); the picker's
@@ -22,7 +23,8 @@ import { Shortcuts } from "shortcuts.slint";
 import { DragPointer, DragSeen, DropPlace, DropAt } from "list-parts.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
 
-// The head above a row: the first favorite starts "즐겨찾기", the first drive "이 PC".
+// The head above a row: the first favorite starts "즐겨찾기", the first of 내 PC and the drives
+// "이 PC"; 휴지통 comes after them under no head.
 export enum SectionHead {
     none,
     favorites,
@@ -49,6 +51,9 @@ export struct TreeRow {
     head: SectionHead,
     is-place: bool,
     is-drive: bool,
+    // The row's icon (`Icon.name`): a place's own (a drive, 내 PC's screen, 휴지통's bin) or a
+    // folder's; empty shows a folder's too.
+    icon: string,
     info: string,
     fill: float,
     // The row has folders below it, or may have (not listed yet): it shows a chevron.
@@ -470,8 +475,8 @@ component TreeItem inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 18px;
                     height: 18px;
-                    name: root.item.is-drive ? "drive" : "folder";
-                    color: root.item.dimmed ? Theme.faint : root.item.is-drive ? Theme.text : Theme.folder;
+                    name: root.item.icon != "" ? root.item.icon : root.item.is-drive ? "drive" : "folder";
+                    color: root.item.dimmed ? Theme.faint : root.item.icon == "folder" || root.item.icon == "" ? Theme.folder : Theme.text;
                 }
                 VerticalLayout {
                     horizontal-stretch: 1;

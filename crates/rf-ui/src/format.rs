@@ -135,8 +135,12 @@ pub fn short_path(path: &str, max: usize) -> String {
 }
 
 /// The name of a folder in a tab or the path row: its own name, or for a root the path
-/// without its last separator (`/`, `C:`, `\\server\share`).
+/// without its last separator (`/`, `C:`, `\\server\share`); a place of the shell by its
+/// name (`휴지통`, `내 PC`), never its `shell://` address.
 pub fn folder_label(path: &VPath) -> String {
+    if let Some(place) = shell_place_at(path) {
+        return crate::words::shell_place(place).to_owned();
+    }
     if let Some(name) = path.file_name() {
         return name.to_string_lossy().into_owned();
     }
@@ -146,6 +150,21 @@ pub fn folder_label(path: &VPath) -> String {
         text
     } else {
         trimmed.to_owned()
+    }
+}
+
+/// The place of the shell `path` is (`shell://trash`, `shell://computer`) itself, not an item
+/// of it; `None` for any other path.
+pub fn shell_place_at(path: &VPath) -> Option<rf_vfs::ShellPlace> {
+    rf_vfs::ShellPlace::of(path).filter(|_| path.segments().is_some_and(<[String]>::is_empty))
+}
+
+/// The text of the path field for `path`, as the user reads and types it: the path itself, and
+/// a place of the shell by its name (`휴지통`, `내 PC`), which the field takes back.
+pub fn location_text(path: &VPath) -> String {
+    match shell_place_at(path) {
+        Some(place) => crate::words::shell_place(place).to_owned(),
+        None => path.to_string(),
     }
 }
 
@@ -162,7 +181,7 @@ pub fn file_extension(entry: &Entry) -> Option<&OsStr> {
 /// column shows ([`file_extension`]). A folder, a link, a name without an extension and a dot
 /// file (`.bashrc`) show whole.
 pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
-    let name = entry.name.to_string_lossy();
+    let name = entry.shown_name().to_string_lossy();
     let extension = file_extension(entry).filter(|_| !show_extensions);
     let stem = extension.and_then(|extension| {
         name.strip_suffix(&*extension.to_string_lossy())?
@@ -176,7 +195,7 @@ pub fn shown_name(entry: &Entry, show_extensions: bool) -> String {
 /// A folder named `….app` is a macOS app bundle and reads `응용 프로그램`.
 pub fn kind_label(entry: &Entry) -> String {
     match entry.kind {
-        EntryKind::Dir if is_app_bundle(&entry.name) => return "응용 프로그램".to_owned(),
+        EntryKind::Dir if is_app_bundle(entry.shown_name()) => return "응용 프로그램".to_owned(),
         EntryKind::Dir => return "파일 폴더".to_owned(),
         EntryKind::Symlink => return "바로 가기".to_owned(),
         EntryKind::Other => return "특수 파일".to_owned(),
@@ -211,7 +230,7 @@ pub fn kind_label(entry: &Entry) -> String {
 /// are for a later version.
 pub fn file_icon(entry: &Entry) -> &'static str {
     match entry.kind {
-        EntryKind::Dir if is_app_bundle(&entry.name) => return "app",
+        EntryKind::Dir if is_app_bundle(entry.shown_name()) => return "app",
         EntryKind::Dir => return "folder",
         EntryKind::Symlink => return "link",
         EntryKind::Other => return "file",

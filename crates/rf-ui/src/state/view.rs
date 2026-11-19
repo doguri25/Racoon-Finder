@@ -21,7 +21,7 @@
 //! [`grid_shape`]), 목록 top to bottom and then right (column-major).
 
 use rf_core::VPath;
-use rf_vfs::{SortBy, SortKey, SortOrder, SortSpec};
+use rf_vfs::{ShellPlace, SortBy, SortKey, SortOrder, SortSpec};
 
 use super::{AppState, Effect};
 use crate::dialogs::{Confirm, Modal};
@@ -269,10 +269,15 @@ pub enum Column {
     /// The folder the item is in. In a folder's listing that is the folder itself on every row;
     /// it tells the items apart once a view lists items of many folders (search, a flat view).
     Path,
+    /// Where an item of the trash was before it was trashed (원래 위치, `Entry::origin`): the
+    /// trash's column, empty where the trash does not keep it.
+    Original,
+    /// When an item of the trash was trashed (삭제한 날짜, `Entry::deleted`): the trash's column.
+    Deleted,
 }
 
 impl Column {
-    /// The columns besides the name, in the order the header's menu lists them.
+    /// The columns besides the name of a folder, in the order the header's menu lists them.
     pub const OPTIONAL: [Column; 8] = [
         Column::Size,
         Column::Modified,
@@ -283,6 +288,42 @@ impl Column {
         Column::Attributes,
         Column::Path,
     ];
+
+    /// The columns besides the name of the trash (`shell://trash`), in the order its header's
+    /// menu lists them: what the trash keeps of an item. The times and the attributes of the item
+    /// itself are not kept, and its folder is the trash.
+    pub const TRASH: [Column; 5] = [
+        Column::Original,
+        Column::Deleted,
+        Column::Size,
+        Column::Kind,
+        Column::Extension,
+    ];
+
+    /// Every column but the name, the folders' and the trash's.
+    const ALL_OPTIONAL: [Column; 10] = [
+        Column::Size,
+        Column::Modified,
+        Column::Created,
+        Column::Accessed,
+        Column::Kind,
+        Column::Extension,
+        Column::Attributes,
+        Column::Path,
+        Column::Original,
+        Column::Deleted,
+    ];
+
+    /// The columns besides the name that a view of `folder` offers: the trash's in the trash
+    /// ([`Column::TRASH`]), none in the computer (`shell://computer`, which shows tiles), and a
+    /// folder's elsewhere ([`Column::OPTIONAL`]).
+    pub fn offered(folder: &VPath) -> &'static [Column] {
+        match ShellPlace::of(folder) {
+            Some(ShellPlace::Trash) => &Column::TRASH,
+            Some(ShellPlace::Computer) => &[],
+            _ => &Column::OPTIONAL,
+        }
+    }
 
     /// The column's name in the settings file.
     pub fn name(self) -> &'static str {
@@ -296,19 +337,21 @@ impl Column {
             Column::Attributes => "attributes",
             Column::Accessed => "accessed",
             Column::Path => "path",
+            Column::Original => "original",
+            Column::Deleted => "deleted",
         }
     }
 
     /// The column the settings file calls `name`; `None` for one this version does not know.
     pub fn from_name(name: &str) -> Option<Column> {
         std::iter::once(Column::Name)
-            .chain(Column::OPTIONAL)
+            .chain(Column::ALL_OPTIONAL)
             .find(|column| column.name() == name)
     }
 
     /// The number the screen knows the column by: 0 name, 1 size, 2 modified, 3 kind (the
     /// numbers of the first demo's column heads), 4 created, 5 extension, 6 attributes,
-    /// 7 accessed, 8 path.
+    /// 7 accessed, 8 path, 9 original place, 10 deleted.
     pub fn number(self) -> i32 {
         match self {
             Column::Name => 0,
@@ -320,16 +363,18 @@ impl Column {
             Column::Attributes => 6,
             Column::Accessed => 7,
             Column::Path => 8,
+            Column::Original => 9,
+            Column::Deleted => 10,
         }
     }
 
-    /// How many numbers the columns take (0 to 8): the length of `PaneView.shows`.
-    pub const COUNT: usize = 9;
+    /// How many numbers the columns take (0 to 10): the length of `PaneView.shows`.
+    pub const COUNT: usize = 11;
 
     /// The column of the screen's number; `None` for no column.
     pub fn from_number(number: i32) -> Option<Column> {
         std::iter::once(Column::Name)
-            .chain(Column::OPTIONAL)
+            .chain(Column::ALL_OPTIONAL)
             .find(|column| column.number() == number)
     }
 
@@ -349,6 +394,8 @@ impl Column {
             Column::Kind => SortKey::Kind,
             Column::Extension => SortKey::Extension,
             Column::Accessed => SortKey::Accessed,
+            Column::Original => SortKey::Origin,
+            Column::Deleted => SortKey::Deleted,
             Column::Attributes | Column::Path => return None,
         })
     }
@@ -363,6 +410,8 @@ impl Column {
             SortKey::Kind => Column::Kind,
             SortKey::Extension => Column::Extension,
             SortKey::Accessed => Column::Accessed,
+            SortKey::Origin => Column::Original,
+            SortKey::Deleted => Column::Deleted,
         }
     }
 
@@ -372,11 +421,11 @@ impl Column {
         match self {
             Column::Name => 120,
             Column::Size => 72,
-            Column::Modified | Column::Created | Column::Accessed => 126,
+            Column::Modified | Column::Created | Column::Accessed | Column::Deleted => 126,
             Column::Kind => 104,
             Column::Extension => 64,
             Column::Attributes => 56,
-            Column::Path => 220,
+            Column::Path | Column::Original => 220,
         }
     }
 
@@ -429,6 +478,47 @@ impl Default for FolderView {
 }
 
 impl FolderView {
+    /// The view `folder` shows until one is chosen for it: the trash's
+    /// ([`FolderView::trash`]), the computer's ([`FolderView::computer`]), else the default one.
+    pub fn default_for(folder: &VPath) -> FolderView {
+        match ShellPlace::of(folder) {
+            Some(ShellPlace::Trash) => FolderView::trash(),
+            Some(ShellPlace::Computer) => FolderView::computer(),
+            None => FolderView::default(),
+        }
+    }
+
+    /// The trash's view until one is chosen for it: 자세히 with the original place, the time the
+    /// item was trashed and its size after the name, by name ascending, folders first.
+    pub fn trash() -> FolderView {
+        FolderView {
+            mode: ViewMode::Details,
+            columns: [Column::Original, Column::Deleted, Column::Size]
+                .into_iter()
+                .map(ShownColumn::new)
+                .collect(),
+            sort: SortSpec::default(),
+        }
+    }
+
+    /// The computer's view, which is the only one it has: its drives as tiles (each with the bar
+    /// of how full it is), in the order of their top folders (the system's first, then by letter
+    /// or by the folder they are mounted on).
+    pub fn computer() -> FolderView {
+        FolderView {
+            mode: ViewMode::Tiles,
+            columns: Vec::new(),
+            sort: SortSpec {
+                primary: SortBy {
+                    key: SortKey::Origin,
+                    order: SortOrder::Ascending,
+                },
+                secondary: None,
+                folders_first: true,
+            },
+        }
+    }
+
     /// The default view in the order `sort`.
     pub fn sorted(sort: SortSpec) -> FolderView {
         FolderView {
@@ -702,9 +792,19 @@ impl AppState {
     /// tab at the folder may have changed it since (its sort, while this tab's columns change),
     /// which a whole view of this tab's would undo. A folder whose view cannot be kept
     /// ([`ViewStore::keeps`]) changes as its tab shows it.
-    fn change_view(&mut self, side: usize, change: impl FnOnce(&mut FolderView) -> Chosen) {
+    ///
+    /// The computer (`shell://computer`) keeps its one view: nothing changes there, and the
+    /// notice that says so is given back.
+    fn change_view(
+        &mut self,
+        side: usize,
+        change: impl FnOnce(&mut FolderView) -> Chosen,
+    ) -> Option<Effect> {
         self.activate(side);
         let folder = self.tab(side).location().clone();
+        if ShellPlace::of(&folder) == Some(ShellPlace::Computer) {
+            return Some(Effect::Notice(words::computer_view_fixed().to_owned()));
+        }
         let mut view = if self.views.keeps(&folder) {
             self.views.view_for(&folder)
         } else {
@@ -718,18 +818,21 @@ impl AppState {
                 tab.set_view(view.clone());
             }
         }
+        None
     }
 
     /// Shows pane `side` in `mode`, and scrolls to its cursor there. The selection and the
     /// cursor stay as they were: a view lays the same rows out otherwise.
     pub fn set_view_mode(&mut self, side: usize, mode: ViewMode) -> Vec<Effect> {
-        self.change_view(side, |view| {
+        if let Some(refused) = self.change_view(side, |view| {
             view.mode = mode;
             Chosen {
                 mode: true,
                 ..Chosen::default()
             }
-        });
+        }) {
+            return vec![refused];
+        }
         let row = self.tab(side).selection().cursor().unwrap_or(0);
         vec![Effect::ScrollTo { side, row }]
     }
@@ -760,13 +863,15 @@ impl AppState {
         if mode.thumb_size() == Some(now) {
             return Vec::new();
         }
-        self.change_view(side, |view| {
+        if let Some(refused) = self.change_view(side, |view| {
             view.mode = mode;
             Chosen {
                 mode: true,
                 ..Chosen::default()
             }
-        });
+        }) {
+            return vec![refused];
+        }
         match self.tab(side).selection().cursor() {
             Some(row) => vec![Effect::ScrollTo { side, row }],
             None => Vec::new(),
@@ -799,13 +904,19 @@ impl AppState {
         self.show_thumbnails = on;
     }
 
-    /// Shows or hides `column` in pane `side` (the head's menu, the 보기 menu's 열).
+    /// Shows or hides `column` in pane `side` (the head's menu, the 보기 menu's 열). A column
+    /// the folder does not offer ([`Column::offered`]: the trash's elsewhere, a folder's in the
+    /// trash) does not show there.
     pub fn toggle_column(&mut self, side: usize, column: Column) -> Vec<Effect> {
+        if !Column::offered(self.tab(side).location()).contains(&column) {
+            return Vec::new();
+        }
         self.change_view(side, |view| {
             view.toggle_column(column);
             Chosen::default()
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Moves the column at `from` among those after the name to `slot` in pane `side` (a head
@@ -814,8 +925,9 @@ impl AppState {
         self.change_view(side, |view| {
             view.move_column(from, slot);
             Chosen::default()
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Makes `column` of pane `side` `width` logical pixels wide (its border dragged, or a
@@ -824,8 +936,9 @@ impl AppState {
         self.change_view(side, |view| {
             view.set_width(column, width);
             Chosen::default()
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// 모든 열 너비 맞추기 in pane `side`: in 자세히 the screen fits every column to its texts
@@ -852,8 +965,9 @@ impl AppState {
                 then: !first,
                 ..Chosen::default()
             }
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// The 보기 menu's 2차 정렬 for pane `side`: `key`, or none.
@@ -864,8 +978,9 @@ impl AppState {
                 then: true,
                 ..Chosen::default()
             }
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// Folders first, or mixed in with the files (NAV-08), in pane `side`.
@@ -873,8 +988,9 @@ impl AppState {
         self.change_view(side, |view| {
             view.sort.folders_first = !view.sort.folders_first;
             Chosen::default()
-        });
-        Vec::new()
+        })
+        .into_iter()
+        .collect()
     }
 
     /// 하위 폴더에 적용: the view of pane `side` is the view of its folder and of every folder
@@ -1313,7 +1429,16 @@ mod tests {
                 assert_eq!(Column::of_key(key), column);
             }
         }
-        assert_eq!(Column::from_number(9), None);
+        assert_eq!(Column::from_number(11), None);
+        // The trash's columns have their own numbers and keys, and are no folder's.
+        for column in Column::TRASH {
+            assert_eq!(Column::from_name(column.name()), Some(column));
+            assert_eq!(Column::from_number(column.number()), Some(column));
+        }
+        assert_eq!(Column::Original.sort_key(), Some(SortKey::Origin));
+        assert_eq!(Column::of_key(SortKey::Deleted), Column::Deleted);
+        assert_eq!(Column::from_name("original"), Some(Column::Original));
+        assert!(!Column::OPTIONAL.contains(&Column::Deleted));
         assert_eq!(Column::Attributes.sort_key(), None);
         assert_eq!(Column::Path.sort_key(), None);
         assert_eq!(Column::Accessed.sort_key(), Some(SortKey::Accessed));
