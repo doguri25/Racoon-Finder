@@ -212,24 +212,35 @@ impl Localizer {
     /// A message whose argument is missing shows its name in braces where the value would be.
     /// Never panics; a debug build notes on stderr what was missing.
     pub fn text(&self, key: &str, args: &[Arg<'_>]) -> String {
-        let Some((text, errors)) = self.format(key, args) else {
+        let Some(Formatted {
+            text,
+            errors,
+            fallback,
+        }) = self.format(key, args)
+        else {
             note(format_args!("no message {key}"));
             return key.to_owned();
         };
+        if fallback {
+            note(format_args!(
+                "{key} is not in {}: shown in English",
+                self.lang.code()
+            ));
+        }
         if !errors.is_empty() {
             note(format_args!("{key}: {errors:?}"));
         }
         text
     }
 
-    /// The message `key` with `args`, and the errors of its formatting, from the first bundle
-    /// that has it; `None` when none has.
-    fn format(&self, key: &str, args: &[Arg<'_>]) -> Option<(String, Vec<FluentError>)> {
+    /// The message `key` with `args` from the first bundle that has it; `None` when none has.
+    fn format(&self, key: &str, args: &[Arg<'_>]) -> Option<Formatted> {
         let pattern = self
             .bundles
             .iter()
-            .find_map(|bundle| Some((bundle, bundle.get_message(key)?.value()?)));
-        let (bundle, pattern) = pattern?;
+            .enumerate()
+            .find_map(|(at, bundle)| Some((at, bundle, bundle.get_message(key)?.value()?)));
+        let (at, bundle, pattern) = pattern?;
         let mut all = FluentArgs::with_capacity(args.len() + 1);
         all.set(OS_ARG, os_arg(Os::CURRENT));
         for (name, value) in args {
@@ -237,8 +248,21 @@ impl Localizer {
         }
         let mut errors = Vec::new();
         let text = bundle.format_pattern(pattern, Some(&all), &mut errors);
-        Some((text.into_owned(), errors))
+        Some(Formatted {
+            text: text.into_owned(),
+            errors,
+            fallback: at > 0,
+        })
     }
+}
+
+/// A message as [`Localizer::format`] made it.
+struct Formatted {
+    text: String,
+    /// What went wrong in its formatting (a missing argument, an unknown selector).
+    errors: Vec<FluentError>,
+    /// Whether it came from English, the language lacking it.
+    fallback: bool,
 }
 
 /// A bundle of `lang` with the files `sources`. A file that does not parse whole, or a message
@@ -486,7 +510,12 @@ mod tests {
                             .map(|name| (name.as_str(), dummy.clone()))
                             .collect();
                         args.push((OS_ARG, os_arg(os)));
-                        let (text, errors) = localizer.format(&key, &args).expect("a message");
+                        let Formatted {
+                            text,
+                            errors,
+                            fallback,
+                        } = localizer.format(&key, &args).expect("a message");
+                        assert!(!fallback, "{}: {key} is English", lang.code());
                         assert!(errors.is_empty(), "{}: {key}: {errors:?}", lang.code());
                         assert!(!text.is_empty(), "{}: {key}", lang.code());
                         assert!(
@@ -570,6 +599,11 @@ mod tests {
             "Only English"
         );
         assert_eq!(localizer.text("nowhere-at-all", &[]), "nowhere-at-all");
+        // What a debug build notes: the English that stood in for a Korean message.
+        let fallback = |key: &str| localizer.format(key, &[]).map(|made| made.fallback);
+        assert_eq!(fallback("both"), Some(false));
+        assert_eq!(fallback("english-only"), Some(true));
+        assert_eq!(fallback("nowhere-at-all"), None);
         // A missing argument shows its name, and nothing panics.
         assert_eq!(localizer.text("english-only", &[]), "Only {$what}");
         // English has nothing behind it.
@@ -610,9 +644,14 @@ mod tests {
         ));
     }
 
-    /// Test support that is compiled into the library, whose Hangul literals are the names of
-    /// the files its checks make, never words of the app.
-    const FIXTURES: [&str; 1] = ["crates/rf-vfs/src/testkit.rs"];
+    /// Test support that is compiled into the library (`rf_vfs::testkit`, which the tests of
+    /// other crates call), and its items whose Hangul literals are allowed for good: the names
+    /// of the files its checks make, which a provider must store and list whole in any script,
+    /// never words of the app. Each item must still hold one, or its allowance goes.
+    const FIXTURES: [(&str, &[&str]); 1] = [(
+        "crates/rf-vfs/src/testkit.rs",
+        &["UNICODE_NAMES", "check_long_paths"],
+    )];
 
     /// Whether `c` is Hangul: a syllable or a jamo.
     fn is_hangul(c: char) -> bool {
@@ -624,11 +663,72 @@ mod tests {
             | '\u{D7B0}'..='\u{D7FF}')
     }
 
+    /// How a literal is written.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Written {
+        /// `"…"` or `b"…"`, whose escapes stand for characters.
+        Plain,
+        /// `r"…"`, `r#"…"#`: as it is.
+        Raw,
+        /// `'…'`, one character.
+        Char,
+    }
+
+    /// A string or character literal: where it starts and where it ends (after its closing
+    /// quote), and its text between the quotes, as written.
+    struct Literal {
+        at: usize,
+        end: usize,
+        text: String,
+        written: Written,
+    }
+
+    impl Literal {
+        /// The text with each `\u{…}` escape turned into the character it stands for (a raw
+        /// string has none); the other escapes as written.
+        fn decoded(&self) -> String {
+            if self.written == Written::Raw {
+                return self.text.clone();
+            }
+            let mut out = String::new();
+            let mut chars = self.text.chars();
+            while let Some(c) = chars.next() {
+                if c != '\\' {
+                    out.push(c);
+                    continue;
+                }
+                match chars.next() {
+                    Some('u') => {
+                        let code: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                        let decoded = code
+                            .strip_prefix('{')
+                            .and_then(|hex| u32::from_str_radix(&hex.replace('_', ""), 16).ok())
+                            .and_then(char::from_u32);
+                        match decoded {
+                            Some(decoded) => out.push(decoded),
+                            None => {
+                                out.push_str("\\u");
+                                out.push_str(&code);
+                                out.push('}');
+                            }
+                        }
+                    }
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            }
+            out
+        }
+    }
+
     /// A Rust file read for its literals: its text with the comments and the literals blanked
-    /// out, and the literals, each with the place it starts at.
+    /// out, and the literals.
     struct Scanned {
         masked: Vec<char>,
-        literals: Vec<(usize, String)>,
+        literals: Vec<Literal>,
     }
 
     /// `chars` with its comments and its string and character literals blanked (the line breaks
@@ -644,6 +744,9 @@ mod tests {
             }
         };
         let at = |i: usize| chars.get(i).copied();
+        let text = |from: usize, to: usize| -> String {
+            chars[from..to.min(chars.len())].iter().collect()
+        };
         let mut i = 0;
         while i < chars.len() {
             let c = chars[i];
@@ -693,15 +796,26 @@ mod tests {
                 {
                     end += 1;
                 }
-                literals.push((i, chars[body..end.min(chars.len())].iter().collect()));
-                blank(&mut masked, i, end + 1 + hashes);
-                i = end + 1 + hashes;
+                let after = end + 1 + hashes;
+                literals.push(Literal {
+                    at: i,
+                    end: after,
+                    text: text(body, end),
+                    written: Written::Raw,
+                });
+                blank(&mut masked, i, after);
+                i = after;
             } else if c == '"' {
                 let mut end = i + 1;
                 while end < chars.len() && chars[end] != '"' {
                     end += if chars[end] == '\\' { 2 } else { 1 };
                 }
-                literals.push((i, chars[i + 1..end.min(chars.len())].iter().collect()));
+                literals.push(Literal {
+                    at: i,
+                    end: end + 1,
+                    text: text(i + 1, end),
+                    written: Written::Plain,
+                });
                 blank(&mut masked, i, end + 1);
                 i = end + 1;
             } else if c == '\'' && (at(i + 1) == Some('\\') || at(i + 2) == Some('\'')) {
@@ -710,7 +824,12 @@ mod tests {
                 while end < chars.len() && chars[end] != '\'' {
                     end += 1;
                 }
-                literals.push((i, chars[i + 1..end.min(chars.len())].iter().collect()));
+                literals.push(Literal {
+                    at: i,
+                    end: end + 1,
+                    text: text(i + 1, end),
+                    written: Written::Char,
+                });
                 blank(&mut masked, i, end + 1);
                 i = end + 1;
             } else {
@@ -720,9 +839,106 @@ mod tests {
         Scanned { masked, literals }
     }
 
-    /// The parts of `masked` that only tests compile: each item under a `#[cfg(…)]` that needs
-    /// `test` (`test`, `all(test, unix)`), as places from to; and the names of such items that
-    /// are modules in files of their own (`#[cfg(test)] mod tests;`).
+    /// Whether `literal` is a character that bounds a range (`'\u{AC00}'..='\u{D7A3}'`): a code
+    /// point the code compares with, never a word.
+    fn is_range_bound(masked: &[char], literal: &Literal) -> bool {
+        if literal.written != Written::Char {
+            return false;
+        }
+        let mut after = literal.end;
+        while masked.get(after).is_some_and(|c| c.is_whitespace()) {
+            after += 1;
+        }
+        let mut before = literal.at;
+        while before > 0 && masked[before - 1].is_whitespace() {
+            before -= 1;
+        }
+        let ends_with = |tail: &str| {
+            let tail: Vec<char> = tail.chars().collect();
+            before >= tail.len() && masked[before - tail.len()..before] == tail[..]
+        };
+        masked.get(after..after + 2) == Some(&['.', '.'][..]) || ends_with("..") || ends_with("..=")
+    }
+
+    /// Whether the attribute `#[cfg(…` (to its `]`) keeps its item out of every build but the
+    /// tests': `cfg(test)`, or `cfg(all(…))` with `test` among its conditions. `any(test, …)`
+    /// and `not(…)` may hold outside the tests, so their items count as the app's.
+    fn only_in_tests(attribute: &str) -> bool {
+        let Some(condition) = attribute
+            .trim()
+            .strip_prefix("#[cfg(")
+            .and_then(|rest| rest.trim_end().strip_suffix(')'))
+            .map(str::trim)
+        else {
+            return false;
+        };
+        if condition == "test" {
+            return true;
+        }
+        let Some(all) = condition
+            .strip_prefix("all(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return false;
+        };
+        let mut depth = 0;
+        let mut part = String::new();
+        let mut parts = Vec::new();
+        for c in all.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(std::mem::take(&mut part));
+                    continue;
+                }
+                _ => {}
+            }
+            part.push(c);
+        }
+        parts.push(part);
+        parts.iter().any(|part| part.trim() == "test")
+    }
+
+    /// Where the item that starts at `from` in `masked` ends: at its first `;` or `,` outside
+    /// brackets (an item of a list, a field, an arm of a match), at the `}` of its first `{`,
+    /// or where the brackets around it close.
+    fn item_end(masked: &[char], from: usize) -> usize {
+        let mut j = from;
+        let mut depth = 0;
+        while j < masked.len() {
+            match masked[j] {
+                '(' | '[' => depth += 1,
+                ')' | ']' | '}' if depth == 0 => break,
+                ')' | ']' => depth -= 1,
+                ';' | ',' if depth == 0 => break,
+                '{' if depth == 0 => {
+                    let mut braces = 0;
+                    while j < masked.len() {
+                        match masked[j] {
+                            '{' => braces += 1,
+                            '}' => {
+                                braces -= 1;
+                                if braces == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        j
+    }
+
+    /// The parts of `masked` that only tests compile: each item under a `#[cfg(…)]` that
+    /// keeps it to the tests ([`only_in_tests`]), as places from to; and the names of such items
+    /// that are modules in files of their own (`#[cfg(test)] mod tests;`).
     fn test_items(masked: &[char]) -> (Vec<(usize, usize)>, Vec<String>) {
         let text: String = masked.iter().collect();
         let mut ranges = Vec::new();
@@ -749,42 +965,13 @@ mod tests {
             }
             let attribute: String = masked[start_char..i.min(masked.len())].iter().collect();
             from = start + 1;
-            let words: Vec<&str> = attribute
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .collect();
-            if !words.contains(&"test") || attribute.contains("not(test") {
+            if !only_in_tests(&attribute) {
                 continue;
             }
-            // The item: to its first `;`, or to the `}` of its first `{`.
-            let mut j = i + 1;
-            let mut depth = 0;
-            while j < masked.len() {
-                match masked[j] {
-                    '(' | '[' => depth += 1,
-                    ')' | ']' => depth -= 1,
-                    ';' if depth == 0 => break,
-                    '{' if depth == 0 => {
-                        let mut braces = 0;
-                        while j < masked.len() {
-                            match masked[j] {
-                                '{' => braces += 1,
-                                '}' => {
-                                    braces -= 1;
-                                    if braces == 0 {
-                                        break;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            j += 1;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-                j += 1;
-            }
-            let item: String = masked[i + 1..j.min(masked.len())].iter().collect();
+            let j = item_end(masked, i + 1);
+            let item: String = masked[(i + 1).min(masked.len())..j.min(masked.len())]
+                .iter()
+                .collect();
             let item = item.trim();
             if let Some(name) = item
                 .strip_prefix("mod ")
@@ -796,6 +983,38 @@ mod tests {
             ranges.push((start_char, j));
         }
         (ranges, modules)
+    }
+
+    /// Where the item `name` of `masked` (a `fn`, a `const` or a `static`) starts and ends.
+    fn item_named(masked: &[char], name: &str) -> Option<(usize, usize)> {
+        let text: String = masked.iter().collect();
+        let at = ["fn ", "const ", "static "].iter().find_map(|kind| {
+            let wanted = format!("{kind}{name}");
+            text.match_indices(&wanted)
+                .find(|(at, _)| {
+                    !text[at + wanted.len()..]
+                        .starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+                .map(|(at, _)| at)
+        })?;
+        let start = text[..at].chars().count();
+        Some((start, item_end(masked, start)))
+    }
+
+    /// The Hangul literals of the file `scanned` outside the items only tests compile
+    /// (`tests`), but the bounds of a range, read with their escapes decoded.
+    fn hangul_literals<'a>(scanned: &'a Scanned, tests: &[(usize, usize)]) -> Vec<&'a Literal> {
+        scanned
+            .literals
+            .iter()
+            .filter(|literal| {
+                !tests
+                    .iter()
+                    .any(|&(from, to)| (from..to).contains(&literal.at))
+            })
+            .filter(|literal| !is_range_bound(&scanned.masked, literal))
+            .filter(|literal| literal.decoded().chars().any(is_hangul))
+            .collect()
     }
 
     /// The Rust files under `dir`, but those of test, bench and example folders and of the
@@ -823,8 +1042,8 @@ mod tests {
     }
 
     /// The rule of I18N-02 after Task 9: the words of the app are in the Fluent files, so no
-    /// Rust code outside tests holds a Hangul string or character literal, but in what
-    /// [`FIXTURES`] allows.
+    /// Rust code outside tests holds a Hangul string or character literal (escapes decoded), but
+    /// in what [`FIXTURES`] allows. A character that bounds a range is a code point, not a word.
     #[test]
     fn no_hangul_string_literal_outside_tests() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -844,7 +1063,11 @@ mod tests {
                 .join("/")
         };
         let names: Vec<String> = files.iter().map(|path| relative(path)).collect();
-        for reached in ["crates/rf-ui/src/words.rs", "crates/rf-ui/src/format.rs"] {
+        for reached in [
+            "crates/rf-ui/src/words.rs",
+            "crates/rf-ui/src/format.rs",
+            "crates/rf-platform/src/links/mod.rs",
+        ] {
             assert!(
                 names.iter().any(|name| name == reached),
                 "{reached}: {names:?}"
@@ -852,6 +1075,7 @@ mod tests {
         }
         let mut test_files = Vec::new();
         let mut found: Vec<(String, usize, String)> = Vec::new();
+        let mut needed: Vec<(String, &str)> = Vec::new();
         for (path, name) in files.iter().zip(&names) {
             let source = std::fs::read_to_string(path).expect("a Rust file");
             let chars: Vec<char> = source.chars().collect();
@@ -872,14 +1096,25 @@ mod tests {
                     test_files.push(relative(&dir.join(&module).join("mod.rs")));
                 }
             }
-            if FIXTURES.contains(&name.as_str()) {
-                continue;
-            }
-            for (at, literal) in scanned.literals {
-                let in_test = tests.iter().any(|&(from, to)| (from..to).contains(&at));
-                if literal.chars().any(is_hangul) && !in_test {
-                    let line = chars[..at].iter().filter(|&&c| c == '\n').count() + 1;
-                    found.push((name.clone(), line, literal));
+            let allowed: Vec<(&str, (usize, usize))> = FIXTURES
+                .iter()
+                .filter(|(file, _)| file == name)
+                .flat_map(|(_, items)| items.iter())
+                .map(|&item| {
+                    let span = item_named(&scanned.masked, item)
+                        .unwrap_or_else(|| panic!("{name} has no item {item}"));
+                    (item, span)
+                })
+                .collect();
+            for literal in hangul_literals(&scanned, &tests) {
+                let fixture = allowed
+                    .iter()
+                    .find(|(_, (from, to))| (*from..*to).contains(&literal.at));
+                if let Some((item, _)) = fixture {
+                    needed.push((name.clone(), item));
+                } else {
+                    let line = chars[..literal.at].iter().filter(|&&c| c == '\n').count() + 1;
+                    found.push((name.clone(), line, literal.text.clone()));
                 }
             }
         }
@@ -888,22 +1123,180 @@ mod tests {
             found.is_empty(),
             "Hangul literals outside tests (move the words to crates/rf-ui/i18n): {found:#?}"
         );
+        // An allowance goes once its item holds no Hangul literal.
+        for (file, items) in FIXTURES {
+            for &item in items {
+                assert!(
+                    needed.contains(&(file.to_owned(), item)),
+                    "{file}: {item} needs no allowance any more: take it out of FIXTURES"
+                );
+            }
+        }
     }
 
     #[test]
     fn the_scan_finds_literals_and_skips_comments_and_tests() {
-        let source = "// ‘주석’ \"아님\"\nfn a() { let x = \"보임\"; let c = '가'; let r = r#\"원\"#; }\n/* \"블록\" */\nfn b<'a>(_: &'a str) {}\n#[cfg(all(test, unix))]\nmod t { fn c() { let _ = \"시험\"; } }\n#[cfg(not(test))]\nfn d() { let _ = \"보임2\"; }\n#[cfg(test)]\nmod tests;\n";
+        let source = concat!(
+            "// ‘주석’ \"아님\"\n",
+            "fn a() { let x = \"보임\"; let c = '가'; let r = r#\"원\"#; let n = \"글\"; }\n",
+            "/* \"블록\" */\n",
+            "fn b<'a>(_: &'a str) {}\n",
+            "#[cfg(all(test, unix))]\nmod t { fn c() { let _ = \"시험\"; } }\n",
+            "#[cfg(not(test))]\nfn d() { let _ = \"보임2\"; }\n",
+            // Conditions that hold outside the tests too.
+            "#[cfg(any(test, unix))]\nfn e() { let _ = \"보임3\"; }\n",
+            "#[cfg(not(any(test, debug_assertions)))]\nfn f() { let _ = \"보임4\"; }\n",
+            // An attribute on an arm of a match keeps that arm alone.
+            "fn g(x: u8) -> &'static str {\n",
+            "    match x { #[cfg(test)] 0 => \"시험2\", _ => { \"보임5\" } }\n",
+            "}\n",
+            // Escapes are read; the bounds of a range are code points.
+            "fn h() { let _ = \"\\u{d734}\\u{c9c0}\"; let _ = r\"\\u{d734}\"; ",
+            "let _ = ('\\u{AC00}'..='\\u{D7A3}', '\\u{AC00}'); let _ = \"\\\\u{AC00}\"; }\n",
+            "#[cfg(test)]\nmod tests;\n",
+        );
         let chars: Vec<char> = source.chars().collect();
         let scanned = scan(&chars);
         let (tests, modules) = test_items(&scanned.masked);
-        let shown: Vec<&str> = scanned
-            .literals
-            .iter()
-            .filter(|(at, _)| !tests.iter().any(|&(from, to)| (from..to).contains(at)))
-            .map(|(_, literal)| literal.as_str())
+        let shown: Vec<&str> = hangul_literals(&scanned, &tests)
+            .into_iter()
+            .map(|literal| literal.text.as_str())
             .collect();
-        assert_eq!(shown, ["보임", "가", "원", "보임2"]);
+        assert_eq!(
+            shown,
+            [
+                "보임",
+                "가",
+                "원",
+                "글",
+                "보임2",
+                "보임3",
+                "보임4",
+                "보임5",
+                "\\u{d734}\\u{c9c0}",
+                "\\u{AC00}"
+            ]
+        );
         assert_eq!(modules, ["tests"]);
+        // The attribute as `test_items` reads it, to its `]`.
+        assert!(only_in_tests("#[cfg(test)"));
+        assert!(only_in_tests("#[cfg(all(unix, test))"));
+        assert!(!only_in_tests("#[cfg(all(unix, any(test, windows)))"));
+        assert!(!only_in_tests("#[cfg(unix)"));
+    }
+
+    /// The calls in `masked` whose parentheses hold the key of a message: the name before each
+    /// `(` and where it opens and closes.
+    fn calls(masked: &[char]) -> Vec<(String, usize, usize)> {
+        let mut made = Vec::new();
+        let mut open: Vec<(String, usize)> = Vec::new();
+        for (i, &c) in masked.iter().enumerate() {
+            match c {
+                '(' => {
+                    let mut start = i;
+                    while start > 0
+                        && (masked[start - 1].is_alphanumeric() || masked[start - 1] == '_')
+                    {
+                        start -= 1;
+                    }
+                    open.push((masked[start..i].iter().collect(), i));
+                }
+                ')' => {
+                    if let Some((name, at)) = open.pop() {
+                        made.push((name, at, i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        made
+    }
+
+    /// The calls that make a message with no argument but `$os`: [`t_static`], and `format.rs`'s
+    /// closure `named`, which asks it.
+    const STATIC_CALLS: [&str; 2] = ["t_static", "named"];
+
+    /// The calls that make a message with arguments: [`t`], and the words' helpers that call it
+    /// with a key they are given.
+    const CALLS: [&str; 6] = ["t", "says", "with_reason", "of_app", "sized", "of_kind"];
+
+    /// Whether `literal` is written as a key is: lowercase words joined by `-`. A `ko-` name is
+    /// a Korean argument's, not a key.
+    fn is_key(literal: &str) -> bool {
+        literal.contains('-')
+            && !literal.starts_with('-')
+            && !literal.starts_with("ko-")
+            && literal
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+
+    /// Every key the words ask for is in both languages; and each one they ask [`t_static`] for
+    /// (a key whose nearest call is it) takes no argument but `$os` in either, so that no message
+    /// is kept for good with `{$name}` in it.
+    #[test]
+    fn every_key_the_moved_code_asks_for_is_in_both_languages() {
+        let ko = messages(Lang::Ko);
+        let en = messages(Lang::En);
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut asked = 0;
+        let mut kept = 0;
+        for file in ["words.rs", "format.rs"] {
+            let source = std::fs::read_to_string(src.join(file)).expect("a Rust file");
+            // The code outside the tests.
+            let moved = source.split("#[cfg(test)]").next().unwrap_or_default();
+            let chars: Vec<char> = moved.chars().collect();
+            let scanned = scan(&chars);
+            let calls = calls(&scanned.masked);
+            let line = |at: usize| chars[..at].iter().filter(|&&c| c == '\n').count() + 1;
+            for literal in scanned.literals.iter().filter(|l| is_key(&l.text)) {
+                let key = &literal.text;
+                asked += 1;
+                assert!(ko.contains_key(key), "{file}: {key} is not in ko");
+                assert!(en.contains_key(key), "{file}: {key} is not in en");
+                let nearest = calls
+                    .iter()
+                    .filter(|(name, from, to)| {
+                        (*from..*to).contains(&literal.at)
+                            && (STATIC_CALLS.contains(&name.as_str())
+                                || CALLS.contains(&name.as_str()))
+                    })
+                    .max_by_key(|(_, from, _)| *from);
+                if nearest.is_some_and(|(name, _, _)| STATIC_CALLS.contains(&name.as_str())) {
+                    kept += 1;
+                    for (lang, all) in [("ko", &ko), ("en", &en)] {
+                        let names = &all[key];
+                        assert!(
+                            names.iter().all(|name| name == OS_ARG),
+                            "{file}:{}: {key} is kept by t_static but takes {names:?} in {lang}",
+                            line(literal.at)
+                        );
+                    }
+                }
+            }
+            // `t_static` is given its key where this test sees it: a key, or a `match` or an
+            // `if` of keys, never a name that stands for one (but in the closure `named`).
+            for (name, from, to) in &calls {
+                let start = scanned.masked[..*from]
+                    .iter()
+                    .rposition(|&c| c == '\n')
+                    .map_or(0, |at| at + 1);
+                let before: String = scanned.masked[start..*from].iter().collect();
+                let sees_a_key = scanned
+                    .literals
+                    .iter()
+                    .any(|l| (*from..*to).contains(&l.at) && is_key(&l.text));
+                assert!(
+                    name != "t_static"
+                        || sees_a_key
+                        || before.trim() == "let named = |key| t_static",
+                    "{file}:{}: t_static is given a key this test cannot see",
+                    line(*from)
+                );
+            }
+        }
+        assert!(asked > 400, "{asked} keys");
+        assert!(kept > 200, "{kept} keys kept by t_static");
     }
 
     #[test]
@@ -1134,34 +1527,5 @@ mod tests {
         );
         assert_eq!(en.text("link-name-shortcut", &[]), "Shortcut");
         assert_eq!(en.text("link-name-alias", &[]), "alias");
-    }
-
-    #[test]
-    fn every_key_the_moved_code_asks_for_is_in_both_languages() {
-        let ko = messages(Lang::Ko);
-        let en = messages(Lang::En);
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut asked = 0;
-        for file in ["words.rs", "format.rs"] {
-            let source = std::fs::read_to_string(src.join(file)).expect("a Rust file");
-            // The code outside the tests.
-            let moved = source.split("#[cfg(test)]").next().unwrap_or_default();
-            let chars: Vec<char> = moved.chars().collect();
-            for (_, literal) in scan(&chars).literals {
-                // A `ko-` name is a Korean argument's, not a key.
-                let is_key = literal.contains('-')
-                    && !literal.starts_with('-')
-                    && !literal.starts_with("ko-")
-                    && literal
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-                if is_key {
-                    asked += 1;
-                    assert!(ko.contains_key(&literal), "{file}: {literal} is not in ko");
-                    assert!(en.contains_key(&literal), "{file}: {literal} is not in en");
-                }
-            }
-        }
-        assert!(asked > 200, "{asked} keys");
     }
 }

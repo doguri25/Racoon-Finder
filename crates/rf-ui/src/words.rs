@@ -582,7 +582,7 @@ pub fn shell_place(place: ShellPlace) -> &'static str {
 /// a name or size the target cannot hold, the [`issue_kind`] fact and what it meant for the
 /// item (a rename or a create refuses every name with an issue, warnings too).
 pub fn failure_reason(reason: &FailureReason) -> String {
-    let key = match reason {
+    t_static(match reason {
         FailureReason::IntoItself => "failure-into-itself",
         FailureReason::NoTargetFolder => "failure-no-target-folder",
         FailureReason::TargetNotAFolder => "failure-target-not-a-folder",
@@ -628,8 +628,8 @@ pub fn failure_reason(reason: &FailureReason) -> String {
             return issue_and(issue, refused_because(issue));
         }
         _ => "failure-unknown",
-    };
-    t_static(key).to_owned()
+    })
+    .to_owned()
 }
 
 /// The [`issue_kind`] fact of `issue`, then what it meant (`consequence`), as one line.
@@ -1743,26 +1743,31 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
             many => t("history-items", &[("count", count(many.len()))]),
         }
     }
-    // The head of the row (a message), then what it was done to.
-    let put = |label: &'static str, what: String| format!("{}: {what}", t_static(label));
+    // The head of the row, then what it was done to.
+    let put = |label: &str, what: String| format!("{label}: {what}");
     let make = |kind: &CreateKind, path: &VPath| {
-        let label = match kind {
+        let label = t_static(match kind {
             CreateKind::File => "history-new-file",
             CreateKind::Dir => "history-new-folder",
-        };
+        });
         put(label, named(path))
     };
     match (record, redo) {
-        (UndoRecord::Renamed { from, to }, false) => {
-            put("history-rename", format!("{} → {}", named(from), named(to)))
-        }
-        (UndoRecord::Renamed { from, to }, true) => {
-            put("history-rename", format!("{} → {}", named(to), named(from)))
-        }
+        (UndoRecord::Renamed { from, to }, false) => put(
+            t_static("history-rename"),
+            format!("{} → {}", named(from), named(to)),
+        ),
+        (UndoRecord::Renamed { from, to }, true) => put(
+            t_static("history-rename"),
+            format!("{} → {}", named(to), named(from)),
+        ),
         (UndoRecord::Moved { moves, .. }, false) => {
             let moved: Vec<&VPath> = moves.iter().map(|m| &m.to).collect();
             let into = moves.first().map(|m| folder_of(&m.to)).unwrap_or_default();
-            put("history-move", format!("{} → {into}", items(&moved)))
+            put(
+                t_static("history-move"),
+                format!("{} → {into}", items(&moved)),
+            )
         }
         (UndoRecord::Moved { moves, .. }, true) => {
             let moved: Vec<&VPath> = moves.iter().map(|m| &m.from).collect();
@@ -1770,7 +1775,10 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
                 .first()
                 .map(|m| folder_of(&m.from))
                 .unwrap_or_default();
-            put("history-move", format!("{} → {into}", items(&moved)))
+            put(
+                t_static("history-move"),
+                format!("{} → {into}", items(&moved)),
+            )
         }
         (UndoRecord::Copied { created, .. }, false) => {
             let made: Vec<&VPath> = created.iter().map(|item| &item.path).collect();
@@ -1778,20 +1786,23 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
                 .first()
                 .map(|item| folder_of(&item.path))
                 .unwrap_or_default();
-            put("history-copy", format!("{} → {into}", items(&made)))
+            put(
+                t_static("history-copy"),
+                format!("{} → {into}", items(&made)),
+            )
         }
         (UndoRecord::Copied { created, .. }, true) => put(
-            "history-to-trash",
+            t_static("history-to-trash"),
             items(&created.iter().map(|item| &item.path).collect::<Vec<_>>()),
         ),
         (UndoRecord::Created { path, kind }, false)
         | (UndoRecord::Removed { path, kind }, true) => make(kind, path),
         (UndoRecord::Created { path, .. }, true) | (UndoRecord::Removed { path, .. }, false) => {
-            put("history-delete", named(path))
+            put(t_static("history-delete"), named(path))
         }
         (UndoRecord::Trashed { items: trashed }, false)
         | (UndoRecord::Restored { items: trashed }, true) => put(
-            "history-to-trash",
+            t_static("history-to-trash"),
             items(
                 &trashed
                     .iter()
@@ -1801,7 +1812,7 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
         ),
         (UndoRecord::Trashed { items: trashed }, true)
         | (UndoRecord::Restored { items: trashed }, false) => put(
-            "history-from-trash",
+            t_static("history-from-trash"),
             items(
                 &trashed
                     .iter()
@@ -1811,12 +1822,12 @@ pub fn history_action(record: &UndoRecord, redo: bool) -> String {
         ),
         (UndoRecord::LinksMade { at: links }, false)
         | (UndoRecord::LinksRemoved { links }, true) => put(
-            "history-link",
+            t_static("history-link"),
             items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
         ),
         (UndoRecord::LinksMade { at: links }, true)
         | (UndoRecord::LinksRemoved { links }, false) => put(
-            "history-unlink",
+            t_static("history-unlink"),
             items(&links.iter().map(|(link, _, _)| link).collect::<Vec<_>>()),
         ),
         // A record added after this was written.
@@ -1880,7 +1891,7 @@ fn clip_end(text: &str, max: usize) -> String {
 /// is the next one: the folders on screen can lag behind the disk, and the undo looks again
 /// itself.
 pub fn history_note(redo: bool, next: bool, stale: Option<Stale>) -> String {
-    let key = match (stale, next, redo) {
+    t_static(match (stale, next, redo) {
         (Some(Stale::Missing), _, false) => "history-missing-undo",
         (Some(Stale::Missing), _, true) => "history-missing-redo",
         (Some(Stale::Changed), _, false) => "history-changed-undo",
@@ -1889,8 +1900,8 @@ pub fn history_note(redo: bool, next: bool, stale: Option<Stale>) -> String {
         (None, true, true) => "history-next-redo",
         (None, false, false) => return undo_order().to_owned(),
         (None, false, true) => "history-redo-first",
-    };
-    t_static(key).to_owned()
+    })
+    .to_owned()
 }
 
 /// The time of a row: `14:32` for today (the day of `now` in `tz`), `10월 30일 14:32` before.
@@ -2461,7 +2472,7 @@ pub fn error_ask_item(failure: &ItemFailure) -> String {
 /// 두었습니다", [`failure_reason`]) say here only what is wrong, since whether the item is left
 /// out is what the window asks. Any other failure reads as in that list ([`item_failure`]).
 pub fn error_ask_reason(failure: &ItemFailure) -> String {
-    let key = match &failure.reason {
+    t_static(match &failure.reason {
         Some(FailureReason::TooDeep) => "error-ask-too-deep",
         Some(FailureReason::NotARegularFile) => "error-ask-not-a-regular-file",
         Some(FailureReason::SourceCutShort) => "error-ask-source-cut-short",
@@ -2469,8 +2480,8 @@ pub fn error_ask_reason(failure: &ItemFailure) -> String {
         Some(FailureReason::ChangedWhileMoved) => "error-ask-changed-while-moved",
         Some(FailureReason::OtherVolume) => "error-ask-other-volume",
         _ => return item_failure(failure),
-    };
-    t_static(key).to_owned()
+    })
+    .to_owned()
 }
 
 /// What the error window says while 남은 오류에도 같은 선택 is on: why 다시 시도 is off.
@@ -2564,7 +2575,7 @@ pub fn pick_favorites() -> &'static str {
 /// never read as the same number; `at_least` when folders are among the items, whose content
 /// adds to the need.
 pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> String {
-    let key = match validity {
+    t_static(match validity {
         Validity::Ok => return String::new(),
         Validity::IntoSource if mode == TransferMode::Copy => "pick-problem-into-copied",
         Validity::IntoSource => "pick-problem-into-moved",
@@ -2573,13 +2584,12 @@ pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> S
         Validity::ShellPlace | Validity::ForeignToTrash => "pick-problem-shell-place",
         Validity::NotWritable => "pick-problem-not-writable",
         Validity::NotEnoughSpace { need, available } => {
-            let key = if at_least {
-                "pick-problem-space-at-least"
-            } else {
-                "pick-problem-space"
-            };
             return t(
-                key,
+                if at_least {
+                    "pick-problem-space-at-least"
+                } else {
+                    "pick-problem-space"
+                },
                 &[
                     ("need", format_size_rounded(need, Rounding::Up).into()),
                     (
@@ -2589,8 +2599,8 @@ pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> S
                 ],
             );
         }
-    };
-    t_static(key).to_owned()
+    })
+    .to_owned()
 }
 
 /// The free room at the picker's target: `남은 공간 212 GB`, rounded down like the status
@@ -2645,15 +2655,14 @@ pub fn pick_path_error(kind: ErrorKind) -> String {
 /// confirms with Enter alone.
 pub fn pick_policy(policy: ConflictPolicy) -> (&'static str, bool) {
     // One sentence a line, so that a narrow window breaks the line between them.
-    let (key, destroys) = match policy {
-        ConflictPolicy::Overwrite => ("pick-policy-overwrite", true),
-        ConflictPolicy::OverwriteIfNewer => ("pick-policy-if-newer", true),
-        ConflictPolicy::OverwriteIfSizeDiffers => ("pick-policy-if-size-differs", true),
-        ConflictPolicy::Skip => ("pick-policy-skip", false),
-        ConflictPolicy::AutoRename => ("pick-policy-auto-rename", false),
-        ConflictPolicy::Ask => ("pick-policy-ask", false),
-    };
-    (t_static(key), destroys)
+    match policy {
+        ConflictPolicy::Overwrite => (t_static("pick-policy-overwrite"), true),
+        ConflictPolicy::OverwriteIfNewer => (t_static("pick-policy-if-newer"), true),
+        ConflictPolicy::OverwriteIfSizeDiffers => (t_static("pick-policy-if-size-differs"), true),
+        ConflictPolicy::Skip => (t_static("pick-policy-skip"), false),
+        ConflictPolicy::AutoRename => (t_static("pick-policy-auto-rename"), false),
+        ConflictPolicy::Ask => (t_static("pick-policy-ask"), false),
+    }
 }
 
 /// What the picker's folder tree shows when its filter finds nothing: it looks only among
@@ -3008,18 +3017,17 @@ pub fn size_fact(bytes: u64, whole: bool) -> String {
 /// of those that `flagged` (how many of `of` items have each) has, `(일부)` after one that
 /// only some of them have, or `없음`.
 pub fn attribute_names(flagged: &[usize; 4], of: usize) -> String {
-    const NAMES: [&str; 4] = [
-        "attribute-read-only",
-        "attribute-hidden",
-        "attribute-system",
-        "attribute-archive",
+    let all = [
+        t_static("attribute-read-only"),
+        t_static("attribute-hidden"),
+        t_static("attribute-system"),
+        t_static("attribute-archive"),
     ];
-    let names: Vec<String> = NAMES
-        .iter()
+    let names: Vec<String> = all
+        .into_iter()
         .zip(flagged)
         .filter(|(_, flagged)| **flagged > 0)
-        .map(|(key, flagged)| {
-            let name = t_static(key);
+        .map(|(name, flagged)| {
             if *flagged < of {
                 t("attribute-partly", &[("name", name.into())])
             } else {
