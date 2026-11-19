@@ -157,11 +157,17 @@ impl AppState {
 
     /// What `command` does in pane `side` when the pane shows a place of the shell, in the
     /// place of what it does in a folder; `None` for a folder, and for a command that works
-    /// there as anywhere (the cursor, the selection, the tabs, the view, F5). Whatever the place
-    /// does not allow ([`place_capabilities`]) says why in a notice.
+    /// there as anywhere (the cursor, the selection, the tabs, the view, F5). The place's
+    /// capability bits ([`place_capabilities`]) decide: without `WRITE` nothing is made,
+    /// renamed, pasted or moved in or out; with `DELETE_FOREVER` (the trash) Delete deletes for
+    /// good after its question, and without `TRASH` nothing goes to a trash from there. The items
+    /// of a place of the shell are no files to read (its provider refuses `open_read`), so
+    /// nothing copies, previews or shows the properties of them either. Each refusal says why in
+    /// a notice.
     pub(super) fn shell_refusal(&mut self, side: usize, command: &Command) -> Option<Vec<Effect>> {
         let place = self.shell_place_of(side)?;
         let caps = place.capabilities();
+        let writes = caps.contains(Capabilities::WRITE);
         let blocked = match command {
             Command::Open => return Some(self.open_cursor_in_shell(side, place)),
             Command::Refresh if place == ShellPlace::Computer => {
@@ -175,13 +181,15 @@ impl AppState {
             {
                 return Some(self.delete_from_trash(side));
             }
-            Command::Trash | Command::DeletePermanently => Blocked::Delete,
-            Command::NewFolder => Blocked::NewFolder,
-            Command::Rename => Blocked::Rename,
+            Command::Trash if !caps.contains(Capabilities::TRASH) => Blocked::Delete,
+            Command::DeletePermanently if !writes => Blocked::Delete,
+            Command::NewFolder if !writes => Blocked::NewFolder,
+            Command::Rename if !writes => Blocked::Rename,
+            Command::Paste | Command::PasteMove if !writes => Blocked::Paste,
+            // A move takes the items out, which is a write too; a copy reads them.
             Command::CopyTo | Command::MoveTo => Blocked::Transfer,
             Command::Copy => Blocked::Copy,
             Command::Cut => Blocked::Cut,
-            Command::Paste | Command::PasteMove => Blocked::Paste,
             Command::CopyPath => Blocked::CopyPath,
             Command::Properties | Command::SystemProperties => Blocked::Properties,
             Command::OpenWith | Command::RunAsAdmin => Blocked::OpenWith,
@@ -191,8 +199,6 @@ impl AppState {
             Command::SystemMenu | Command::ContextMenu => return Some(self.app_menu(side)),
             _ => return None,
         };
-        // A write into the place, or a read of its items: nothing the bits allow.
-        debug_assert!(!caps.contains(Capabilities::WRITE));
         Some(vec![Effect::Notice(words::shell_blocked(place, blocked))])
     }
 
