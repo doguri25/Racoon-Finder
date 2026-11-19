@@ -1,31 +1,40 @@
-#![allow(unsafe_code, reason = "IFileOperation COM")]
+#![allow(
+    unsafe_code,
+    reason = "IFileOperation COM, the user's SID and SHEmptyRecycleBinW"
+)]
 
-//! The Windows recycle bin through the shell's `IFileOperation`.
+//! The Windows recycle bin through the shell's `IFileOperation`, and the bin as a place: its
+//! `$I…` records, read from the user's folder of each fixed drive's bin.
 //!
 //! `IFileOperation` recycles only when it can and deletes permanently when it cannot (a path
 //! over `MAX_PATH`, an item larger than the bin allows). A progress sink looks at every delete
 //! before it happens and aborts the one that would be permanent.
 
-use std::ffi::{OsString, c_void};
-use std::io;
-use std::os::windows::ffi::OsStringExt;
+use std::ffi::{OsStr, OsString, c_void};
+use std::io::{self, Read};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rf_core::{Error, ErrorKind, FileId, Result, VPath, VolumeId};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::Storage::FileSystem::GetDriveTypeW;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, CoUninitialize, IBindCtx,
 };
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
     FOF_ALLOWUNDO, FOF_NO_UI, FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FileOperation,
     IFileOperation, IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
-    SIGDN_FILESYSPATH,
+    SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW, SIGDN_FILESYSPATH,
 };
-use windows::core::{IUnknown, PCWSTR};
+use windows::core::{IUnknown, PCWSTR, PWSTR};
 
 use self::sink::RecycleGuard;
+use super::{TrashId, TrashItem, directly_in, io_error, not_in_trash, parse_recycle_index};
 use crate::fileid::file_identity;
 use crate::volume::volume_root;
 use crate::win_util::{to_io, wide};
@@ -238,6 +247,204 @@ fn is_item(wanted: Identity, resolved: &Path) -> bool {
         .ok()
         .and_then(|resolved| file_identity(&resolved).ok())
         .is_some_and(|found| found == wanted)
+}
+
+/// The size above which a `$I…` file is not read: a version 2 record is at most 64 KiB.
+const MAX_RECORD_LEN: u64 = 64 * 1024 + 28;
+
+/// The first two UTF-16 units of a record's name: `$I`.
+const RECORD_START: [u16; 2] = [0x24, 0x49];
+
+/// The first two UTF-16 units of an item's name: `$R`.
+const ITEM_START: [u16; 2] = [0x24, 0x52];
+
+/// The folders of the current user's recycle bins: `X:\$Recycle.Bin\<user SID>` of every fixed
+/// drive that has one. None when the user's SID cannot be read.
+fn bins() -> Vec<PathBuf> {
+    let Some(sid) = user_sid() else {
+        return Vec::new();
+    };
+    ('A'..='Z')
+        .filter_map(|letter| {
+            let root = format!("{letter}:\\");
+            let wide_root = wide(OsStr::new(&root));
+            // SAFETY: `wide_root` is NUL-terminated and outlives the call.
+            let fixed = unsafe { GetDriveTypeW(PCWSTR(wide_root.as_ptr())) } == DRIVE_FIXED;
+            let bin = PathBuf::from(format!("{root}$Recycle.Bin\\{sid}"));
+            (fixed && std::fs::symlink_metadata(&bin).is_ok_and(|meta| meta.is_dir()))
+                .then_some(bin)
+        })
+        .collect()
+}
+
+/// Closes a handle when it goes out of scope.
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle was opened for this guard alone and is closed once, here.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// The SID of the user the process runs as, as text (`S-1-5-21-…`), from the process's token.
+fn user_sid() -> Option<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: `GetCurrentProcess` gives a pseudo-handle that needs no closing, and `token` is a
+    // writable handle that lives through the call.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) }.ok()?;
+    let token = OwnedHandle(token);
+    let mut needed = 0_u32;
+    // SAFETY: a query of the size alone, with no buffer; it fails with
+    // `ERROR_INSUFFICIENT_BUFFER` and sets `needed`.
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &raw mut needed) };
+    let len = usize::try_from(needed).ok().filter(|&len| len > 0)?;
+    // `u64` units keep the `TOKEN_USER` at the start aligned.
+    let mut buffer = vec![0_u64; len.div_ceil(8)];
+    // SAFETY: `buffer` is writable for at least `needed` bytes and lives through the call.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            needed,
+            &raw mut needed,
+        )
+    }
+    .ok()?;
+    // SAFETY: on success the buffer starts with a `TOKEN_USER`, aligned for it, whose SID points
+    // into the same buffer, which outlives the use of both below.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let mut text = PWSTR::null();
+    // SAFETY: the SID is valid (see above); on success `text` is a NUL-terminated string the
+    // system allocated with `LocalAlloc`.
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut text) }.ok()?;
+    // SAFETY: `text` is NUL-terminated (see above).
+    let sid = unsafe { text.to_string() }.ok();
+    // SAFETY: `text` was allocated with `LocalAlloc` and is freed once, here.
+    let _ = unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    sid
+}
+
+/// The bytes of the small file at `path`, if it is no larger than [`MAX_RECORD_LEN`].
+fn read_record(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_LEN + 1).read_to_end(&mut bytes).ok()?;
+    (u64::try_from(bytes.len()).ok()? <= MAX_RECORD_LEN).then_some(bytes)
+}
+
+/// Every item of the user's recycle bins: each `$I…` record that reads (see
+/// `parse_recycle_index`) and whose `$R…` item is there. A bin that cannot be read is passed
+/// over, and so is an item without a record, which the shell does not show either.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the shape of `list` on every system; macOS can fail"
+)]
+pub fn list() -> Result<Vec<TrashItem>> {
+    let mut items = Vec::new();
+    for bin in bins() {
+        let Ok(entries) = std::fs::read_dir(&bin) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let units: Vec<u16> = entry.file_name().encode_wide().collect();
+            let Some(rest) = units.strip_prefix(&RECORD_START) else {
+                continue;
+            };
+            let Some((original, deleted, size)) =
+                read_record(&entry.path()).and_then(|bytes| parse_recycle_index(&bytes))
+            else {
+                continue;
+            };
+            let mut item_name = ITEM_START.to_vec();
+            item_name.extend_from_slice(rest);
+            let location = bin.join(OsString::from_wide(&item_name));
+            let Ok(meta) = std::fs::symlink_metadata(&location) else {
+                continue;
+            };
+            let name = original
+                .file_name()
+                .or_else(|| location.file_name())
+                .map(ToOwned::to_owned)
+                .unwrap_or_default();
+            items.push(TrashItem {
+                id: TrashId::of(&location),
+                name,
+                original: Some(original),
+                deleted,
+                size: Some(size),
+                is_dir: meta.is_dir(),
+                location,
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// Refuses, with `Error::Unsupported`, an item that is not a `$R…` item directly in one of the
+/// user's bins.
+fn check(item: &TrashItem) -> Result<()> {
+    let named = item.location.file_name().is_some_and(|name| {
+        let units: Vec<u16> = name.encode_wide().collect();
+        units.starts_with(&ITEM_START) && units.len() > ITEM_START.len()
+    });
+    if named && directly_in(&item.location, &bins()) {
+        Ok(())
+    } else {
+        Err(not_in_trash(&item.location))
+    }
+}
+
+pub fn restore(item: &TrashItem, to: &Path) -> Result<()> {
+    check(item)?;
+    let location = VPath::local(&item.location)?;
+    crate::fsops::rename_no_replace(&location, &VPath::local(to)?)?;
+    super::remove_recycle_record(&location);
+    Ok(())
+}
+
+pub fn delete_forever(item: &TrashItem) -> Result<()> {
+    check(item)?;
+    let location = VPath::local(&item.location)?;
+    let extended = location
+        .to_extended_length()
+        .unwrap_or_else(|| item.location.clone());
+    super::remove_tree(&extended).map_err(|e| io_error("delete_forever", &item.location, e))?;
+    super::remove_recycle_record(&location);
+    Ok(())
+}
+
+/// Empties every recycle bin with `SHEmptyRecycleBinW`, on a thread of its own for COM, with no
+/// question, progress or sound. The shell fails this call when the bins are empty already
+/// (`E_UNEXPECTED` on some versions); a failure after which the user's bins hold nothing counts
+/// as done.
+pub fn empty() -> Result<()> {
+    let emptied = std::thread::spawn(|| {
+        // SAFETY: no reserved pointer; the thread is new, so no apartment is set yet.
+        let init =
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+        if init.is_err() {
+            return Err(to_io(&windows::core::Error::from_hresult(init)));
+        }
+        let _scope = ComScope;
+        let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+        // SAFETY: no owner window, and a null root path, which means every bin.
+        unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), flags) }.map_err(|e| to_io(&e))
+    })
+    .join()
+    .unwrap_or_else(|_| Err(io::Error::other("the thread that empties the bin panicked")));
+    match emptied {
+        Ok(()) => Ok(()),
+        Err(_) if list().is_ok_and(|items| items.is_empty()) => Ok(()),
+        Err(e) => {
+            let bin = bins()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| PathBuf::from("C:\\"));
+            Err(io_error("empty_trash", &bin, e))
+        }
+    }
 }
 
 /// The progress sink, in a module of its own because the `implement` macro writes code that

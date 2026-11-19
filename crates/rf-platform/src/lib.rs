@@ -41,6 +41,13 @@ pub use sparse::{DataRanges, data_ranges, file_data_ranges, mark_sparse};
 pub use thumbs::{
     Thumb, ThumbOutcome, bgra_to_rgba_rows, fit_within, os_thumbnail, supports_os_thumbnails,
 };
-pub use trash::{move_to_trash, restore_from_trash, trash_supported};
-pub use volume::{DiskSpace, VolumeInfo, disk_space, volume_info};
+#[cfg(unix)]
+pub use trash::FreedesktopTrash;
+pub use trash::{
+    TrashId, TrashItem, move_to_trash, parse_recycle_index, parse_trashinfo, restore_from_trash,
+    trash_supported,
+};
+pub use volume::{
+    DiskSpace, MountedRoot, RootKind, VolumeInfo, disk_space, mounted_roots, volume_info,
+};
 pub use watch::{DirEvent, DirEventHandler, DirWatch, watch_dir};

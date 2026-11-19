@@ -164,9 +164,11 @@ fn long_descendant_folder_is_never_deleted_permanently() {
     }
 }
 
+/// On Linux a temporary folder has no trash, so no test ever fills the user's home trash; the
+/// freedesktop trash itself is tested in a temporary folder of its own (`FreedesktopTrash`).
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_has_no_trash_and_keeps_the_file() {
+fn a_temporary_folder_has_no_trash_on_linux_and_keeps_the_file() {
     let t = tempfile::tempdir().unwrap();
     let f = unique(t.path(), ".txt");
     std::fs::write(&f, b"keep").unwrap();
@@ -280,4 +282,130 @@ fn trailing_dot_name_never_trashes_its_sibling() {
         }
         Ok(None) => panic!("trashed without a recycle bin entry"),
     }
+}
+
+/// An item that is not in a trash folder is never deleted or moved, whatever the item says.
+#[test]
+fn an_item_outside_the_trash_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let f = unique(t.path(), ".txt");
+    std::fs::write(&f, b"keep").unwrap();
+    let mut item = rf_platform::TrashItem::at(f.clone(), false);
+    item.original = Some(t.path().join("back.txt"));
+    let back = t.path().join("back.txt");
+    for result in [
+        rf_platform::trash::delete_forever(&item),
+        rf_platform::trash::restore(&item, &back),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::Unsupported);
+    }
+    assert_eq!(std::fs::read(&f).unwrap(), b"keep");
+    assert!(!back.exists());
+    // The trash folder itself is no item of it either.
+    let folder = rf_platform::TrashItem::at(t.path().to_path_buf(), true);
+    assert_eq!(
+        rf_platform::trash::delete_forever(&folder)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
+    );
+    assert!(f.exists());
+}
+
+/// The item a test trashed, as the trash lists it; `None` when the trash cannot be listed here
+/// (macOS lets only an app with Full Disk Access read `~/.Trash`).
+#[cfg(any(windows, target_os = "macos"))]
+#[allow(clippy::print_stderr, reason = "says why the test is skipped")]
+fn listed(location: &Path) -> Option<rf_platform::TrashItem> {
+    match rf_platform::trash::list() {
+        Ok(items) => {
+            let wanted = std::fs::canonicalize(location).unwrap();
+            let found = items
+                .into_iter()
+                .find(|item| std::fs::canonicalize(&item.location).ok().as_ref() == Some(&wanted));
+            Some(found.expect("the trashed item is listed"))
+        }
+        Err(e) if cfg!(target_os = "macos") && e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!("skipped: the trash cannot be listed here ({e})");
+            None
+        }
+        Err(e) => panic!("the trash cannot be listed: {e}"),
+    }
+}
+
+/// The `$I` record next to the `$R` item at `location` (Windows).
+#[cfg(windows)]
+fn record_of(location: &Path) -> PathBuf {
+    let name = location.file_name().unwrap().to_string_lossy().into_owned();
+    location.with_file_name(format!("$I{}", name.strip_prefix("$R").unwrap()))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_trashed_file_is_listed_and_deleted_for_good() {
+    let t = tempfile::tempdir().unwrap();
+    let f = unique(t.path(), ".txt");
+    std::fs::write(&f, b"trash me").unwrap();
+    let before = std::time::SystemTime::now();
+    let location = move_to_trash(&VPath::local(&f).unwrap())
+        .unwrap()
+        .expect("trash location");
+    let Some(item) = listed(&location) else {
+        purge(&location);
+        return;
+    };
+    assert_eq!(item.name.as_os_str(), f.file_name().unwrap());
+    assert!(!item.is_dir);
+    assert_eq!(item.size, Some(8));
+    if cfg!(windows) {
+        let original = item
+            .original
+            .clone()
+            .expect("the bin keeps the original place");
+        assert_eq!(
+            std::fs::canonicalize(original.parent().unwrap()).unwrap(),
+            std::fs::canonicalize(t.path()).unwrap()
+        );
+        let deleted = item.deleted.expect("the bin keeps the time");
+        let floor = before - std::time::Duration::from_secs(2);
+        assert!(deleted >= floor, "{deleted:?}");
+    } else {
+        assert_eq!(item.original, None);
+    }
+    rf_platform::trash::delete_forever(&item).unwrap();
+    assert!(std::fs::symlink_metadata(&location).is_err());
+    #[cfg(windows)]
+    assert!(!record_of(&location).exists());
+    assert!(!f.exists());
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn a_trashed_folder_is_put_back_and_never_over_another_item() {
+    let t = tempfile::tempdir().unwrap();
+    let d = unique(t.path(), "");
+    std::fs::create_dir_all(d.join("inner")).unwrap();
+    std::fs::write(d.join("inner").join("f.txt"), b"x").unwrap();
+    let location = move_to_trash(&VPath::local(&d).unwrap())
+        .unwrap()
+        .expect("trash location");
+    let Some(item) = listed(&location) else {
+        purge(&location);
+        return;
+    };
+    assert!(item.is_dir);
+    // A new item in its place stays; the folder stays in the trash.
+    std::fs::write(&d, b"new").unwrap();
+    let clash = rf_platform::trash::restore(&item, &d);
+    let kind = clash.as_ref().map_err(rf_core::Error::kind).err();
+    std::fs::remove_file(&d).unwrap();
+    if kind != Some(ErrorKind::AlreadyExists) {
+        purge(&location);
+        panic!("a taken place is a conflict: {clash:?}");
+    }
+    rf_platform::trash::restore(&item, &d).unwrap();
+    assert_eq!(std::fs::read(d.join("inner").join("f.txt")).unwrap(), b"x");
+    assert!(std::fs::symlink_metadata(&location).is_err());
+    #[cfg(windows)]
+    assert!(!record_of(&location).exists());
 }

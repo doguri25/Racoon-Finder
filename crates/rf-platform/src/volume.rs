@@ -53,6 +53,177 @@ pub fn volume_info(path: &VPath) -> Result<VolumeInfo> {
     imp::volume_info(path, &local)
 }
 
+/// What a [`MountedRoot`] is, for the words a window gives it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RootKind {
+    /// `/`, the system's own volume, on macOS and Linux.
+    System,
+    /// A Windows drive, by its letter (`C`).
+    Letter(char),
+    /// Another mounted volume, by the name of the folder it is mounted on (`/Volumes/USB` is
+    /// `USB`).
+    Volume(std::ffi::OsString),
+}
+
+/// The top folder of a drive or mounted volume.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MountedRoot {
+    pub path: VPath,
+    pub kind: RootKind,
+}
+
+/// The drives and mounted volumes, in this order:
+///
+/// - Windows: every drive letter whose root can be read.
+/// - macOS: `/`, then the folders of `/Volumes` that are other volumes than `/` (which skips the
+///   link to the system volume there).
+/// - Linux: `/`, then the folders of `/media/*`, `/run/media/*` and `/mnt` that are other volumes
+///   than `/`, each volume once, under its folder's name.
+///
+/// Folders whose names start with a dot (`/Volumes/.timemachine`) are the system's own and are
+/// left out. This blocks on a slow or sleeping drive: call it on a worker thread.
+pub fn mounted_roots() -> Vec<MountedRoot> {
+    roots::mounted_roots()
+}
+
+#[cfg(windows)]
+mod roots {
+    use rf_core::VPath;
+
+    use super::{MountedRoot, RootKind};
+
+    pub(super) fn mounted_roots() -> Vec<MountedRoot> {
+        ('A'..='Z')
+            .filter_map(|letter| {
+                let root = format!("{letter}:\\");
+                std::fs::metadata(&root).ok()?;
+                Some(MountedRoot {
+                    path: VPath::local(&root).ok()?,
+                    kind: RootKind::Letter(letter),
+                })
+            })
+            .collect()
+    }
+}
+
+#[cfg(unix)]
+mod roots {
+    use std::collections::HashSet;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+
+    use rf_core::VPath;
+
+    use super::{MountedRoot, RootKind};
+
+    /// The folders that may hold other volumes than `/`, as globs of one or two levels.
+    #[cfg(target_os = "macos")]
+    const MOUNT_FOLDERS: &[(&str, usize)] = &[("/Volumes", 1)];
+    #[cfg(not(target_os = "macos"))]
+    const MOUNT_FOLDERS: &[(&str, usize)] = &[("/media", 2), ("/run/media", 2), ("/mnt", 1)];
+
+    pub(super) fn mounted_roots() -> Vec<MountedRoot> {
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        let root = Path::new("/");
+        if let Ok(meta) = std::fs::metadata(root) {
+            seen.insert(meta.dev());
+        }
+        if let Ok(path) = VPath::local(root) {
+            roots.push(MountedRoot {
+                path,
+                kind: RootKind::System,
+            });
+        }
+        for &(base, depth) in MOUNT_FOLDERS {
+            for folder in folders_at(Path::new(base), depth) {
+                // A folder on the device of a volume already listed is no mount of its own; the
+                // device also tells a volume reached under two paths.
+                let Ok(meta) = std::fs::metadata(&folder) else {
+                    continue;
+                };
+                if !meta.is_dir() || !seen.insert(meta.dev()) {
+                    continue;
+                }
+                let name = folder
+                    .file_name()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_default();
+                if let Ok(path) = VPath::local(&folder) {
+                    roots.push(MountedRoot {
+                        path,
+                        kind: RootKind::Volume(name),
+                    });
+                }
+            }
+        }
+        roots
+    }
+
+    /// The folders `depth` levels below `base`, sorted by path, without those whose names start
+    /// with a dot.
+    pub(super) fn folders_at(base: &Path, depth: usize) -> Vec<PathBuf> {
+        let mut level = vec![base.to_path_buf()];
+        for _ in 0..depth {
+            level = level
+                .iter()
+                .filter_map(|folder| std::fs::read_dir(folder).ok())
+                .flatten()
+                .filter_map(Result::ok)
+                .filter(|child| !child.file_name().as_encoded_bytes().starts_with(b"."))
+                .map(|child| child.path())
+                .collect();
+        }
+        level.sort();
+        level
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn mount_folders_skip_dot_folders() {
+            let t = tempfile::tempdir().expect("a temporary folder");
+            for name in ["user/USB", "user/.hidden", ".timemachine/x", "Data"] {
+                std::fs::create_dir_all(t.path().join(name)).expect("a folder");
+            }
+            assert_eq!(
+                folders_at(t.path(), 1),
+                [t.path().join("Data"), t.path().join("user")]
+            );
+            assert_eq!(folders_at(t.path(), 2), [t.path().join("user/USB")]);
+        }
+
+        #[test]
+        fn the_system_volume_comes_first_and_each_volume_once() {
+            let roots = mounted_roots();
+            assert_eq!(
+                roots[0],
+                MountedRoot {
+                    path: VPath::local("/").unwrap(),
+                    kind: RootKind::System
+                }
+            );
+            for (i, root) in roots.iter().enumerate() {
+                assert!(
+                    roots[..i].iter().all(|other| other.path != root.path),
+                    "{roots:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+mod roots {
+    use super::MountedRoot;
+
+    pub(super) fn mounted_roots() -> Vec<MountedRoot> {
+        Vec::new()
+    }
+}
+
 /// The form of `path` to hand to the OS, after checking that the item exists.
 ///
 /// The check matters on Windows, where `GetVolumePathNameW` returns a root even for a path

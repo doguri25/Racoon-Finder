@@ -1,18 +1,25 @@
-//! The macOS trash: Finder first, so that "Put Back" works, then `NSFileManager`.
+//! The macOS trash: Finder first, so that "Put Back" works, then `NSFileManager`; and the trash
+//! as a place, read from `~/.Trash` and the `.Trashes/<uid>` folder of each other volume.
 
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_foundation::{
     NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask, NSString, NSURL,
 };
 use rf_core::{Error, Result, VPath};
+
+use super::{TrashId, TrashItem, directly_in, io_error, not_in_trash};
+
+/// The file Finder keeps its view of a folder in, the trash's included; no trashed item.
+const FINDER_FILE: &str = ".DS_Store";
 
 /// Set once Finder has shown that it cannot be used in this process: automation was denied,
 /// the request timed out, or there is no Finder. The next trash request then skips Finder
@@ -206,4 +213,127 @@ fn via_file_manager(local: &Path) -> io::Result<Option<PathBuf>> {
     Ok(resulting
         .and_then(|moved| moved.path())
         .map(|moved| PathBuf::from(moved.to_string())))
+}
+
+/// The user's trash folders: `~/.Trash` first, then `<volume>/.Trashes/<uid>` of each folder of
+/// `/Volumes` that is another volume than `/` (which passes over the link to the system volume
+/// there) and has one. The home trash is given even when it does not exist.
+fn trash_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| home.join(".Trash"))
+        .into_iter()
+        .collect();
+    let uid = rustix::process::getuid().as_raw().to_string();
+    let system = std::fs::metadata("/").map(|meta| meta.dev()).ok();
+    let Ok(volumes) = std::fs::read_dir("/Volumes") else {
+        return dirs;
+    };
+    let mut others: Vec<PathBuf> = volumes
+        .flatten()
+        .filter(|volume| !volume.file_name().as_bytes().starts_with(b"."))
+        .filter(|volume| {
+            std::fs::metadata(volume.path()).is_ok_and(|meta| Some(meta.dev()) != system)
+        })
+        .map(|volume| volume.path().join(".Trashes").join(&uid))
+        .filter(|trash| std::fs::symlink_metadata(trash).is_ok_and(|meta| meta.is_dir()))
+        .collect();
+    others.sort();
+    dirs.append(&mut others);
+    dirs
+}
+
+/// The time `meta` last changed state (`st_ctime`), which a move into the trash sets.
+fn changed_at(meta: &std::fs::Metadata) -> Option<SystemTime> {
+    let seconds = u64::try_from(meta.ctime()).ok()?;
+    let nanos = u32::try_from(meta.ctime_nsec()).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, nanos))
+}
+
+/// Every item of the user's trash folders but Finder's own `.DS_Store`. The original place is
+/// never known (see [`TrashItem::original`]). The home trash must be readable: macOS lets only an
+/// app with Full Disk Access list it, and its error is the result; another volume's trash that
+/// cannot be read is passed over.
+pub fn list() -> Result<Vec<TrashItem>> {
+    let mut items = Vec::new();
+    for (index, dir) in trash_dirs().into_iter().enumerate() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if index == 0 => return Err(io_error("list_trash", &dir, e)),
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == FINDER_FILE {
+                continue;
+            }
+            let location = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&location) else {
+                continue;
+            };
+            let is_dir = meta.is_dir();
+            items.push(TrashItem {
+                id: TrashId::of(&location),
+                name,
+                original: None,
+                deleted: changed_at(&meta),
+                size: (!is_dir).then_some(meta.len()),
+                is_dir,
+                location,
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// Refuses, with `Error::Unsupported`, an item that is not directly in one of the user's trash
+/// folders, and Finder's `.DS_Store` there.
+fn check(item: &TrashItem) -> Result<()> {
+    let finder_file = item.location.file_name() == Some(OsStr::new(FINDER_FILE));
+    if !finder_file && directly_in(&item.location, &trash_dirs()) {
+        Ok(())
+    } else {
+        Err(not_in_trash(&item.location))
+    }
+}
+
+pub fn restore(item: &TrashItem, to: &Path) -> Result<()> {
+    check(item)?;
+    crate::fsops::rename_no_replace(&VPath::local(&item.location)?, &VPath::local(to)?)
+}
+
+/// Removes the item at `local` with `NSFileManager`, which removes a link itself and a folder
+/// with everything in it, following no link inside.
+fn remove(local: &Path) -> Result<()> {
+    autoreleasepool(|_| {
+        let url = file_url(local).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path is not valid UTF-8, which the file manager needs",
+            )
+        })?;
+        NSFileManager::defaultManager()
+            .removeItemAtURL_error(&url)
+            .map_err(|e| io::Error::other(e.localizedDescription().to_string()))
+    })
+    .map_err(|e| io_error("delete_forever", local, e))
+}
+
+pub fn delete_forever(item: &TrashItem) -> Result<()> {
+    check(item)?;
+    remove(&item.location)
+}
+
+/// Removes every item of every trash folder with `NSFileManager`, Finder's `.DS_Store` aside. It
+/// goes on after an error and gives the first one.
+pub fn empty() -> Result<()> {
+    let mut first = None;
+    for item in list()? {
+        if let Err(e) = remove(&item.location)
+            && first.is_none()
+        {
+            first = Some(e);
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
