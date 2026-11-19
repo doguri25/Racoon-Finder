@@ -107,7 +107,7 @@ use crate::places::{self, Place};
 use crate::preview::{self, PREVIEW_DELAY};
 use crate::properties::{MeasureNews, Tally};
 use crate::resolver::Question;
-use crate::settings::{OnError, PickStart, Saver, Session, Settings, ThemeChoice, Waiting};
+use crate::settings::{FontScale, Look, OnError, PickStart, Saver, Session, Settings, Waiting};
 use crate::state::long_press::Spot;
 use crate::state::{
     AppState, ClipboardFailure, Column, DropSpot, Effect, Hover, LEFT, Layout, LinkFacts,
@@ -143,7 +143,7 @@ use matcher::Matcher;
 use newest::Outcome;
 pub use persist::{FINAL_SAVE_WAIT, RESTORE_WAIT, RESTORE_WORKERS, SAVE_DELAY};
 use persist::{SaveLedger, WindowKept, logical, look_for, wait_for};
-pub(crate) use persist::{theme_number, theme_of};
+pub(crate) use persist::{density_number, density_of, theme_number, theme_of};
 pub use previewer::Previewer;
 use properties::{Hasher, Measurer};
 use sorter::Sorter;
@@ -330,6 +330,8 @@ pub fn begin(window: &MainWindow, startup: Startup, jobs: Jobs) -> Rc<Controller
     // theme changes.
     ui_bridge::follow_theme(window);
     window.set_theme_choice(theme_number(settings.theme));
+    window.set_density(density_number(settings.density));
+    window.set_font_scale(i32::from(settings.font_scale.percent()));
     window.invoke_show_theme();
     // The layout of the last run from the start, before the panes' folders are known.
     show_layout(window, session.layout, false);
@@ -609,6 +611,25 @@ fn number(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// The 보기 menu's theme, density and size of text (THEME-07), to the controller.
+fn connect_look(window: &MainWindow) {
+    window.on_theme_chosen(|choice| {
+        if let Some(theme) = theme_of(choice) {
+            with(|c| c.choose_theme(theme));
+        }
+    });
+    window.on_density_chosen(|density| {
+        if let Some(density) = density_of(density) {
+            with(|c| c.choose_density(density));
+        }
+    });
+    window.on_font_scale_chosen(|percent| {
+        if let Some(scale) = FontScale::of_percent(i64::from(percent)) {
+            with(|c| c.choose_font_scale(scale));
+        }
+    });
+}
+
 fn connect(window: &MainWindow) {
     window.on_key(|text, ctrl, shift, alt, meta, repeat| {
         let mods = Mods {
@@ -646,11 +667,7 @@ fn connect(window: &MainWindow) {
             });
         });
     });
-    window.on_theme_chosen(|choice| {
-        if let Some(theme) = theme_of(choice) {
-            with(|c| c.choose_theme(theme));
-        }
-    });
+    connect_look(window);
     window.on_window_resized(|| {
         with(Controller::window_resized);
     });
@@ -1800,8 +1817,8 @@ pub struct Controller {
     /// The drag of rows that left the window goes out on the next turn of the event loop
     /// ([`Controller::pointer_outside`]).
     leaving: Cell<bool>,
-    /// The theme chosen in the 보기 menu.
-    theme: Cell<ThemeChoice>,
+    /// The theme, the density and the size of text chosen in the 보기 menu (THEME-07).
+    look: Cell<Look>,
     /// Where the settings say the window was (LAY-07), until it is put there once, as the
     /// window system is about to make it ([`place_window`]).
     saved_place: Cell<Option<SavedPlace>>,
@@ -1904,7 +1921,7 @@ impl Controller {
             subfolder_rows: Rc::new(VecModel::default()),
             panes: [PaneModels::default(), PaneModels::default()],
             shown: RefCell::new([None, None]),
-            theme: Cell::new(settings.theme),
+            look: Cell::new(settings.look()),
             saved_place: Cell::new(Some(settings.saved_place())),
             window_kept: RefCell::new(WindowKept::new(&settings)),
             maximize_after_show: Cell::new(false),
@@ -4153,14 +4170,18 @@ impl Controller {
     }
 
     /// Makes the job panel's own window and shows it: with the models the panel under the
-    /// panes has, what else it showed last, the theme of the main window, and the same
+    /// panes has, what else it showed last, the theme, the density and the size of text of the
+    /// main window, and the same
     /// handlers. Its close button puts the panel back under the panes
     /// ([`Controller::dock_jobs`]).
     fn open_job_window(&self) -> Result<(), slint::PlatformError> {
         let own = JobWindow::new()?;
         own.set_window_title(words::job_window_title().into());
         ui_bridge::follow_theme(&own);
-        own.set_theme_choice(theme_number(self.theme.get()));
+        let look = self.look.get();
+        own.set_theme_choice(theme_number(look.theme));
+        own.set_density(density_number(look.density));
+        own.set_font_scale(i32::from(look.font_scale.percent()));
         own.invoke_show_theme();
         // The keys of 위로 and 아래로, which each window that shows the panel has for itself.
         ui_bridge::show_panel_shortcuts(&own, Os::CURRENT);
@@ -4522,6 +4543,7 @@ fn tree_index(tree: i32) -> usize {
 mod tests {
     use super::*;
     use crate::settings;
+    use crate::settings::{Density, ThemeChoice};
 
     #[test]
     fn a_menu_choice_trusts_the_system_s_keys_where_it_tells_them() {
@@ -5436,6 +5458,35 @@ mod tests {
             ui_bridge::shown_theme(&own),
             crate::theme::Builtin::HighContrast.tokens()
         );
+        // The density and the size of text of 보기 ▸ 테마 reach it at once too (THEME-07), and
+        // the main window (whose tokens follow them as ui_smoke shows), and the settings keep
+        // them.
+        c.choose_density(Density::Roomy);
+        c.choose_font_scale(FontScale::Largest);
+        slint::platform::update_timers_and_animations();
+        let roomy = crate::theme::scaled(
+            crate::theme::Builtin::HighContrast.tokens(),
+            Density::Roomy,
+            FontScale::Largest,
+        );
+        assert_eq!(ui_bridge::shown_theme(&own), roomy);
+        assert_eq!(
+            (d.window.get_density(), d.window.get_font_scale()),
+            (2, 130)
+        );
+        let settings = c.settings_text().expect("the settings");
+        assert!(settings.contains("density = \"roomy\"\n"), "{settings}");
+        assert!(settings.contains("font_scale = 130\n"), "{settings}");
+        c.choose_density(Density::Normal);
+        c.choose_font_scale(FontScale::Normal);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(
+            ui_bridge::shown_theme(&own),
+            crate::theme::Builtin::HighContrast.tokens()
+        );
+        let settings = c.settings_text().expect("the settings");
+        assert!(!settings.contains("density"), "{settings}");
+        assert!(!settings.contains("font_scale"), "{settings}");
         c.choose_theme(ThemeChoice::Dark);
         slint::platform::update_timers_and_animations();
 

@@ -25,6 +25,10 @@ export component JobWindow inherits Window {
     // The theme of the settings, numbered as the main window's `theme-choice`: 0 follows the
     // system, 1 is light, 2 dark, 3 high contrast.
     in property <int> theme-choice;
+    // The density and the size of text of the settings, as the main window's `density` and
+    // `font-scale` (THEME-07).
+    in property <int> density: 1;
+    in property <int> font-scale: 100;
     // What the panel shows, named as the main window names it: the jobs a worker has taken up,
     // those that wait, the keyboard cursor, 최근 완료 and 되돌리기 기록.
     in property <[JobRowView]> job-rows;
@@ -85,7 +89,7 @@ export component JobWindow inherits Window {
         if (root.theme-choice == 0) {
             Palette.color-scheme = ColorScheme.unknown;
         }
-        Theme.pick(root.theme-choice, root.system-dark);
+        Theme.pick(root.theme-choice, root.system-dark, root.density, root.font-scale);
         if (root.theme-choice != 0) {
             Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
         }
@@ -94,6 +98,12 @@ export component JobWindow inherits Window {
         root.show-theme();
     }
     changed theme-choice => {
+        root.show-theme();
+    }
+    changed density => {
+        root.show-theme();
+    }
+    changed font-scale => {
         root.show-theme();
     }
 

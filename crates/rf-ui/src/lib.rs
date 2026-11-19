@@ -115,9 +115,9 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
         // What the user asked for is done: the app shows. Nothing to tell.
         Ok(instance::Start::Shown) => return Ok(()),
         Ok(instance::Start::Running) => {
-            // The theme of the instance that runs, read only: that one writes the settings.
-            let theme = settings::peek_look(paths.config_dir()).theme;
-            show_notice(words::already_running(), theme)?;
+            // The look of the instance that runs, read only: that one writes the settings.
+            let look = settings::peek_look(paths.config_dir());
+            show_notice(words::already_running(), look)?;
             return Err(RunError::AlreadyRunning);
         }
         Err(error) => return Err(RunError::Lock(error)),
@@ -245,10 +245,10 @@ pub fn report_startup_failure(error: &RunError) {
         RunError::Thread(_) => words::background_failed().to_owned(),
     };
     let message = format!("{}: {reason}", words::startup_failed());
-    let theme = rf_core::AppPaths::detect()
-        .map(|paths| settings::peek_look(paths.config_dir()).theme)
+    let look = rf_core::AppPaths::detect()
+        .map(|paths| settings::peek_look(paths.config_dir()))
         .unwrap_or_default();
-    if show_notice(&message, theme).is_ok() {
+    if show_notice(&message, look).is_ok() {
         return;
     }
     if let Ok(paths) = rf_core::AppPaths::detect() {
@@ -266,11 +266,14 @@ fn io_kind(path: &std::path::Path, source: &std::io::Error) -> rf_core::ErrorKin
     }
 }
 
-/// Shows `message` in a small window of its own, in `theme`, until it is closed.
-fn show_notice(message: &str, theme: settings::ThemeChoice) -> Result<(), slint::PlatformError> {
+/// Shows `message` in a small window of its own, in the theme, the density and the size of text
+/// of `look`, until it is closed.
+fn show_notice(message: &str, look: settings::Look) -> Result<(), slint::PlatformError> {
     let window = NoticeWindow::new()?;
     ui_bridge::follow_theme(&window);
-    window.set_theme_choice(controller::theme_number(theme));
+    window.set_theme_choice(controller::theme_number(look.theme));
+    window.set_density(controller::density_number(look.density));
+    window.set_font_scale(i32::from(look.font_scale.percent()));
     window.invoke_show_theme();
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     window.set_heading(rf_core::identity::DISPLAY_NAME.into());

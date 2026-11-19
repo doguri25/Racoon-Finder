@@ -14,7 +14,7 @@ use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
 use rf_ui::places::{Place, PlaceKind};
 use rf_ui::selection::Selection;
-use rf_ui::settings::ThemeChoice;
+use rf_ui::settings::{Density, FontScale, ThemeChoice};
 use rf_ui::state::{
     AppState, Column, DEFAULT_THUMB_SIZE, DropSpot, Effect, FolderView, Hover, MAX_THUMB_SIZE,
     MIN_THUMB_SIZE, MenuFacts, ShownColumn, TreeMode, ViewMode, grid_shape,
@@ -164,8 +164,57 @@ fn a_theme_chosen_shows_at_once_in_every_window() {
     // Asked again with the same theme (as the window comes to the front), nothing changes.
     window.invoke_show_theme();
     assert_eq!(ui_bridge::shown_theme(&window), tokens_of(2));
+    // The density and the size of text (THEME-07) show at once in every window too, with the
+    // theme as it is, and back to 보통 and 100 % the theme's own tokens.
+    for (density, percent, look) in [
+        (2, 130, (Density::Roomy, FontScale::Largest)),
+        (0, 90, (Density::Compact, FontScale::Smaller)),
+        (0, 115, (Density::Compact, FontScale::Larger)),
+        (1, 100, (Density::Normal, FontScale::Normal)),
+    ] {
+        for (name, tokens) in [
+            ("main", {
+                window.set_density(density);
+                window.set_font_scale(percent);
+                slint::platform::update_timers_and_animations();
+                ui_bridge::shown_theme(&window)
+            }),
+            ("job window", {
+                own.set_density(density);
+                own.set_font_scale(percent);
+                slint::platform::update_timers_and_animations();
+                ui_bridge::shown_theme(&own)
+            }),
+            ("notice", {
+                notice.set_density(density);
+                notice.set_font_scale(percent);
+                slint::platform::update_timers_and_animations();
+                ui_bridge::shown_theme(&notice)
+            }),
+        ] {
+            assert_eq!(
+                tokens,
+                theme::scaled(tokens_of(2), look.0, look.1),
+                "{name} {look:?}"
+            );
+        }
+    }
+    assert_eq!(ui_bridge::shown_theme(&window), tokens_of(2));
     own.hide().expect("hidden");
     notice.hide().expect("hidden");
+}
+
+/// The screens reckon a line of text with the share Rust's floor of the rows does
+/// (`Theme.line`, `theme::line`).
+#[test]
+fn the_screens_reckon_a_line_of_text_as_rust_does() {
+    let window = window();
+    let shown = window.global::<Theme<'_>>();
+    for size in [
+        8.0, 11.0, 12.0, 13.0, 14.0, 15.5, 16.0, 18.0, 20.0, 26.0, 72.0,
+    ] {
+        assert_eq!(shown.invoke_line(size), theme::line(size), "{size}");
+    }
 }
 
 #[test]
@@ -3066,18 +3115,128 @@ fn the_theme_follows_the_view_menu() {
         click("테마");
         ElementHandle::find_by_accessible_label(&window, "✓").count()
     };
-    assert_eq!(open_themes(), 2);
+    // The theme's mark, the toolbar's, and 테마's density and size of text (보통, 100%).
+    assert_eq!(open_themes(), 4);
     // Choosing the theme that is chosen keeps its mark.
     click("어둡게");
     assert_eq!(chosen.borrow().as_slice(), [2, 3, 2, 2]);
-    assert_eq!(open_themes(), 2);
+    assert_eq!(open_themes(), 4);
     click("어둡게");
     window.set_show_hidden(true);
-    assert_eq!(open_themes(), 3);
+    assert_eq!(open_themes(), 5);
     click("어둡게");
     button[0].invoke_accessible_default_action();
     click("숨김 파일 보기");
     assert_eq!(commands.borrow().as_slice(), ["toggle-hidden"]);
+}
+
+/// 보기 ▸ 테마 ▸ 표시 밀도: … and 글자 크기: … (THEME-07): each item says its choice to Rust, one
+/// mark of each shows, and the window takes its tokens at what Rust sets back at once; 테마 still
+/// ends inside the smallest window.
+#[test]
+fn the_view_menu_chooses_the_density_and_the_size_of_the_text() {
+    let window = window();
+    ui_bridge::follow_theme(&window);
+    window.invoke_show_theme();
+    let chosen = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&chosen);
+    let weak = window.as_weak();
+    // Rust, as the controller does: the choice comes back as the window's.
+    window.on_density_chosen(move |density| {
+        record.borrow_mut().push(format!("density {density}"));
+        if let Some(window) = weak.upgrade() {
+            window.set_density(density);
+        }
+    });
+    let record = Rc::clone(&chosen);
+    let weak = window.as_weak();
+    window.on_font_scale_chosen(move |percent| {
+        record.borrow_mut().push(format!("scale {percent}"));
+        if let Some(window) = weak.upgrade() {
+            window.set_font_scale(percent);
+        }
+    });
+    let button = labelled(&window, "보기", AccessibleRole::Button).remove(0);
+    let middle_y =
+        |element: &ElementHandle| element.absolute_position().y + element.size().height / 2.0;
+    let item = |label: &str| {
+        ElementHandle::find_by_accessible_label(&window, label)
+            .next()
+            .unwrap_or_else(|| panic!("the menu shows {label}"))
+    };
+    let marked = |label: &str| {
+        let item = item(label);
+        ElementHandle::find_by_accessible_label(&window, "✓")
+            .any(|mark| (middle_y(&mark) - middle_y(&item)).abs() < 4.0)
+    };
+    let densities = [
+        "표시 밀도: 촘촘하게",
+        "표시 밀도: 보통",
+        "표시 밀도: 넉넉하게",
+    ];
+    let scales = [
+        "글자 크기: 90%",
+        "글자 크기: 100%",
+        "글자 크기: 115%",
+        "글자 크기: 130%",
+    ];
+    let open = || {
+        button.invoke_accessible_default_action();
+        item("테마").mock_single_click(slint::platform::PointerEventButton::Left);
+    };
+    let marks = |want_density: usize, want_scale: usize| {
+        for (i, label) in densities.iter().enumerate() {
+            assert_eq!(marked(label), i == want_density, "{label}");
+        }
+        for (i, label) in scales.iter().enumerate() {
+            assert_eq!(marked(label), i == want_scale, "{label}");
+        }
+    };
+    open();
+    marks(1, 1);
+    // The menu is a popup window of its own: the element clicks there.
+    item(densities[2]).mock_single_click(slint::platform::PointerEventButton::Left);
+    open();
+    marks(2, 1);
+    item(scales[3]).mock_single_click(slint::platform::PointerEventButton::Left);
+    assert_eq!(chosen.borrow().as_slice(), ["density 2", "scale 130"]);
+    slint::platform::update_timers_and_animations();
+    let roomy = theme::scaled(tokens_of(0), Density::Roomy, FontScale::Largest);
+    assert_eq!(ui_bridge::shown_theme(&window), roomy);
+    assert_eq!(window.global::<Theme<'_>>().get_row_height(), 40.0);
+    open();
+    marks(2, 3);
+    item(densities[0]).mock_single_click(slint::platform::PointerEventButton::Left);
+    open();
+    item(scales[0]).mock_single_click(slint::platform::PointerEventButton::Left);
+    slint::platform::update_timers_and_animations();
+    assert_eq!(
+        ui_bridge::shown_theme(&window),
+        theme::scaled(tokens_of(0), Density::Compact, FontScale::Smaller)
+    );
+    open();
+    marks(0, 0);
+    for _ in 0..2 {
+        press(&window, Key::Escape);
+    }
+    // In the smallest window, at the largest look, 테마 ends inside it, and so does the 보기 menu.
+    window.set_density(2);
+    window.set_font_scale(130);
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    slint::platform::update_timers_and_animations();
+    open();
+    let last = item(scales[3]);
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "테마 ends at {end}px of 560");
+    let at = last.absolute_position();
+    assert!(at.x + last.size().width <= 900.0, "{at:?}");
+    for _ in 0..2 {
+        press(&window, Key::Escape);
+    }
+    button.invoke_accessible_default_action();
+    let last = item("설정");
+    let end = last.absolute_position().y + last.size().height;
+    assert!(end <= 560.0, "the 보기 menu ends at {end}px of 560");
 }
 
 #[test]

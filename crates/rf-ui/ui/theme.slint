@@ -5,8 +5,10 @@
 //
 // The values here are the light theme's, which a window shows until Rust gives it its theme
 // (a test keeps them equal to crates/rf-ui/themes/light.toml). A window asks for the tokens of
-// its theme with `pick`: as it starts, when its `theme-choice` changes, and when the system's
-// own colors turn light or dark.
+// its theme with `pick`: as it starts, when its `theme-choice`, its `density` or its
+// `font-scale` changes, and when the system's own colors turn light or dark. The density and
+// the size of text are Rust's to apply (`theme::scaled`): the values here are the theme's at
+// 보통 and 100 %.
 
 export global Theme {
     // The theme's `scheme`: the system's own widgets (scroll bars, menus, fields) are drawn
@@ -85,8 +87,18 @@ export global Theme {
 
     // A window asks Rust for the tokens of the theme `choice` (its `theme-choice`), with
     // whether the system's own widgets are dark now (`system-dark`, which 시스템 설정 따르기
-    // follows). Rust gives them to that window's `Theme` before this returns.
-    callback pick(choice: int, system-dark: bool);
+    // follows), at its `density` (0 촘촘하게, 1 보통, 2 넉넉하게) and its size of text
+    // (`font-scale`, in percent: 90, 100, 115 or 130; THEME-07). Rust gives them to that window's
+    // `Theme` before this returns, the row height, the gaps and the font sizes scaled.
+    callback pick(choice: int, system-dark: bool, density: int, font-scale: int);
+
+    // The room of a line of text of `size`: 1.5 times it, in whole pixels up. The fonts of the
+    // systems draw a line 1.2 to 1.45 times their size; a height that holds text grows with it
+    // where the text would not fit (the same share as Rust's `theme::line`, which a test holds
+    // to this).
+    public pure function line(size: length) -> length {
+        return ceil(size * 1.5 / 1px) * 1px;
+    }
 }
 
 // What marks a selected item besides its color while the theme has `marks`: a short bar at

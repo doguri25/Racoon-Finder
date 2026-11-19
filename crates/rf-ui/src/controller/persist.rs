@@ -16,7 +16,7 @@ use slint::{ComponentHandle, TimerMode};
 
 use super::{Controller, with};
 use crate::pane::ancestors;
-use crate::settings::{Found, Settings, ThemeChoice};
+use crate::settings::{Density, FontScale, Found, Look, Settings, ThemeChoice};
 use crate::state::{Placement, Screen, placement};
 use crate::ui_bridge::post;
 use crate::words;
@@ -237,6 +237,26 @@ pub(crate) fn theme_of(choice: i32) -> Option<ThemeChoice> {
         1 => Some(ThemeChoice::Light),
         2 => Some(ThemeChoice::Dark),
         3 => Some(ThemeChoice::HighContrast),
+        _ => None,
+    }
+}
+
+/// The number the 보기 menu uses for `density` (`density` of the windows): 0 촘촘하게, 1 보통,
+/// 2 넉넉하게.
+pub(crate) fn density_number(density: Density) -> i32 {
+    match density {
+        Density::Compact => 0,
+        Density::Normal => 1,
+        Density::Roomy => 2,
+    }
+}
+
+/// The density of the 보기 menu's number `density`.
+pub(crate) fn density_of(density: i32) -> Option<Density> {
+    match density {
+        0 => Some(Density::Compact),
+        1 => Some(Density::Normal),
+        2 => Some(Density::Roomy),
         _ => None,
     }
 }
@@ -468,7 +488,7 @@ impl Controller {
             settings.long_press_ms = state.long_press_ms();
             settings.checkbox_select = state.checkbox_select();
         }
-        settings.theme = self.theme.get();
+        settings.set_look(self.look.get());
         let kept = *self.window_kept.borrow();
         if let Some(size) = kept.size() {
             settings.window = Some(size);
@@ -624,7 +644,10 @@ impl Controller {
     /// it asks for the theme's tokens), and so does the job panel's own window, while there is
     /// one.
     pub(super) fn choose_theme(&self, theme: ThemeChoice) {
-        self.theme.set(theme);
+        self.look.set(Look {
+            theme,
+            ..self.look.get()
+        });
         if let Some(window) = self.window.upgrade() {
             window.set_theme_choice(theme_number(theme));
         }
@@ -634,12 +657,45 @@ impl Controller {
         self.plan_save();
     }
 
+    /// The density chosen in 보기 ▸ 테마 (THEME-07): every window takes its tokens at it at once
+    /// (the main window and the job panel's own; the notice window shows only at a start).
+    pub(super) fn choose_density(&self, density: Density) {
+        self.look.set(Look {
+            density,
+            ..self.look.get()
+        });
+        let number = density_number(density);
+        if let Some(window) = self.window.upgrade() {
+            window.set_density(number);
+        }
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.set_density(number);
+        }
+        self.plan_save();
+    }
+
+    /// The size of text chosen in 보기 ▸ 테마 (THEME-07), as [`Controller::choose_density`].
+    pub(super) fn choose_font_scale(&self, scale: FontScale) {
+        self.look.set(Look {
+            font_scale: scale,
+            ..self.look.get()
+        });
+        let percent = i32::from(scale.percent());
+        if let Some(window) = self.window.upgrade() {
+            window.set_font_scale(percent);
+        }
+        if let Some(own) = self.panel.window.borrow().as_ref() {
+            own.set_font_scale(percent);
+        }
+        self.plan_save();
+    }
+
     /// The window came to the front: while the theme follows the system's setting, the
     /// windows take their tokens again, so that a high contrast the system turned on or off
     /// meanwhile shows (Windows and macOS tell the window of a change between light and dark
     /// alone). The same tokens change nothing on the screen.
     pub(super) fn look_at_system_theme(&self) {
-        if self.theme.get() != ThemeChoice::System {
+        if self.look.get().theme != ThemeChoice::System {
             return;
         }
         if let Some(window) = self.window.upgrade() {

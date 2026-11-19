@@ -1,5 +1,6 @@
 // The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
-// columns, which its column heads change too), the theme, the hidden items and the extensions of
+// columns, which its column heads change too), the theme with the density and the size of the
+// text (테마 ▸, THEME-07), the hidden items and the extensions of
 // the names, the toolbar itself (LAY-10), the folder tree (폴더 트리 ▸, LAY-03: one shared tree,
 // a tree for each pane, or none, and F6 to it) and the preview panel, the layout and the commands
 // between the panes,
@@ -16,7 +17,8 @@
 //
 // A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
 // items are two-way bound to properties set from the state: the view's marks as the menu opens and
-// after an item changed the view (`mark`), the theme's from `theme-choice`, and the layout's to the
+// after an item changed the view (`mark`), the theme's from `theme-choice` (the density's and the
+// size's from `density` and `font-scale`), and the layout's to the
 // window's, which Rust sets back to the state's after the toggle.
 
 import { Shortcuts, PathForms } from "shortcuts.slint";
@@ -27,6 +29,10 @@ export component ViewMenu inherits ContextMenuArea {
     in property <PaneView> view;
     // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게, 3 고대비).
     in property <int> theme-choice;
+    // The density (0 촘촘하게, 1 보통, 2 넉넉하게) and the size of text in percent (90, 100, 115,
+    // 130) chosen (THEME-07).
+    in property <int> density: 1;
+    in property <int> font-scale: 100;
     // The layout, the hidden items and the extensions, two-way with the window's. The folder
     // tree shows (`show-tree`) with a tree for each pane (`tree-per-pane`) or one shared tree.
     in-out property <bool> show-hidden;
@@ -70,6 +76,9 @@ export component ViewMenu inherits ContextMenuArea {
     // A command of the window's (`MainWindow.command`).
     callback command(name: string);
     callback theme-chosen(choice: int);
+    // An item 표시 밀도: … or 글자 크기: … of 테마 chose `density` or `percent`.
+    callback density-chosen(density: int);
+    callback font-scale-chosen(percent: int);
     // An item 끌어 놓기: … of 설정 chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // An item 길게 누르기 시간: … of 설정 chose `ms` milliseconds.
@@ -202,10 +211,47 @@ export component ViewMenu inherits ContextMenuArea {
     }
     init => {
         root.mark-theme(root.theme-choice);
+        root.mark-look(root.density, root.font-scale);
         root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
     }
     changed theme-choice => {
         root.mark-theme(root.theme-choice);
+    }
+
+    // The marks of 테마's densities and sizes of text, one of each at a time.
+    private property <bool> compact-mark;
+    private property <bool> normal-density-mark: true;
+    private property <bool> roomy-mark;
+    private property <bool> scale-90-mark;
+    private property <bool> scale-100-mark: true;
+    private property <bool> scale-115-mark;
+    private property <bool> scale-130-mark;
+    function mark-look(density: int, percent: int) {
+        root.compact-mark = density == 0;
+        root.normal-density-mark = density == 1;
+        root.roomy-mark = density == 2;
+        root.scale-90-mark = percent == 90;
+        root.scale-100-mark = percent == 100;
+        root.scale-115-mark = percent == 115;
+        root.scale-130-mark = percent == 130;
+    }
+    changed density => {
+        root.mark-look(root.density, root.font-scale);
+    }
+    changed font-scale => {
+        root.mark-look(root.density, root.font-scale);
+    }
+    // An item of a density or a size of text: its mark alone shows, and Rust keeps the choice
+    // (and sets `density` or `font-scale`, which the windows' tokens follow at once).
+    function choose-density(density: int) {
+        root.mark-look(density, root.font-scale);
+        root.density-chosen(density);
+        root.done();
+    }
+    function choose-font-scale(percent: int) {
+        root.mark-look(root.density, percent);
+        root.font-scale-chosen(percent);
+        root.done();
     }
 
     // The marks of 폴더 트리 ▸'s three modes (0 공유 트리, 1 패널별 트리, 2 트리 숨김), one at a time.
@@ -810,6 +856,67 @@ export component ViewMenu inherits ContextMenuArea {
                     root.mark-theme(0);
                     root.theme-chosen(0);
                     root.done();
+                }
+            }
+            // THEME-07: the rows' and the gaps' room, and the size of the text, apart. Their own
+            // items, as 설정's 끌어 놓기: … are, not sub-menus: a third level would open over the
+            // 보기 menu in a narrow window. No keys (keyboard.md: Ctrl++ is 모든 열 너비 맞추기).
+            MenuSeparator { }
+            MenuItem {
+                title: "표시 밀도: 촘촘하게";
+                checkable: true;
+                checked <=> root.compact-mark;
+                activated => {
+                    root.choose-density(0);
+                }
+            }
+            MenuItem {
+                title: "표시 밀도: 보통";
+                checkable: true;
+                checked <=> root.normal-density-mark;
+                activated => {
+                    root.choose-density(1);
+                }
+            }
+            MenuItem {
+                title: "표시 밀도: 넉넉하게";
+                checkable: true;
+                checked <=> root.roomy-mark;
+                activated => {
+                    root.choose-density(2);
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "글자 크기: 90%";
+                checkable: true;
+                checked <=> root.scale-90-mark;
+                activated => {
+                    root.choose-font-scale(90);
+                }
+            }
+            MenuItem {
+                title: "글자 크기: 100%";
+                checkable: true;
+                checked <=> root.scale-100-mark;
+                activated => {
+                    root.choose-font-scale(100);
+                }
+            }
+            MenuItem {
+                title: "글자 크기: 115%";
+                checkable: true;
+                checked <=> root.scale-115-mark;
+                activated => {
+                    root.choose-font-scale(115);
+                }
+            }
+            MenuItem {
+                title: "글자 크기: 130%";
+                checkable: true;
+                checked <=> root.scale-130-mark;
+                activated => {
+                    root.choose-font-scale(130);
                 }
             }
         }

@@ -45,7 +45,7 @@ use crate::places::{Place, PlaceKind, recent_slot};
 use crate::preview::PreviewContent;
 use crate::properties::{self, Properties, Verdict};
 use crate::selection::Selection;
-use crate::settings::DragDefault;
+use crate::settings::{DragDefault, FontScale};
 use crate::state::drop_rule::DropChoice;
 use crate::state::{
     AppState, Column, Completion, DropSpot, HistoryView, LEFT, LinkFacts, MenuFacts, Names,
@@ -1708,11 +1708,13 @@ where
 }
 
 /// Has `window` take the tokens of its theme from here whenever it asks for them (`Theme.pick`,
-/// as it starts, as its `theme-choice` changes and as the system's colors turn light or dark):
-/// the built-in theme of the choice it shows ([`theme::builtin`]), with the system's high
-/// contrast setting read then (`rf_platform::desktop::high_contrast`, a quick look at a setting,
-/// never per frame). Each window that uses `Theme` is given this once, as it is made; its
-/// `show-theme` then shows the theme before its first frame.
+/// as it starts, as its `theme-choice`, `density` or `font-scale` changes and as the system's
+/// colors turn light or dark): the built-in theme of the choice it shows ([`theme::builtin`]),
+/// with the system's high contrast setting read then (`rf_platform::desktop::high_contrast`, a
+/// quick look at a setting, never per frame), at the window's density and size of text
+/// ([`theme::scaled`], THEME-07; a number it does not know is 보통 or 100 %). Each window that
+/// uses `Theme` is given this once, as it is made; its `show-theme` then shows the theme before
+/// its first frame.
 pub fn follow_theme<W>(window: &W)
 where
     W: ComponentHandle + 'static,
@@ -1721,13 +1723,16 @@ where
     let weak = window.as_weak();
     window
         .global::<Theme<'_>>()
-        .on_pick(move |choice, system_dark| {
+        .on_pick(move |choice, system_dark, density, font_scale| {
             let Some(window) = weak.upgrade() else {
                 return;
             };
             let choice = controller::theme_of(choice).unwrap_or_default();
             let high_contrast = rf_platform::desktop::high_contrast();
-            show_theme(&window, &theme::builtin(choice, system_dark, high_contrast));
+            let tokens = theme::builtin(choice, system_dark, high_contrast);
+            let density = controller::density_of(density).unwrap_or_default();
+            let font_scale = FontScale::of_percent(i64::from(font_scale)).unwrap_or_default();
+            show_theme(&window, &theme::scaled(tokens, density, font_scale));
         });
 }
 

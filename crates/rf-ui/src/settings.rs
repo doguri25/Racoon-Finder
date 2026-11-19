@@ -1126,6 +1126,22 @@ pub struct Loaded {
 }
 
 impl Settings {
+    /// The theme, the density and the size of text.
+    pub fn look(&self) -> Look {
+        Look {
+            theme: self.theme,
+            density: self.density,
+            font_scale: self.font_scale,
+        }
+    }
+
+    /// Takes in the theme, the density and the size of text of `look`.
+    pub fn set_look(&mut self, look: Look) {
+        self.theme = look.theme;
+        self.density = look.density;
+        self.font_scale = look.font_scale;
+    }
+
     /// The tabs and which are pinned, the active pane, the hidden items and the layout. A tab
     /// whose folder does not read back as a path is left out (it stays in the file, with its
     /// pin, [`Settings::set_session`]); the tab that shows stays the same one when it is kept,
@@ -1504,11 +1520,7 @@ pub fn peek_look(config_dir: &Path) -> Look {
     read_small(&config_dir.join(FILE_NAME))
         .ok()
         .and_then(|text| parse(&text))
-        .map(|settings| Look {
-            theme: settings.theme,
-            density: settings.density,
-            font_scale: settings.font_scale,
-        })
+        .map(|settings| settings.look())
         .unwrap_or_default()
 }
 

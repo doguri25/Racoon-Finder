@@ -159,6 +159,10 @@ export component MainWindow inherits Window {
     // The theme chosen in the 보기 menu (0 시스템 설정 따르기, 1 밝게, 2 어둡게, 3 고대비), whether hidden
     // items show and whether the names show their extensions, for the menu's check marks.
     in property <int> theme-choice;
+    // The density (0 촘촘하게, 1 보통, 2 넉넉하게) and the size of text in percent (90, 100, 115,
+    // 130) chosen in 보기 ▸ 테마 (THEME-07): the window asks for its tokens at them.
+    in property <int> density: 1;
+    in property <int> font-scale: 100;
     in-out property <bool> show-hidden;
     in-out property <bool> show-extensions: true;
     // The payload of a drag of rows, made by Rust: the id of the items the last press on a row
@@ -294,6 +298,10 @@ export component MainWindow inherits Window {
     callback split-changed(share: float);
     // A theme was chosen in the 보기 menu (the numbers of `theme-choice`).
     callback theme-chosen(choice: int);
+    // A density, or a size of text, was chosen in 보기 ▸ 테마 (the numbers of `density` and
+    // `font-scale`).
+    callback density-chosen(density: int);
+    callback font-scale-chosen(percent: int);
     // 보기 ▸ 설정 ▸ 끌어 놓기: … chose `choice` (the numbers of `drag-default`).
     callback drag-default-chosen(choice: int);
     // 보기 ▸ 설정 ▸ 길게 누르기 시간 chose `ms` milliseconds.
@@ -996,7 +1004,7 @@ export component MainWindow inherits Window {
         if (root.theme-choice == 0) {
             Palette.color-scheme = ColorScheme.unknown;
         }
-        Theme.pick(root.theme-choice, root.system-dark);
+        Theme.pick(root.theme-choice, root.system-dark, root.density, root.font-scale);
         if (root.theme-choice != 0) {
             Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
         }
@@ -1040,6 +1048,12 @@ export component MainWindow inherits Window {
     }
 
     changed theme-choice => {
+        root.show-theme();
+    }
+    changed density => {
+        root.show-theme();
+    }
+    changed font-scale => {
         root.show-theme();
     }
 
@@ -2444,6 +2458,8 @@ export component MainWindow inherits Window {
         view-menu := ViewMenu {
             view: root.active-view;
             theme-choice: root.theme-choice;
+            density: root.density;
+            font-scale: root.font-scale;
             show-hidden <=> root.show-hidden;
             show-extensions <=> root.show-extensions;
             show-tree <=> root.show-tree;
@@ -2477,6 +2493,12 @@ export component MainWindow inherits Window {
             }
             theme-chosen(choice) => {
                 root.theme-chosen(choice);
+            }
+            density-chosen(density) => {
+                root.density-chosen(density);
+            }
+            font-scale-chosen(percent) => {
+                root.font-scale-chosen(percent);
             }
             drag-default-chosen(choice) => {
                 root.drag-default-chosen(choice);
