@@ -38,7 +38,10 @@ trash-restore-elsewhere = 위치를 골라 꺼내기…
 # 위치를 골라 꺼내기…에 여러 볼륨의 휴지통 항목을 함께 골랐을 때.
 trash-restore-two-volumes = 고른 항목이 여러 드라이브(볼륨)의 휴지통에 있어 한 폴더로 꺼낼 수 없습니다. 드라이브마다 따로 골라 꺼내세요.
 trash-item-not-opened = 휴지통 안의 항목은 열 수 없습니다. 먼저 복원하세요.
-computer-drive-gone = 드라이브를 찾을 수 없습니다. 새로 고침(F5)으로 목록을 다시 읽으세요.
+computer-drive-gone = 드라이브를 찾을 수 없습니다. 새로 고침({ $os ->
+        [macos] ⌘R
+       *[other] F5
+    })으로 목록을 다시 읽으세요.
 
 ## 휴지통과 내 PC에서 할 수 없는 일 (words::shell_blocked)
 #

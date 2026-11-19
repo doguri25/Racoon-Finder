@@ -250,8 +250,11 @@ job-undone =
         [redo] 다시 실행을 되돌렸습니다
        *[other] 작업을 되돌렸습니다
     }
-# 이름 바꾸기와 새로 만들기가 실패했을 때. $reason: 까닭(error-*, failure-*).
-job-create-refused = 새 폴더를 만들지 못했습니다: { $reason }
+# 이름 바꾸기와 새로 만들기가 실패했을 때. $reason: 까닭(error-*, failure-*). $kind: 새로 만든 것(file, folder).
+job-create-refused = { $kind ->
+        [file] 새 파일을
+       *[folder] 새 폴더를
+    } 만들지 못했습니다: { $reason }
 job-rename-refused = 이름을 바꾸지 못했습니다: { $reason }
 job-failures-title = 처리하지 못한 항목
 

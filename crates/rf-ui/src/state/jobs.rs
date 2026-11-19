@@ -965,7 +965,7 @@ impl AppState {
         report: &JobReport,
     ) -> Effect {
         if matches!(work, JobWork::Create | JobWork::Rename) {
-            return Effect::Notice(words::name_refused(work, failures[0]));
+            return Effect::Notice(words::name_refused(&report.spec, failures[0]));
         }
         // A restore that found original folders gone offers another place for those items.
         if let Some(toast) = self.restore_toast(report) {

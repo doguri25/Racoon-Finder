@@ -355,8 +355,12 @@ job-undone =
         [redo] the redo
        *[other] the job
     }
-# When a rename or a new item failed. $reason: why (error-*, failure-*).
-job-create-refused = Couldn't create the new item: { $reason }
+# When a rename or a new item failed. $reason: why (error-*, failure-*). $kind: what was being
+# created (file, folder).
+job-create-refused = Couldn't create the new { $kind ->
+        [file] file
+       *[folder] folder
+    }: { $reason }
 job-rename-refused = Couldn't rename: { $reason }
 job-failures-title = Items Not Processed
 

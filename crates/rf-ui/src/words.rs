@@ -1659,14 +1659,21 @@ pub fn undone(record: &UndoRecord) -> String {
     work.says("job-undone", &[])
 }
 
-/// The notice of a rename or a create that failed, with why: `이름을 바꾸지 못했습니다: 같은
-/// 이름의 항목이 이미 있습니다`.
-pub fn name_refused(work: JobWork, failure: &ItemFailure) -> String {
-    let key = match work {
-        JobWork::Create => "job-create-refused",
-        _ => "job-rename-refused",
-    };
-    t(key, &[("reason", item_failure(failure).into())])
+/// The notice of a rename or a create (`spec`) that failed, with why: `이름을 바꾸지 못했습니다:
+/// 같은 이름의 항목이 이미 있습니다`; a create names what it made, `새 파일을 만들지 못했습니다:
+/// …` or `새 폴더를 …`.
+pub fn name_refused(spec: &JobSpec, failure: &ItemFailure) -> String {
+    let reason = ("reason", item_failure(failure).into());
+    match spec {
+        JobSpec::Create { kind, .. } => {
+            let kind = match kind {
+                CreateKind::File => "file",
+                CreateKind::Dir => "folder",
+            };
+            t("job-create-refused", &[("kind", kind.into()), reason])
+        }
+        _ => t("job-rename-refused", &[reason]),
+    }
 }
 
 /// Why one item failed: its [`failure_reason`] when the job refused it, else the
@@ -4289,8 +4296,12 @@ mod tests {
             message: String::new(),
             reason: None,
         };
+        let rename = JobSpec::Rename {
+            from: path("a.txt"),
+            to: path("b.txt"),
+        };
         assert_eq!(
-            name_refused(JobWork::Rename, &failure),
+            name_refused(&rename, &failure),
             "이름을 바꾸지 못했습니다: 같은 이름의 항목이 이미 있습니다"
         );
         assert_eq!(
@@ -4320,10 +4331,67 @@ mod tests {
             kind: ErrorKind::InvalidPath,
             ..failure
         };
+        let create = |kind| JobSpec::Create {
+            parent: path("docs"),
+            name: "CON".into(),
+            kind,
+        };
         assert_eq!(
-            name_refused(JobWork::Create, &refused),
+            name_refused(&create(CreateKind::Dir), &refused),
             "새 폴더를 만들지 못했습니다: Windows가 장치 이름으로 쓰는 이름입니다(CON, NUL 등). 이 이름은 쓸 수 없습니다"
         );
+        assert!(name_refused(&create(CreateKind::File), &refused).starts_with("새 파일을 "));
+    }
+
+    #[test]
+    fn a_create_that_failed_names_what_it_made() {
+        let refused = ItemFailure {
+            source: None,
+            target: None,
+            stage: rf_jobs::Stage::Create,
+            kind: ErrorKind::AlreadyExists,
+            message: String::new(),
+            reason: None,
+        };
+        let create = |kind| JobSpec::Create {
+            parent: VPath::local(std::env::temp_dir()).expect("a local path"),
+            name: "a".into(),
+            kind,
+        };
+        assert_eq!(
+            name_refused(&create(CreateKind::File), &refused),
+            "새 파일을 만들지 못했습니다: 같은 이름의 항목이 이미 있습니다"
+        );
+        assert_eq!(
+            name_refused(&create(CreateKind::Dir), &refused),
+            "새 폴더를 만들지 못했습니다: 같은 이름의 항목이 이미 있습니다"
+        );
+        // English says which too.
+        let english = Localizer::new(Lang::En);
+        for (kind, said) in [
+            ("folder", "Couldn't create the new folder: x"),
+            ("file", "Couldn't create the new file: x"),
+        ] {
+            let args = [("kind", kind.into()), ("reason", "x".into())];
+            assert_eq!(english.text("job-create-refused", &args), said);
+        }
+    }
+
+    #[test]
+    fn a_drive_that_is_gone_says_the_refresh_key_of_its_system() {
+        let korean = Localizer::new(Lang::Ko);
+        let said = |os| korean.text("computer-drive-gone", &[(OS_ARG, os_arg(os))]);
+        assert_eq!(
+            said(Os::MacOs),
+            "드라이브를 찾을 수 없습니다. 새로 고침(⌘R)으로 목록을 다시 읽으세요."
+        );
+        for os in [Os::Windows, Os::Other] {
+            assert_eq!(
+                said(os),
+                "드라이브를 찾을 수 없습니다. 새로 고침(F5)으로 목록을 다시 읽으세요."
+            );
+        }
+        assert_eq!(drive_gone(), said(Os::CURRENT));
     }
 
     #[test]
