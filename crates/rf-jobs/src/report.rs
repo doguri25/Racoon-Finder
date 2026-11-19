@@ -46,14 +46,16 @@ pub enum Stage {
     Create,
     /// Reversing an earlier job.
     Undo,
+    /// Putting an item back from the trash (`JobSpec::RestoreFromTrash`).
+    Restore,
     /// A fault in the engine itself, such as a panic in a worker.
     Internal,
 }
 
 impl Stage {
     /// The word the log writes for this step: `plan`, `preflight`, `conflict`, `read`,
-    /// `write`, `commit`, `metadata`, `delete_source`, `delete`, `rename`, `create`, `undo` or
-    /// `internal`. It is English whatever language the UI shows.
+    /// `write`, `commit`, `metadata`, `delete_source`, `delete`, `rename`, `create`, `undo`,
+    /// `restore` or `internal`. It is English whatever language the UI shows.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Plan => "plan",
@@ -68,6 +70,7 @@ impl Stage {
             Self::Rename => "rename",
             Self::Create => "create",
             Self::Undo => "undo",
+            Self::Restore => "restore",
             Self::Internal => "internal",
         }
     }
@@ -211,6 +214,10 @@ pub enum FailureReason {
     /// kind to that target (another item replaced it, or the link was pointed elsewhere), and is
     /// left in place; the target is never touched.
     ChangedSinceLinked,
+    /// `Conflict`, `AlreadyExists`: the place an item of the trash was to go back to is taken, and
+    /// the answer was to overwrite; a restore never replaces anything, so the item stays in the
+    /// trash and the other one where it is.
+    RestoreNeverReplaces,
     /// `Write` warning: a temporary file of the job could not be removed and stays under its
     /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
     /// crash recovery will not look for it.
@@ -259,6 +266,7 @@ impl FailureReason {
             Self::LinkNeedsPrivilege => "link_needs_privilege",
             Self::LinkTargetMissing => "link_target_missing",
             Self::ChangedSinceLinked => "changed_since_linked",
+            Self::RestoreNeverReplaces => "restore_never_replaces",
             Self::TempLeftBehind => "temp_left_behind",
             Self::Issue(issue) => issue.name(),
         }
@@ -479,10 +487,37 @@ pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec>
         JobSpec::Delete(spec) => retry_delete(spec, failed),
         JobSpec::DeleteCopies(spec) => retry_delete_copies(spec, failed),
         JobSpec::MakeLink { links } => retry_links(links, failed),
-        JobSpec::Rename { .. } | JobSpec::Create { .. } | JobSpec::Undo(_) => {
-            (!failed.is_empty()).then(|| original.clone())
+        JobSpec::RestoreFromTrash { items } => {
+            let items: Vec<_> = items
+                .iter()
+                .filter(|(item, _)| failed_in_trash(&item.location, failed))
+                .cloned()
+                .collect();
+            (!items.is_empty()).then_some(JobSpec::RestoreFromTrash { items })
         }
+        JobSpec::DeleteFromTrash { items } => {
+            let items: Vec<_> = items
+                .iter()
+                .filter(|item| failed_in_trash(&item.location, failed))
+                .cloned()
+                .collect();
+            (!items.is_empty()).then_some(JobSpec::DeleteFromTrash { items })
+        }
+        JobSpec::Rename { .. }
+        | JobSpec::Create { .. }
+        | JobSpec::Undo(_)
+        | JobSpec::EmptyTrash => (!failed.is_empty()).then(|| original.clone()),
     }
+}
+
+/// Whether one of `failed` names the item at `location` in the trash as its source.
+fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
+    let Ok(location) = VPath::local(location) else {
+        return false;
+    };
+    failed
+        .iter()
+        .any(|failure| failure.source.as_ref() == Some(&location))
 }
 
 /// The links that failed: each one a failure names by its target (the source) and its place

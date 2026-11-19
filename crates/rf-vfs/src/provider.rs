@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use rf_core::{Attributes, Entry, EntryKind, Error, Result, Scheme, VPath};
-pub use rf_platform::{DataRanges, DiskSpace};
+pub use rf_platform::{DataRanges, DiskSpace, TrashItem};
 
 use crate::cancel::CancelToken;
 use crate::watch::{WatchHandle, WatchSink};
@@ -32,6 +32,13 @@ bitflags::bitflags! {
         const TRASH = 1 << 1;
         /// The folder can be watched for changes (`Provider::watch`).
         const WATCH = 1 << 2;
+        /// Items can be put back from here, to the place they came from or another
+        /// (`Provider::restore_from_trash`): the trash.
+        const RESTORE = 1 << 3;
+        /// Items can be deleted for good from here, and the whole place emptied
+        /// (`Provider::delete_from_trash`, `Provider::empty_trash`): the trash. Without
+        /// [`WRITE`](Self::WRITE) nothing can be made, renamed or moved in.
+        const DELETE_FOREVER = 1 << 4;
     }
 }
 
@@ -208,7 +215,7 @@ fn unsupported(op: &str, path: &VPath) -> Error {
 /// between threads (`Send + Sync`) and is used as `dyn Provider`.
 ///
 /// The methods after `watch` have default implementations, so that a provider without links,
-/// metadata or a trash to restore from needs none of them: they fail with
+/// metadata or a trash to restore from, delete from or empty needs none of them: they fail with
 /// `Error::Unsupported`, except `copy_extras`, `fs_name` and `data_ranges`, which have nothing
 /// to give, `sync_dir`, which has nothing to do, and `delete_leaf`, which uses `stat` and
 /// `delete`.
@@ -455,5 +462,39 @@ pub trait Provider: Send + Sync + Debug {
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         let _ = original;
         Err(unsupported("restore_trashed", location))
+    }
+
+    /// Puts `item`, an item of the trash this provider shows, back at `to`: its original place
+    /// or one the user chose, a local path.
+    ///
+    /// Never replaces anything: a taken `to` is `ErrorKind::AlreadyExists` and both items stay,
+    /// for the job's conflict rule; a missing folder is `ErrorKind::NotFound` and another volume
+    /// `ErrorKind::CrossesDevices` (nothing is copied across). An item that is not in a trash
+    /// folder is refused with `Error::Unsupported` and nothing is done. For the shell provider it
+    /// is `rf_platform::trash::restore`; the default implementation gives `Error::Unsupported`.
+    fn restore_from_trash(&self, item: &TrashItem, to: &VPath) -> Result<()> {
+        let _ = item;
+        Err(unsupported("restore_from_trash", to))
+    }
+
+    /// Deletes `item`, an item of the trash this provider shows, for good, with the trash's
+    /// record of it. An item that is not in a trash folder is refused with `Error::Unsupported`
+    /// and nothing is done. For the shell provider it is `rf_platform::trash::delete_forever`;
+    /// the default implementation gives `Error::Unsupported`.
+    fn delete_from_trash(&self, item: &TrashItem) -> Result<()> {
+        Err(Error::Unsupported(format!(
+            "delete_from_trash is not supported for {}",
+            item.location.display()
+        )))
+    }
+
+    /// Deletes everything in the trash this provider shows for good. Nothing outside the trash
+    /// folders is touched. For the shell provider it is `rf_platform::trash::empty`; the default
+    /// implementation gives `Error::Unsupported`.
+    fn empty_trash(&self) -> Result<()> {
+        Err(Error::Unsupported(format!(
+            "empty_trash is not supported for {} paths",
+            self.scheme()
+        )))
     }
 }

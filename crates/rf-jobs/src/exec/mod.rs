@@ -8,6 +8,7 @@ mod simple;
 #[cfg(all(test, unix))]
 mod swapping;
 mod transfer;
+mod trash;
 mod undo;
 
 use std::any::Any;
@@ -175,6 +176,9 @@ fn run(ctx: &mut Ctx<'_>, spec: &JobSpec) {
         JobSpec::Create { parent, name, kind } => simple::run_create(ctx, parent, name, *kind),
         JobSpec::MakeLink { links } => link::run_make_links(ctx, links),
         JobSpec::Undo(record) => undo::run_undo(ctx, record),
+        JobSpec::RestoreFromTrash { items } => trash::run_restore(ctx, items),
+        JobSpec::DeleteFromTrash { items } => trash::run_delete(ctx, items),
+        JobSpec::EmptyTrash => trash::run_empty(ctx),
     }
 }
 

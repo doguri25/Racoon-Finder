@@ -8,6 +8,7 @@ use rf_core::{Error, Result, Scheme, VPath};
 
 use crate::local::LocalProvider;
 use crate::provider::Provider;
+use crate::shell::ShellProvider;
 
 /// The providers of the app, by scheme. Cloning is cheap and shares the providers.
 #[derive(Clone, Default)]
@@ -25,6 +26,14 @@ impl Vfs {
     pub fn with_local() -> Vfs {
         let mut vfs = Vfs::new();
         vfs.register(Arc::new(LocalProvider::new()));
+        vfs
+    }
+
+    /// A registry of the local provider and the shell's places of this system (`shell://trash`,
+    /// `shell://computer`, see [`ShellProvider::new`]), for an app that shows those places.
+    pub fn with_local_and_shell() -> Vfs {
+        let mut vfs = Vfs::with_local();
+        vfs.register(Arc::new(ShellProvider::new()));
         vfs
     }
 

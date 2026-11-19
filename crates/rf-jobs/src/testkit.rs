@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use rf_core::{Entry, Error, Result, Scheme, VPath, VolumeId};
 use rf_vfs::{
     CancelToken, Capabilities, DataRanges, DeleteMode, Deleted, DiskSpace, LinkTarget,
-    LocalProvider, MetadataPatch, Provider, ReadStream, RenameMode, Vfs, WatchHandle, WatchSink,
-    WriteMode, WriteStream,
+    LocalProvider, MetadataPatch, Provider, ReadStream, RenameMode, TrashItem, Vfs, WatchHandle,
+    WatchSink, WriteMode, WriteStream,
 };
 
 use crate::conflict::{Conflict, ConflictAnswer};
@@ -392,6 +392,11 @@ pub enum Fault {
     /// `injected seek failure`, as on a stream that cannot seek (a pipe-like FUSE file, a
     /// remote stream). Its `ReadStream::data_ranges` still answers.
     FailSeek { name: OsString },
+    /// `delete` with `DeleteMode::Trash` sends the item to the freedesktop trash in the folder
+    /// `root` (`rf_platform::FreedesktopTrash`) instead of the system's, and every path has
+    /// `Capabilities::TRASH`: a trash of the test's own, which the user's never sees.
+    #[cfg(unix)]
+    TrashInto { root: PathBuf },
 }
 
 impl Fault {
@@ -620,6 +625,22 @@ impl FaultyProvider {
         }
     }
 
+    /// The folder of the trash a [`Fault::TrashInto`] names, if one does.
+    #[cfg(unix)]
+    fn trash_root(&self) -> Option<&Path> {
+        self.faults.iter().find_map(|fault| match fault {
+            Fault::TrashInto { root } => Some(root.as_path()),
+            _ => None,
+        })
+    }
+
+    /// No [`Fault`] names a trash of its own here.
+    #[cfg(not(unix))]
+    #[allow(clippy::unused_self, reason = "the shape of the Unix one")]
+    fn trash_root(&self) -> Option<&Path> {
+        None
+    }
+
     /// Fails with `PermissionDenied` when a [`Fault::FailDelete`] names the item at `path`.
     fn refuse_delete(&self, path: &VPath) -> Result<()> {
         let refused = self.faults.iter().any(|fault| {
@@ -662,6 +683,9 @@ impl Provider for FaultyProvider {
 
     fn capabilities(&self, path: &VPath) -> Capabilities {
         let mut capabilities = self.inner.capabilities(path);
+        if self.trash_root().is_some() {
+            capabilities |= Capabilities::TRASH;
+        }
         let read_only = self
             .faults
             .iter()
@@ -760,6 +784,15 @@ impl Provider for FaultyProvider {
         }
         if mode == DeleteMode::Trash && self.faults.contains(&Fault::TrashDeletesForGood) {
             return self.inner.delete(path, DeleteMode::Permanent);
+        }
+        #[cfg(unix)]
+        if mode == DeleteMode::Trash
+            && let Some(root) = self.trash_root()
+        {
+            let location = rf_platform::FreedesktopTrash::new(root).move_to_trash(path)?;
+            return Ok(Deleted::Trashed {
+                location: location.and_then(|location| VPath::local(location).ok()),
+            });
         }
         self.inner.delete(path, mode)
     }
@@ -888,6 +921,18 @@ impl Provider for FaultyProvider {
 
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         self.inner.restore_trashed(location, original)
+    }
+
+    fn restore_from_trash(&self, item: &TrashItem, to: &VPath) -> Result<()> {
+        self.inner.restore_from_trash(item, to)
+    }
+
+    fn delete_from_trash(&self, item: &TrashItem) -> Result<()> {
+        self.inner.delete_from_trash(item)
+    }
+
+    fn empty_trash(&self) -> Result<()> {
+        self.inner.empty_trash()
     }
 
     fn data_ranges(&self, path: &VPath) -> Result<Option<Vec<Range<u64>>>> {

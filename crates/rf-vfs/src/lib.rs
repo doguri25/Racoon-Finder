@@ -1,4 +1,5 @@
-//! Virtual file system layer: providers, the local provider, sorting and filtering.
+//! Virtual file system layer: providers, the local provider, the shell's places, sorting and
+//! filtering.
 
 pub mod cancel;
 pub mod filter;
@@ -6,6 +7,7 @@ pub mod local;
 mod names;
 pub mod provider;
 pub mod registry;
+pub mod shell;
 pub mod sort;
 pub mod testkit;
 pub mod watch;
@@ -19,6 +21,10 @@ pub use provider::{
     ReadStream, RenameMode, WriteMode, WriteStream,
 };
 pub use registry::Vfs;
-pub use rf_platform::{DataRanges, DiskSpace};
+pub use rf_platform::{DataRanges, DiskSpace, RootKind, TrashId, TrashItem};
+pub use shell::{
+    Drive, DriveRow, DriveSource, ShellColumn, ShellPlace, ShellProvider, SystemDrives,
+    SystemTrash, TrashRow, TrashSource,
+};
 pub use sort::{SortBy, SortKey, SortOrder, SortSpec, compare_entries, sort_by_name, sort_entries};
 pub use watch::{Change, MAX_PENDING_CHANGES, WATCH_DEBOUNCE, WatchEvent, WatchHandle, WatchSink};

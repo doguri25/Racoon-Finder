@@ -1,10 +1,11 @@
 //! What a job is asked to do: the data the UI hands to the engine, before any file is touched.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use rf_core::{Error, Result, VPath};
-use rf_platform::LinkKind;
+use rf_platform::{LinkKind, TrashItem};
 use serde::{Deserialize, Serialize};
 
 use crate::undo::{CreatedItem, UndoRecord};
@@ -188,6 +189,60 @@ pub enum JobSpec {
     /// Reverses an earlier job as its record says (OPS-12). The report's undo record reverses
     /// this job in turn, which is how a redo is done.
     Undo(UndoRecord),
+    /// Puts items back from the trash (NAV-16): each `(item, to)` from its place in the trash to
+    /// `to`, its original place or one the user chose, through the provider of `shell://trash`.
+    /// Nothing is ever replaced: a taken `to` is a conflict, which the job's resolver answers
+    /// (skip, a numbered name, or cancel; an overwrite is refused with `RestoreNeverReplaces`).
+    /// Its kind is [`JobKind::Restore`]. The report's undo record sends what came back to the
+    /// trash again ([`UndoRecord::Restored`]).
+    RestoreFromTrash {
+        #[serde(with = "restore_targets")]
+        items: Vec<(TrashItem, PathBuf)>,
+    },
+    /// Deletes items of the trash for good, each with the trash's record of it. Its kind is
+    /// [`JobKind::Delete`], and it leaves no undo record: it cannot be undone, which the window
+    /// says in the question it asks first.
+    DeleteFromTrash {
+        items: Vec<TrashItem>,
+    },
+    /// Deletes everything in the user's trashes for good. Its kind is [`JobKind::Delete`], and,
+    /// as [`JobSpec::DeleteFromTrash`], it leaves no undo record.
+    EmptyTrash,
+}
+
+/// The targets of a [`JobSpec::RestoreFromTrash`], kept as the OS's own strings so that no name
+/// is lost (a path that is not UTF-8 cannot be stored as text).
+mod restore_targets {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use rf_platform::TrashItem;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[allow(
+        clippy::ptr_arg,
+        reason = "the signature serde's `with` attribute calls"
+    )]
+    pub fn serialize<S: Serializer>(
+        items: &Vec<(TrashItem, PathBuf)>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let items: Vec<(&TrashItem, &std::ffi::OsStr)> = items
+            .iter()
+            .map(|(item, to)| (item, to.as_os_str()))
+            .collect();
+        items.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<(TrashItem, PathBuf)>, D::Error> {
+        let items = Vec::<(TrashItem, OsString)>::deserialize(deserializer)?;
+        Ok(items
+            .into_iter()
+            .map(|(item, to)| (item, PathBuf::from(to)))
+            .collect())
+    }
 }
 
 /// The sort of job, for lanes, progress text and undo.
@@ -202,11 +257,14 @@ pub enum JobKind {
     /// Making links (`JobSpec::MakeLink`).
     Link,
     Undo,
+    /// Putting items back from the trash (`JobSpec::RestoreFromTrash`).
+    Restore,
 }
 
 impl JobKind {
     /// The word the log writes for this kind: `copy`, `move`, `delete`, `rename`, `create`,
-    /// `link` or `undo`. It is English whatever language the UI shows, so logs can be compared.
+    /// `link`, `undo` or `restore`. It is English whatever language the UI shows, so logs can be
+    /// compared.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Copy => "copy",
@@ -216,6 +274,7 @@ impl JobKind {
             Self::Create => "create",
             Self::Link => "link",
             Self::Undo => "undo",
+            Self::Restore => "restore",
         }
     }
 }
@@ -227,12 +286,32 @@ impl JobSpec {
                 TransferMode::Copy => JobKind::Copy,
                 TransferMode::Move => JobKind::Move,
             },
-            Self::Delete(_) | Self::DeleteCopies(_) => JobKind::Delete,
+            Self::Delete(_)
+            | Self::DeleteCopies(_)
+            | Self::DeleteFromTrash { .. }
+            | Self::EmptyTrash => JobKind::Delete,
             Self::Rename { .. } => JobKind::Rename,
             Self::Create { .. } => JobKind::Create,
             Self::MakeLink { .. } => JobKind::Link,
             Self::Undo(_) => JobKind::Undo,
+            Self::RestoreFromTrash { .. } => JobKind::Restore,
         }
+    }
+
+    /// Whether a job of this spec can be undone once it has changed something: every job but
+    /// those that delete for good (a permanent delete, a delete of copies, a delete from the
+    /// trash and emptying it), which leave no undo record. A window asks before it submits one of
+    /// those, and its question says that it cannot be undone.
+    pub fn undoable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Delete(DeleteSpec {
+                method: DeleteMethod::Permanent,
+                ..
+            }) | Self::DeleteCopies(_)
+                | Self::DeleteFromTrash { .. }
+                | Self::EmptyTrash
+        )
     }
 
     /// This spec for a run after one that a crash cut off once it had started: a delete of
@@ -253,7 +332,9 @@ impl JobSpec {
     /// does an undo, which may move, copy or trash as many, and a job that makes several
     /// links. A link job leaves no temporary file for recovery to remove; its journal lines let
     /// the next start say that it was cut off. Run again, it numbers the links that were made
-    /// already, as a copy under `ConflictPolicy::AutoRename` does.
+    /// already, as a copy under `ConflictPolicy::AutoRename` does. The jobs on the trash keep
+    /// none: each item is one rename or one delete, and what a crash cut off is seen in the trash
+    /// itself.
     pub fn journaled(&self) -> bool {
         matches!(
             self,
