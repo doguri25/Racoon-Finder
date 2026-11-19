@@ -205,8 +205,12 @@ pub enum JobSpec {
     DeleteFromTrash {
         items: Vec<TrashItem>,
     },
-    /// Deletes everything in the user's trashes for good. Its kind is [`JobKind::Delete`], and,
-    /// as [`JobSpec::DeleteFromTrash`], it leaves no undo record.
+    /// Deletes everything in the user's trashes for good: item by item where the system allows
+    /// it, each item that cannot be deleted a failure of its own, and in one call of the
+    /// system's where it does not (the Windows recycle bin). Its kind is [`JobKind::Delete`],
+    /// and, as [`JobSpec::DeleteFromTrash`], it leaves no undo record. A retry deletes only the
+    /// items that failed, as they were listed (`JobReport::retry_spec`), never what was trashed
+    /// since; one done in one call is not retried.
     EmptyTrash,
 }
 

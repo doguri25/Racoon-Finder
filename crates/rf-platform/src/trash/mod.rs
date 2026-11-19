@@ -357,6 +357,12 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
     imp::delete_forever(item)
 }
 
+/// Whether the system empties its trash in one call that cannot be split into one call per item:
+/// `SHEmptyRecycleBinW` on Windows. Elsewhere [`empty`] deletes item by item, and a job that
+/// empties the trash does so itself with [`delete_forever`], so that each item that cannot be
+/// deleted is a failure of its own, which a retry deletes alone.
+pub const EMPTIES_AT_ONCE: bool = cfg!(windows);
+
 /// Deletes everything in the user's trashes for good, by the system's own way where it has one:
 /// `SHEmptyRecycleBinW` on Windows (with no question and no sound: the app asks first), each item
 /// with `NSFileManager` on macOS, and on Linux the items, records and size cache of the home

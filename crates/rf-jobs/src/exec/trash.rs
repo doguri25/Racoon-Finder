@@ -223,16 +223,25 @@ fn restore_numbered(
 }
 
 /// Deletes each of `items` from the trash for good, with its record, as one step under
-/// [`ERRORS`] through the provider of `shell://trash`; the plan counts them. An item that is gone
-/// already is skipped. A failure is `Stage::Delete` with the provider's error (`Unsupported` for
-/// an item that is not in a trash folder, which stays as it is). There is no undo record.
+/// [`ERRORS`] through the provider of `shell://trash`; the plan counts them (see
+/// [`delete_each`]). There is no undo record.
 pub(crate) fn run_delete(ctx: &mut Ctx<'_>, items: &[TrashItem]) {
     let mut totals = Totals::default();
     for item in items {
         count(&mut totals, item);
     }
     ctx.planned(totals);
+    delete_each(ctx, items);
+}
+
+/// Deletes each of `items` from the trash for good, as one step each under [`ERRORS`]. An item
+/// that is gone already is skipped. A failure is `Stage::Delete` with the provider's error
+/// (`Unsupported` for an item that is not in a trash folder, `TrashItemChanged` for one that is
+/// no longer the item listed), and its item stays as it is; the items that failed are given
+/// back, as they were asked. A cancel stops between two items.
+fn delete_each(ctx: &mut Ctx<'_>, items: &[TrashItem]) -> Vec<TrashItem> {
     let trash = ShellPlace::Trash.path();
+    let mut failed = Vec::new();
     for item in items {
         let source = place_of(item);
         let deleted = ctx.attempt(ERRORS, source.as_ref(), None, |ctx| {
@@ -248,18 +257,48 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, items: &[TrashItem]) {
         match deleted {
             Attempt::Done(true) => ctx.item_done(!item.is_dir, item.is_dir),
             Attempt::Done(false) => ctx.report.skipped += 1,
-            Attempt::Skipped => {}
+            Attempt::Skipped => failed.push(item.clone()),
             Attempt::Stop => break,
         }
     }
+    failed
 }
 
-/// Empties the trash through the provider of `shell://trash`, as one step under [`ERRORS`]. The
-/// plan counts what the trash lists now (nothing, when it cannot be listed: the empty itself then
-/// says what is wrong), and once the trash is empty that is what was done. A failure is
-/// `Stage::Delete`, naming `shell://trash` as its target. There is no undo record.
+/// Empties the trash through the provider of `shell://trash`. There is no undo record.
+///
+/// Where the trash can be emptied item by item (`Provider::empties_trash_at_once` says no: Linux,
+/// macOS), the job lists it (`Provider::trash_items`), the plan counts what it lists, and each
+/// item is deleted as [`delete_each`] does, with a failure of its own; the items that failed go
+/// to `JobReport::trash_left`, which a retry deletes, alone. Anything trashed after the listing
+/// stays. A listing that fails is a `Stage::Plan` failure naming `shell://trash` as its target.
+///
+/// Where the system empties it in one call (the Windows recycle bin), that is one step under
+/// [`ERRORS`]: the plan counts what the trash lists now (nothing, when it cannot be listed: the
+/// empty itself then says what is wrong), and once the trash is empty that is what was done. A
+/// failure is `Stage::Delete`, naming `shell://trash` as its target, and is not retried.
 pub(crate) fn run_empty(ctx: &mut Ctx<'_>) {
     let trash = ShellPlace::Trash.path();
+    let at_once = ctx
+        .provider(&trash)
+        .is_ok_and(|provider| provider.empties_trash_at_once());
+    if !at_once {
+        let listed = ctx.attempt(ERRORS, None, Some(&trash), |ctx| {
+            ctx.check().at(Stage::Plan)?;
+            let provider = ctx.provider(&trash).at(Stage::Plan)?;
+            provider.trash_items().at(Stage::Plan)
+        });
+        let Attempt::Done(items) = listed else {
+            return;
+        };
+        let mut totals = Totals::default();
+        for item in &items {
+            count(&mut totals, item);
+        }
+        ctx.planned(totals);
+        let left = delete_each(ctx, &items);
+        ctx.report.trash_left = left;
+        return;
+    }
     let mut totals = Totals::default();
     if let Ok(provider) = ctx.provider(&trash) {
         match ctx.list(&*provider, &trash) {

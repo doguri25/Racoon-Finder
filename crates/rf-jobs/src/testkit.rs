@@ -320,7 +320,8 @@ pub enum Fault {
     /// Every rename fails with `io::ErrorKind::CrossesDevices`, as between two volumes, except
     /// the commit of a temporary file (a `from` whose name `temp_job` reads).
     CrossDevice,
-    /// Deleting an item called `name` (`delete` or `delete_leaf`) fails with `PermissionDenied`.
+    /// Deleting an item called `name` (`delete`, `delete_leaf`, or `delete_from_trash` of an
+    /// item of the trash whose place has that name) fails with `PermissionDenied`.
     FailDelete { name: OsString },
     /// A `stat` or `delete_leaf` of `path` waits until [`FaultyProvider::release`], as a slow
     /// disk holds a job there; once released, every later call passes. It wakes
@@ -928,7 +929,18 @@ impl Provider for FaultyProvider {
     }
 
     fn delete_from_trash(&self, item: &TrashItem) -> Result<()> {
+        if let Ok(place) = VPath::local(&item.location) {
+            self.refuse_delete(&place)?;
+        }
         self.inner.delete_from_trash(item)
+    }
+
+    fn trash_items(&self) -> Result<Vec<TrashItem>> {
+        self.inner.trash_items()
+    }
+
+    fn empties_trash_at_once(&self) -> bool {
+        self.inner.empties_trash_at_once()
     }
 
     fn empty_trash(&self) -> Result<()> {

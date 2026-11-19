@@ -121,6 +121,11 @@ pub trait TrashSource: Send + Sync + fmt::Debug {
     fn delete_forever(&self, item: &TrashItem) -> Result<()>;
     /// Deletes everything in the trash for good (see `rf_platform::trash::empty`).
     fn empty(&self) -> Result<()>;
+    /// Whether the trash is emptied in one call that cannot be split into one per item (see
+    /// `rf_platform::trash::EMPTIES_AT_ONCE`); the default implementation says no.
+    fn empties_at_once(&self) -> bool {
+        false
+    }
 }
 
 /// The system trash of `rf_platform::trash`.
@@ -142,6 +147,10 @@ impl TrashSource for SystemTrash {
 
     fn empty(&self) -> Result<()> {
         rf_platform::trash::empty()
+    }
+
+    fn empties_at_once(&self) -> bool {
+        rf_platform::trash::EMPTIES_AT_ONCE
     }
 }
 
@@ -428,6 +437,14 @@ impl Provider for ShellProvider {
 
     fn delete_from_trash(&self, item: &TrashItem) -> Result<()> {
         self.trash.delete_forever(item)
+    }
+
+    fn trash_items(&self) -> Result<Vec<TrashItem>> {
+        self.trash.list()
+    }
+
+    fn empties_trash_at_once(&self) -> bool {
+        self.trash.empties_at_once()
     }
 
     fn empty_trash(&self) -> Result<()> {

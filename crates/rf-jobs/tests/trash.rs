@@ -144,11 +144,54 @@ fn only_the_failed_items_of_a_job_on_the_trash_are_tried_again() {
         Some(JobSpec::DeleteFromTrash { items: vec![b] })
     );
     assert_eq!(rf_jobs::retry_spec(&delete, &[]), None);
-    assert_eq!(
-        rf_jobs::retry_spec(&JobSpec::EmptyTrash, &[failed]),
-        Some(JobSpec::EmptyTrash)
-    );
+    // A new empty would take what was trashed since the user was asked: never by itself.
+    assert_eq!(rf_jobs::retry_spec(&JobSpec::EmptyTrash, &[failed]), None);
     assert_eq!(rf_jobs::retry_spec(&JobSpec::EmptyTrash, &[]), None);
+}
+
+/// A trash the system empties in one call (the Windows recycle bin), which fails here.
+#[derive(Debug)]
+struct AtOnce;
+
+impl rf_vfs::TrashSource for AtOnce {
+    fn list(&self) -> rf_core::Result<Vec<TrashItem>> {
+        Ok(vec![TrashItem::at(std::env::temp_dir().join("x"), false)])
+    }
+    fn restore(&self, item: &TrashItem, _to: &std::path::Path) -> rf_core::Result<()> {
+        Err(rf_core::Error::Unsupported(
+            item.location.display().to_string(),
+        ))
+    }
+    fn delete_forever(&self, item: &TrashItem) -> rf_core::Result<()> {
+        Err(rf_core::Error::Unsupported(
+            item.location.display().to_string(),
+        ))
+    }
+    fn empty(&self) -> rf_core::Result<()> {
+        Err(rf_core::Error::Unsupported("the bin refused".to_owned()))
+    }
+    fn empties_at_once(&self) -> bool {
+        true
+    }
+}
+
+/// A trash emptied in one call fails as a whole, and is never tried again by itself: the user
+/// asks for a new empty, and is asked again.
+#[test]
+fn an_empty_at_once_is_not_tried_again() {
+    let mut vfs = Vfs::with_local();
+    vfs.register(std::sync::Arc::new(rf_vfs::ShellProvider::with_sources(
+        std::sync::Arc::new(AtOnce),
+        std::sync::Arc::new(rf_vfs::SystemDrives),
+    )));
+    let rep = run_with(&JobSpec::EmptyTrash, &vfs, &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+    assert_eq!(rep.failures.len(), 1);
+    assert_eq!(
+        rep.failures[0].target,
+        Some(rf_vfs::ShellPlace::Trash.path())
+    );
+    assert_eq!(rep.retry_spec(), None);
 }
 
 /// A freedesktop trash in a temporary folder, the local disk whose trash it is, and the trash as
@@ -508,6 +551,60 @@ mod in_a_trash_of_its_own {
         assert_eq!(b.records(), ["a.txt.trashinfo"]);
         assert!(!b.home.join("elsewhere.txt").exists());
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+    }
+
+    /// Emptying the trash goes item by item: an item that cannot be deleted is a failure of its
+    /// own, and the retry deletes that item alone, as it was listed, never what was trashed since.
+    #[test]
+    fn an_empty_that_fails_on_an_item_is_retried_as_a_delete_of_that_item() {
+        let b = bin();
+        let a = b.trashed("a.txt", "A");
+        let kept = b.trashed("b.txt", "B");
+        let c = b.trashed("c.txt", "C");
+        let mut vfs = Vfs::new();
+        vfs.register(FaultyProvider::local(Vec::new()));
+        let shell = ShellProvider::with_sources(Arc::new(b.trash.clone()), Arc::new(SystemDrives));
+        let faulty = FaultyProvider::new(
+            Arc::new(shell),
+            vec![Fault::FailDelete {
+                name: "b.txt".into(),
+            }],
+        );
+        vfs.register(Arc::new(faulty));
+
+        let rep = run_with(&JobSpec::EmptyTrash, &vfs, &NonInteractive);
+        assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        assert_eq!((rep.planned.files, rep.done.files), (3, 2));
+        let [failure] = rep.failures.as_slice() else {
+            panic!("one failure: {:?}", rep.failures);
+        };
+        assert_eq!(
+            (failure.stage, failure.kind, failure.source.clone()),
+            (
+                Stage::Delete,
+                ErrorKind::PermissionDenied,
+                Some(v(&kept.location))
+            )
+        );
+        assert!(!a.location.exists() && !c.location.exists());
+        assert!(kept.location.exists());
+        assert_eq!(b.records(), ["b.txt.trashinfo"]);
+
+        // Something trashed after the empty is never taken by its retry.
+        let later = b.trashed("later.txt", "L");
+        let retry = rep.retry_spec().expect("the failed item is tried again");
+        assert_eq!(
+            retry,
+            JobSpec::DeleteFromTrash {
+                items: vec![b.item_at(&kept.location)]
+            }
+        );
+        let again = run_with(&retry, &b.vfs, &NonInteractive);
+        assert_eq!(again.outcome, Outcome::Completed, "{:?}", again.failures);
+        assert!(!kept.location.exists());
+        assert_eq!(std::fs::read_to_string(&later.location).unwrap(), "L");
+        assert_eq!(b.records(), ["later.txt.trashinfo"]);
+        assert!(b.kept_outside());
     }
 
     /// An item that does not lie in the trash is refused, whatever it says: nothing is moved or
