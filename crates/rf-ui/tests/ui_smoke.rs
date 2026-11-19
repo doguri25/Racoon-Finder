@@ -10072,3 +10072,303 @@ fn the_grid_holds_as_many_items_a_row_as_rust_reckons() {
         }
     }
 }
+
+/// 휴지통 and 내 PC (NAV-16): a trash item called `name` of the temporary folder's trash, trashed
+/// from its folder `from` of `size` bytes.
+fn trashed(name: &str, from: &str, size: u64) -> rf_vfs::TrashItem {
+    let base = std::env::temp_dir();
+    let mut item = rf_vfs::TrashItem::at(base.join("Trash").join("files").join(name), false);
+    item.original = Some(base.join(from).join(name));
+    item.size = Some(size);
+    item.deleted = Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+    item
+}
+
+/// A pane at the trash in its own view, which has listed `items`.
+fn trash_pane(items: &[rf_vfs::TrashItem]) -> Pane {
+    let trash = rf_vfs::ShellPlace::Trash.path();
+    let (mut pane, request) = Pane::new(trash, VisibilityFilter::default());
+    pane.active_tab_mut().set_view(FolderView::trash());
+    pane.handle(LoadEvent::TrashItems {
+        generation: request.generation,
+        items: items.to_vec(),
+    });
+    pane.handle(LoadEvent::Listed {
+        generation: request.generation,
+        entries: items.iter().map(rf_vfs::trash_entry).collect(),
+    });
+    pane
+}
+
+#[test]
+fn the_sidebar_lists_the_computer_before_the_drives_and_the_trash_after_them() {
+    let window = window();
+    let (disk, disk_label) = system_drive();
+    let home = VPath::local(std::env::temp_dir()).expect("a local path");
+    let [computer, trash] = rf_ui::places::shell_places();
+    let places = vec![
+        Place {
+            label: "홈".to_owned(),
+            path: home,
+            kind: PlaceKind::Favorite(KnownFolder::Home),
+            space: None,
+        },
+        computer,
+        Place {
+            label: disk_label.clone(),
+            path: disk,
+            kind: PlaceKind::Drive,
+            space: None,
+        },
+        trash,
+    ];
+    let mut tree = Tree::new(VisibilityFilter::default());
+    tree.set_roots(
+        places
+            .iter()
+            .map(|place| (place.label.clone(), place.path.clone())),
+    );
+    let rows = Rc::new(TreeRows::default());
+    rows.sync(&tree, &places);
+    window.set_tree(ModelRc::from(Rc::clone(&rows)));
+    // One head over 내 PC and the drives; none over 휴지통.
+    assert_eq!(labelled(&window, "즐겨찾기", AccessibleRole::Text).len(), 1);
+    assert_eq!(labelled(&window, "이 PC", AccessibleRole::Text).len(), 1);
+    let mut drawn: Vec<(usize, String)> = window
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(AccessibleRole::ListItem)
+        .find_all()
+        .into_iter()
+        .filter_map(|row| Some((row.accessible_item_index()?, row.accessible_label()?.into())))
+        .collect();
+    drawn.sort();
+    assert_eq!(
+        drawn,
+        [
+            (0, "홈".to_owned()),
+            (1, "내 PC".to_owned()),
+            (2, disk_label),
+            (3, "휴지통".to_owned()),
+        ]
+    );
+    // They are lists, not folders: no chevron, each with its own icon.
+    for (label, icon) in [("내 PC", "computer"), ("휴지통", "delete")] {
+        let row = &labelled(&window, label, AccessibleRole::ListItem)[0];
+        assert_eq!(row.accessible_expandable(), Some(false), "{label}");
+        let index = row.accessible_item_index().expect("a row");
+        assert_eq!(
+            rows.row_data(index).map(|row| row.icon.to_string()),
+            Some(icon.to_owned())
+        );
+    }
+    assert_eq!(
+        rows.row_data(0).map(|row| row.icon.to_string()),
+        Some("folder".to_owned())
+    );
+}
+
+#[test]
+fn the_trash_shows_its_own_columns_and_its_head_offers_them() {
+    use slint::platform::PointerEventButton;
+    let window = window();
+    // Wide enough for every head of the trash to show in the left pane.
+    window.window().set_size(LogicalSize::new(2400.0, 800.0));
+    let pane = trash_pane(&[trashed("보고서.txt", "문서", 2048)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let toggled = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&toggled);
+    window.on_column_toggled(move |side, column| record.borrow_mut().push((side, column)));
+    // 이름, 원래 위치, 삭제한 날짜, 크기, by the name the item had.
+    for head in ["이름", "원래 위치", "삭제한 날짜", "크기"] {
+        assert!(
+            !labelled(&window, head, AccessibleRole::Button).is_empty(),
+            "the head {head}"
+        );
+    }
+    assert!(!labelled(&window, "보고서.txt", AccessibleRole::ListItem).is_empty());
+    let folder = std::env::temp_dir().join("문서").display().to_string();
+    assert_eq!(labelled(&window, &folder, AccessibleRole::Text).len(), 1);
+    // The head's menu offers the trash's columns, not a folder's.
+    labelled(&window, "크기", AccessibleRole::Button)[0]
+        .mock_single_click(PointerEventButton::Right);
+    assert!(
+        ElementHandle::find_by_accessible_label(&window, "수정한 날짜")
+            .next()
+            .is_none()
+    );
+    choose_item(&window, "삭제한 날짜");
+    assert_eq!(toggled.borrow().as_slice(), [(0, 10)]);
+}
+
+#[test]
+fn the_trash_s_questions_name_what_goes_and_start_on_cancel() {
+    let window = window();
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&answers);
+    window.on_confirm_accepted(move || record.borrow_mut().push("accepted"));
+    let record = Rc::clone(&answers);
+    window.on_dialog_cancelled(move || record.borrow_mut().push("cancelled"));
+    let items = vec![trashed("a.txt", "x", 1024), trashed("b.txt", "x", 1024)];
+    let enter = char::from(Key::Return).to_string();
+    for (confirm, button) in [
+        (
+            rf_ui::dialogs::Confirm::delete_from_trash(items.clone()),
+            "영구 삭제",
+        ),
+        (
+            rf_ui::dialogs::Confirm::empty_trash(&items),
+            "휴지통 비우기",
+        ),
+    ] {
+        answers.borrow_mut().clear();
+        window.set_dialog(DialogKind::None);
+        window.set_confirm_view(ui_bridge::confirm_view(&confirm));
+        window.set_dialog(DialogKind::Confirm);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(
+            labelled(&window, &confirm.message, AccessibleRole::Text).len(),
+            1,
+            "{}",
+            confirm.message
+        );
+        assert!(confirm.message.ends_with("되돌릴 수 없습니다."));
+        assert!(confirm.message.contains("2개(2 KB)"));
+        // Enter answers No: the keys start on 취소.
+        chord(&window, &[&enter]);
+        assert_eq!(answers.borrow().as_slice(), ["cancelled"], "{button}");
+        // Only the button deletes.
+        labelled(&window, button, AccessibleRole::Button)
+            .last()
+            .expect("the button")
+            .invoke_accessible_default_action();
+        assert_eq!(answers.borrow().as_slice(), ["cancelled", "accepted"]);
+    }
+}
+
+#[test]
+fn the_computer_shows_its_drives_as_tiles_with_their_bars() {
+    let window = window();
+    let (disk, disk_label) = system_drive();
+    let places = vec![Place {
+        label: disk_label.clone(),
+        path: disk,
+        kind: PlaceKind::Drive,
+        space: Some(DiskSpace {
+            total: 100 * 1024 * 1024 * 1024,
+            free: 25 * 1024 * 1024 * 1024,
+            available: 25 * 1024 * 1024 * 1024,
+        }),
+    }];
+    let computer = rf_vfs::ShellPlace::Computer.path();
+    let (mut pane, request) = Pane::new(computer.clone(), VisibilityFilter::default());
+    pane.active_tab_mut().set_view(FolderView::computer());
+    pane.handle(LoadEvent::Listed {
+        generation: request.generation,
+        entries: rf_ui::state::computer_entries(&places),
+    });
+    let models = PaneModels::default();
+    models.set_drives(&computer, &places);
+    let view = models.view(&pane, true);
+    assert_eq!((view.mode, view.place), (7, 2));
+    let row = view.rows.row_data(0).expect("the drive's row");
+    assert_eq!(row.name, disk_label.as_str());
+    assert_eq!(row.size, "25 GB 남음 / 100 GB");
+    assert!((row.fill - 0.75).abs() < 1e-6, "{}", row.fill);
+    window.set_left_pane(view);
+    assert!(!labelled(&window, &disk_label, AccessibleRole::ListItem).is_empty());
+    assert_eq!(
+        labelled(&window, "25 GB 남음 / 100 GB", AccessibleRole::Text).len(),
+        1
+    );
+}
+
+#[test]
+fn the_trash_s_menus_offer_what_the_trash_allows_alone() {
+    use slint::platform::PointerEventButton;
+    let window = window();
+    let pane = trash_pane(&[trashed("a.txt", "x", 1)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&commands);
+    window.on_command(move |name| record.borrow_mut().push(name.to_string()));
+    // The item's menu: 복원, 위치를 골라 꺼내기… and 영구 삭제…, nothing that writes or reads
+    // (what the window shows of those names besides the menu stays as it was).
+    let titles = [
+        "복원",
+        "위치를 골라 꺼내기…",
+        "이동…",
+        "복사…",
+        "열기",
+        "속성",
+    ];
+    let count = |title: &str| ElementHandle::find_by_accessible_label(&window, title).count();
+    let before: Vec<usize> = titles.iter().map(|title| count(title)).collect();
+    labelled(&window, "a.txt", AccessibleRole::ListItem)[0]
+        .mock_single_click(PointerEventButton::Right);
+    let after: Vec<usize> = titles.iter().map(|title| count(title)).collect();
+    let came: Vec<&str> = titles
+        .iter()
+        .zip(before.iter().zip(&after))
+        .filter(|(_, (before, after))| after > before)
+        .map(|(title, _)| *title)
+        .collect();
+    assert_eq!(came, ["복원", "위치를 골라 꺼내기…"]);
+    choose_item(&window, "위치를 골라 꺼내기…");
+    assert_eq!(commands.borrow().as_slice(), ["restore-elsewhere"]);
+    labelled(&window, "a.txt", AccessibleRole::ListItem)[0]
+        .mock_single_click(PointerEventButton::Right);
+    // (Its key, Delete, shows once the controller has set the shortcuts.)
+    choose_item(&window, "영구 삭제…");
+    assert_eq!(
+        commands.borrow().as_slice(),
+        ["restore-elsewhere", "delete-from-trash"]
+    );
+}
+
+#[test]
+fn a_restore_s_conflict_shows_no_overwrite_at_all() {
+    let window = window();
+    let answers = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&answers);
+    window.on_conflict_answered(move |choice, all| record.borrow_mut().push((choice, all)));
+    window.set_conflict_view(ConflictView {
+        can_overwrite: false,
+        restore: true,
+        incoming_label: "복원할 파일".into(),
+        skip_hint: "이 파일은 휴지통에 그대로 둡니다".into(),
+        ..conflict_view()
+    });
+    window.set_dialog(DialogKind::Conflict);
+    // Skip, a numbered name and stopping the job: no overwrite, plain or by a condition.
+    for overwrite in [
+        "덮어쓰기",
+        "더 새 파일만 덮어쓰기",
+        "크기가 다를 때만 덮어쓰기",
+    ] {
+        assert_eq!(
+            labelled(&window, overwrite, AccessibleRole::RadioButton).len(),
+            0,
+            "{overwrite}"
+        );
+    }
+    assert_eq!(
+        labelled(&window, "건너뛰기", AccessibleRole::RadioButton).len(),
+        1
+    );
+    // ↑ goes no further than skipping, ↓ no further than the numbered name.
+    let (up, down, enter) = (
+        char::from(Key::UpArrow).to_string(),
+        char::from(Key::DownArrow).to_string(),
+        char::from(Key::Return).to_string(),
+    );
+    chord(&window, &[&up]);
+    chord(&window, &[&up]);
+    chord(&window, &[&enter]);
+    chord(&window, &[&down]);
+    chord(&window, &[&down]);
+    chord(&window, &[&enter]);
+    assert_eq!(answers.borrow().as_slice(), [(1, false), (2, false)]);
+}

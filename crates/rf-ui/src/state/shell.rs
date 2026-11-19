@@ -296,14 +296,16 @@ impl AppState {
     /// keys. `None` leaves the press to the app's own menus.
     pub fn right_click(&mut self, side: usize, row: Option<usize>) -> Option<Vec<Effect>> {
         let shift = self.drag_mods.shift;
+        let side = side.min(RIGHT);
+        // The system's menu knows no list of the shell (휴지통, 내 PC): the app's shows there.
         if self.modal.is_some()
             || self.quitting
             || self.quick_look_open()
             || !self.system_menu_now(shift)
+            || self.shell_place_of(side).is_some()
         {
             return None;
         }
-        let side = side.min(RIGHT);
         let mut effects = vec![Effect::FocusPanes];
         if let Some(row) = row {
             self.row_menu(side, row);

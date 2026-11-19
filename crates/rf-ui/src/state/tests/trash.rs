@@ -210,6 +210,9 @@ fn the_address_bar_names_the_places_and_takes_their_names_typed() {
     assert_eq!(location_text(&computer()), "내 PC");
     assert_eq!(folder_label(&trash()), "휴지통");
     assert_eq!(folder_label(&computer()), "내 PC");
+    // A place has nothing above it: its path row is one piece, and Alt+↑ goes nowhere.
+    assert_eq!(trash().parent(), None);
+    assert_eq!(ancestors(&computer()), [computer()]);
     // An item of the trash is no place itself.
     let row = trash().join("x").expect("a name");
     assert_eq!(crate::format::shell_place_at(&row), None);

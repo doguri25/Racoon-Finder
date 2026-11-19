@@ -188,7 +188,7 @@ impl AppState {
             Command::OpenTerminal => Blocked::Terminal,
             Command::QuickLook => Blocked::Preview,
             // The system's menu of items knows no list of the shell: the app's menu shows.
-            Command::SystemMenu => return Some(self.app_menu(side)),
+            Command::SystemMenu | Command::ContextMenu => return Some(self.app_menu(side)),
             _ => return None,
         };
         // A write into the place, or a read of its items: nothing the bits allow.

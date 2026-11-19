@@ -173,10 +173,16 @@ fn release_answers_cancel() {
 /// The engine of the app on the journal folder `journal`, with its events and questions in
 /// channels, as the window gets them.
 fn jobs(journal: &Path) -> (Jobs, Receiver<JobEvent>, Receiver<Question>) {
+    jobs_with(Vfs::with_local_and_shell(), journal)
+}
+
+/// [`jobs`] with the engine reaching the files through `vfs`.
+fn jobs_with(vfs: Vfs, journal: &Path) -> (Jobs, Receiver<JobEvent>, Receiver<Question>) {
     let (event_tx, events) = mpsc::channel();
     let (question_tx, questions) = mpsc::channel();
     let question_tx = Mutex::new(question_tx);
-    let jobs = Jobs::start(
+    let jobs = Jobs::start_with(
+        vfs,
         journal,
         move |event| {
             let _ = event_tx.send(event);
@@ -318,13 +324,18 @@ struct Harness {
 
 impl Harness {
     fn new() -> Harness {
+        Harness::with_vfs(Vfs::with_local())
+    }
+
+    /// The harness whose engine and loader reach the files through `vfs`.
+    fn with_vfs(vfs: Vfs) -> Harness {
         let journal = TempDir::new().expect("a journal folder");
-        let (jobs, events, questions) = jobs(journal.path());
+        let (jobs, events, questions) = jobs_with(vfs.clone(), journal.path());
         Harness {
             jobs,
             events,
             questions,
-            loader: Loader::new(Vfs::with_local()),
+            loader: Loader::new(vfs),
             loads: mpsc::channel(),
             tickets: Vec::new(),
             feed_questions: true,
@@ -1899,4 +1910,204 @@ fn a_running_copy_names_the_file_it_is_at_in_its_row() {
     harness.run(&mut state, Vec::new());
     assert_eq!(state.job_rows(), []);
     assert_eq!(read(&right.join("보고서.txt")), "new");
+}
+
+/// 휴지통 in the window with a trash of the test's own (a freedesktop trash in a temporary
+/// folder, never the user's): what goes to it is listed there, comes back by 복원, goes there
+/// again by the undo, and an emptying asks first.
+#[cfg(unix)]
+mod a_trash_of_its_own {
+    use rf_jobs::testkit::{Fault, FaultyProvider};
+    use rf_platform::FreedesktopTrash;
+    use rf_vfs::{ShellPlace, ShellProvider, SystemDrives};
+
+    use super::*;
+
+    /// A home folder, another folder and a trash, all in one temporary folder, and the files
+    /// reached as the app reaches them, but for the trash.
+    struct Bin {
+        _dir: TempDir,
+        home: PathBuf,
+        other: PathBuf,
+        trash: FreedesktopTrash,
+        vfs: Vfs,
+    }
+
+    fn bin() -> Bin {
+        let dir = TempDir::new().expect("a temporary folder");
+        let base = dir.path().canonicalize().expect("its path");
+        let (home, other) = (base.join("home"), base.join("other"));
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&other).expect("other");
+        let root = base.join("data").join("Trash");
+        let mut vfs = Vfs::new();
+        vfs.register(FaultyProvider::local(vec![Fault::TrashInto {
+            root: root.clone(),
+        }]));
+        vfs.register(Arc::new(ShellProvider::with_sources(
+            Arc::new(FreedesktopTrash::new(&root)),
+            Arc::new(SystemDrives),
+        )));
+        Bin {
+            _dir: dir,
+            home,
+            other,
+            trash: FreedesktopTrash::new(&root),
+            vfs,
+        }
+    }
+
+    /// The names the rows of pane `side` show.
+    fn shown(state: &AppState, side: usize) -> Vec<String> {
+        state.panes()[side]
+            .active_tab()
+            .visible()
+            .iter()
+            .map(|entry| entry.shown_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Whether pane `side` shows the trash, listed, with the rows called `names`.
+    fn lists(state: &AppState, side: usize, names: &[&str]) -> bool {
+        let tab = state.panes()[side].active_tab();
+        tab.location() == &ShellPlace::Trash.path()
+            && tab.status() == LoadStatus::Ready
+            && shown(state, side) == names
+    }
+
+    /// Sends the files `names` of the home folder to the test's trash through the window: their
+    /// rows selected, Delete, the trash found there.
+    fn trash_through_the_window(harness: &mut Harness, state: &mut AppState, names: &[&str]) {
+        for (i, name) in names.iter().enumerate() {
+            let row = shown(state, LEFT)
+                .iter()
+                .position(|shown| shown == name)
+                .unwrap_or_else(|| panic!("{name} is listed"));
+            state.click_row(LEFT, row, i > 0, false);
+        }
+        let effects = key(state, Key::Delete, false);
+        let [Effect::CheckTrash { paths, .. }] = effects.as_slice() else {
+            panic!("the trash is looked for: {effects:?}");
+        };
+        let effects = state.trash_checked(paths.clone(), true);
+        harness.run(state, effects);
+    }
+
+    #[test]
+    fn a_trashed_file_is_listed_restored_put_back_by_the_undo_and_listed_again() {
+        let bin = bin();
+        write(&bin.home.join("a.txt"), "A");
+        let mut harness = Harness::with_vfs(bin.vfs.clone());
+        let mut state = harness.open(&bin.home, &bin.other);
+        trash_through_the_window(&mut harness, &mut state, &["a.txt"]);
+        assert!(!bin.home.join("a.txt").exists());
+        assert_eq!(bin.trash.list().expect("the trash").len(), 1);
+
+        // The right pane shows the trash: the item, by the name it had and where it was.
+        state.activate(RIGHT);
+        let effects = state.go_to(ShellPlace::Trash.path());
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the trash's listing", |state| {
+            lists(state, RIGHT, &["a.txt"])
+        });
+        let entry = &state.panes()[RIGHT].active_tab().visible()[0];
+        assert_eq!(entry.origin.as_deref(), Some(bin.home.as_path()));
+
+        // 복원 puts it back where it was; the trash's list follows.
+        state.click_row(RIGHT, 0, false, false);
+        let effects = state
+            .trash_command("restore")
+            .expect("a command of the trash");
+        let seen = harness.run(&mut state, effects);
+        assert_eq!(read(&bin.home.join("a.txt")), "A");
+        harness.until(&mut state, "the empty trash", |state| {
+            lists(state, RIGHT, &[])
+        });
+        assert!(
+            seen.iter().any(|effect| matches!(
+                effect,
+                Effect::Toast { text, action, .. }
+                    if text == "항목 1개를 ‘home’ 폴더로 복원했습니다" && action == "되돌리기"
+            )),
+            "{seen:?}"
+        );
+
+        // Ctrl+Z sends it to the trash again, and the list shows it there again.
+        let undo = rf_ui::keys::command_for(
+            "z",
+            rf_ui::keys::Mods {
+                ctrl: true,
+                ..rf_ui::keys::Mods::NONE
+            },
+            Os::Windows,
+        )
+        .expect("the undo key");
+        let effects = state
+            .key(
+                undo,
+                rf_ui::keys::Mods::NONE,
+                Paging::rows(10),
+                Instant::now(),
+            )
+            .expect("the window takes it");
+        harness.run(&mut state, effects);
+        assert!(!bin.home.join("a.txt").exists());
+        harness.until(&mut state, "the trash's listing again", |state| {
+            lists(state, RIGHT, &["a.txt"])
+        });
+        assert_eq!(bin.trash.list().expect("the trash").len(), 1);
+    }
+
+    #[test]
+    fn emptying_the_trash_asks_first_and_then_deletes_what_it_holds() {
+        let bin = bin();
+        write(&bin.home.join("a.txt"), "A");
+        write(&bin.home.join("b.txt"), "B");
+        write(&bin.other.join("keep.txt"), "K");
+        let mut harness = Harness::with_vfs(bin.vfs.clone());
+        let mut state = harness.open(&bin.home, &bin.other);
+        trash_through_the_window(&mut harness, &mut state, &["a.txt", "b.txt"]);
+        let effects = state.go_to(ShellPlace::Trash.path());
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the trash's listing", |state| {
+            lists(state, LEFT, &["a.txt", "b.txt"])
+        });
+
+        // 휴지통 비우기… reads the trash again and asks; No keeps everything.
+        let effects = state.trash_command("empty-trash").expect("a command");
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the question", |state| {
+            matches!(state.modal(), Some(Modal::Confirm(_)))
+        });
+        let Some(Modal::Confirm(confirm)) = state.modal() else {
+            unreachable!("the question shows");
+        };
+        assert_eq!(confirm.purpose, ConfirmPurpose::EmptyTrash);
+        assert_eq!(
+            confirm.message,
+            "휴지통의 항목 2개(2 바이트)를 모두 영구 삭제할까요?\n되돌릴 수 없습니다."
+        );
+        assert!(confirm.danger);
+        assert_eq!(state.dialog_cancelled(), []);
+        assert_eq!(bin.trash.list().expect("the trash").len(), 2);
+
+        // Yes empties it, and nothing outside it.
+        let effects = state.trash_command("empty-trash").expect("a command");
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the question", |state| {
+            matches!(state.modal(), Some(Modal::Confirm(_)))
+        });
+        let effects = state.confirm_accepted();
+        harness.run(&mut state, effects);
+        assert_eq!(bin.trash.list().expect("the trash"), []);
+        harness.until(&mut state, "the empty list", |state| {
+            lists(state, LEFT, &[])
+        });
+        assert_eq!(read(&bin.other.join("keep.txt")), "K");
+        // The emptying leaves no record of its own to undo: the last one is still the trash's.
+        assert!(matches!(
+            harness.jobs.history().top,
+            Some(UndoRecord::Trashed { .. })
+        ));
+    }
 }
