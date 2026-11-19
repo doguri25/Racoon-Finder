@@ -516,7 +516,7 @@ impl AppState {
             }
             ConfirmPurpose::DeletePermanently(_)
             | ConfirmPurpose::DeleteFromTrash(_)
-            | ConfirmPurpose::EmptyTrash => {
+            | ConfirmPurpose::EmptyTrash(_) => {
                 let spec = confirm.job();
                 self.close();
                 spec.map(|spec| submit(spec, None)).into_iter().collect()

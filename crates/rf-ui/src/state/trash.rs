@@ -390,7 +390,7 @@ impl AppState {
         if items.is_empty() {
             return vec![Effect::Notice(words::trash_already_empty().to_owned())];
         }
-        self.open(Modal::Confirm(Confirm::empty_trash(&items)));
+        self.open(Modal::Confirm(Confirm::empty_trash(items)));
         Vec::new()
     }
 

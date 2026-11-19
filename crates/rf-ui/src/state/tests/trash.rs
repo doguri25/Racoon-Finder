@@ -395,14 +395,20 @@ fn emptying_the_trash_reads_it_again_and_asks_with_what_it_holds_then() {
     );
     assert_eq!(asked.ok, "휴지통 비우기");
     assert!(asked.danger);
-    assert_eq!(asked.purpose, ConfirmPurpose::EmptyTrash);
+    assert_eq!(asked.purpose, ConfirmPurpose::EmptyTrash(now.to_vec()));
     assert_eq!(state.dialog_cancelled(), []);
     // Yes empties it.
     let effects = state.trash_command("empty-trash").expect("a command");
     let request = the_load(&effects);
     list_trash(&mut state, &request, &now);
     let effects = state.confirm_accepted();
-    assert_eq!(submitted(&effects), [&JobSpec::EmptyTrash]);
+    // It deletes the items it counted, each while it is that very item.
+    assert_eq!(
+        submitted(&effects),
+        [&JobSpec::DeleteFromTrash {
+            items: now.to_vec()
+        }]
+    );
 
     // An empty trash asks nothing.
     let effects = state.trash_command("empty-trash").expect("a command");
@@ -846,4 +852,70 @@ fn the_trash_and_the_computer_offer_what_their_capabilities_allow() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].shown_name(), "USB");
     assert_eq!(entries[0].origin.as_deref(), folder("usb").as_local());
+}
+
+#[test]
+fn emptying_deletes_exactly_what_its_question_counted() {
+    let a = item("a.txt", Some("docs"), Some(5));
+    let mut state = in_trash(std::slice::from_ref(&a));
+    let effects = state.trash_command("empty-trash").expect("a command");
+    let request = the_load(&effects);
+    list_trash(&mut state, &request, std::slice::from_ref(&a));
+    assert!(confirm(&state).message.contains("항목 1개"));
+    // While the question is open the trash is read again (the window came to the front) and
+    // holds c too; the question still counts a alone, and so does its answer.
+    let c = item("c.txt", Some("docs"), Some(7));
+    let effects = state.window_focused();
+    let request = the_load(&effects);
+    list_trash(&mut state, &request, &[a.clone(), c]);
+    let effects = state.confirm_accepted();
+    assert_eq!(
+        submitted(&effects),
+        [&JobSpec::DeleteFromTrash { items: vec![a] }]
+    );
+}
+
+#[test]
+fn the_retry_of_a_partly_failed_empty_deletes_only_what_failed_after_asking() {
+    let (a, b) = (
+        item("a.txt", Some("docs"), Some(5)),
+        item("b.txt", Some("docs"), Some(5)),
+    );
+    let mut state = in_trash(&[a.clone(), b.clone()]);
+    let spec = JobSpec::DeleteFromTrash {
+        items: vec![a, b.clone()],
+    };
+    let effects = finish(&mut state, 1, &spec, JobWork::Delete, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(ItemFailure {
+            source: VPath::local(&b.location).ok(),
+            target: None,
+            stage: Stage::Delete,
+            kind: ErrorKind::PermissionDenied,
+            message: String::new(),
+            reason: None,
+        });
+    });
+    let token = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Toast { token, .. } => Some(*token),
+            _ => None,
+        })
+        .expect("a toast");
+    state.toast_clicked(token);
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items show: {:?}", state.modal());
+    };
+    assert_eq!(
+        failures.retry.as_ref().map(|retry| &retry.spec),
+        Some(&JobSpec::DeleteFromTrash {
+            items: vec![b.clone()]
+        })
+    );
+    assert_eq!(submitted(&state.failures_retried()), [] as [&JobSpec; 0]);
+    assert_eq!(
+        confirm(&state).purpose,
+        ConfirmPurpose::DeleteFromTrash(vec![b])
+    );
 }

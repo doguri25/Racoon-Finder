@@ -450,8 +450,10 @@ pub enum ConfirmPurpose {
     /// Delete these items of the trash for good (휴지통 ▸ 영구 삭제…), as the trash's list showed
     /// them: each is deleted only while the trash holds that very item.
     DeleteFromTrash(Vec<TrashItem>),
-    /// Empty the trash (휴지통 비우기…).
-    EmptyTrash,
+    /// Empty the trash (휴지통 비우기…) of exactly these items, the stamped records of the
+    /// listing the question counted: what came into the trash since stays there, and an item that
+    /// changed since is not deleted (`TrashItemChanged`).
+    EmptyTrash(Vec<TrashItem>),
 }
 
 /// A window that asks before something happens that cannot be taken back.
@@ -634,11 +636,11 @@ impl Confirm {
     /// The question before the trash is emptied (휴지통 비우기…, NAV-16): how many items it holds
     /// as `items` (a listing read for the question) show, their size when the trash knows it for
     /// each, and that it cannot be undone. Only its button empties the trash, never Enter alone
-    /// (`danger`).
-    pub fn empty_trash(items: &[TrashItem]) -> Confirm {
+    /// (`danger`), and it empties `items` alone ([`ConfirmPurpose::EmptyTrash`]).
+    pub fn empty_trash(items: Vec<TrashItem>) -> Confirm {
         Confirm {
             title: words::empty_trash_title().to_owned(),
-            message: words::empty_trash(items.len(), total_size(items)),
+            message: words::empty_trash(items.len(), total_size(&items)),
             detail: String::new(),
             lines: Vec::new(),
             question: String::new(),
@@ -647,7 +649,7 @@ impl Confirm {
             alt: String::new(),
             check: String::new(),
             checked: false,
-            purpose: ConfirmPurpose::EmptyTrash,
+            purpose: ConfirmPurpose::EmptyTrash(items),
         }
     }
 
@@ -659,10 +661,14 @@ impl Confirm {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
             ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
-            ConfirmPurpose::DeleteFromTrash(items) => Some(JobSpec::DeleteFromTrash {
-                items: items.clone(),
-            }),
-            ConfirmPurpose::EmptyTrash => Some(JobSpec::EmptyTrash),
+            // On every system, the items the question counted, each while it is that very item:
+            // never the whole trash as the job finds it (`JobSpec::EmptyTrash`, which would take
+            // what came in since, by this app's own jobs queued before it too).
+            ConfirmPurpose::DeleteFromTrash(items) | ConfirmPurpose::EmptyTrash(items) => {
+                Some(JobSpec::DeleteFromTrash {
+                    items: items.clone(),
+                })
+            }
             ConfirmPurpose::Quit
             | ConfirmPurpose::ApplyViewBelow { .. }
             | ConfirmPurpose::RemoveApp

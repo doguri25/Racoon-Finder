@@ -10332,7 +10332,7 @@ fn the_trash_s_questions_name_what_goes_and_start_on_cancel() {
             "영구 삭제",
         ),
         (
-            rf_ui::dialogs::Confirm::empty_trash(&items),
+            rf_ui::dialogs::Confirm::empty_trash(items.clone()),
             "휴지통 비우기",
         ),
     ] {

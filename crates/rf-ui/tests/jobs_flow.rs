@@ -2082,7 +2082,14 @@ mod a_trash_of_its_own {
         let Some(Modal::Confirm(confirm)) = state.modal() else {
             unreachable!("the question shows");
         };
-        assert_eq!(confirm.purpose, ConfirmPurpose::EmptyTrash);
+        // It holds the items it counted, with their records as the trash lists them.
+        let ConfirmPurpose::EmptyTrash(mut counted) = confirm.purpose.clone() else {
+            panic!("the question of an emptying: {:?}", confirm.purpose);
+        };
+        let mut listed = bin.trash.list().expect("the trash");
+        counted.sort_by(|a, b| a.name.cmp(&b.name));
+        listed.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(counted, listed);
         assert_eq!(
             confirm.message,
             "휴지통의 항목 2개(2 바이트)를 모두 영구 삭제할까요?\n되돌릴 수 없습니다."
@@ -2109,5 +2116,114 @@ mod a_trash_of_its_own {
             harness.jobs.history().top,
             Some(UndoRecord::Trashed { .. })
         ));
+    }
+
+    /// The question of 휴지통 비우기… in pane `side`, which shows the trash: asked, read again,
+    /// shown.
+    fn ask_to_empty(harness: &mut Harness, state: &mut AppState) {
+        let effects = state.trash_command("empty-trash").expect("a command");
+        harness.carry_out(state, effects);
+        harness.until(state, "the question", |state| {
+            matches!(state.modal(), Some(Modal::Confirm(_)))
+        });
+    }
+
+    /// The names the test's trash holds, sorted.
+    fn in_bin(bin: &Bin) -> Vec<String> {
+        let mut names: Vec<String> = bin
+            .trash
+            .list()
+            .expect("the trash")
+            .into_iter()
+            .map(|item| item.name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_item_trashed_while_the_question_is_open_stays_in_the_trash() {
+        let bin = bin();
+        write(&bin.home.join("a.txt"), "A");
+        write(&bin.home.join("b.txt"), "B");
+        let mut harness = Harness::with_vfs(bin.vfs.clone());
+        let mut state = harness.open(&bin.home, &bin.other);
+        trash_through_the_window(&mut harness, &mut state, &["a.txt"]);
+        state.activate(RIGHT);
+        let effects = state.go_to(ShellPlace::Trash.path());
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the trash's listing", |state| {
+            lists(state, RIGHT, &["a.txt"])
+        });
+        ask_to_empty(&mut harness, &mut state);
+        let Some(Modal::Confirm(confirm)) = state.modal() else {
+            unreachable!("the question shows");
+        };
+        assert!(confirm.message.contains("항목 1개"), "{}", confirm.message);
+        // Another app trashes b while the question is open.
+        bin.trash
+            .move_to_trash(&local(&bin.home.join("b.txt")))
+            .expect("b goes to the trash");
+        let effects = state.confirm_accepted();
+        harness.run(&mut state, effects);
+        // What the question counted is gone; what came after it stays.
+        assert_eq!(in_bin(&bin), ["b.txt"]);
+    }
+
+    #[test]
+    fn a_trash_queued_behind_a_copy_is_not_emptied_by_an_earlier_question() {
+        let bin = bin();
+        write(&bin.home.join("a.txt"), "A");
+        write(&bin.home.join("보고서.txt"), "kept");
+        write(&bin.home.join("x.txt"), "new");
+        write(&bin.other.join("x.txt"), "old");
+        let mut harness = Harness::with_vfs(bin.vfs.clone());
+        let mut state = harness.open(&bin.home, &bin.other);
+        trash_through_the_window(&mut harness, &mut state, &["a.txt"]);
+        // A copy that waits on its question holds the main lane.
+        harness.feed_questions = false;
+        click(&mut state, LEFT, "x.txt");
+        let effects = state.transfer(
+            LEFT,
+            TransferMode::Copy,
+            &local(&bin.other),
+            TransferOptions::default(),
+        );
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the copy to ask", |state| {
+            state.job_rows().first().is_some_and(|row| row.waiting)
+        });
+        // The report goes to the trash: its job waits behind the copy.
+        click(&mut state, LEFT, "보고서.txt");
+        let effects = key(&mut state, Key::Delete, false);
+        let [Effect::CheckTrash { paths, .. }] = effects.as_slice() else {
+            panic!("the trash is looked for: {effects:?}");
+        };
+        let effects = state.trash_checked(paths.clone(), true);
+        harness.carry_out(&mut state, effects);
+        // The trash shows a.txt alone, and the question counts it alone.
+        state.activate(RIGHT);
+        let effects = state.go_to(ShellPlace::Trash.path());
+        harness.carry_out(&mut state, effects);
+        harness.until(&mut state, "the trash's listing", |state| {
+            lists(state, RIGHT, &["a.txt"])
+        });
+        ask_to_empty(&mut harness, &mut state);
+        let Some(Modal::Confirm(confirm)) = state.modal() else {
+            unreachable!("the question shows");
+        };
+        assert!(confirm.message.contains("항목 1개"), "{}", confirm.message);
+        let effects = state.confirm_accepted();
+        harness.carry_out(&mut state, effects);
+        // The copy goes on (it keeps both), then the report is trashed, then the emptying runs.
+        harness.feed_questions = true;
+        harness.until(&mut state, "the copy's question", |state| {
+            matches!(state.modal(), Some(Modal::Conflict(_)))
+        });
+        let effects = state.conflict_answered(ConflictChoice::Skip, false);
+        harness.run(&mut state, effects);
+        // The report the user sent to the trash to keep it is still there to restore.
+        assert_eq!(in_bin(&bin), ["보고서.txt"]);
+        assert_eq!(read(&bin.other.join("x.txt")), "old");
     }
 }
