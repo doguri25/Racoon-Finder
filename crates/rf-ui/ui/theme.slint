@@ -102,6 +102,14 @@ export global Theme {
     public pure function line(size: length) -> length {
         return ceil(size * 1.5 / 1px) * 1px;
     }
+
+    // The height of the job panel under the panes (LAY-09): what it `wanted`, at most what leaves
+    // each pane three rows of `row-height` in a window `window-height` tall above `chrome` (the
+    // rest of the window above the panel), and never below 0 (the same as Rust's
+    // `theme::job_panel_height`, which a test holds to this).
+    public pure function job-panel-height(window-height: length, wanted: length, row-height: length, chrome: length) -> length {
+        return max(0px, min(wanted, window-height - chrome - 3 * row-height));
+    }
 }
 
 // What marks a selected item besides its color while the theme has `marks`: a short bar at

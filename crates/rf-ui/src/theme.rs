@@ -573,6 +573,22 @@ pub fn line(size: f32) -> f32 {
     (size * LINE).ceil()
 }
 
+/// How many rows of its list each pane keeps above the job panel under the panes (LAY-09).
+pub const PANE_ROWS_KEPT: f32 = 3.0;
+
+/// The height of the job panel under the panes (LAY-09): what it `wanted` (its own height with
+/// every line it shows), at most what leaves each pane [`PANE_ROWS_KEPT`] rows of `row_height`
+/// in a window `window_height` tall, where `chrome` is the rest of the window above the panel
+/// besides those rows (the toolbar, the room around the panes, and each pane's tabs, path row,
+/// column head and status bar; with the panes one above the other, both panes' and the second
+/// pane's rows). Never below 0. A panel cut to it scrolls inside (`Theme.job-panel-height`, which
+/// a test holds to this).
+pub fn job_panel_height(window_height: f32, wanted: f32, row_height: f32, chrome: f32) -> f32 {
+    wanted
+        .min(window_height - chrome - PANE_ROWS_KEPT * row_height)
+        .max(0.0)
+}
+
 /// The share of the theme's row height and gaps that `density` gives them, as a fraction: four
 /// fifths, all, or five quarters.
 pub fn density_share(density: Density) -> (u16, u16) {
@@ -663,6 +679,32 @@ fn luminance(color: Rgba) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The job panel under the panes keeps each pane three rows of its list (LAY-09): at 900×560,
+    /// 보통 + 100 % and 넉넉하게 + 130 %, with a panel that wants more than the window.
+    #[test]
+    fn the_docked_job_panel_leaves_each_pane_three_rows() {
+        let base = Builtin::Light.tokens();
+        for (density, font_scale) in [
+            (Density::Normal, FontScale::Normal),
+            (Density::Roomy, FontScale::Largest),
+        ] {
+            let tokens = scaled(base.clone(), density, font_scale);
+            let row = tokens.size.row_height;
+            // The toolbar, the gaps around the panes, and a pane's tabs, path, head and status.
+            let chrome = 60.0 + 2.0 * tokens.size.gap_m + 40.0 + 38.0 + row + 32.0;
+            for wanted in [0.0, 100.0, 300.0, 2000.0] {
+                let panel = job_panel_height(560.0, wanted, row, chrome);
+                assert!(panel <= wanted, "{density:?} {wanted}");
+                assert!(560.0 - chrome - panel >= 3.0 * row, "{density:?} {wanted}");
+                assert!(panel >= 0.0);
+            }
+            // A panel that fits keeps its height.
+            assert_eq!(job_panel_height(560.0, 50.0, row, chrome), 50.0);
+        }
+        // No room at all: no panel, not a negative height.
+        assert_eq!(job_panel_height(200.0, 300.0, 40.0, 180.0), 0.0);
+    }
 
     #[test]
     fn the_built_in_themes_are_valid() {

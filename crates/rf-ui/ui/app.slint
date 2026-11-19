@@ -17,7 +17,7 @@
 // preview panel shows the item under the active pane's cursor (`preview`), and so does quick
 // look over the window (`quick-look`), which takes every key while it shows (`quick-look-key`).
 
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
@@ -130,6 +130,13 @@ export component MainWindow inherits Window {
     // keeps room for the panes with two. Set by the handlers of the height, as `compact` is:
     // the window's height depends on the panel's.
     private property <int> recent-lines: 3;
+    // The window's height, for the job panel under the panes, which leaves each pane three rows
+    // (`Theme.job-panel-height`). Set by the handlers of the height, as `recent-lines` is.
+    private property <length> panel-window-height: 560px;
+    // The rest of the window above the job panel besides the panes' rows: the toolbar, the room
+    // around the panes, and a pane's tabs, path row, head and status bar; with the panes one
+    // above the other, both panes', the gap between them and the upper pane's three rows.
+    private property <length> panel-chrome: toolbar.height + 2 * Theme.gap-m + (root.dual-pane && root.stacked ? left.chrome + right.chrome + Theme.gap-m + 3 * Theme.row-height : left.chrome);
     // The dialog that is open, and what each kind shows. Rust sets the view before the kind.
     in property <DialogKind> dialog: DialogKind.none;
     in property <NameView> name-view;
@@ -1040,6 +1047,7 @@ export component MainWindow inherits Window {
         root.compact = root.width < 1200px;
         root.titled = root.width >= 1400px;
         root.recent-lines = root.height < 700px ? 2 : 3;
+        root.panel-window-height = root.height;
         root.show-theme();
         ItemMenu.toolbar-shown = root.show-toolbar;
     }
@@ -1055,7 +1063,20 @@ export component MainWindow inherits Window {
     }
     changed height => {
         root.recent-lines = root.height < 700px ? 2 : 3;
+        root.panel-window-height = root.height;
         root.window-resized();
+    }
+    // The part of the job panel under the panes from `top` (from the panel's top) and `height`
+    // tall shows: the panel scrolls as little as it can to it, to its top when it is taller than
+    // the panel's room (as the floating job window's `reveal`).
+    function panel-reveal(top: length, height: length) {
+        let shown = -panel-page.content-y;
+        let lowest = min(0px, panel-page.visible-height - panel-page.content-height);
+        if (top < shown || height > panel-page.visible-height) {
+            panel-page.content-y = max(lowest, -top);
+        } else if (top + height > shown + panel-page.visible-height) {
+            panel-page.content-y = max(lowest, panel-page.visible-height - top - height);
+        }
     }
 
     changed theme-choice => {
@@ -1873,8 +1894,11 @@ export component MainWindow inherits Window {
             // The job panel takes room only while a job runs, and none while it shows in a
             // window of its own. It takes the keys of its buttons
             // while it has them (F6 after the tree), and passes the others on to the window's.
+            // It is at most as tall as leaves each pane three rows of its list (LAY-09): the rest
+            // of it scrolls inside, by the wheel and by the keys, which bring their line into
+            // view (`panel-reveal`).
             panel-keys := FocusScope {
-                height: root.panel-shows ? jobs.preferred-height : 0px;
+                height: root.panel-shows ? Theme.job-panel-height(root.panel-window-height, jobs.preferred-height, Theme.row-height, root.panel-chrome) : 0px;
                 visible: root.panel-shows;
                 focus-on-click: false;
                 focus-on-tab-navigation: false;
@@ -1898,60 +1922,72 @@ export component MainWindow inherits Window {
                     reject
                 }
 
-                jobs := JobPanel {
+                panel-page := ScrollView {
                     width: parent.width;
                     height: parent.height;
-                    rows: root.job-rows;
-                    queue: root.job-queue;
-                    // One job that waits fewer than lines of 최근 완료 (one in a window below
-                    // 700px high, else two): the list scrolls for the others, and the panes
-                    // keep their room. The panel's own window shows more of them.
-                    queue-lines: max(1, root.recent-lines - 1);
-                    recent: root.recent-rows;
-                    recent-title: root.recent-title;
-                    recent-open: root.recent-open;
-                    recent-lines: root.recent-lines;
-                    history-title: root.history-title;
-                    history-open: root.history-open;
-                    history: root.history-rows;
-                    history-heads: root.history-heads;
-                    // Both lists open at once would leave the panes little room in a window
-                    // as low as 560px.
-                    history-lines: root.recent-open ? 1 : root.recent-lines;
-                    focus-line: panel-keys.has-focus ? root.panel-line : -1;
-                    focus-button: panel-keys.has-focus ? root.panel-button : -1;
-                    pause(index) => {
-                        root.job-pause(index);
-                    }
-                    resume(index) => {
-                        root.job-resume(index);
-                    }
-                    cancel(index) => {
-                        root.job-cancel(index);
-                    }
-                    move-up(index) => {
-                        root.job-move-up(index);
-                    }
-                    move-down(index) => {
-                        root.job-move-down(index);
-                    }
-                    recent-toggled => {
-                        root.recent-toggled();
-                    }
-                    recent-cleared => {
-                        root.recent-cleared();
-                    }
-                    recent-details(index) => {
-                        root.recent-details(index);
-                    }
-                    recent-save(index) => {
-                        root.recent-save(index);
-                    }
-                    history-toggled => {
-                        root.history-toggled();
-                    }
-                    history-run(redo, index) => {
-                        root.history-run(redo, index);
+                    content-width: self.visible-width;
+                    content-height: jobs.preferred-height;
+
+                    jobs := JobPanel {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: self.preferred-height;
+                        rows: root.job-rows;
+                        queue: root.job-queue;
+                        // One job that waits fewer than lines of 최근 완료 (one in a window below
+                        // 700px high, else two): the list scrolls for the others, and the panes
+                        // keep their room. The panel's own window shows more of them.
+                        queue-lines: max(1, root.recent-lines - 1);
+                        recent: root.recent-rows;
+                        recent-title: root.recent-title;
+                        recent-open: root.recent-open;
+                        recent-lines: root.recent-lines;
+                        history-title: root.history-title;
+                        history-open: root.history-open;
+                        history: root.history-rows;
+                        history-heads: root.history-heads;
+                        // Both lists open at once would leave the panes little room in a window
+                        // as low as 560px.
+                        history-lines: root.recent-open ? 1 : root.recent-lines;
+                        focus-line: panel-keys.has-focus ? root.panel-line : -1;
+                        focus-button: panel-keys.has-focus ? root.panel-button : -1;
+                        pause(index) => {
+                            root.job-pause(index);
+                        }
+                        resume(index) => {
+                            root.job-resume(index);
+                        }
+                        cancel(index) => {
+                            root.job-cancel(index);
+                        }
+                        move-up(index) => {
+                            root.job-move-up(index);
+                        }
+                        move-down(index) => {
+                            root.job-move-down(index);
+                        }
+                        recent-toggled => {
+                            root.recent-toggled();
+                        }
+                        recent-cleared => {
+                            root.recent-cleared();
+                        }
+                        recent-details(index) => {
+                            root.recent-details(index);
+                        }
+                        recent-save(index) => {
+                            root.recent-save(index);
+                        }
+                        history-toggled => {
+                            root.history-toggled();
+                        }
+                        history-run(redo, index) => {
+                            root.history-run(redo, index);
+                        }
+                        reveal(top, height) => {
+                            root.panel-reveal(top, height);
+                        }
                     }
                 }
             }

@@ -178,7 +178,9 @@ export component JobPanel inherits Rectangle {
         if (line < 0) {
             return;
         } else if (line < root.rows.length) {
-            root.reveal(0px, queue-list.y);
+            // A job's row shows itself, alone (`keyed`): their block can be taller than the
+            // window.
+            return;
         } else if (line < root.head-line) {
             root.reveal(queue-list.y, queue-list.height);
         } else if (line == root.head-line && root.recent.length > 0) {
@@ -220,6 +222,15 @@ export component JobPanel inherits Rectangle {
 
     VerticalLayout {
         for row[i] in root.rows: Rectangle {
+            // The keys came to this job's row: the row shows, the one line they are on
+            // ([`reveal`]), not the block of the running jobs.
+            property <bool> keyed: root.focus-line == i;
+            changed keyed => {
+                if (self.keyed) {
+                    root.reveal(self.y, self.height);
+                }
+            }
+
             VerticalLayout {
                 padding-left: 20px;
                 padding-right: 20px;

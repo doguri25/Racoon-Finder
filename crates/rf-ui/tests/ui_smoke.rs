@@ -11889,3 +11889,152 @@ fn the_window_of_unfinished_jobs_stays_inside_the_window() {
     let end = close.absolute_position().y + close.size().height;
     assert!(end <= 548.0, "닫기 ends at {end}");
 }
+
+/// The screens cap the job panel under the panes as Rust does (`Theme.job-panel-height`,
+/// `theme::job_panel_height`).
+#[test]
+fn the_screens_cap_the_job_panel_as_rust_does() {
+    let window = window();
+    let shown = window.global::<Theme<'_>>();
+    for (height, wanted, row, chrome) in [
+        (560.0, 120.0, 32.0, 230.0),
+        (560.0, 900.0, 40.0, 260.0),
+        (560.0, 900.0, 32.0, 230.0),
+        (300.0, 400.0, 40.0, 280.0),
+        (800.0, 0.0, 32.0, 230.0),
+    ] {
+        assert_eq!(
+            shown.invoke_job_panel_height(height, wanted, row, chrome),
+            theme::job_panel_height(height, wanted, row, chrome),
+            "{height} {wanted} {row} {chrome}"
+        );
+    }
+}
+
+/// The job panel under the panes leaves each pane three rows of its list (LAY-09): at 900×560,
+/// 보통 + 100 % and 넉넉하게 + 130 %, with a job running, one waiting, and 최근 완료 and 되돌리기
+/// 기록 open. What it does not hold scrolls inside it: the wheel reaches its last button. (The
+/// rows are measured against the shown theme's row height, not a fixed number.)
+#[test]
+fn the_docked_job_panel_leaves_each_pane_three_rows_and_scrolls_the_rest() {
+    let window = window();
+    window.window().set_size(LogicalSize::new(900.0, 560.0));
+    for (density, percent) in [(1, 100), (2, 130)] {
+        window.set_density(density);
+        window.set_font_scale(percent);
+        window.set_job_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+            JobRowView {
+                current: "a.bin".into(),
+                graphed: true,
+                ..job_row("복사 중")
+            },
+        ]))));
+        window.set_job_queue(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+            waiting_row("복사 · b → 백업", false, false),
+        ]))));
+        window.set_recent_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+            recent_row("복사했습니다", false),
+            recent_row("이동했습니다", false),
+        ]))));
+        window.set_recent_title(rf_ui::words::recent_head(2).into());
+        window.set_recent_open(true);
+        window.set_history_title("되돌리기 기록 2개".into());
+        window.set_history_open(true);
+        window.set_history_heads(1);
+        window.set_history_rows(ModelRc::from(Rc::new(slint::VecModel::from(vec![
+            history_head("되돌릴 수 있음 2개", 0),
+            history_row("이름 바꾸기: a.txt → b.txt", "", 0, 0, 1),
+            history_row("새 폴더: c", "마지막", 1, 1, 1),
+        ]))));
+        slint::platform::update_timers_and_animations();
+        let what = format!("density {density}, {percent} %");
+        let row = ui_bridge::shown_theme(&window).size.row_height;
+        let lists = labelled(&window, "항목 목록", AccessibleRole::List);
+        assert_eq!(lists.len(), 2, "{what}");
+        for list in &lists {
+            let height = list.size().height;
+            assert!(
+                height >= 3.0 * row,
+                "{what}: a pane's list is {height}px, rows of {row}px"
+            );
+        }
+        // The panel shows below the panes' lists, within the window.
+        let panes_end = lists
+            .iter()
+            .map(|list| list.absolute_position().y + list.size().height)
+            .fold(0.0_f32, f32::max);
+        let in_panel = |element: &ElementHandle| {
+            let (at, size) = (element.absolute_position(), element.size());
+            at.y >= panes_end && at.y + size.height <= 560.0 && size.height > 0.0
+        };
+        let last_shows = || {
+            labelled(&window, "되돌리기", AccessibleRole::Button)
+                .iter()
+                .any(in_panel)
+        };
+        let panel = labelled(&window, "작업", AccessibleRole::Groupbox).remove(0);
+        let point = LogicalPosition::new(300.0, 556.0);
+        assert!(point.y > panes_end, "{what}");
+        for _ in 0..20 {
+            window
+                .window()
+                .dispatch_event(WindowEvent::PointerScrolled {
+                    position: point,
+                    delta_x: 0.0,
+                    delta_y: -120.0,
+                });
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(500));
+        }
+        assert!(
+            last_shows(),
+            "{what}: the wheel reaches the panel's last button (the panel is {}px)",
+            panel.size().height
+        );
+    }
+}
+
+/// The keys of the floating job window show the one line they are on (LAY-09), not the block of
+/// the running jobs: with eight jobs running in a window of 460px at 넉넉하게 + 130 %, each line the
+/// keys go down to lies within the window, the last one too (measured).
+#[test]
+fn the_job_window_s_keys_show_their_line_among_many_running_jobs() {
+    i_slint_backend_testing::init_no_event_loop();
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
+    own.window().set_size(LogicalSize::new(520.0, 460.0));
+    own.set_density(2);
+    own.set_font_scale(130);
+    let running: Vec<JobRowView> = (1..=8)
+        .map(|n| JobRowView {
+            current: format!("f{n}.bin").into(),
+            ..job_row(&format!("복사 중 {n}"))
+        })
+        .collect();
+    own.set_job_rows(ModelRc::from(Rc::new(slint::VecModel::from(running))));
+    own.show().expect("the window shows");
+    slint::platform::update_timers_and_animations();
+    let in_view = |element: &ElementHandle| {
+        let (at, size) = (element.absolute_position(), element.size());
+        at.y >= 0.0 && at.y + size.height <= 460.0
+    };
+    // The line of job `n` shows whole: its name, at its top, and its file, at its foot.
+    let line_shows = |n: usize| {
+        let name = labelled_in(&own, &format!("복사 중 {n}"), AccessibleRole::Text);
+        let file = labelled_in(&own, &format!("f{n}.bin"), AccessibleRole::Text);
+        name.iter().any(in_view) && file.iter().any(in_view)
+    };
+    let panel = labelled_in(&own, "작업", AccessibleRole::Groupbox).remove(0);
+    assert!(
+        panel.size().height > 460.0,
+        "the rows are taller than the window"
+    );
+    assert!(!line_shows(8));
+    // ↓ from the first line to the last, one line at a time, as the panel's keys move.
+    for line in 0..8 {
+        own.set_panel_line(line);
+        own.set_panel_button(0);
+        slint::platform::update_timers_and_animations();
+        let n = usize::try_from(line).expect("a line") + 1;
+        assert!(line_shows(n), "the keys' line {n} shows");
+    }
+    assert!(!line_shows(1), "the window scrolled to the last line");
+}

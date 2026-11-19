@@ -792,6 +792,10 @@ export component Pane inherits Rectangle {
     // items a line holds.
     out property <int> page-rows: root.view.mode == 0 ? files.page-rows : grid.page-lines;
     out property <int> line-items: root.view.mode == 0 ? 1 : grid.line-items;
+    // The pane's height besides its list's rows: its tabs, its path row, the list's column head
+    // (the theme's row height) and its status bar. The job panel under the panes leaves the
+    // panes their rows above it (LAY-09, `Theme.job-panel-height`).
+    out property <length> chrome: tab-strip.height + path-row.height + Theme.row-height + status-bar.height;
     // The thumbnail view shows, with its size slider in the status bar.
     private property <bool> thumbs: root.view.mode == 6;
     // The size slider has the keys (as far as the pane knows: it goes with the thumbnail view).
@@ -1206,7 +1210,7 @@ export component Pane inherits Rectangle {
         }
 
         // Path row: the crumbs, or the path as text while editing.
-        Rectangle {
+        path-row := Rectangle {
             height: 38px;
             accessible-role: groupbox;
             accessible-label: Tr.pane-path;
@@ -1620,7 +1624,7 @@ export component Pane inherits Rectangle {
         }
 
         // Status bar.
-        Rectangle {
+        status-bar := Rectangle {
             height: 32px;
 
             Rectangle {
