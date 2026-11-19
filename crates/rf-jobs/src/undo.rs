@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, VPath};
-use rf_platform::LinkKind;
+use rf_platform::{LinkKind, TrashStamp};
 use serde::{Deserialize, Serialize};
 
 use crate::spec::CreateKind;
@@ -50,6 +50,15 @@ pub struct MovedItem {
 pub struct TrashedItem {
     pub original: VPath,
     pub location: Option<VPath>,
+    /// What the item in the trash was right after the job sent it there
+    /// (`Provider::trash_stamp`): an undo puts it back only while the item at `location` still
+    /// has it, so never another item that took the same name in the trash since. `None` when the
+    /// provider could not tell, in a record of a restore (whose undo trashes the item again), and
+    /// in a record written before stamps were kept: such an item is put back by its place, as
+    /// before. Left out of the stored record when `None`, so a record reads the same in builds
+    /// before and after this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<TrashStamp>,
 }
 
 /// How to reverse one finished job.

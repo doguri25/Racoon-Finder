@@ -16,9 +16,9 @@ use std::ops::ControlFlow;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath};
-use rf_vfs::{Deleted, Provider};
+use rf_vfs::{Deleted, Provider, TrashStamp};
 
-use super::delete::{deleted_not_trashed, trash_one};
+use super::delete::{deleted_not_trashed, sent_stamp, trash_one};
 use super::{At, Attempt, Ctx, Failed, Stopped, link, simple, transfer};
 use crate::copies::{self, Compared};
 use crate::report::{FailureReason, Stage, Totals};
@@ -193,18 +193,20 @@ fn trash_item<'e>(
         check(ctx, &*provider, &now)?;
         ctx.working_on(path);
         let deleted = trash_one(&*provider, path)?;
-        Ok(Some((deleted, now.kind == EntryKind::Dir)))
+        let stamp = sent_stamp(&*provider, &deleted);
+        Ok(Some((deleted, now.kind == EntryKind::Dir, stamp)))
     });
     match sent {
-        Attempt::Done(Some((Deleted::Trashed { location }, is_dir))) => {
+        Attempt::Done(Some((Deleted::Trashed { location }, is_dir, stamp))) => {
             trashed.push(TrashedItem {
                 original: path.clone(),
                 location,
+                stamp,
             });
             ctx.item_done(!is_dir, is_dir);
         }
         // A provider that breaks its promise: the item is gone, but no redo brings it back.
-        Attempt::Done(Some((Deleted::Permanently, is_dir))) => {
+        Attempt::Done(Some((Deleted::Permanently, is_dir, _))) => {
             ctx.warn(deleted_not_trashed(path), Some(path), None);
             ctx.item_done(!is_dir, is_dir);
         }
@@ -453,8 +455,9 @@ fn make_again(ctx: &mut Ctx<'_>, path: &VPath, kind: CreateKind) {
 /// Puts each of `items` back from the trash, at its own original place, with
 /// `Provider::restore_trashed`, each as one step under [`ERRORS`]. Every failure is
 /// `Stage::Undo` and leaves the item where it is: an item whose trash location is not known
-/// fails with `Unsupported` (`TrashLocationUnknown`), and the restore's error is passed on as
-/// it is, its path being the
+/// fails with `Unsupported` (`TrashLocationUnknown`), one whose record keeps a stamp that the
+/// item at its location no longer has fails with `TrashItemChanged` (see [`check_sent`]), and
+/// the restore's error is passed on as it is, its path being the
 /// trash location: `AlreadyExists` when the original place is taken (nothing is replaced),
 /// `NotFound` when the trash no longer holds the item or the original folder is gone, and
 /// `CrossesDevices` when the trash is on another volume. The plan counts each item by what is
@@ -482,6 +485,9 @@ fn restore(ctx: &mut Ctx<'_>, items: &[TrashedItem]) {
             };
             let provider = ctx.provider(original).at(Stage::Undo)?;
             ctx.working_on(original);
+            if let Some(sent) = &item.stamp {
+                check_sent(&*provider, location, sent)?;
+            }
             provider.restore_trashed(location, original).at(Stage::Undo)
         });
         match put_back {
@@ -496,6 +502,27 @@ fn restore(ctx: &mut Ctx<'_>, items: &[TrashedItem]) {
     }
     if !restored.is_empty() {
         ctx.report.undo = Some(UndoRecord::Restored { items: restored });
+    }
+}
+
+/// Checks that the item at `location` in the trash is the one the job sent there, by the stamp
+/// `sent` it had then (see `TrashedItem::stamp`): another item that took the name since, or an
+/// item the provider can no longer tell, fails as `Stage::Undo` with `TrashItemChanged`, and
+/// nothing is moved. A missing item fails with the provider's `NotFound`.
+fn check_sent(provider: &dyn Provider, location: &VPath, sent: &TrashStamp) -> Result<(), Failed> {
+    match provider.trash_stamp(location).at(Stage::Undo)? {
+        Some(now) if now == *sent => Ok(()),
+        _ => {
+            let error = location.as_local().map_or_else(
+                || Error::Unsupported(format!("{location} cannot be told apart in the trash")),
+                rf_platform::changed_since_listed,
+            );
+            Err(Failed::refused(
+                Stage::Undo,
+                error,
+                FailureReason::TrashItemChanged,
+            ))
+        }
     }
 }
 

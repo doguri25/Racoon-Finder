@@ -1377,10 +1377,12 @@ mod tests {
             TrashedItem {
                 original: a.clone(),
                 location: Some(remote(&["bin", "a.txt"])),
+                stamp: None,
             },
             TrashedItem {
                 original: b.clone(),
                 location: None,
+                stamp: None,
             },
         ];
         // A file with every field set, and a folder without the ones it may lack.
@@ -1495,6 +1497,53 @@ mod tests {
         };
         let kinds: Vec<_> = golden.iter().map(|(record, _)| kind(record)).collect();
         assert_eq!(kinds, (0..9).collect::<Vec<_>>());
+    }
+
+    /// The stamp of an item a trash sent is kept through the journal: a recovered undo of that
+    /// trash still checks it. A line written before stamps were kept reads with none.
+    #[test]
+    fn a_stamped_trash_record_is_recovered_with_its_stamp() {
+        let t = tempfile::tempdir().unwrap();
+        let stamp = rf_platform::TrashStamp {
+            identity: Some((1, u128::from(u64::MAX) + 7)),
+            changed: Some((1_700_000_000, 123)),
+            record: Some(0xfeed),
+        };
+        let record = UndoRecord::Trashed {
+            items: vec![TrashedItem {
+                original: remote(&["a.txt"]),
+                location: Some(remote(&["bin", "a.txt"])),
+                stamp: Some(stamp),
+            }],
+        };
+        let spec = JobSpec::Undo(record);
+        pinned(
+            &spec,
+            r#"{"Undo":{"Trashed":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt","stamp":{"identity":[1,18446744073709551622],"changed":[1700000000,123],"record":65261}}]}}}"#,
+        );
+        let (h, thread) = JournalHandle::spawn(
+            t.path().to_path_buf(),
+            Box::new(|| {}),
+            Box::new(|e| panic!("{e}")),
+        )
+        .unwrap();
+        h.append(Record::Submitted {
+            job: A,
+            spec: spec.clone(),
+            at: golden_time(),
+        });
+        h.shutdown();
+        thread.join().unwrap();
+        let [found] = jobs(t.path()).try_into().unwrap();
+        assert_eq!(found.spec, spec);
+        // An old line, without the field, is a record without a stamp.
+        let old = r#"{"Undo":{"Trashed":{"items":[{"original":"remote://p/a.txt","location":"remote://p/bin/a.txt"}]}}}"#;
+        let JobSpec::Undo(UndoRecord::Trashed { items }) =
+            serde_json::from_str::<JobSpec>(old).unwrap()
+        else {
+            panic!("an undo of a trash");
+        };
+        assert_eq!(items[0].stamp, None);
     }
 
     #[test]

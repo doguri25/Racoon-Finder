@@ -126,7 +126,8 @@ fn undo_records_roundtrip_and_count_items() {
         items: vec![
             TrashedItem {
                 original: p("x"),
-                location: None
+                location: None,
+                stamp: None,
             };
             3
         ],

@@ -891,6 +891,7 @@ fn trashed(paths: &[VPath]) -> UndoRecord {
             .map(|path| rf_jobs::TrashedItem {
                 original: path.clone(),
                 location: None,
+                stamp: None,
             })
             .collect(),
     }

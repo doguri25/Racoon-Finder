@@ -10,6 +10,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use rf_core::{Entry, EntryKind, Error, Result, Scheme, VPath};
+use rf_platform::TrashStamp;
 
 use crate::cancel::CancelToken;
 use crate::provider::{
@@ -221,5 +222,13 @@ impl Provider for LocalProvider {
 
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         rf_platform::restore_from_trash(location, original)
+    }
+
+    fn trash_stamp(&self, location: &VPath) -> Result<Option<TrashStamp>> {
+        // The plain path, as the trash's own listing reads its items.
+        let Some(local) = location.as_local() else {
+            return Err(Error::Unsupported(format!("not a local path: {location}")));
+        };
+        rf_platform::stamp_at(local).map(Some)
     }
 }

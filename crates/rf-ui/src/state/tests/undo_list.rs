@@ -308,6 +308,7 @@ fn history_dims_a_made_folder_that_is_gone_and_leaves_the_trash_alone() {
         items: vec![rf_jobs::TrashedItem {
             original: in_a("gone.txt"),
             location: None,
+            stamp: None,
         }],
     };
     state.set_history(history(&[trashed], &[], t0()));

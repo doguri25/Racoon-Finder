@@ -330,7 +330,7 @@ fn user_sid() -> Option<String> {
 
 /// The `$I…` record next to the `$R…` item at `location`, by its name; `None` for any other
 /// name.
-fn record_of(location: &Path) -> Option<PathBuf> {
+pub(super) fn record_of(location: &Path) -> Option<PathBuf> {
     let units: Vec<u16> = location.file_name()?.encode_wide().collect();
     let rest = units
         .strip_prefix(&ITEM_START)

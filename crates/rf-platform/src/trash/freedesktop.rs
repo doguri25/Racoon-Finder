@@ -376,20 +376,25 @@ fn write_record(path: &Path, text: &str) -> io::Result<()> {
     written
 }
 
-/// Removes the record of the item at `location` when `location` is in a folder `files` next to
-/// a folder `info`, the freedesktop layout: `info/<name>.trashinfo` goes, and nothing else.
-/// Errors are ignored: the item is out of the trash, and a record without an item is not listed.
-pub(super) fn remove_info_record(location: &Path) {
-    let (Some(name), Some(files)) = (location.file_name(), location.parent()) else {
-        return;
-    };
+/// The record of the item at `location` when `location` is in a folder `files`, as a
+/// freedesktop trash keeps it: `info/<name>.trashinfo` beside `files`. `None` for any other
+/// place.
+pub(super) fn record_path(location: &Path) -> Option<PathBuf> {
+    let (name, files) = (location.file_name()?, location.parent()?);
     if files.file_name() != Some(OsStr::new("files")) {
-        return;
+        return None;
     }
-    let Some(root) = files.parent() else {
+    Some(files.parent()?.join("info").join(info_name(name)))
+}
+
+/// Removes the record of the item at `location` when `location` is in a folder `files` next to
+/// a folder `info`, the freedesktop layout (see [`record_path`]): `info/<name>.trashinfo` goes,
+/// and nothing else. Errors are ignored: the item is out of the trash, and a record without an
+/// item is not listed.
+pub(super) fn remove_info_record(location: &Path) {
+    let Some(record) = record_path(location) else {
         return;
     };
-    let record = root.join("info").join(info_name(name));
     let is_file = std::fs::symlink_metadata(&record).is_ok_and(|meta| meta.is_file());
     if is_file {
         let _ = std::fs::remove_file(record);

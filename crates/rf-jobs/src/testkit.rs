@@ -924,6 +924,10 @@ impl Provider for FaultyProvider {
         self.inner.restore_trashed(location, original)
     }
 
+    fn trash_stamp(&self, location: &VPath) -> Result<Option<rf_vfs::TrashStamp>> {
+        self.inner.trash_stamp(location)
+    }
+
     fn restore_from_trash(&self, item: &TrashItem, to: &VPath) -> Result<()> {
         self.inner.restore_from_trash(item, to)
     }

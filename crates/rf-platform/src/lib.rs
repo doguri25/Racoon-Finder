@@ -44,8 +44,8 @@ pub use thumbs::{
 #[cfg(unix)]
 pub use trash::FreedesktopTrash;
 pub use trash::{
-    TrashId, TrashItem, TrashStamp, is_changed_since_listed, move_to_trash, parse_recycle_index,
-    parse_trashinfo, restore_from_trash, trash_supported,
+    TrashId, TrashItem, TrashStamp, changed_since_listed, is_changed_since_listed, move_to_trash,
+    parse_recycle_index, parse_trashinfo, restore_from_trash, stamp_at, trash_supported,
 };
 pub use volume::{
     DiskSpace, MountedRoot, RootKind, VolumeInfo, disk_space, mounted_roots, volume_info,

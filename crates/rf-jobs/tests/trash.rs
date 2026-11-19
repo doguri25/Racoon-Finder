@@ -81,6 +81,51 @@ fn a_job_on_the_trash_is_stored_and_read_back_whole() {
     }
 }
 
+/// A record of a trash written before stamps were kept still undoes as it did: by the place
+/// alone. A stamped record reads back whole, and one without a stamp is stored as before.
+#[test]
+fn a_trash_record_without_a_stamp_still_undoes_by_its_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let (original, location) = (dir.path().join("a.txt"), bin.join("a.txt"));
+    std::fs::write(&location, "A").unwrap();
+    let uri = |path: &std::path::Path| serde_json::to_string(&v(path).to_uri()).unwrap();
+    let old = format!(
+        r#"{{"Trashed":{{"items":[{{"original":{},"location":{}}}]}}}}"#,
+        uri(&original),
+        uri(&location)
+    );
+    let record: rf_jobs::UndoRecord = serde_json::from_str(&old).unwrap();
+    let rf_jobs::UndoRecord::Trashed { items } = &record else {
+        panic!("{record:?}");
+    };
+    assert_eq!(items[0].stamp, None);
+    // Stored again, it reads exactly as it was written.
+    assert_eq!(serde_json::to_string(&record).unwrap(), old);
+    let rep = run_with(&JobSpec::Undo(record), &Vfs::with_local(), &NonInteractive);
+    assert_eq!(rep.outcome, Outcome::Completed, "{:?}", rep.failures);
+    assert_eq!(std::fs::read_to_string(&original).unwrap(), "A");
+
+    let stamped = rf_jobs::UndoRecord::Trashed {
+        items: vec![rf_jobs::TrashedItem {
+            original: v(&original),
+            location: Some(v(&location)),
+            stamp: Some(rf_platform::TrashStamp {
+                identity: Some((7, 9)),
+                changed: Some((1, 2)),
+                record: None,
+            }),
+        }],
+    };
+    let text = serde_json::to_string(&stamped).unwrap();
+    assert!(text.contains("\"stamp\""), "{text}");
+    assert_eq!(
+        serde_json::from_str::<rf_jobs::UndoRecord>(&text).unwrap(),
+        stamped
+    );
+}
+
 /// Without a provider of `shell://trash` nothing is done, and each item says so.
 #[test]
 fn without_the_trash_provider_nothing_is_done() {
@@ -316,6 +361,7 @@ mod in_a_trash_of_its_own {
                 items: vec![TrashedItem {
                     original: v(&original),
                     location: Some(v(&item.location)),
+                    stamp: None,
                 }]
             })
         );
@@ -635,6 +681,58 @@ mod in_a_trash_of_its_own {
         assert_eq!(std::fs::read_to_string(&later.location).unwrap(), "L");
         assert_eq!(b.records(), ["later.txt.trashinfo"]);
         assert!(b.kept_outside());
+    }
+
+    /// The undo of a trash puts back only the item that job sent: once that item is out and
+    /// another of the same name took its place in the trash, the undo is refused and touches
+    /// neither.
+    #[test]
+    fn the_undo_of_a_trash_never_puts_back_another_item_of_the_name() {
+        let b = bin();
+        for folder in ["x", "y", "elsewhere"] {
+            std::fs::create_dir(b.home.join(folder)).unwrap();
+        }
+        let first = b.home.join("x").join("a.txt");
+        std::fs::write(&first, "first").unwrap();
+        let trash = |path: &Path| {
+            JobSpec::Delete(DeleteSpec {
+                paths: vec![v(path)],
+                method: DeleteMethod::Trash,
+                errors: ErrorPolicy::Continue,
+            })
+        };
+        let sent = run_with(&trash(&first), &b.vfs, &NonInteractive);
+        assert_eq!(sent.outcome, Outcome::Completed, "{:?}", sent.failures);
+        let first_record = sent.undo.clone().expect("the trash can be undone");
+        let location = b.trash.files_dir().join("a.txt");
+
+        // Out of the trash to another place, and another a.txt trashed under the same name.
+        let restored = b.home.join("elsewhere").join("a.txt");
+        let back = JobSpec::RestoreFromTrash {
+            items: vec![(b.item_at(&location), restored.clone())],
+        };
+        assert_eq!(
+            run_with(&back, &b.vfs, &NonInteractive).outcome,
+            Outcome::Completed
+        );
+        let second = b.home.join("y").join("a.txt");
+        std::fs::write(&second, "second").unwrap();
+        let sent = run_with(&trash(&second), &b.vfs, &NonInteractive);
+        assert_eq!(sent.outcome, Outcome::Completed, "{:?}", sent.failures);
+        assert_eq!(std::fs::read_to_string(&location).unwrap(), "second");
+
+        let undo = run_with(&JobSpec::Undo(first_record), &b.vfs, &NonInteractive);
+        assert_eq!(undo.outcome, Outcome::CompletedWithErrors);
+        let failure = &undo.failures[0];
+        assert_eq!(
+            (failure.stage, failure.reason.clone()),
+            (Stage::Undo, Some(FailureReason::TrashItemChanged))
+        );
+        assert_eq!(undo.undo, None);
+        assert!(!first.exists());
+        assert_eq!(std::fs::read_to_string(&location).unwrap(), "second");
+        assert_eq!(b.records(), ["a.txt.trashinfo"]);
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), "first");
     }
 
     /// An item that does not lie in the trash is refused, whatever it says: nothing is moved or

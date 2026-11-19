@@ -534,6 +534,7 @@ fn only_the_undo_of_a_copy_offers_its_copies() {
         items: vec![rf_jobs::TrashedItem {
             original: in_a("a.txt"),
             location: None,
+            stamp: None,
         }],
     };
     let effects = undo_refused(&mut state, 1, &record, &[in_a("a.txt")]);

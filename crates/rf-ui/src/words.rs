@@ -3188,6 +3188,7 @@ mod tests {
                 .map(|i| rf_jobs::TrashedItem {
                     original: path(&format!("t{i}.txt")),
                     location: None,
+                    stamp: None,
                 })
                 .collect(),
         };

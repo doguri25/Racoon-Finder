@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use rf_core::{Attributes, Entry, EntryKind, Error, Result, Scheme, VPath};
-pub use rf_platform::{DataRanges, DiskSpace, TrashItem};
+pub use rf_platform::{DataRanges, DiskSpace, TrashItem, TrashStamp};
 
 use crate::cancel::CancelToken;
 use crate::watch::{WatchHandle, WatchSink};
@@ -462,6 +462,18 @@ pub trait Provider: Send + Sync + Debug {
     fn restore_trashed(&self, location: &VPath, original: &VPath) -> Result<()> {
         let _ = original;
         Err(unsupported("restore_trashed", location))
+    }
+
+    /// The stamp of the item at `location`, the place in the trash where
+    /// [`delete`](Self::delete) with `DeleteMode::Trash` said an item went
+    /// (`rf_platform::trash::stamp_at` for the local provider): what a job that sent an item to the
+    /// trash keeps, and what the undo of that job checks before it puts the item back, so that it
+    /// never puts back another item that took the same name since. `Ok(None)` when the provider
+    /// cannot tell, as the default implementation; such a record is undone by place, as before
+    /// stamps were kept.
+    fn trash_stamp(&self, location: &VPath) -> Result<Option<TrashStamp>> {
+        let _ = location;
+        Ok(None)
     }
 
     /// Puts `item`, an item of the trash this provider shows, back at `to`: its original place

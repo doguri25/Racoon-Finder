@@ -21,7 +21,7 @@ pub use provider::{
     ReadStream, RenameMode, WriteMode, WriteStream,
 };
 pub use registry::Vfs;
-pub use rf_platform::{DataRanges, DiskSpace, RootKind, TrashId, TrashItem};
+pub use rf_platform::{DataRanges, DiskSpace, RootKind, TrashId, TrashItem, TrashStamp};
 pub use shell::{
     Drive, DriveRow, DriveSource, ShellColumn, ShellPlace, ShellProvider, SystemDrives,
     SystemTrash, TrashRow, TrashSource,

@@ -804,6 +804,7 @@ mod beyond {
             items: vec![TrashedItem {
                 original: original.clone(),
                 location: None,
+                stamp: None,
             }],
         };
         let rep = run(&JobSpec::Undo(record));

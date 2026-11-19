@@ -175,6 +175,22 @@ pub(crate) fn stamp_of(location: &Path, record: Option<&[u8]>) -> Result<TrashSt
     })
 }
 
+/// The stamp of the item at `location`, a place in the trash, read now as a listing of that trash
+/// reads it: with the record the trash keeps there (the `$I…` file next to a `$R…` item on
+/// Windows, `info/<name>.trashinfo` beside a `files` folder elsewhere; none in the macOS trash).
+/// A job that sent an item to the trash keeps it, so that its undo puts back that item and no
+/// other. A missing item gives `ErrorKind::NotFound`.
+pub fn stamp_at(location: &Path) -> Result<TrashStamp> {
+    #[cfg(windows)]
+    let record = windows::record_of(location);
+    #[cfg(unix)]
+    let record = freedesktop::record_path(location);
+    #[cfg(not(any(windows, unix)))]
+    let record: Option<PathBuf> = None;
+    let bytes = record.as_deref().and_then(read_record_bytes);
+    stamp_of(location, bytes.as_deref())
+}
+
 /// Refuses `item` unless what is at its place now has the stamp it was listed with: the item and,
 /// at `record`, the trash's record of it. A missing item gives `ErrorKind::NotFound`; any other
 /// difference, or an item without a stamp, [`changed_since_listed`].
@@ -388,9 +404,10 @@ impl std::fmt::Display for ChangedSinceListed {
 
 impl std::error::Error for ChangedSinceListed {}
 
-/// The error of an item that is in the trash folder but is not the one that was listed: an I/O
-/// error (`ErrorKind::Other`) of `location` that [`is_changed_since_listed`] tells apart.
-pub(crate) fn changed_since_listed(location: &Path) -> Error {
+/// The error of an item that is in the trash folder but is not the one that was listed (or that
+/// a job sent there): an I/O error (`ErrorKind::Other`) of `location` that
+/// [`is_changed_since_listed`] tells apart.
+pub fn changed_since_listed(location: &Path) -> Error {
     io_error("trash", location, io::Error::other(ChangedSinceListed))
 }
 

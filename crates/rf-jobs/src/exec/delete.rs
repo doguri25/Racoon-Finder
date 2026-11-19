@@ -31,7 +31,7 @@ use std::ops::ControlFlow;
 use std::time::SystemTime;
 
 use rf_core::{Entry, EntryKind, Error, ErrorKind, VPath, VolumeId};
-use rf_vfs::{DeleteMode, Deleted, Provider};
+use rf_vfs::{DeleteMode, Deleted, Provider, TrashStamp};
 
 use super::{
     At, Attempt, Ctx, Failed, Level, MAX_DEPTH, Parent, Stopped, Walking, on_another_volume,
@@ -458,6 +458,18 @@ pub(crate) fn trash_one(provider: &dyn Provider, path: &VPath) -> Result<Deleted
     })
 }
 
+/// What the item a trash put at the place `deleted` names is, read right after the move
+/// (`Provider::trash_stamp`), for the record: its undo puts back that item and no other. `None`
+/// when the place is not known or the provider cannot tell, and the undo then goes by the place.
+pub(crate) fn sent_stamp(provider: &dyn Provider, deleted: &Deleted) -> Option<TrashStamp> {
+    match deleted {
+        Deleted::Trashed {
+            location: Some(location),
+        } => provider.trash_stamp(location).ok().flatten(),
+        _ => None,
+    }
+}
+
 /// The warning of an item `path` that a provider deleted for good when it was asked to trash
 /// it: it is gone, and no undo brings it back.
 pub(crate) fn deleted_not_trashed(path: &VPath) -> Failed {
@@ -480,19 +492,22 @@ fn trash(ctx: &mut Ctx<'_>, errors: ErrorPolicy, items: &[(VPath, Entry)]) {
             ctx.check().at(Stage::Delete)?;
             let provider = ctx.provider(path).at(Stage::Delete)?;
             ctx.working_on(path);
-            trash_one(&*provider, path)
+            let deleted = trash_one(&*provider, path)?;
+            let stamp = sent_stamp(&*provider, &deleted);
+            Ok((deleted, stamp))
         });
         let is_dir = entry.kind == EntryKind::Dir;
         match deleted {
-            Attempt::Done(Deleted::Trashed { location }) => {
+            Attempt::Done((Deleted::Trashed { location }, stamp)) => {
                 trashed.push(TrashedItem {
                     original: path.clone(),
                     location,
+                    stamp,
                 });
                 ctx.item_done(!is_dir, is_dir);
             }
             // A provider that breaks its promise: the item is gone, but no undo brings it back.
-            Attempt::Done(Deleted::Permanently) => {
+            Attempt::Done((Deleted::Permanently, _)) => {
                 ctx.warn(deleted_not_trashed(path), Some(path), None);
                 ctx.item_done(!is_dir, is_dir);
             }

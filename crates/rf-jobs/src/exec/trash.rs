@@ -73,6 +73,7 @@ pub(crate) fn run_restore(ctx: &mut Ctx<'_>, items: &[(TrashItem, PathBuf)]) {
                 restored.push(TrashedItem {
                     original: at.clone(),
                     location: source,
+                    stamp: None,
                 });
                 ctx.report.outputs.push(at);
                 ctx.item_done(!item.is_dir, item.is_dir);
