@@ -604,7 +604,12 @@ impl AppState {
         self.completion = None;
         let tab = self.tab(side);
         let (id, location) = (tab.id(), tab.location().clone());
-        let Some(folder) = ancestors(&location).into_iter().nth(index) else {
+        // A place of the shell (휴지통, 내 PC) holds no folders to go into.
+        let Some(folder) = ancestors(&location)
+            .into_iter()
+            .nth(index)
+            .filter(crate::tree::holds_folders)
+        else {
             return Vec::new();
         };
         let generation = next_generation();
@@ -705,6 +710,7 @@ impl AppState {
         let environment = &self.environment;
         let Some((head, prefix, folder)) =
             completion_base(text, Os::CURRENT, &|name| environment.var(name))
+                .filter(|(_, _, folder)| crate::tree::holds_folders(folder))
         else {
             return Vec::new();
         };

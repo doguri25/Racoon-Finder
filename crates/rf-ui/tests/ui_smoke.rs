@@ -10486,3 +10486,23 @@ fn a_restore_s_conflict_shows_no_overwrite_at_all() {
     chord(&window, &[&enter]);
     assert_eq!(answers.borrow().as_slice(), [(1, false), (2, false)]);
 }
+
+#[test]
+fn a_place_of_the_shell_has_no_folders_button_in_its_path_row() {
+    let window = window();
+    let pane = trash_pane(&[trashed("a.txt", "x", 1)]);
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    assert!(!labelled(&window, "휴지통", AccessibleRole::Button).is_empty());
+    assert_eq!(
+        labelled(&window, "‘휴지통’ 하위 폴더", AccessibleRole::Button).len(),
+        0
+    );
+    // A folder keeps its own.
+    let pane = listed_pane(vec![entry("a.txt", EntryKind::File, 1)]);
+    window.set_left_pane(models.view(&pane, true));
+    assert_eq!(
+        labelled(&window, "‘listed’ 하위 폴더", AccessibleRole::Button).len(),
+        1
+    );
+}

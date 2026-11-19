@@ -919,3 +919,65 @@ fn the_retry_of_a_partly_failed_empty_deletes_only_what_failed_after_asking() {
         ConfirmPurpose::DeleteFromTrash(vec![b])
     );
 }
+
+#[test]
+fn a_relist_while_the_emptying_waits_still_asks_with_the_fresh_listing() {
+    let a = item("a.txt", Some("docs"), Some(5));
+    let mut state = in_trash(std::slice::from_ref(&a));
+    let effects = state.trash_command("empty-trash").expect("a command");
+    let first = the_load(&effects);
+    // Before that listing comes, the window comes to the front and the trash is read again.
+    let effects = state.window_focused();
+    let second = the_load(&effects);
+    assert_ne!(first.generation, second.generation);
+    // The first listing is stale now; the second one asks, with what it found.
+    let c = item("c.txt", Some("docs"), Some(7));
+    list_trash(&mut state, &first, std::slice::from_ref(&a));
+    assert_eq!(state.modal(), None);
+    list_trash(&mut state, &second, &[a.clone(), c.clone()]);
+    assert_eq!(
+        confirm(&state).message,
+        "휴지통의 항목 2개(12 바이트)를 모두 영구 삭제할까요?\n되돌릴 수 없습니다."
+    );
+    assert_eq!(
+        confirm(&state).purpose,
+        ConfirmPurpose::EmptyTrash(vec![a.clone(), c])
+    );
+    assert_eq!(state.dialog_cancelled(), []);
+    // F5 meanwhile, too.
+    let effects = state.trash_command("empty-trash").expect("a command");
+    let first = the_load(&effects);
+    let effects = press(&mut state, &special(Key::F5), NONE).expect("taken");
+    let second = the_load(&effects);
+    list_trash(&mut state, &first, std::slice::from_ref(&a));
+    assert_eq!(state.modal(), None);
+    list_trash(&mut state, &second, std::slice::from_ref(&a));
+    assert!(confirm(&state).message.contains("항목 1개"));
+}
+
+#[test]
+fn a_place_of_the_shell_lists_no_folders_in_the_address_bar() {
+    let mut state = in_trash(&[item("folder", Some("docs"), None)]);
+    // The `›` of its piece lists nothing (the trash's items are no folders to go into).
+    assert_eq!(state.open_subfolders(LEFT, 0), []);
+    assert!(state.subfolders().is_none());
+    // Nor does the path field complete anything in it.
+    for text in [
+        "shell://trash/",
+        "shell://trash/f",
+        "휴지통",
+        "shell://computer/",
+    ] {
+        let effects = state.path_edited(LEFT, text);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ListNames(_))),
+            "{text}: {effects:?}"
+        );
+    }
+    let mut state = ready(vec![], vec![]);
+    let request = go(&mut state, computer());
+    state.list_computer(request.generation);
+    assert_eq!(state.open_subfolders(LEFT, 0), []);
+}

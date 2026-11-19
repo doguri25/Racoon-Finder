@@ -1271,8 +1271,9 @@ export component Pane inherits Rectangle {
                             HorizontalLayout {
                                 spacing: 0px;
 
-                                // The `›` of the piece before (its folder's folders).
-                                if i > 0: VerticalLayout {
+                                // The `›` of the piece before (its folder's folders); none in a
+                                // place of the shell, which holds no folders (NAV-16).
+                                if i > 0 && root.view.place == 0: VerticalLayout {
                                     alignment: center;
 
                                     ChevronButton {
@@ -1295,7 +1296,7 @@ export component Pane inherits Rectangle {
                                     }
                                 }
                                 // The pane's own folder's folders.
-                                if i == root.view.crumbs.length - 1: VerticalLayout {
+                                if i == root.view.crumbs.length - 1 && root.view.place == 0: VerticalLayout {
                                     alignment: center;
 
                                     ChevronButton {

@@ -38,7 +38,7 @@ use super::{AppState, Effect, ToastAction};
 use crate::dialogs::{Confirm, Modal};
 use crate::format::{folder_label, shell_place_at};
 use crate::keys::Command;
-use crate::loader::LoadEvent;
+use crate::loader::{LoadEvent, LoadRequest};
 use crate::pick::{PickPurpose, PickRequest, Picker, quick_targets};
 use crate::places::{Place, PlaceKind};
 use crate::words::{self, Blocked};
@@ -127,14 +127,33 @@ impl AppState {
         })
     }
 
-    /// Every tab that shows `place` lists it again, keeping its rows meanwhile.
+    /// Every tab that shows `place` lists it again, keeping its rows meanwhile; what waits for
+    /// one of their listings waits for the new one ([`AppState::relisted`]).
     pub(super) fn relist_shell(&mut self, place: ShellPlace) -> Vec<Effect> {
-        self.panes
+        let moves: Vec<(u64, LoadRequest)> = self
+            .panes
             .iter_mut()
             .flat_map(crate::pane::Pane::tabs_mut)
             .filter(|tab| shell_place_at(tab.location()) == Some(place))
-            .map(|tab| Effect::Load(tab.reload()))
+            .map(|tab| (tab.generation(), tab.reload()))
+            .collect();
+        moves
+            .into_iter()
+            .map(|(old, request)| {
+                self.relisted(old, request.generation);
+                Effect::Load(request)
+            })
             .collect()
+    }
+
+    /// The tab whose listing was `old` lists its folder again under `generation` (a relist of
+    /// the trash, F5, a rescan, a reload after its watch ended): navigation sync's wait, and the
+    /// question 휴지통 비우기… waits to ask, go on under the new listing, so that neither is lost.
+    pub(super) fn relisted(&mut self, old: u64, generation: u64) {
+        self.sync_relisted(old, generation);
+        if self.pending_empty == Some(old) {
+            self.pending_empty = Some(generation);
+        }
     }
 
     /// A job of `spec` ended: when it changes the trash ([`changes_trash`]), which cannot be

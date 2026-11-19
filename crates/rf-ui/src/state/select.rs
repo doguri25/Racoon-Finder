@@ -147,7 +147,7 @@ impl AppState {
         let tab = self.tab_mut(side);
         let old = tab.generation();
         let request = tab.reload();
-        self.sync_relisted(old, request.generation);
+        self.relisted(old, request.generation);
         vec![Effect::Load(request)]
     }
 
