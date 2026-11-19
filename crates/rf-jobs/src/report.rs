@@ -222,6 +222,9 @@ pub enum FailureReason {
     /// or the item or its record changed, since the trash was listed; nothing was done, and the
     /// trash should be listed again. A retry cannot help.
     TrashItemChanged,
+    /// `Restore`, `NotFound`: the folder an item of the trash was to go back to is gone; the item
+    /// stays in the trash, and can be put back to a place the user picks. Nothing is made.
+    OriginalFolderGone,
     /// `Write` warning: a temporary file of the job could not be removed and stays under its
     /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
     /// crash recovery will not look for it.
@@ -272,6 +275,7 @@ impl FailureReason {
             Self::ChangedSinceLinked => "changed_since_linked",
             Self::RestoreNeverReplaces => "restore_never_replaces",
             Self::TrashItemChanged => "trash_item_changed",
+            Self::OriginalFolderGone => "original_folder_gone",
             Self::TempLeftBehind => "temp_left_behind",
             Self::Issue(issue) => issue.name(),
         }

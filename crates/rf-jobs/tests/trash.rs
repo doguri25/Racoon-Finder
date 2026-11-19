@@ -352,13 +352,43 @@ mod in_a_trash_of_its_own {
         };
         let rep = run_with(&spec, &b.vfs, &NonInteractive);
         assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+        // The folder is gone, not the item: a reason of its own, for "choose a place".
         assert_eq!(
-            (rep.failures[0].stage, rep.failures[0].kind),
-            (Stage::Restore, ErrorKind::NotFound)
+            (
+                rep.failures[0].stage,
+                rep.failures[0].kind,
+                rep.failures[0].reason.clone()
+            ),
+            (
+                Stage::Restore,
+                ErrorKind::NotFound,
+                Some(FailureReason::OriginalFolderGone)
+            )
         );
         assert_eq!(rep.failures[0].target, Some(v(&missing)));
         assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "A");
         assert_eq!(rep.outputs, [v(&chosen)]);
+        assert!(!b.home.join("a.txt").exists());
+    }
+
+    /// An item that left the trash is gone: `NotFound` with no reason, unlike a gone folder.
+    #[test]
+    fn an_item_that_left_the_trash_is_gone() {
+        let b = bin();
+        let item = b.trashed("a.txt", "A");
+        std::fs::remove_file(&item.location).unwrap();
+        let spec = JobSpec::RestoreFromTrash {
+            items: vec![(item.clone(), b.home.join("a.txt"))],
+        };
+        let rep = run_with(&spec, &b.vfs, &NonInteractive);
+        assert_eq!(
+            (
+                rep.failures[0].stage,
+                rep.failures[0].kind,
+                rep.failures[0].reason.clone()
+            ),
+            (Stage::Restore, ErrorKind::NotFound, None)
+        );
         assert!(!b.home.join("a.txt").exists());
     }
 

@@ -217,10 +217,12 @@ fn via_file_manager(local: &Path) -> io::Result<Option<PathBuf>> {
 
 /// The user's trash folders: `~/.Trash` first, then `<volume>/.Trashes/<uid>` of each folder of
 /// `/Volumes` that is another volume than `/` (which passes over the link to the system volume
-/// there) and has one. The home trash is given even when it does not exist.
+/// there) and has one. The home trash is given even when it does not exist. A trash folder that is
+/// itself a link is never one: it would make what it leads to the trash.
 fn trash_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = dirs::home_dir()
         .map(|home| home.join(".Trash"))
+        .filter(|trash| !is_symlink(trash))
         .into_iter()
         .collect();
     let uid = rustix::process::getuid().as_raw().to_string();
@@ -255,6 +257,14 @@ fn changed_at(meta: &std::fs::Metadata) -> Option<SystemTime> {
 /// cannot be read is passed over.
 pub fn list() -> Result<Vec<TrashItem>> {
     let mut items = Vec::new();
+    if let Some(home) = dirs::home_dir().map(|home| home.join(".Trash"))
+        && is_symlink(&home)
+    {
+        return Err(Error::Unsupported(format!(
+            "{} is a link, not the trash, and is not used",
+            home.display()
+        )));
+    }
     for (index, dir) in trash_dirs().into_iter().enumerate() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -306,9 +316,14 @@ pub fn restore(item: &TrashItem, to: &Path) -> Result<()> {
     crate::fsops::rename_no_replace(&VPath::local(&item.location)?, &VPath::local(to)?)
 }
 
-/// Removes the item at `local` with `NSFileManager`, which removes a link itself and a folder
-/// with everything in it, following no link inside.
+/// Removes the item at `local` for good: a link itself, and anything else with `NSFileManager`,
+/// which removes a folder with everything in it, following no link inside.
 fn remove(local: &Path) -> Result<()> {
+    // A link goes by `unlink` itself: `fileURLWithPath` would read a link to a folder as that
+    // folder and add a `/`, which the removal must not follow.
+    if is_symlink(local) {
+        return std::fs::remove_file(local).map_err(|e| io_error("delete_forever", local, e));
+    }
     autoreleasepool(|_| {
         let url = file_url(local).ok_or_else(|| {
             io::Error::new(
@@ -340,4 +355,36 @@ pub fn empty() -> Result<()> {
         }
     }
     first.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link to a folder goes as the link; the folder and what is in it stay.
+    #[test]
+    fn a_link_to_a_folder_is_removed_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("keep.txt"), "K").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+        remove(&link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("keep.txt")).unwrap(),
+            "K"
+        );
+        // A folder with a link in it goes, the link's target stays.
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::os::unix::fs::symlink(&folder, tree.join("inner-link")).unwrap();
+        remove(&tree).unwrap();
+        assert!(!tree.exists());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("keep.txt")).unwrap(),
+            "K"
+        );
+    }
 }

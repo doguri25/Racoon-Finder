@@ -97,8 +97,9 @@ pub(crate) fn run_restore(ctx: &mut Ctx<'_>, items: &[(TrashItem, PathBuf)]) {
 /// cancels the job, and any overwrite fails as `Stage::Conflict` with `RestoreNeverReplaces`.
 /// Every other failure is `Stage::Restore` with the provider's error: `Unsupported` for an item
 /// that is not in a trash folder, `TrashItemChanged` for one that is no longer the item listed,
-/// `NotFound` when the item or the folder of `to` is gone, and `CrossesDevices` for a `to` on
-/// another volume than the trash.
+/// `NotFound` with `OriginalFolderGone` when the folder of `to` is gone (nothing is made) and
+/// without a reason when the item left the trash, and `CrossesDevices` for a `to` on another
+/// volume than the trash.
 fn restore_one(
     ctx: &mut Ctx<'_>,
     trash: &VPath,
@@ -113,6 +114,13 @@ fn restore_one(
         match provider.restore_from_trash(item, &target) {
             Ok(()) => return Ok(Some(target)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == ErrorKind::NotFound && folder_gone(ctx, &target) => {
+                return Err(Failed::refused(
+                    Stage::Restore,
+                    error,
+                    FailureReason::OriginalFolderGone,
+                ));
+            }
             Err(error) => return Err(trash_failure(Stage::Restore, error)),
         }
         let existing = match ctx.provider(&target).and_then(|local| local.stat(&target)) {
@@ -143,6 +151,16 @@ fn restore_one(
         io::Error::from(io::ErrorKind::AlreadyExists),
     );
     Err(Failed::new(Stage::Conflict, error))
+}
+
+/// Whether the folder `target` was to go in is gone (its `stat` says `NotFound`), rather than
+/// the item that was to go there.
+fn folder_gone(ctx: &Ctx<'_>, target: &VPath) -> bool {
+    target.parent().is_some_and(|folder| {
+        ctx.provider(&folder)
+            .and_then(|provider| provider.stat(&folder))
+            .is_err_and(|error| error.kind() == ErrorKind::NotFound)
+    })
 }
 
 /// The item as a conflict shows it: what the local provider finds at its place in the trash

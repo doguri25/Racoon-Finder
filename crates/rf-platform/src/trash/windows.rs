@@ -259,7 +259,9 @@ const RECORD_START: [u16; 2] = [0x24, 0x49];
 const ITEM_START: [u16; 2] = [0x24, 0x52];
 
 /// The folders of the current user's recycle bins: `X:\$Recycle.Bin\<user SID>` of every fixed
-/// drive that has one. None when the user's SID cannot be read.
+/// drive that has one. None when the user's SID cannot be read. A bin folder that is a link or a
+/// junction is no folder by `symlink_metadata`, so it is never one: it would make what it leads
+/// to the bin.
 fn bins() -> Vec<PathBuf> {
     let Some(sid) = user_sid() else {
         return Vec::new();

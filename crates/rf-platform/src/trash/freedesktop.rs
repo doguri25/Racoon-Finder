@@ -4,7 +4,8 @@
 //!
 //! On Linux the home trash (`$XDG_DATA_HOME/Trash`) is one; tests use one in a temporary
 //! folder. Nothing here removes or moves anything that is not in `files/`, `info/` or the
-//! `directorysizes` cache of the trash it was given, and no link is ever followed.
+//! `directorysizes` cache of the trash it was given, and no link is ever followed: a `files/` or
+//! `info/` that is itself a link makes the trash unusable (`Error::Unsupported`).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirBuilder, OpenOptions};
@@ -105,6 +106,7 @@ impl FreedesktopTrash {
                 "cannot trash a volume root: {path}"
             )));
         };
+        self.check_folders()?;
         let (files, info) = (self.files_dir(), self.info_dir());
         for dir in [&files, &info] {
             DirBuilder::new()
@@ -120,6 +122,12 @@ impl FreedesktopTrash {
             match write_record(&info_path, &record) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => {
+                    return Err(Error::Unsupported(format!(
+                        "the name of {path} is too long for the trash to keep its record; delete \
+                         permanently instead"
+                    )));
+                }
                 Err(e) => return Err(Error::io("trash", path.clone(), e)),
             }
             let location = files.join(&candidate);
@@ -163,6 +171,7 @@ impl FreedesktopTrash {
     ///
     /// A trash that does not exist yet is empty. The order is that of the folder.
     pub fn list(&self) -> Result<Vec<TrashItem>> {
+        self.check_folders()?;
         let files = self.files_dir();
         let entries = match std::fs::read_dir(&files) {
             Ok(entries) => entries,
@@ -233,6 +242,7 @@ impl FreedesktopTrash {
     /// stay, empty. Nothing else is touched, whatever the links in it lead to. It goes on after
     /// an error and gives the first one; a trash that does not exist is empty already.
     pub fn empty(&self) -> Result<()> {
+        self.check_folders()?;
         let mut first = None;
         let mut keep = |result: Result<()>| {
             if let Err(e) = result
@@ -274,9 +284,25 @@ impl FreedesktopTrash {
         first.map_or(Ok(()), Err)
     }
 
+    /// Refuses, with `Error::Unsupported`, a trash whose `files/` or `info/` is a link (to the
+    /// user's documents, say), which would make what it leads to the trash: nothing is listed,
+    /// deleted, emptied or moved through it.
+    fn check_folders(&self) -> Result<()> {
+        for dir in [self.files_dir(), self.info_dir()] {
+            if std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(Error::Unsupported(format!(
+                    "{} is a link, not a folder of the trash, and is not used",
+                    dir.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses, with `Error::Unsupported`, an item that is not directly in `files/`, and then one
     /// that is not the item listed, by the item and its record (see `check_listed`).
     fn check(&self, item: &TrashItem) -> Result<()> {
+        self.check_folders()?;
         if !super::directly_in(&item.location, &[self.files_dir()]) {
             return Err(not_in_trash(&item.location));
         }
@@ -858,6 +884,58 @@ mod tests {
         std::fs::remove_file(&b.location).unwrap();
         let error = trash.delete_forever(&b).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NotFound, "{error}");
+    }
+
+    /// A `files/` or `info/` that is a link (to the user's documents, say) is never taken for the
+    /// trash's own folder: nothing is listed, deleted, emptied or moved through it.
+    #[test]
+    fn a_trash_folder_that_is_a_link_is_not_used() {
+        for linked in ["files", "info"] {
+            let (_dir, trash, home) = fixture();
+            trash_file(&trash, &home.join("a.txt"), "A");
+            let [item] = trash.list().unwrap().try_into().unwrap();
+            let documents = home.join("documents");
+            std::fs::create_dir(&documents).unwrap();
+            std::fs::write(documents.join("a.txt"), "mine").unwrap();
+            std::fs::write(documents.join("a.txt.trashinfo"), "mine").unwrap();
+            let folder = trash.root().join(linked);
+            std::fs::rename(&folder, home.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&documents, &folder).unwrap();
+
+            let mut linked_item = item.clone();
+            linked_item.location = trash.files_dir().join("a.txt");
+            let refusals = [
+                trash.list().map(drop),
+                trash.empty(),
+                trash.delete_forever(&linked_item),
+                trash.restore(&linked_item, &home.join("back.txt")),
+            ];
+            for result in refusals {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{linked}: {error}");
+            }
+            std::fs::write(home.join("b.txt"), "B").unwrap();
+            let error = trash
+                .move_to_trash(&local(&home.join("b.txt")))
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{linked}: {error}");
+            assert!(home.join("b.txt").exists());
+            assert_eq!(names(&documents), ["a.txt", "a.txt.trashinfo"], "{linked}");
+            assert!(!home.join("back.txt").exists());
+        }
+    }
+
+    /// A name too long to have a record (`<name>.trashinfo` over the file system's limit) is
+    /// refused as the trash refuses an item, so that the caller offers a permanent delete.
+    #[test]
+    fn a_name_too_long_for_a_record_is_refused_as_unsupported() {
+        let (_dir, trash, home) = fixture();
+        let file = home.join(format!("{}.txt", "x".repeat(246)));
+        std::fs::write(&file, "A").unwrap();
+        let error = trash.move_to_trash(&local(&file)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(file.exists());
+        assert_eq!(names(&trash.info_dir()), Vec::<String>::new());
     }
 
     #[test]

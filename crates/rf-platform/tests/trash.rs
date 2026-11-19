@@ -340,6 +340,55 @@ fn record_of(location: &Path) -> PathBuf {
     location.with_file_name(format!("$I{}", name.strip_prefix("$R").unwrap()))
 }
 
+/// A test's own item in the real trash, at the place the system reported for it. When the test
+/// ends, however it ends, the item is removed from the trash, but only while that place still
+/// holds the test's uniquely named item: on Windows the `$I` record names it as the original, on
+/// macOS the place has its name.
+#[cfg(any(windows, target_os = "macos"))]
+struct Trashed {
+    location: PathBuf,
+    name: std::ffi::OsString,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Trashed {
+    fn new(location: &Path, original: &Path) -> Trashed {
+        Trashed {
+            location: location.to_path_buf(),
+            name: original.file_name().unwrap().to_owned(),
+        }
+    }
+
+    /// Whether the place still holds the test's own item.
+    fn is_ours(&self) -> bool {
+        #[cfg(windows)]
+        let ours = std::fs::read(record_of(&self.location))
+            .ok()
+            .and_then(|bytes| rf_platform::parse_recycle_index(&bytes))
+            .is_some_and(|(original, _, _)| original.file_name() == Some(self.name.as_os_str()));
+        #[cfg(target_os = "macos")]
+        let ours = self.location.file_name() == Some(self.name.as_os_str());
+        ours && std::fs::symlink_metadata(extended(&self.location)).is_ok()
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Drop for Trashed {
+    fn drop(&mut self) {
+        if !self.is_ours() {
+            return;
+        }
+        let item = extended(&self.location);
+        let _ = if item.is_dir() {
+            std::fs::remove_dir_all(&item)
+        } else {
+            std::fs::remove_file(&item)
+        };
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(record_of(&self.location));
+    }
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
 fn a_trashed_file_is_listed_and_deleted_for_good() {
@@ -350,8 +399,8 @@ fn a_trashed_file_is_listed_and_deleted_for_good() {
     let location = move_to_trash(&VPath::local(&f).unwrap())
         .unwrap()
         .expect("trash location");
+    let _cleanup = Trashed::new(&location, &f);
     let Some(item) = listed(&location) else {
-        purge(&location);
         return;
     };
     assert_eq!(item.name.as_os_str(), f.file_name().unwrap());
@@ -389,20 +438,23 @@ fn a_trashed_folder_is_put_back_and_never_over_another_item() {
     let location = move_to_trash(&VPath::local(&d).unwrap())
         .unwrap()
         .expect("trash location");
+    let _cleanup = Trashed::new(&location, &d);
     let Some(item) = listed(&location) else {
-        purge(&location);
         return;
     };
+    // Only the test's own item is put back.
+    assert_eq!(item.name.as_os_str(), d.file_name().unwrap());
     assert!(item.is_dir);
     // A new item in its place stays; the folder stays in the trash.
     std::fs::write(&d, b"new").unwrap();
     let clash = rf_platform::trash::restore(&item, &d);
     let kind = clash.as_ref().map_err(rf_core::Error::kind).err();
     std::fs::remove_file(&d).unwrap();
-    if kind != Some(ErrorKind::AlreadyExists) {
-        purge(&location);
-        panic!("a taken place is a conflict: {clash:?}");
-    }
+    assert_eq!(
+        kind,
+        Some(ErrorKind::AlreadyExists),
+        "a taken place is a conflict: {clash:?}"
+    );
     rf_platform::trash::restore(&item, &d).unwrap();
     assert_eq!(std::fs::read(d.join("inner").join("f.txt")).unwrap(), b"x");
     assert!(std::fs::symlink_metadata(&location).is_err());

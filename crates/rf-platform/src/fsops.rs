@@ -321,9 +321,10 @@ mod imp {
         }
     }
 
-    /// `EINVAL` means the file system does not know `RENAME_NOREPLACE`. Check for `to` first and
-    /// rename plainly. Another process can create `to` in between and have it replaced; Linux is
-    /// a development platform only, and macOS never gets here.
+    /// `EINVAL` means the file system does not know `RENAME_NOREPLACE` (some network and FUSE
+    /// file systems). Check for `to` first and rename plainly. Another process can create `to`
+    /// in the moment between the two and have it replaced: that window is accepted on such a
+    /// file system, the only way it can rename at all. macOS never gets here.
     #[cfg(target_os = "linux")]
     fn fallback(from: &Path, to: &Path) -> io::Result<()> {
         match std::fs::symlink_metadata(to) {
