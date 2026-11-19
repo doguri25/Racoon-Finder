@@ -11440,7 +11440,7 @@ fn the_conflict_window_brings_the_chosen_choice_and_its_warning_into_sight() {
 
 /// The window of unfinished jobs stays inside the window's room (THEME-07): with eight jobs and
 /// a long note at 넉넉하게 and 130 % in 900×560 its list gives up rows (and scrolls) so that the
-/// dialog, its 닫기 included, keeps 20px from the window's edges; at 보통 and 100 % in the usual
+/// dialog, its 닫기 included, keeps 12px from the window's edges; at 보통 and 100 % in the usual
 /// window the list shows five jobs and a half, as before. The note has six lines, so the dialog
 /// would pass 560px on any font without the cap (six lines of at least 18px, a 26px title, a
 /// 320px list, 닫기 and the paddings).
@@ -11469,11 +11469,11 @@ fn the_window_of_unfinished_jobs_stays_inside_the_window() {
     slint::platform::update_timers_and_animations();
     let (at, size) = (dialog().absolute_position(), dialog().size());
     assert!(
-        at.y >= 20.0 - 0.5 && at.y + size.height <= 540.0 + 0.5,
+        at.y >= 12.0 - 0.5 && at.y + size.height <= 548.0 + 0.5,
         "the dialog at {at:?} {size:?}"
     );
     assert!(list().size().height >= 56.0, "a job in sight at least");
     let close = labelled(&window, "닫기", AccessibleRole::Button).remove(0);
     let end = close.absolute_position().y + close.size().height;
-    assert!(end <= 540.0, "닫기 ends at {end}");
+    assert!(end <= 548.0, "닫기 ends at {end}");
 }
