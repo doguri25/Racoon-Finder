@@ -16,7 +16,7 @@ use objc2_foundation::{
 };
 use rf_core::{Error, Result, VPath};
 
-use super::{TrashId, TrashItem, directly_in, io_error, not_in_trash};
+use super::{TrashId, TrashItem, check_listed, directly_in, io_error, not_in_trash, stamp_of};
 
 /// The file Finder keeps its view of a folder in, the trash's included; no trashed item.
 const FINDER_FILE: &str = ".DS_Store";
@@ -271,6 +271,9 @@ pub fn list() -> Result<Vec<TrashItem>> {
             let Ok(meta) = std::fs::symlink_metadata(&location) else {
                 continue;
             };
+            let Ok(stamp) = stamp_of(&location, None) else {
+                continue;
+            };
             let is_dir = meta.is_dir();
             items.push(TrashItem {
                 id: TrashId::of(&location),
@@ -280,6 +283,7 @@ pub fn list() -> Result<Vec<TrashItem>> {
                 size: (!is_dir).then_some(meta.len()),
                 is_dir,
                 location,
+                stamp: Some(stamp),
             });
         }
     }
@@ -287,14 +291,14 @@ pub fn list() -> Result<Vec<TrashItem>> {
 }
 
 /// Refuses, with `Error::Unsupported`, an item that is not directly in one of the user's trash
-/// folders, and Finder's `.DS_Store` there.
+/// folders, and Finder's `.DS_Store` there; then one that is not the item listed, by its
+/// identity and change time (see `check_listed`; the macOS trash keeps no record).
 fn check(item: &TrashItem) -> Result<()> {
     let finder_file = item.location.file_name() == Some(OsStr::new(FINDER_FILE));
-    if !finder_file && directly_in(&item.location, &trash_dirs()) {
-        Ok(())
-    } else {
-        Err(not_in_trash(&item.location))
+    if finder_file || !directly_in(&item.location, &trash_dirs()) {
+        return Err(not_in_trash(&item.location));
     }
+    check_listed(item, None)
 }
 
 pub fn restore(item: &TrashItem, to: &Path) -> Result<()> {

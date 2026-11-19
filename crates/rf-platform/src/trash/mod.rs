@@ -13,6 +13,17 @@
 //! [`TrashItem`] first checks that its `location` lies directly in one of them, and refuses it
 //! with `Error::Unsupported` otherwise. A folder is deleted with what is in it, but a link or a
 //! junction in it is removed itself, never followed.
+//!
+//! An item is acted on only while it is the one that was listed. A trash reuses the names it
+//! frees (on Linux and macOS a trashed item keeps its own name), so a row of an old listing can
+//! name a place that another item has taken since. Each [`TrashItem`] of a listing carries its
+//! [`TrashStamp`]: the identity and change time of the item itself and a digest of the trash's
+//! record of it. Right before a restore or a delete for good the stamp is read again, and an item
+//! whose stamp differs is refused with nothing done ([`is_changed_since_listed`]). What remains is
+//! the time between that last look and the rename or removal itself, one system call: an item
+//! swapped in at exactly that moment is not caught. Closing that needs calls made on an open
+//! handle of the item (`unlinkat` relative to the trash folder, a delete by handle on Windows),
+//! which std does not offer for a folder tree.
 
 use std::ffi::OsString;
 use std::io;
@@ -90,6 +101,91 @@ pub struct TrashItem {
     /// Where the item is now, inside the trash. Every operation goes by this.
     #[serde(with = "os_path")]
     pub location: PathBuf,
+    /// What the item was when it was listed; `None` for an item no listing made, which is never
+    /// acted on.
+    #[serde(default)]
+    pub stamp: Option<TrashStamp>,
+}
+
+/// What identifies an item of the trash beyond its place, read when the trash is listed and
+/// again right before the item is acted on: a reused name cannot match it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TrashStamp {
+    /// The volume and file IDs of the item itself, without following a link (`st_dev` and
+    /// `st_ino` on Unix, the volume serial number and file ID on Windows), when the file system
+    /// keeps usable ones.
+    pub identity: Option<(u64, u128)>,
+    /// When the item itself last changed state (`st_ctime`, seconds and nanoseconds), on Unix.
+    pub changed: Option<(i64, i64)>,
+    /// A digest (64-bit FNV-1a) of the bytes of the trash's record of the item: its `$I…` file on
+    /// Windows, its `.trashinfo` file in a freedesktop trash (which holds its `Path=` and
+    /// `DeletionDate=`). `None` without a readable one, and on macOS, which keeps none.
+    pub record: Option<u64>,
+}
+
+/// The size above which a record is not read: none comes near it.
+pub(crate) const MAX_RECORD_LEN: u64 = 64 * 1024 + 28;
+
+/// The bytes of the regular file at `path`, when it is no larger than [`MAX_RECORD_LEN`].
+pub(crate) fn read_record_bytes(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_RECORD_LEN {
+        return None;
+    }
+    let file = crate::fsops::open_regular_file(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_LEN + 1).read_to_end(&mut bytes).ok()?;
+    (u64::try_from(bytes.len()).ok()? <= MAX_RECORD_LEN).then_some(bytes)
+}
+
+/// The 64-bit FNV-1a digest of `bytes`: fixed, so that a stamp means the same in every build.
+fn digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The stamp of the item at `location`, read now, with `record` the bytes of its record if the
+/// trash keeps one. A missing item gives `ErrorKind::NotFound`.
+pub(crate) fn stamp_of(location: &Path, record: Option<&[u8]>) -> Result<TrashStamp> {
+    let path = VPath::local(location)?;
+    let meta =
+        std::fs::symlink_metadata(location).map_err(|e| Error::io("trash", path.clone(), e))?;
+    let identity = match crate::fileid::file_identity(&path) {
+        Ok((volume, file)) => Some((volume.0, file.0)),
+        Err(e) if e.kind() == rf_core::ErrorKind::Unsupported => None,
+        Err(e) => return Err(e),
+    };
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.ctime(), meta.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let changed = {
+        let _ = meta;
+        None
+    };
+    Ok(TrashStamp {
+        identity,
+        changed,
+        record: record.map(digest),
+    })
+}
+
+/// Refuses `item` unless what is at its place now has the stamp it was listed with: the item and,
+/// at `record`, the trash's record of it. A missing item gives `ErrorKind::NotFound`; any other
+/// difference, or an item without a stamp, [`changed_since_listed`].
+pub(crate) fn check_listed(item: &TrashItem, record: Option<&Path>) -> Result<()> {
+    let bytes = record.and_then(read_record_bytes);
+    let now = stamp_of(&item.location, bytes.as_deref())?;
+    if item.stamp == Some(now) {
+        Ok(())
+    } else {
+        Err(changed_since_listed(&item.location))
+    }
 }
 
 impl TrashItem {
@@ -107,6 +203,7 @@ impl TrashItem {
             size: None,
             is_dir,
             location,
+            stamp: None,
         }
     }
 }
@@ -267,6 +364,36 @@ pub fn delete_forever(item: &TrashItem) -> Result<()> {
 /// cannot be undone.
 pub fn empty() -> Result<()> {
     imp::empty()
+}
+
+/// What marks the error of an item that is not the one that was listed (see
+/// [`is_changed_since_listed`]).
+#[derive(Debug)]
+struct ChangedSinceListed;
+
+impl std::fmt::Display for ChangedSinceListed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the item in the trash is not the one that was listed; nothing was done (list the \
+             trash again)",
+        )
+    }
+}
+
+impl std::error::Error for ChangedSinceListed {}
+
+/// The error of an item that is in the trash folder but is not the one that was listed: an I/O
+/// error (`ErrorKind::Other`) of `location` that [`is_changed_since_listed`] tells apart.
+pub(crate) fn changed_since_listed(location: &Path) -> Error {
+    io_error("trash", location, io::Error::other(ChangedSinceListed))
+}
+
+/// Whether `error` is the refusal of an item whose place in the trash now holds something else
+/// than what the listing found there, or whose record changed: nothing was done, and the trash
+/// should be listed again.
+pub fn is_changed_since_listed(error: &Error) -> bool {
+    matches!(error, Error::Io { source, .. }
+        if source.get_ref().is_some_and(<dyn std::error::Error + Send + Sync>::is::<ChangedSinceListed>))
 }
 
 /// The error of an item that is not directly in a trash folder: `Error::Unsupported`, and

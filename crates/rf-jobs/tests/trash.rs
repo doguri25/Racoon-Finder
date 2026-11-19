@@ -462,6 +462,54 @@ mod in_a_trash_of_its_own {
         assert_eq!(names(&b.home), ["stays.txt"]);
     }
 
+    /// A row of an old listing whose name another trashed item took since is refused, for a
+    /// delete and a restore and for their retries: the other item is never touched.
+    #[test]
+    fn a_stale_item_never_touches_the_item_that_took_its_place() {
+        let b = bin();
+        let stale = b.trashed("a.txt", "first");
+        let first = b.home.join("a.txt");
+        let back = JobSpec::RestoreFromTrash {
+            items: vec![(stale.clone(), first.clone())],
+        };
+        assert_eq!(
+            run_with(&back, &b.vfs, &NonInteractive).outcome,
+            Outcome::Completed
+        );
+        let other = b.home.join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("a.txt"), "second").unwrap();
+        let location = b
+            .trash
+            .move_to_trash(&v(other.join("a.txt")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(location, stale.location, "the name is taken again");
+
+        let delete = JobSpec::DeleteFromTrash {
+            items: vec![stale.clone()],
+        };
+        let restore = JobSpec::RestoreFromTrash {
+            items: vec![(stale.clone(), b.home.join("elsewhere.txt"))],
+        };
+        for (spec, stage) in [(delete, Stage::Delete), (restore, Stage::Restore)] {
+            let rep = run_with(&spec, &b.vfs, &NonInteractive);
+            assert_eq!(rep.outcome, Outcome::CompletedWithErrors);
+            let failure = &rep.failures[0];
+            assert_eq!(
+                (failure.stage, failure.reason.clone()),
+                (stage, Some(FailureReason::TrashItemChanged))
+            );
+            assert_eq!(failure.source, Some(v(&stale.location)));
+            // Nothing a retry could change.
+            assert_eq!(rep.retry_spec(), None);
+        }
+        assert_eq!(std::fs::read_to_string(&location).unwrap(), "second");
+        assert_eq!(b.records(), ["a.txt.trashinfo"]);
+        assert!(!b.home.join("elsewhere.txt").exists());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "first");
+    }
+
     /// An item that does not lie in the trash is refused, whatever it says: nothing is moved or
     /// deleted.
     #[test]

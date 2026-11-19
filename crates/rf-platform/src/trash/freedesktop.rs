@@ -8,7 +8,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirBuilder, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -17,13 +17,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rf_core::{Error, ErrorKind, Result, VPath};
 
 use super::parse::{escape_path, format_deletion_date, parse_trashinfo};
-use super::{TrashId, TrashItem, io_error, localtime, not_in_trash, remove_tree};
+use super::{
+    TrashId, TrashItem, check_listed, io_error, localtime, not_in_trash, read_record_bytes,
+    remove_tree, stamp_of,
+};
 
 /// The ending of every record in `info/`.
 const INFO_SUFFIX: &str = ".trashinfo";
-
-/// The size above which a record is not read: no real record comes near it.
-const MAX_INFO_LEN: u64 = 64 * 1024;
 
 /// How many names a trash tries for one item before it gives up (`a.txt`, `a.2.txt`, …).
 const MAX_NAMES: u32 = 10_000;
@@ -155,7 +155,8 @@ impl FreedesktopTrash {
     /// missing, larger than 64 KiB or malformed is listed too, with neither, as the specification
     /// wants such an item shown; a record without an item is not listed. The name is the last
     /// name of the original path, else the item's name in the trash. A file's size is its length;
-    /// a folder's is not known (`None`).
+    /// a folder's is not known (`None`). Each item carries its stamp: its identity and change
+    /// time and a digest of its record, which a restore or a delete checks again.
     ///
     /// A trash that does not exist yet is empty. The order is that of the folder.
     pub fn list(&self) -> Result<Vec<TrashItem>> {
@@ -174,7 +175,14 @@ impl FreedesktopTrash {
             let Ok(meta) = std::fs::symlink_metadata(&location) else {
                 continue;
             };
-            let record = read_record(&self.info_dir().join(info_name(&in_trash)));
+            let bytes = read_record_bytes(&self.info_dir().join(info_name(&in_trash)));
+            let Ok(stamp) = stamp_of(&location, bytes.as_deref()) else {
+                continue;
+            };
+            let record = bytes
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(parse_trashinfo);
             let original = record.as_ref().map(|(path, _)| base.join(path));
             let name = original
                 .as_deref()
@@ -189,6 +197,7 @@ impl FreedesktopTrash {
                 size: (!is_dir).then_some(meta.len()),
                 is_dir,
                 location,
+                stamp: Some(stamp),
             });
         }
         Ok(items)
@@ -262,13 +271,14 @@ impl FreedesktopTrash {
         first.map_or(Ok(()), Err)
     }
 
-    /// Refuses, with `Error::Unsupported`, an item that is not directly in `files/`.
+    /// Refuses, with `Error::Unsupported`, an item that is not directly in `files/`, and then one
+    /// that is not the item listed, by the item and its record (see `check_listed`).
     fn check(&self, item: &TrashItem) -> Result<()> {
-        if super::directly_in(&item.location, &[self.files_dir()]) {
-            Ok(())
-        } else {
-            Err(not_in_trash(&item.location))
+        if !super::directly_in(&item.location, &[self.files_dir()]) {
+            return Err(not_in_trash(&item.location));
         }
+        let name = item.location.file_name().unwrap_or_default();
+        check_listed(item, Some(&self.info_dir().join(info_name(name))))
     }
 }
 
@@ -335,18 +345,6 @@ fn write_record(path: &Path, text: &str) -> io::Result<()> {
         let _ = std::fs::remove_file(path);
     }
     written
-}
-
-/// What the record at `path` says, if it is a regular file no larger than [`MAX_INFO_LEN`] that
-/// [`parse_trashinfo`] reads.
-fn read_record(path: &Path) -> Option<(PathBuf, Option<SystemTime>)> {
-    let file = crate::fsops::open_regular_file(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(MAX_INFO_LEN + 1).read_to_end(&mut bytes).ok()?;
-    if u64::try_from(bytes.len()).ok()? > MAX_INFO_LEN {
-        return None;
-    }
-    parse_trashinfo(std::str::from_utf8(&bytes).ok()?)
 }
 
 /// Removes the record of the item at `location` when `location` is in a folder `files` next to
@@ -743,16 +741,90 @@ mod tests {
         assert!(item.deleted.is_some());
     }
 
+    /// Where the file system takes a name that is not UTF-8 (APFS refuses one with `EILSEQ`).
     #[test]
     fn a_name_that_is_not_utf8_survives_the_round_trip() {
         let (_dir, trash, home) = fixture();
         let file = home.join(OsStr::from_bytes(b"caf\xE9.txt"));
-        let location = trash_file(&trash, &file, "A");
+        if let Err(e) = std::fs::write(&file, "A") {
+            assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+            eprintln!("skipped: this file system takes no name that is not UTF-8 ({e})");
+            return;
+        }
+        let location = trash.move_to_trash(&local(&file)).unwrap().unwrap();
         assert_eq!(location.file_name(), file.file_name());
         let [item] = trash.list().unwrap().try_into().unwrap();
         assert_eq!(item.original.as_deref(), Some(file.as_path()));
         trash.restore(&item, &file).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "A");
+    }
+
+    /// A row listed before its name was taken by another trashed item never touches that item:
+    /// it is put back elsewhere, and another file of the same name is trashed in its place.
+    #[test]
+    fn a_stale_item_never_touches_the_item_that_took_its_place() {
+        let (_dir, trash, home) = fixture();
+        for folder in ["x", "y"] {
+            std::fs::create_dir(home.join(folder)).unwrap();
+        }
+        trash_file(&trash, &home.join("x").join("a.txt"), "first");
+        let [stale] = trash.list().unwrap().try_into().unwrap();
+        trash
+            .restore(&stale, &home.join("x").join("a.txt"))
+            .unwrap();
+        let location = trash_file(&trash, &home.join("y").join("a.txt"), "second");
+        assert_eq!(location, stale.location, "the name is taken again");
+
+        let elsewhere = home.join("z.txt");
+        for result in [
+            trash.delete_forever(&stale),
+            trash.restore(&stale, &elsewhere),
+        ] {
+            let error = result.unwrap_err();
+            assert!(super::super::is_changed_since_listed(&error), "{error}");
+        }
+        assert_eq!(std::fs::read_to_string(&location).unwrap(), "second");
+        assert_eq!(names(&trash.info_dir()), ["a.txt.trashinfo"]);
+        assert!(!elsewhere.exists());
+
+        // An item made by hand, which no listing vouches for, is refused the same way.
+        let unlisted = TrashItem::at(location.clone(), false);
+        let error = trash.delete_forever(&unlisted).unwrap_err();
+        assert!(super::super::is_changed_since_listed(&error), "{error}");
+
+        // The item as it is listed now goes.
+        let [fresh] = trash.list().unwrap().try_into().unwrap();
+        assert_eq!(fresh.original, Some(home.join("y").join("a.txt")));
+        trash.delete_forever(&fresh).unwrap();
+        assert_eq!(names(&trash.files_dir()), Vec::<String>::new());
+    }
+
+    /// An item whose record was rewritten, or that was swapped for another under its name, is no
+    /// longer the one listed.
+    #[test]
+    fn a_changed_item_or_record_is_not_the_one_listed() {
+        let (_dir, trash, home) = fixture();
+        trash_file(&trash, &home.join("a.txt"), "A");
+        trash_file(&trash, &home.join("b.txt"), "B");
+        let items = trash.list().unwrap();
+        let item = |name: &str| items.iter().find(|i| i.name == name).unwrap().clone();
+        let (a, b) = (item("a.txt"), item("b.txt"));
+        std::fs::write(
+            trash.info_dir().join("a.txt.trashinfo"),
+            "[Trash Info]\nPath=/etc/passwd\n",
+        )
+        .unwrap();
+        std::fs::remove_file(&b.location).unwrap();
+        std::fs::write(&b.location, "other").unwrap();
+        for stale in [&a, &b] {
+            let error = trash.delete_forever(stale).unwrap_err();
+            assert!(super::super::is_changed_since_listed(&error), "{error}");
+            assert!(stale.location.exists());
+        }
+        // An item that left the trash is gone, not changed.
+        std::fs::remove_file(&b.location).unwrap();
+        let error = trash.delete_forever(&b).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound, "{error}");
     }
 
     #[test]

@@ -35,6 +35,16 @@ fn count(totals: &mut Totals, item: &TrashItem) {
     }
 }
 
+/// The failure, at `stage`, of `error` from the trash: an item that is no longer the one listed
+/// (`rf_platform::is_changed_since_listed`) has the reason `TrashItemChanged`.
+fn trash_failure(stage: Stage, error: Error) -> Failed {
+    if rf_platform::is_changed_since_listed(&error) {
+        Failed::refused(stage, error, FailureReason::TrashItemChanged)
+    } else {
+        Failed::new(stage, error)
+    }
+}
+
 /// The place of `item` in the trash as a local path: what its failures name as their source.
 fn place_of(item: &TrashItem) -> Option<VPath> {
     VPath::local(&item.location).ok()
@@ -86,8 +96,9 @@ pub(crate) fn run_restore(ctx: &mut Ctx<'_>, items: &[(TrashItem, PathBuf)]) {
 /// (`a (2).txt`, by the job's naming rule; `NoFreeName` when every one is taken), `Cancel`
 /// cancels the job, and any overwrite fails as `Stage::Conflict` with `RestoreNeverReplaces`.
 /// Every other failure is `Stage::Restore` with the provider's error: `Unsupported` for an item
-/// that is not in a trash folder, `NotFound` when the item or the folder of `to` is gone, and
-/// `CrossesDevices` for a `to` on another volume than the trash.
+/// that is not in a trash folder, `TrashItemChanged` for one that is no longer the item listed,
+/// `NotFound` when the item or the folder of `to` is gone, and `CrossesDevices` for a `to` on
+/// another volume than the trash.
 fn restore_one(
     ctx: &mut Ctx<'_>,
     trash: &VPath,
@@ -102,7 +113,7 @@ fn restore_one(
         match provider.restore_from_trash(item, &target) {
             Ok(()) => return Ok(Some(target)),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(Failed::new(Stage::Restore, error)),
+            Err(error) => return Err(trash_failure(Stage::Restore, error)),
         }
         let existing = match ctx.provider(&target).and_then(|local| local.stat(&target)) {
             Ok(existing) => existing,
@@ -194,7 +205,9 @@ fn restore_numbered(
         match provider.restore_from_trash(item, &candidate) {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(Failed::new(Stage::Restore, error).writing(&candidate)),
+            Err(error) => {
+                return Err(trash_failure(Stage::Restore, error).writing(&candidate));
+            }
         }
     }
     let error = Error::io(
@@ -229,7 +242,7 @@ pub(crate) fn run_delete(ctx: &mut Ctx<'_>, items: &[TrashItem]) {
             match provider.delete_from_trash(item) {
                 Ok(()) => Ok(true),
                 Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(Failed::new(Stage::Delete, error)),
+                Err(error) => Err(trash_failure(Stage::Delete, error)),
             }
         });
         match deleted {

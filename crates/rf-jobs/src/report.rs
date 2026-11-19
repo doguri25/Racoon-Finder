@@ -218,6 +218,10 @@ pub enum FailureReason {
     /// the answer was to overwrite; a restore never replaces anything, so the item stays in the
     /// trash and the other one where it is.
     RestoreNeverReplaces,
+    /// `Restore` or `Delete`, `Other`: the place of an item of the trash now holds another item,
+    /// or the item or its record changed, since the trash was listed; nothing was done, and the
+    /// trash should be listed again. A retry cannot help.
+    TrashItemChanged,
     /// `Write` warning: a temporary file of the job could not be removed and stays under its
     /// temporary name (`.rf-….rfpart`), which the warning's target names; the job ended, so
     /// crash recovery will not look for it.
@@ -267,6 +271,7 @@ impl FailureReason {
             Self::LinkTargetMissing => "link_target_missing",
             Self::ChangedSinceLinked => "changed_since_linked",
             Self::RestoreNeverReplaces => "restore_never_replaces",
+            Self::TrashItemChanged => "trash_item_changed",
             Self::TempLeftBehind => "temp_left_behind",
             Self::Issue(issue) => issue.name(),
         }
@@ -510,14 +515,17 @@ pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec>
     }
 }
 
-/// Whether one of `failed` names the item at `location` in the trash as its source.
+/// Whether one of `failed` names the item at `location` in the trash as its source, for a reason
+/// a retry can get past: not for an item that is no longer the one listed (`TrashItemChanged`),
+/// which a retry is refused again.
 fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
     let Ok(location) = VPath::local(location) else {
         return false;
     };
-    failed
-        .iter()
-        .any(|failure| failure.source.as_ref() == Some(&location))
+    failed.iter().any(|failure| {
+        failure.source.as_ref() == Some(&location)
+            && failure.reason != Some(FailureReason::TrashItemChanged)
+    })
 }
 
 /// The links that failed: each one a failure names by its target (the source) and its place

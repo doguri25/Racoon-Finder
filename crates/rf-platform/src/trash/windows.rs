@@ -11,7 +11,7 @@
 //! before it happens and aborts the one that would be permanent.
 
 use std::ffi::{OsStr, OsString, c_void};
-use std::io::{self, Read};
+use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,7 +34,10 @@ use windows::Win32::UI::Shell::{
 use windows::core::{IUnknown, PCWSTR, PWSTR};
 
 use self::sink::RecycleGuard;
-use super::{TrashId, TrashItem, directly_in, io_error, not_in_trash, parse_recycle_index};
+use super::{
+    TrashId, TrashItem, check_listed, directly_in, io_error, not_in_trash, parse_recycle_index,
+    read_record_bytes, stamp_of,
+};
 use crate::fileid::file_identity;
 use crate::volume::volume_root;
 use crate::win_util::{to_io, wide};
@@ -249,9 +252,6 @@ fn is_item(wanted: Identity, resolved: &Path) -> bool {
         .is_some_and(|found| found == wanted)
 }
 
-/// The size above which a `$I…` file is not read: a version 2 record is at most 64 KiB.
-const MAX_RECORD_LEN: u64 = 64 * 1024 + 28;
-
 /// The first two UTF-16 units of a record's name: `$I`.
 const RECORD_START: [u16; 2] = [0x24, 0x49];
 
@@ -326,12 +326,16 @@ fn user_sid() -> Option<String> {
     sid
 }
 
-/// The bytes of the small file at `path`, if it is no larger than [`MAX_RECORD_LEN`].
-fn read_record(path: &Path) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(MAX_RECORD_LEN + 1).read_to_end(&mut bytes).ok()?;
-    (u64::try_from(bytes.len()).ok()? <= MAX_RECORD_LEN).then_some(bytes)
+/// The `$I…` record next to the `$R…` item at `location`, by its name; `None` for any other
+/// name.
+fn record_of(location: &Path) -> Option<PathBuf> {
+    let units: Vec<u16> = location.file_name()?.encode_wide().collect();
+    let rest = units
+        .strip_prefix(&ITEM_START)
+        .filter(|rest| !rest.is_empty())?;
+    let mut record = RECORD_START.to_vec();
+    record.extend_from_slice(rest);
+    Some(location.with_file_name(OsString::from_wide(&record)))
 }
 
 /// Every item of the user's recycle bins: each `$I…` record that reads (see
@@ -352,15 +356,19 @@ pub fn list() -> Result<Vec<TrashItem>> {
             let Some(rest) = units.strip_prefix(&RECORD_START) else {
                 continue;
             };
-            let Some((original, deleted, size)) =
-                read_record(&entry.path()).and_then(|bytes| parse_recycle_index(&bytes))
-            else {
+            let Some(bytes) = read_record_bytes(&entry.path()) else {
+                continue;
+            };
+            let Some((original, deleted, size)) = parse_recycle_index(&bytes) else {
                 continue;
             };
             let mut item_name = ITEM_START.to_vec();
             item_name.extend_from_slice(rest);
             let location = bin.join(OsString::from_wide(&item_name));
             let Ok(meta) = std::fs::symlink_metadata(&location) else {
+                continue;
+            };
+            let Ok(stamp) = stamp_of(&location, Some(&bytes)) else {
                 continue;
             };
             let name = original
@@ -376,6 +384,7 @@ pub fn list() -> Result<Vec<TrashItem>> {
                 size: Some(size),
                 is_dir: meta.is_dir(),
                 location,
+                stamp: Some(stamp),
             });
         }
     }
@@ -383,17 +392,14 @@ pub fn list() -> Result<Vec<TrashItem>> {
 }
 
 /// Refuses, with `Error::Unsupported`, an item that is not a `$R…` item directly in one of the
-/// user's bins.
+/// user's bins, and then one that is not the item listed: by the item's file ID and the bytes of
+/// its `$I…` record (see `check_listed`).
 fn check(item: &TrashItem) -> Result<()> {
-    let named = item.location.file_name().is_some_and(|name| {
-        let units: Vec<u16> = name.encode_wide().collect();
-        units.starts_with(&ITEM_START) && units.len() > ITEM_START.len()
-    });
-    if named && directly_in(&item.location, &bins()) {
-        Ok(())
-    } else {
-        Err(not_in_trash(&item.location))
-    }
+    let record = record_of(&item.location);
+    let Some(record) = record.filter(|_| directly_in(&item.location, &bins())) else {
+        return Err(not_in_trash(&item.location));
+    };
+    check_listed(item, Some(&record))
 }
 
 pub fn restore(item: &TrashItem, to: &Path) -> Result<()> {
