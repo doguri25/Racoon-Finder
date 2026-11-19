@@ -1,0 +1,664 @@
+// The rows of a folder listing in 목록, the icon views, the thumbnails and the tiles (NAV-06);
+// 자세히 is `file-list.slint`.
+//
+// All are virtualized, as 자세히 is: the icon views, the thumbnails and the tiles are a ListView
+// of rows of items, as many in a row as the width holds (Rust's `state::grid_shape` reckons it
+// the same way, from the same widths: `ViewMode::cell_width`), and only the rows on screen
+// exist; 목록 lays the names out top to bottom and then in the next column, scrolls sideways
+// (the wheel too), and makes only the columns on screen. A folder of 100,000 items costs no
+// more than one of ten.
+//
+// From the medium icons up, in the thumbnails and in the tiles, a file shows its thumbnail
+// (VIEW-09) in the place of its icon once Rust has it (`FileRow.thumb`), fitted to the icon's
+// square in its own ratio; until then, and for a folder, its kind's icon shows. The thumbnails
+// are a square of any size from 64 to 512 px (`thumb-size`), which Rust asks the pictures for
+// in a few steps only: a picture made for a larger step is drawn down to the square. The list
+// tells which items are on screen (`visible-changed`), for Rust to ask for theirs first.
+//
+// An item takes the same presses, drags, right clicks and double clicks as a row of 자세히 (the
+// same `RowMenu`), and tells Rust the same things by its position in the rows; the list is one
+// place to drop on, as in 자세히: an item of a folder takes the items into that folder, any other
+// place into the pane's folder. Held near an end of the list, a drag scrolls it (DND-08): the
+// icons up and down, 목록 sideways.
+
+import { ListView, ScrollView } from "std-widgets.slint";
+import { Theme, SelectedMark } from "theme.slint";
+import { Icon, StateBadge } from "icons.slint";
+import { FileRow, RowWords } from "file-list.slint";
+import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
+import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
+import { Tr } from "tr.slint";
+
+// What the pointer did to an item.
+enum TileEvent {
+    // A left press (with Ctrl and Shift as held); its command is "name" when it is on the item's
+    // name, for the slow second click that renames (OPS-02).
+    press,
+    // Its release, when no drag came of the press.
+    release,
+    // A double click, or the screen reader's default action.
+    activate,
+    // A right press, just before the item's menu opens.
+    menu,
+    // An item of the item's menu (its name).
+    command,
+    // A drag of the items ended, dropped or not.
+    drag-end,
+    // A click on its checkbox (NAV-15).
+    check,
+}
+
+// The line of a kind's icon drawn `size` a side. Slint strokes a path in logical pixels, not in
+// the units of its viewbox, so a line is as wide whatever the icon's size: 1.8 px up to the
+// medium icons, 1.1 px for the large ones, 0.8 px for the extra large ones, and past them (the
+// thumbnail view, to 512 px) 0.8 px grown with the icon, so that a 512 px icon is the 160 px one
+// drawn larger; all of them heavier in a theme whose `icon-style` is bold (`Theme.icon-weight`).
+export global IconLines {
+    public pure function stroke(size: length) -> length {
+        return (size >= 160px ? 0.8px * (size / 160px) : size >= 96px ? 1.1px : 1.8px) * Theme.icon-weight;
+    }
+}
+
+// One item: its icon, and its name beside a small icon or under a larger one; in the tiles, a
+// 48 px icon beside three lines (the name, the kind and the size).
+component Tile inherits Rectangle {
+    in property <FileRow> item;
+    // Its position in the rows.
+    in property <int> index;
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large, 6 thumbnails, 7 tiles.
+    // What the list shows (`FileGrid.place`), for the item menu.
+    in property <int> place;
+    in property <int> mode;
+    // The side of the thumbnails' square (mode 6).
+    in property <length> thumb-size: 192px;
+    // The keyboard cursor is on it (in the pane with the keyboard), a drag would go into it.
+    in property <bool> cursor-here;
+    in property <bool> drop-here;
+    // The items start with a checkbox (NAV-15): in the corner of a large icon, before the icon of
+    // the others.
+    in property <bool> checkboxes;
+    in property <data-transfer> drag-data;
+    // What the pointer did, with the modifiers of a press and the command of a menu item.
+    callback event(what: TileEvent, ctrl: bool, shift: bool, command: string);
+
+    // The name under the icon (the medium icons up, and the thumbnails), or beside it.
+    private property <bool> big: root.mode >= 3 && root.mode <= 6;
+    private property <bool> tiled: root.mode == 7;
+    // What the checkbox takes before the icon of the smaller items.
+    private property <length> check-room: root.checkboxes && !root.big ? 22px : 0px;
+    // The square of the icon or the thumbnail: 48, 96 and 160 from the medium icons up, the
+    // thumbnails' own size, and 48 in the tiles.
+    private property <length> icon-size: root.mode == 6 ? root.thumb-size : root.mode == 5 ? 160px : root.mode == 4 ? 96px : root.mode == 3 || root.tiled ? 48px : 18px;
+    private property <bool> pictured: (root.big || root.tiled) && root.item.thumb.width > 0;
+    // Where the name begins: under the icon of a large item, after the icon of the others.
+    private property <length> name-x: 8px + root.check-room + root.icon-size + (root.tiled ? 10px : 8px);
+    private property <length> name-y: 8px + root.icon-size + 6px;
+    // The line of a kind's icon (`IconLines`).
+    private property <length> stroke: IconLines.stroke(root.icon-size);
+
+    // Whether the point (`x`, `y`) of the item is on its name rather than its icon.
+    pure function on-name(x: length, y: length) -> bool {
+        return root.big ? y >= root.name-y : x >= root.name-x;
+    }
+
+    background: root.item.selected ? Theme.selection : touch.has-hover ? Theme.raised : transparent;
+    border-radius: 6px;
+    accessible-role: list-item;
+    accessible-label: root.item.name;
+    accessible-item-index: root.index;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.item.selected;
+    accessible-description: RowWords.description(root.item);
+    accessible-action-default => {
+        root.event(TileEvent.activate, false, false, "");
+    }
+
+    // A press readies a drag of what it selects, or keeps selected.
+    DragArea {
+        data: root.drag-data;
+        allow-move: true;
+        allow-copy: true;
+        // A drop with the link keys makes links (OPS-08).
+        allow-link: true;
+        drag-finished(action) => {
+            root.event(TileEvent.drag-end, false, false, "");
+        }
+        changed dragging => {
+            DragPointer.rows = self.dragging;
+        }
+
+        item-menu := RowMenu {
+            place: root.place;
+            command(name) => {
+                root.event(TileEvent.command, false, false, name);
+            }
+
+            // It takes the right click itself, so the item is selected before its menu opens.
+            touch := TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.event(TileEvent.press, event.modifiers.control, event.modifiers.shift, root.on-name(self.mouse-x, self.mouse-y) ? "name" : "");
+                    }
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        root.event(TileEvent.menu, false, false, "");
+                        ItemMenu.showing(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                        item-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+                // Not after a drag: the drag takes the pointer from the item.
+                clicked => {
+                    root.event(TileEvent.release, false, false, "");
+                }
+                double-clicked => {
+                    root.event(TileEvent.activate, false, false, "");
+                }
+            }
+        }
+    }
+
+    // Hidden items show dimmed, cut ones dimmer still (the theme's strengths).
+    Rectangle {
+        opacity: root.item.cut ? Theme.dim-cut : root.item.hidden ? Theme.dim-hidden : 1;
+
+        if !root.pictured: Icon {
+            x: root.big ? (parent.width - self.width) / 2 : 8px + root.check-room;
+            y: root.big ? 8px : (parent.height - self.height) / 2;
+            width: root.icon-size;
+            height: root.icon-size;
+            stroke-width: root.stroke;
+            name: root.item.icon;
+            color: root.item.is-dir ? Theme.folder : Theme.muted;
+        }
+        if root.pictured: Image {
+            x: root.tiled ? 8px + root.check-room : (parent.width - self.width) / 2;
+            y: root.tiled ? (parent.height - self.height) / 2 : 8px;
+            width: root.icon-size;
+            height: root.icon-size;
+            source: root.item.thumb;
+            image-fit: contain;
+            accessible-role: none;
+        }
+        // The tiles' three lines: the name, the kind and the size (none for a folder); a drive of
+        // 내 PC has its bar in the place of the kind, and its space line.
+        if root.tiled: VerticalLayout {
+            x: root.name-x;
+            width: parent.width - self.x - 6px;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.item.name;
+                font-family: Theme.font-list;
+                color: Theme.text;
+                overflow: elide;
+            }
+            if root.item.fill < 0: Text {
+                text: root.item.kind;
+                font-family: Theme.font-list;
+                color: Theme.muted;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+            // A drive of 내 PC: how full it is, as the sidebar shows it.
+            if root.item.fill >= 0: Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.border;
+
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(root.item.fill, 0, 1);
+                    border-radius: 2px;
+                    background: Theme.accent;
+                }
+            }
+            Text {
+                text: root.item.size;
+                font-family: Theme.font-list;
+                color: Theme.muted;
+                font-size: Theme.font-small;
+                overflow: elide;
+            }
+        }
+        if root.big: Text {
+            x: 4px;
+            y: root.name-y;
+            width: parent.width - 8px;
+            height: parent.height - self.y - 4px;
+            text: root.item.name;
+            font-family: Theme.font-list;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: top;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        if !root.big && !root.tiled: Text {
+            x: root.name-x;
+            width: parent.width - self.x - 6px;
+            height: parent.height;
+            text: root.item.name;
+            font-family: Theme.font-list;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // Above the item's own press and drag; a click on it selects the item without Ctrl.
+    if root.checkboxes: SelectBox {
+        x: 2px;
+        y: root.big ? 2px : 0px;
+        height: root.big ? 24px : parent.height;
+        state: root.item.selected ? 1 : 0;
+        label: root.item.select;
+        toggled => {
+            root.event(TileEvent.check, false, false, "");
+        }
+    }
+
+    if root.cursor-here: Rectangle {
+        border-width: 1px;
+        border-color: Theme.accent;
+        border-radius: 6px;
+    }
+    if root.drop-here: Rectangle {
+        border-width: 2px;
+        border-color: Theme.accent;
+        border-radius: 6px;
+    }
+    // A selected item, besides its color, in a theme with marks: along the foot of a large one.
+    if Theme.marks && root.item.selected: SelectedMark {
+        foot: root.big;
+    }
+    // A cut or hidden item, besides its strength, in a theme with marks: a badge on the lower
+    // right corner of its icon or picture.
+    if Theme.marks && (root.item.cut || root.item.hidden): StateBadge {
+        width: max(16px, min(28px, root.icon-size * 0.3));
+        height: self.width;
+        x: (root.big ? (root.width - root.icon-size) / 2 : 8px + root.check-room) + root.icon-size - self.width + 3px;
+        y: (root.big ? 8px : (root.height - root.icon-size) / 2) + root.icon-size - self.height + 3px;
+        name: root.item.cut ? "cut" : "hidden";
+    }
+}
+
+export component FileGrid inherits Rectangle {
+    in property <[FileRow]> rows;
+    // What the list shows (`PaneView.place`): 0 a folder, 1 the trash, 2 the computer (its drives
+    // as tiles with the bar of how full each is); its menus offer what that place has (NAV-16).
+    in property <int> place;
+    // 1 목록, 2 small icons, 3 medium, 4 large, 5 extra large, 6 thumbnails, 7 tiles.
+    in property <int> mode: 3;
+    // The side of the thumbnails' square (mode 6), 64 to 512 px.
+    in property <length> thumb-size: 192px;
+    // The keyboard cursor's item, or -1.
+    in property <int> cursor: -1;
+    // Whether this list's pane has the keyboard; the cursor frame shows only then.
+    in property <bool> active;
+    // For the keys: how many items a line holds (a row of icons, a column of 목록), and how
+    // many lines a page key moves (the rows, or the columns, that fit on screen).
+    out property <int> line-items: root.columnar ? root.per-column : root.per-row;
+    out property <int> page-lines: root.columnar ? max(1, floor(columns-view.visible-width / root.tile-w)) : max(1, floor(icons.visible-height / root.tile-h));
+    // The payload of a drag of the items (as `FileList` has it).
+    in property <data-transfer> drag-data;
+    // The item a drag of another app is over and that takes it, and whether such a drag is over
+    // the items, as `FileList` has them.
+    in property <int> outside-row: -2;
+    in property <bool> outside-over;
+    // The items start with a checkbox (NAV-15).
+    in property <bool> checkboxes;
+
+    callback row-clicked(index: int, ctrl: bool, shift: bool, on-name: bool);
+    callback row-released(index: int);
+    callback row-activated(index: int);
+    callback row-menu(index: int);
+    // A click on the checkbox of item `index`.
+    callback row-checkbox(index: int);
+    callback menu-command(name: string);
+    callback drop-check(data: data-transfer, index: int) -> DragAction;
+    callback dropped(data: data-transfer, index: int) -> DragAction;
+    callback drag-ended();
+    // The first and the last item on screen changed (a scroll, another size, other rows).
+    callback visible-changed(first: int, last: int);
+
+    private property <bool> columnar: root.mode == 1;
+    private property <length> pad: 8px;
+    // The room of an item; an item takes all of it but a 4px gap. Its width is Rust's
+    // `ViewMode::cell_width` (a test holds the two together): the thumbnails' square with 12px
+    // at each side, and the tiles 260. Its height follows the theme (THEME-07): 목록 and the
+    // small icons are rows of the list (its row height less 2px, never less than their line of
+    // text and 6px, which 촘촘하게 would cut), the larger icons and the thumbnails have two lines
+    // of the name under the picture, and the tiles three lines beside it, which grow with the
+    // size of the text past the room they have at 14px (`name-grow`, `lines-grow`); at 보통 and
+    // 100 % 30, 112, 156, 220, the thumbnails' square + 60, and 64.
+    private property <length> tile-w: root.mode == 1 ? 240px : root.mode == 2 ? 200px : root.mode == 3 ? 104px : root.mode == 4 ? 136px : root.mode == 6 ? root.thumb-size + 24px : root.mode == 7 ? 260px : 184px;
+    private property <length> name-grow: max(0px, 2 * Theme.line(Theme.font-body) - 42px);
+    private property <length> lines-grow: max(0px, Theme.line(Theme.font-body) + 2 * Theme.line(Theme.font-small) - 57px);
+    private property <length> tile-h: root.mode <= 2 ? max(Theme.row-height - 2px, Theme.line(Theme.font-body) + 6px) : root.mode == 7 ? 64px + root.lines-grow : root.name-grow + (root.mode == 3 ? 112px : root.mode == 4 ? 156px : root.mode == 6 ? root.thumb-size + 60px : 220px);
+    // The scroll bar's room, which the items leave free.
+    private property <length> bar: 14px;
+    // The icons: how many a row holds, and how many rows there are.
+    private property <int> per-row: max(1, floor((root.width - 2 * root.pad - root.bar) / root.tile-w));
+    private property <int> line-count: root.columnar ? 0 : ceil(root.rows.length / root.per-row);
+    // 목록: how many a column holds, how many columns there are, and the first one on screen.
+    private property <int> per-column: max(1, floor((root.height - 2 * root.pad - root.bar) / root.tile-h));
+    private property <int> column-count: !root.columnar ? 0 : ceil(root.rows.length / root.per-column);
+    private property <int> first-column: max(0, floor((-columns-view.content-x - root.pad) / root.tile-w));
+    private property <int> columns-shown: !root.columnar ? 0 : ceil(columns-view.visible-width / root.tile-w) + 1;
+
+    // The first and the last item on screen (-1 for the last when there are none): of the rows
+    // of icons partly in view, or of the columns of 목록.
+    out property <int> visible-first: root.columnar ? root.first-column * root.per-column : max(0, floor(-icons.content-y / root.tile-h)) * root.per-row;
+    out property <int> visible-last: min(root.rows.length - 1, root.columnar ? (root.first-column + root.columns-shown) * root.per-column - 1 : ceil((-icons.content-y + icons.visible-height) / root.tile-h) * root.per-row - 1);
+    changed visible-first => {
+        root.visible-changed(root.visible-first, root.visible-last);
+    }
+    changed visible-last => {
+        root.visible-changed(root.visible-first, root.visible-last);
+    }
+
+    // What the pointer did to item `index`: told to the pane as a row of 자세히 tells it.
+    function tile-event(index: int, what: TileEvent, ctrl: bool, shift: bool, command: string) {
+        if (what == TileEvent.press) {
+            root.row-clicked(index, ctrl, shift, command == "name");
+        } else if (what == TileEvent.release) {
+            root.row-released(index);
+        } else if (what == TileEvent.activate) {
+            root.row-activated(index);
+        } else if (what == TileEvent.menu) {
+            root.row-menu(index);
+        } else if (what == TileEvent.command) {
+            root.menu-command(command);
+        } else if (what == TileEvent.check) {
+            root.row-checkbox(index);
+        } else {
+            root.drag-ended();
+        }
+    }
+
+    // The place of the list under the point (`x`, `y`) of the window, as a drag of items there
+    // names it (`FileList.spot-at`): the item under it by the reckoning of the drop area
+    // (`index-at`), or -1 where there is none.
+    public pure function spot-at(x: length, y: length) -> DropAt {
+        let dx = x - drop.absolute-position.x;
+        let dy = y - drop.absolute-position.y;
+        return {
+            found: dx >= 0 && dy >= 0 && dx < drop.width && dy < drop.height,
+            place: DropPlace.list,
+            side: 0,
+            index: root.index-at(dx, dy),
+        };
+    }
+
+    // The folder item a drag of another app would go into (`FileList`).
+    out property <int> outside-target: root.outside-row < -1 ? -2 : root.outside-row >= 0 && root.outside-row < root.rows.length && root.rows[root.outside-row].is-dir ? root.outside-row : -1;
+
+    // The item at (`x`, `y`) of the list, or -1 where there is none.
+    pure function index-at(x: length, y: length) -> int {
+        if (root.columnar) {
+            let column = floor((x - root.pad - columns-view.content-x) / root.tile-w);
+            let place = floor((y - root.pad) / root.tile-h);
+            let index = column * root.per-column + place;
+            return column >= 0 && place >= 0 && place < root.per-column && index < root.rows.length ? index : -1;
+        }
+        let line = floor((y - icons.content-y) / root.tile-h);
+        let place = floor((x - root.pad) / root.tile-w);
+        let index = line * root.per-row + place;
+        return line >= 0 && place >= 0 && place < root.per-row && index < root.rows.length ? index : -1;
+    }
+
+    // The list scrolls under a drag held near its ends (DND-08) as 자세히 does (`FileList`):
+    // the icons at the top and the bottom, 목록 at the left and the right, while the drag's
+    // pointer stays where this list last saw it (`DragSeen`), or a drag of another app is over
+    // it (`outside-over`); it stops at the first or the last item.
+    drag-seen := DragSeen { }
+    private property <int> scroll-way: !drag-seen.here && !root.outside-over ? 0
+        : root.columnar ? EdgeScroll.way(DragPointer.x - drop.absolute-position.x, drop.width, columns-view.content-x < 0, columns-view.content-x > columns-view.visible-width - columns-view.content-width)
+        : EdgeScroll.way(DragPointer.y - drop.absolute-position.y, drop.height, icons.content-y < 0, icons.content-y > icons.visible-height - icons.content-height);
+
+    // The steps of `scroll-way`; another item is under the still pointer after each.
+    Timer {
+        interval: EdgeScroll.interval;
+        running: root.scroll-way != 0;
+        triggered => {
+            if (root.columnar) {
+                columns-view.content-x = clamp(columns-view.content-x + root.scroll-way * EdgeScroll.step, min(0px, columns-view.visible-width - columns-view.content-width), 0px);
+            } else {
+                settle.stop();
+                icons.content-y = clamp(icons.content-y + root.scroll-way * EdgeScroll.step, min(0px, icons.visible-height - icons.content-height), 0px);
+            }
+            DragPointer.moved-under();
+        }
+    }
+
+    // Scrolls as little as needed to show item `index` whole (the icons keep the place while
+    // their list settles after a long jump, `ListSettle`).
+    public function scroll-to(index: int) {
+        if (index < 0) {
+            return;
+        }
+        if (root.columnar) {
+            let x = ListScroll.into-view(root.pad + floor(index / root.per-column) * root.tile-w - root.pad, root.tile-w + 2 * root.pad, columns-view.content-x, columns-view.visible-width);
+            if (x <= 0) {
+                columns-view.content-x = max(-max(0px, columns-view.content-width - columns-view.visible-width), x);
+            }
+            return;
+        }
+        let y = ListScroll.into-view(floor(index / root.per-row) * root.tile-h, root.tile-h, icons.content-y, icons.visible-height);
+        if (y > 0) {
+            return;
+        }
+        settle.start(y);
+        icons.content-y = y;
+    }
+
+    // The item menu by item `index`, from the keyboard (the menu key, Linux's Shift+F10, macOS
+    // ⌃↩); Rust has scrolled the item into view. The menu shows over its lower part.
+    public function show-item-menu(index: int) {
+        let at = root.item-menu-at(index);
+        ItemMenu.showing(root.absolute-position.x + at.x, root.absolute-position.y + at.y);
+        key-menus.item(at.x, at.y);
+    }
+
+    // The menu of the folder, by the top of the list, from the keyboard (nothing chosen).
+    public function show-blank-menu() {
+        let at = root.blank-menu-at();
+        ItemMenu.showing(root.absolute-position.x + at.x, root.absolute-position.y + at.y);
+        key-menus.blank(at.x, at.y);
+    }
+
+    // The item menu, or the folder's, at the point (`x`, `y`) of the window, for a long press
+    // (as in `FileList`).
+    public function show-item-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.item(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+    public function show-blank-menu-at(x: length, y: length) {
+        ItemMenu.showing(x, y);
+        key-menus.blank(x - root.absolute-position.x, y - root.absolute-position.y);
+    }
+
+    // The place of the list a press at the point (`x`, `y`) of the window is on, for a long press:
+    // as `spot-at` finds it, but not on a scroll bar (the icons' at the right, 목록's at the
+    // bottom).
+    public pure function press-at(x: length, y: length) -> DropAt {
+        let at = root.spot-at(x, y);
+        let dx = x - drop.absolute-position.x;
+        let dy = y - drop.absolute-position.y;
+        let on-bar = root.columnar ? dy > drop.height - 16px && columns-view.content-width > columns-view.visible-width : dx > drop.width - 16px && icons.content-height > icons.visible-height;
+        return { found: at.found && !on-bar, place: at.place, side: at.side, index: at.index };
+    }
+
+    // Where those two show, in the window: the system's own menu of the same items shows there
+    // from the keys (Windows' Shift+F10).
+    public pure function item-menu-place(index: int) -> Point {
+        let at = root.item-menu-at(index);
+        return { x: root.absolute-position.x + at.x, y: root.absolute-position.y + at.y };
+    }
+    public pure function blank-menu-place() -> Point {
+        let at = root.blank-menu-at();
+        return { x: root.absolute-position.x + at.x, y: root.absolute-position.y + at.y };
+    }
+
+    // Where the item menu by item `index` shows from the keyboard, in the list.
+    pure function item-menu-at(index: int) -> Point {
+        return {
+            x: root.columnar ? root.pad + floor(index / root.per-column) * root.tile-w + columns-view.content-x + 24px : root.pad + Math.mod(index, root.per-row) * root.tile-w + 24px,
+            y: root.columnar ? root.pad + (Math.mod(index, root.per-column) + 0.75) * root.tile-h : (floor(index / root.per-row) + 0.75) * root.tile-h + icons.content-y,
+        };
+    }
+
+    // Where the folder's menu shows from the keyboard, in the list.
+    pure function blank-menu-at() -> Point {
+        return { x: root.pad + 24px, y: root.pad + 16px };
+    }
+
+    settle := ListSettle { }
+
+    drop := DropArea {
+        // The folder item the drag would go into; -1 for the pane's folder.
+        property <int> target: -1;
+        can-drop(event) => {
+            let index = root.index-at(event.position.x, event.position.y);
+            self.target = index >= 0 && root.rows[index].is-dir ? index : -1;
+            DragPointer.at(self.absolute-position, event.position);
+            drag-seen.saw();
+            return root.drop-check(event.data, index);
+        }
+        dropped(event) => {
+            DragPointer.at(self.absolute-position, event.position);
+            return root.dropped(event.data, root.index-at(event.position.x, event.position.y));
+        }
+
+        // The menu of the part of the list without items.
+        blank-menu := BlankMenu {
+            place: root.place;
+            width: parent.width;
+            height: parent.height;
+            command(name) => {
+                root.menu-command(name);
+            }
+
+            icons := ListView {
+                width: parent.width;
+                height: parent.height;
+                visible: !root.columnar;
+                accessible-label: Tr.list-items;
+                changed content-y => {
+                    let y = settle.corrected(self.content-y);
+                    if (y != self.content-y) {
+                        self.content-y = y;
+                    }
+                }
+                scrolled => {
+                    settle.stop();
+                }
+
+                for line in root.line-count: Rectangle {
+                    height: root.tile-h;
+
+                    for at in root.per-row: Tile {
+                        index: line * root.per-row + at;
+                        x: root.pad + at * root.tile-w;
+                        y: 2px;
+                        width: root.tile-w - 4px;
+                        height: root.tile-h - 4px;
+                        visible: self.index < root.rows.length;
+                        item: root.rows[self.index];
+                        mode: root.mode;
+                        place: root.place;
+                        thumb-size: root.thumb-size;
+                        cursor-here: root.active && self.index == root.cursor;
+                        drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
+                        drag-data: root.drag-data;
+                        checkboxes: root.checkboxes;
+                        event(what, ctrl, shift, command) => {
+                            root.tile-event(self.index, what, ctrl, shift, command);
+                        }
+                    }
+                }
+            }
+
+            // 목록 scrolls sideways; the wheel's turn up and down scrolls it too. A right click
+            // where there is no item opens the list's menu, as on the empty part of 자세히.
+            wheel := TouchArea {
+                visible: root.columnar;
+                scroll-event(event) => {
+                    let most = max(0px, columns-view.content-width - columns-view.visible-width);
+                    let delta = event.delta-y != 0 ? event.delta-y : event.delta-x;
+                    columns-view.content-x = max(-most, min(0px, columns-view.content-x + delta));
+                    return accept;
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                        blank-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                    }
+                }
+
+                columns-view := ScrollView {
+                    width: parent.width;
+                    height: parent.height;
+                    accessible-role: list;
+                    accessible-label: Tr.list-items;
+                    content-width: root.column-count * root.tile-w + 2 * root.pad;
+                    content-height: self.visible-height;
+
+                    for slot in root.columns-shown: Rectangle {
+                        property <int> column: root.first-column + slot;
+                        x: root.pad + self.column * root.tile-w;
+                        y: 0px;
+                        width: root.tile-w;
+                        height: root.pad + root.per-column * root.tile-h;
+                        visible: self.column < root.column-count;
+
+                        for at in root.per-column: Tile {
+                            index: parent.column * root.per-column + at;
+                            x: 0px;
+                            y: root.pad + at * root.tile-h;
+                            width: root.tile-w - 4px;
+                            height: root.tile-h - 2px;
+                            visible: self.index < root.rows.length;
+                            item: root.rows[self.index];
+                            mode: root.mode;
+                            place: root.place;
+                            thumb-size: root.thumb-size;
+                            cursor-here: root.active && self.index == root.cursor;
+                            drop-here: (drop.has-drag && self.index == drop.target) || self.index == root.outside-target;
+                            drag-data: root.drag-data;
+                            checkboxes: root.checkboxes;
+                            event(what, ctrl, shift, command) => {
+                                root.tile-event(self.index, what, ctrl, shift, command);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The frame while the pane's folder takes the drag.
+    DropFrame {
+        width: parent.width;
+        height: parent.height;
+        frame: (drop.has-drag && drop.target < 0) || root.outside-target == -1;
+    }
+
+    // The end the list scrolls toward under a drag held there (`scroll-way`).
+    scroll-cue := ScrollCue {
+        x: root.columnar && root.scroll-way < 0 ? parent.width - self.width : 0px;
+        y: !root.columnar && root.scroll-way < 0 ? parent.height - self.height : 0px;
+        width: root.columnar ? EdgeScroll.edge : parent.width;
+        height: root.columnar ? parent.height : EdgeScroll.edge;
+        vertical: !root.columnar;
+        way: root.scroll-way;
+    }
+
+    key-menus := KeyMenus {
+        place: root.place;
+        x: 0px;
+        y: 0px;
+        command(name) => {
+            root.menu-command(name);
+        }
+    }
+}

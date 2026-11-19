@@ -1,0 +1,74 @@
+# 고대비: white on black with a yellow accent. Text, the text on the accent and the text of a
+# selected item are at least 7:1 against what they sit on (WCAG AAA); `marks` also marks with a
+# shape what the colors tell (docs/ux/themes.md).
+
+[theme]
+scheme = "dark"
+icon-style = "bold"
+marks = true
+# Cut and hidden items stay readable (7:1 and more, on black and on the selection); a badge on
+# their icon tells them apart.
+dim-cut = 0.8
+dim-hidden = 0.9
+
+[color]
+bg = "#000000"
+panel = "#000000"
+raised = "#262626"
+text = "#FFFFFF"
+muted = "#E0E0E0"
+# Light enough that a hidden folder's faint text, dimmed, stays at 7:1 selected and under the
+# pointer, and a hint at 7:1 on a pressed row.
+faint = "#CCCCCC"
+# A clear step down from the white of what can be used (3.5:1), still 6:1 on black; a dashed
+# frame marks the control too.
+disabled = "#8A8A8A"
+# 3.7:1 on black, enough for a line.
+border = "#666666"
+# Under the pointer's press, an open menu's button and a hovered tab or segment: the text on it
+# stays at 7:1 and more.
+pressed = "#3A3A3A"
+folder = "#FFB347"
+warning = "#FFB347"
+accent = "#FFE500"
+on-accent = "#000000"
+# Dark olive: the text (14:1), the muted text (11:1) and the faint text (8.8:1) of a selected item
+# stay readable on it, dimmed too; the bar beside a selected item tells it. A fill that told it
+# alone (3:1 on black) would leave the muted text at 5.3:1.
+selection = "#332B00"
+# The selected text in a field is black on the accent (16.5:1), a highlight no one misses on the
+# black field; the selection's dark olive would be 1.5:1 against it.
+text-selection = "#FFE500"
+on-text-selection = "#000000"
+# The notices are white, so that they stand out of the black window.
+toast-bg = "#FFFFFF"
+toast-text = "#000000"
+toast-link = "#0000C0"
+toast-hover = "#0000001F"
+toast-pressed = "#00000033"
+shadow = "#00000033"
+shadow-small = "#00000029"
+shadow-toast = "#0000003D"
+shadow-dialog = "#00000052"
+scrim = "#00000059"
+scrim-light = "#00000033"
+
+[font]
+ui = ""
+list = ""
+mono = ""
+small = 12
+note = 13
+body = 14
+app-name = 15
+heading = 16
+title = 20
+
+[size]
+gap-xs = 4
+gap-s = 8
+gap-m = 12
+gap-l = 16
+row-height = 32
+radius = 8
+radius-large = 12

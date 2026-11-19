@@ -1,0 +1,1401 @@
+// The 보기 menu of the toolbar: how the active pane shows its folder (its view mode, order and
+// columns, which its column heads change too), the theme with the density and the size of the
+// text (테마 ▸, THEME-07) and the language of the window (I18N-01, from the next start), the hidden
+// items and the extensions of
+// the names, the toolbar itself (LAY-10), the folder tree (폴더 트리 ▸, LAY-03: one shared tree,
+// a tree for each pane, or none, and F6 to it) and the preview panel, the layout and the commands
+// between the panes,
+// the tabs, 경로 복사 of the active pane's items, and 설정 (what a drop does, the thumbnails of
+// the icon views, the undo of a dragged move, whether a copy or a move asks about each item that
+// fails, where the destination picker starts, and on Windows the menu of a right click), and where
+// the job panel shows (작업 패널 ▸
+// 별도 창, LAY-09). It is short enough for a 560px window,
+// with room to spare below its button: the themes, the folder tree, the panes (배치) and 설정 are
+// sub-menus of their own, and 설정, at the bottom, has none of its own to open over it (정렬 ▸
+// 2차 정렬 and 열 ▸ 열 순서, higher up, do). Every item says its key (KEY-03), and the keys reach
+// every item: F10 (macOS ⌘J) opens it, ↑↓ → Enter choose; also while the toolbar, with its
+// button, is hidden (the window opens it at its top then).
+//
+// A checkable item flips its own `checked` when it is chosen, which would end a binding, so the
+// items are two-way bound to properties set from the state: the view's marks as the menu opens and
+// after an item changed the view (`mark`), the theme's from `theme-choice` (the density's and the
+// size's from `density` and `font-scale`), and the layout's to the
+// window's, which Rust sets back to the state's after the toggle.
+
+import { Shortcuts, PathForms } from "shortcuts.slint";
+import { PaneView } from "pane.slint";
+import { Tr } from "tr.slint";
+
+export component ViewMenu inherits ContextMenuArea {
+    // What the active pane shows.
+    in property <PaneView> view;
+    // The theme chosen (0 시스템 설정 따르기, 1 밝게, 2 어둡게, 3 고대비).
+    in property <int> theme-choice;
+    // The density (0 촘촘하게, 1 보통, 2 넉넉하게) and the size of text in percent (90, 100, 115,
+    // 130) chosen (THEME-07).
+    in property <int> density: 1;
+    in property <int> font-scale: 100;
+    // The language chosen (0 시스템 설정 따르기, 1 한국어, 2 English; I18N-01): the window keeps
+    // the one it started with until the next start.
+    in property <int> language-choice;
+    // The layout, the hidden items and the extensions, two-way with the window's. The folder
+    // tree shows (`show-tree`) with a tree for each pane (`tree-per-pane`) or one shared tree.
+    in-out property <bool> show-hidden;
+    in-out property <bool> show-extensions;
+    in-out property <bool> show-tree;
+    in property <bool> tree-per-pane;
+    in-out property <bool> show-toolbar;
+    in-out property <bool> show-preview;
+    in-out property <bool> dual-pane;
+    in-out property <bool> stacked;
+    in-out property <bool> sync-navigation;
+    // 설정: what a drop does without a modifier key (0 이동, 1 복사, 2 OS 방식, 3 매번 묻기), and
+    // the two switches, two-way with the window's; the last one only where it is offered
+    // (Windows).
+    in property <int> drag-default;
+    in-out property <bool> move-undo-toast;
+    // A copy or a move asks about each item that fails (XFER-09), two-way with the window's;
+    // off, it carries on and lists the failed items at its end.
+    in-out property <bool> ask-on-error;
+    // The destination picker starts at the last place a copy or a move went (PICK-05), two-way
+    // with the window's; off, at the other pane's folder.
+    in-out property <bool> pick-from-last;
+    in-out property <bool> system-menu-first;
+    in property <bool> system-menu-offered;
+    // What the bottom of 설정 offers for removing the app: 0 nothing, 1 "Racoon Finder 완전 삭제…"
+    // (macOS), 2 "제거 프로그램 열기" (an installed app on Windows).
+    in property <int> removal-offer;
+    in property <string> remove-app-title;
+    // The icon views show the files' thumbnails (VIEW-09), two-way with the window's.
+    in-out property <bool> show-thumbnails;
+    // A press held on a row opens its menu (PICK-02), two-way with the window's, and for how many
+    // milliseconds (300, 500, 800 or 1200).
+    in-out property <bool> long-press;
+    in property <int> long-press-ms: 500;
+    // The rows start with checkboxes (NAV-15), two-way with the window's: the same switch as the
+    // 선택 menu's, which the keys cannot open.
+    in-out property <bool> checkbox-select;
+    // The job panel shows in a window of its own (LAY-09), two-way with the window's.
+    in-out property <bool> jobs-window;
+
+    // A command of the window's (`MainWindow.command`).
+    callback command(name: string);
+    callback theme-chosen(choice: int);
+    // An item 표시 밀도: … or 글자 크기: … of 테마 chose `density` or `percent`.
+    callback density-chosen(density: int);
+    callback font-scale-chosen(percent: int);
+    // An item 언어: … of 테마 chose `choice` (the numbers of `language-choice`).
+    callback language-chosen(choice: int);
+    // An item 끌어 놓기: … of 설정 chose `choice` (the numbers of `drag-default`).
+    callback drag-default-chosen(choice: int);
+    // An item 길게 누르기 시간: … of 설정 chose `ms` milliseconds.
+    callback long-press-ms-chosen(ms: int);
+    // 두 패널을 같은 크기로, and the divider moved by `step` of the room.
+    callback even-split();
+    callback divider-moved(step: float);
+    // The active pane's order, columns and view, as the window's callbacks of the same names for
+    // that pane.
+    callback sort(column: int, then: bool);
+    callback sort-then(column: int);
+    callback column-toggled(column: int);
+    // The column at `from` among those after the name goes to `slot` (as a head dragged).
+    callback column-moved(from: int, slot: int);
+    callback view-command(name: string);
+    // An item of the 탭 sub-menu for the tab the active pane shows (`MainWindow.tab-command`).
+    callback tab-command(name: string);
+    // An item of a sub-menu was chosen: the keys are to go back where they were once the menus
+    // have closed (a sub-menu's choice leaves them nowhere).
+    callback sub-menu-done();
+
+    // Opens the menu at `x`, `y`, its marks showing the active pane's view and what a drop
+    // does.
+    public function open(x: length, y: length) {
+        root.mark();
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+        root.mark-drag-default(root.drag-default);
+        root.mark-long-press-ms(root.long-press-ms);
+        root.show({ x: x, y: y });
+    }
+
+    // The marks of the view's items, from the active pane's view.
+    public function mark() {
+        root.mark-mode-0 = root.view.mode == 0;
+        root.mark-mode-1 = root.view.mode == 1;
+        root.mark-mode-2 = root.view.mode == 2;
+        root.mark-mode-3 = root.view.mode == 3;
+        root.mark-mode-4 = root.view.mode == 4;
+        root.mark-mode-5 = root.view.mode == 5;
+        root.mark-mode-6 = root.view.mode == 6;
+        root.mark-mode-7 = root.view.mode == 7;
+        root.mark-folders-first = root.view.folders-first;
+        root.mark-sort-0 = root.view.sort-key == 0;
+        root.mark-sort-1 = root.view.sort-key == 1;
+        root.mark-sort-2 = root.view.sort-key == 2;
+        root.mark-sort-3 = root.view.sort-key == 3;
+        root.mark-sort-4 = root.view.sort-key == 4;
+        root.mark-sort-5 = root.view.sort-key == 5;
+        root.mark-sort-7 = root.view.sort-key == 7;
+        root.mark-sort-9 = root.view.sort-key == 9;
+        root.mark-sort-10 = root.view.sort-key == 10;
+        root.mark-ascending = root.view.sort-ascending;
+        root.mark-descending = !root.view.sort-ascending;
+        root.mark-then-none = root.view.then-key < 0;
+        root.mark-then-0 = root.view.then-key == 0;
+        root.mark-then-1 = root.view.then-key == 1;
+        root.mark-then-2 = root.view.then-key == 2;
+        root.mark-then-3 = root.view.then-key == 3;
+        root.mark-then-4 = root.view.then-key == 4;
+        root.mark-then-5 = root.view.then-key == 5;
+        root.mark-then-7 = root.view.then-key == 7;
+        root.mark-then-9 = root.view.then-key == 9;
+        root.mark-then-10 = root.view.then-key == 10;
+        root.mark-then-ascending = root.view.then-key >= 0 && root.view.then-ascending;
+        root.mark-then-descending = root.view.then-key >= 0 && !root.view.then-ascending;
+        root.mark-col-1 = root.view.shows[1];
+        root.mark-col-2 = root.view.shows[2];
+        root.mark-col-3 = root.view.shows[3];
+        root.mark-col-4 = root.view.shows[4];
+        root.mark-col-5 = root.view.shows[5];
+        root.mark-col-6 = root.view.shows[6];
+        root.mark-col-7 = root.view.shows[7];
+        root.mark-col-8 = root.view.shows[8];
+        root.mark-col-9 = root.view.shows[9];
+        root.mark-col-10 = root.view.shows[10];
+    }
+
+    private property <bool> mark-mode-0;
+    private property <bool> mark-mode-1;
+    private property <bool> mark-mode-2;
+    private property <bool> mark-mode-3;
+    private property <bool> mark-mode-4;
+    private property <bool> mark-mode-5;
+    private property <bool> mark-mode-6;
+    private property <bool> mark-mode-7;
+    private property <bool> mark-folders-first;
+    private property <bool> mark-sort-0;
+    private property <bool> mark-sort-1;
+    private property <bool> mark-sort-2;
+    private property <bool> mark-sort-3;
+    private property <bool> mark-sort-4;
+    private property <bool> mark-sort-5;
+    private property <bool> mark-sort-7;
+    private property <bool> mark-sort-9;
+    private property <bool> mark-sort-10;
+    private property <bool> mark-ascending;
+    private property <bool> mark-descending;
+    private property <bool> mark-then-none;
+    private property <bool> mark-then-0;
+    private property <bool> mark-then-1;
+    private property <bool> mark-then-2;
+    private property <bool> mark-then-3;
+    private property <bool> mark-then-4;
+    private property <bool> mark-then-5;
+    private property <bool> mark-then-7;
+    private property <bool> mark-then-9;
+    private property <bool> mark-then-10;
+    private property <bool> mark-then-ascending;
+    private property <bool> mark-then-descending;
+    private property <bool> mark-col-1;
+    private property <bool> mark-col-2;
+    private property <bool> mark-col-3;
+    private property <bool> mark-col-4;
+    private property <bool> mark-col-5;
+    private property <bool> mark-col-6;
+    private property <bool> mark-col-7;
+    private property <bool> mark-col-8;
+    private property <bool> mark-col-9;
+    private property <bool> mark-col-10;
+
+    private property <bool> system-mark: true;
+    private property <bool> light-mark;
+    private property <bool> dark-mark;
+    private property <bool> high-contrast-mark;
+    function mark-theme(choice: int) {
+        root.system-mark = choice == 0;
+        root.light-mark = choice == 1;
+        root.dark-mark = choice == 2;
+        root.high-contrast-mark = choice == 3;
+    }
+    init => {
+        root.mark-theme(root.theme-choice);
+        root.mark-look(root.density, root.font-scale);
+        root.mark-language(root.language-choice);
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+    }
+    changed theme-choice => {
+        root.mark-theme(root.theme-choice);
+    }
+
+    // The marks of 테마's densities and sizes of text, one of each at a time.
+    private property <bool> compact-mark;
+    private property <bool> normal-density-mark: true;
+    private property <bool> roomy-mark;
+    private property <bool> scale-90-mark;
+    private property <bool> scale-100-mark: true;
+    private property <bool> scale-115-mark;
+    private property <bool> scale-130-mark;
+    function mark-look(density: int, percent: int) {
+        root.compact-mark = density == 0;
+        root.normal-density-mark = density == 1;
+        root.roomy-mark = density == 2;
+        root.scale-90-mark = percent == 90;
+        root.scale-100-mark = percent == 100;
+        root.scale-115-mark = percent == 115;
+        root.scale-130-mark = percent == 130;
+    }
+    changed density => {
+        root.mark-look(root.density, root.font-scale);
+    }
+    changed font-scale => {
+        root.mark-look(root.density, root.font-scale);
+    }
+    // An item of a density or a size of text: its mark alone shows, and Rust keeps the choice
+    // (and sets `density` or `font-scale`, which the windows' tokens follow at once).
+    function choose-density(density: int) {
+        root.mark-look(density, root.font-scale);
+        root.density-chosen(density);
+        root.done();
+    }
+    function choose-font-scale(percent: int) {
+        root.mark-look(root.density, percent);
+        root.font-scale-chosen(percent);
+        root.done();
+    }
+
+    // The marks of 테마's languages, one at a time. An item marks itself, and Rust keeps the
+    // choice for the next start (and sets `language-choice` back).
+    private property <bool> system-language-mark: true;
+    private property <bool> korean-mark;
+    private property <bool> english-mark;
+    function mark-language(choice: int) {
+        root.system-language-mark = choice == 0;
+        root.korean-mark = choice == 1;
+        root.english-mark = choice == 2;
+    }
+    changed language-choice => {
+        root.mark-language(root.language-choice);
+    }
+    function choose-language(choice: int) {
+        root.mark-language(choice);
+        root.language-chosen(choice);
+        root.done();
+    }
+
+    // The marks of 폴더 트리 ▸'s three modes (0 공유 트리, 1 패널별 트리, 2 트리 숨김), one at a time.
+    private property <bool> shared-tree-mark: true;
+    private property <bool> per-pane-tree-mark;
+    private property <bool> hidden-tree-mark;
+    function mark-tree(mode: int) {
+        root.shared-tree-mark = mode == 0;
+        root.per-pane-tree-mark = mode == 1;
+        root.hidden-tree-mark = mode == 2;
+    }
+    changed show-tree => {
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+    }
+    changed tree-per-pane => {
+        root.mark-tree(root.show-tree ? (root.tree-per-pane ? 1 : 0) : 2);
+    }
+    // An item of 폴더 트리 ▸: its mark alone shows, and Rust keeps the mode (`command`).
+    function choose-tree(mode: int, name: string) {
+        root.mark-tree(mode);
+        root.command(name);
+        root.done();
+    }
+
+    private property <bool> drag-move-mark;
+    private property <bool> drag-copy-mark;
+    private property <bool> drag-system-mark;
+    private property <bool> drag-ask-mark;
+    function mark-drag-default(choice: int) {
+        root.drag-move-mark = choice == 0;
+        root.drag-copy-mark = choice == 1;
+        root.drag-system-mark = choice == 2;
+        root.drag-ask-mark = choice == 3;
+    }
+    // An item of what a drop does without a key (끌어 놓기: …): its mark alone shows, and Rust
+    // keeps the choice.
+    function choose-drag-default(choice: int) {
+        root.mark-drag-default(choice);
+        root.drag-default-chosen(choice);
+        root.done();
+    }
+
+    private property <bool> press-300-mark;
+    private property <bool> press-500-mark;
+    private property <bool> press-800-mark;
+    private property <bool> press-1200-mark;
+    function mark-long-press-ms(ms: int) {
+        root.press-300-mark = ms == 300;
+        root.press-500-mark = ms == 500;
+        root.press-800-mark = ms == 800;
+        root.press-1200-mark = ms == 1200;
+    }
+    // An item of how long a press is held (길게 누르기 시간: …): its mark alone shows.
+    function choose-long-press-ms(ms: int) {
+        root.mark-long-press-ms(ms);
+        root.long-press-ms-chosen(ms);
+        root.done();
+    }
+
+    // An item of a sub-menu: its marks show the view it made.
+    function done() {
+        root.mark();
+        root.sub-menu-done();
+    }
+
+    private property <bool> tab-pinned: root.view.tabs[root.view.active-tab].pinned;
+
+    Menu {
+        // 내 PC shows its drives as tiles, in their order, and nothing else (NAV-16).
+        Menu {
+            title: Tr.view-mode;
+            enabled: root.view.place != 2;
+
+            // The thumbnails at a size of their own (NAV-06), the slider in the status bar. No
+            // key, as 특대 and 타일 (keyboard.md).
+            MenuItem {
+                title: Tr.view-thumbnails;
+                checkable: true;
+                checked <=> root.mark-mode-6;
+                activated => {
+                    root.command("view-thumbnails");
+                    root.done();
+                }
+            }
+            // No key: File Explorer's Ctrl+Shift+1 is not assigned (keyboard.md). Ctrl+wheel
+            // and a pinch step to it too.
+            MenuItem {
+                title: Tr.view-extra-large-icons;
+                checkable: true;
+                checked <=> root.mark-mode-5;
+                activated => {
+                    root.command("view-extra-large-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-large-icons, Shortcuts.view-large-icons);
+                checkable: true;
+                checked <=> root.mark-mode-4;
+                activated => {
+                    root.command("view-large-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-medium-icons, Shortcuts.view-medium-icons);
+                checkable: true;
+                checked <=> root.mark-mode-3;
+                activated => {
+                    root.command("view-medium-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-small-icons, Shortcuts.view-small-icons);
+                checkable: true;
+                checked <=> root.mark-mode-2;
+                activated => {
+                    root.command("view-small-icons");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-list, Shortcuts.view-list);
+                checkable: true;
+                checked <=> root.mark-mode-1;
+                activated => {
+                    root.command("view-list");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-details, Shortcuts.view-details);
+                checkable: true;
+                checked <=> root.mark-mode-0;
+                activated => {
+                    root.command("view-details");
+                    root.done();
+                }
+            }
+            // File Explorer's 타일, after 자세히 as there; its Ctrl+Shift+7 is not assigned.
+            MenuItem {
+                title: Tr.view-tiles;
+                checkable: true;
+                checked <=> root.mark-mode-7;
+                activated => {
+                    root.command("view-tiles");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The keys to the thumbnails' size slider, once the menus have closed (the window
+            // gives it them, as 폴더 트리로 가기 the tree): ← → move it.
+            MenuItem {
+                title: Tr.view-thumb-size;
+                enabled: root.view.mode == 6;
+                activated => {
+                    root.view-command("focus-size");
+                }
+            }
+            // The view of this folder for its subfolders too, or the folder's own view forgotten.
+            MenuItem {
+                title: Tr.view-apply-to-subfolders;
+                activated => {
+                    root.view-command("apply-below");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-reset-to-default;
+                enabled: root.view.own-view;
+                activated => {
+                    root.view-command("reset-view");
+                    root.done();
+                }
+            }
+        }
+        // The order: the key and its direction (as a click on a head, which flips the direction
+        // of the key that sorts already), the second key and its direction, folders first.
+        Menu {
+            title: Tr.view-sort;
+            enabled: root.view.place != 2;
+
+            MenuItem {
+                title: Tr.column-name;
+                checkable: true;
+                checked <=> root.mark-sort-0;
+                activated => {
+                    root.sort(0, false);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.column-size;
+                checkable: true;
+                checked <=> root.mark-sort-1;
+                activated => {
+                    root.sort(1, false);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-modified;
+                checkable: true;
+                checked <=> root.mark-sort-2;
+                activated => {
+                    root.sort(2, false);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-created;
+                checkable: true;
+                checked <=> root.mark-sort-4;
+                activated => {
+                    root.sort(4, false);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-accessed;
+                checkable: true;
+                checked <=> root.mark-sort-7;
+                activated => {
+                    root.sort(7, false);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.column-kind;
+                checkable: true;
+                checked <=> root.mark-sort-3;
+                activated => {
+                    root.sort(3, false);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.column-extension;
+                checkable: true;
+                checked <=> root.mark-sort-5;
+                activated => {
+                    root.sort(5, false);
+                    root.done();
+                }
+            }
+            // The trash's (NAV-16): where an item was, and when it was trashed.
+            if root.view.place == 1: MenuItem {
+                title: Tr.column-original;
+                checkable: true;
+                checked <=> root.mark-sort-9;
+                activated => {
+                    root.sort(9, false);
+                    root.done();
+                }
+            }
+            if root.view.place == 1: MenuItem {
+                title: Tr.column-deleted;
+                checkable: true;
+                checked <=> root.mark-sort-10;
+                activated => {
+                    root.sort(10, false);
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-ascending;
+                checkable: true;
+                checked <=> root.mark-ascending;
+                activated => {
+                    if (!root.view.sort-ascending) {
+                        root.sort(root.view.sort-key, false);
+                    }
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-descending;
+                checkable: true;
+                checked <=> root.mark-descending;
+                activated => {
+                    if (root.view.sort-ascending) {
+                        root.sort(root.view.sort-key, false);
+                    }
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The second key (Shift+click on a head), which breaks the ties of the first.
+            Menu {
+                title: Tr.view-then-sort;
+
+                MenuItem {
+                    title: Tr.view-then-none;
+                    checkable: true;
+                    checked <=> root.mark-then-none;
+                    activated => {
+                        root.sort-then(-1);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: Tr.column-name;
+                    checkable: true;
+                    checked <=> root.mark-then-0;
+                    enabled: root.view.sort-key != 0;
+                    activated => {
+                        root.sort-then(0);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: Tr.column-size;
+                    checkable: true;
+                    checked <=> root.mark-then-1;
+                    enabled: root.view.sort-key != 1;
+                    activated => {
+                        root.sort-then(1);
+                        root.done();
+                    }
+                }
+                if root.view.place == 0: MenuItem {
+                    title: Tr.column-modified;
+                    checkable: true;
+                    checked <=> root.mark-then-2;
+                    enabled: root.view.sort-key != 2;
+                    activated => {
+                        root.sort-then(2);
+                        root.done();
+                    }
+                }
+                if root.view.place == 0: MenuItem {
+                    title: Tr.column-created;
+                    checkable: true;
+                    checked <=> root.mark-then-4;
+                    enabled: root.view.sort-key != 4;
+                    activated => {
+                        root.sort-then(4);
+                        root.done();
+                    }
+                }
+                if root.view.place == 0: MenuItem {
+                    title: Tr.column-accessed;
+                    checkable: true;
+                    checked <=> root.mark-then-7;
+                    enabled: root.view.sort-key != 7;
+                    activated => {
+                        root.sort-then(7);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: Tr.column-kind;
+                    checkable: true;
+                    checked <=> root.mark-then-3;
+                    enabled: root.view.sort-key != 3;
+                    activated => {
+                        root.sort-then(3);
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: Tr.column-extension;
+                    checkable: true;
+                    checked <=> root.mark-then-5;
+                    enabled: root.view.sort-key != 5;
+                    activated => {
+                        root.sort-then(5);
+                        root.done();
+                    }
+                }
+                if root.view.place == 1: MenuItem {
+                    title: Tr.column-original;
+                    checkable: true;
+                    checked <=> root.mark-then-9;
+                    enabled: root.view.sort-key != 9;
+                    activated => {
+                        root.sort-then(9);
+                        root.done();
+                    }
+                }
+                if root.view.place == 1: MenuItem {
+                    title: Tr.column-deleted;
+                    checkable: true;
+                    checked <=> root.mark-then-10;
+                    enabled: root.view.sort-key != 10;
+                    activated => {
+                        root.sort-then(10);
+                        root.done();
+                    }
+                }
+                MenuSeparator { }
+                MenuItem {
+                    title: Tr.view-ascending;
+                    checkable: true;
+                    checked <=> root.mark-then-ascending;
+                    enabled: root.view.then-key >= 0;
+                    activated => {
+                        if (!root.view.then-ascending) {
+                            root.sort(root.view.then-key, true);
+                        }
+                        root.done();
+                    }
+                }
+                MenuItem {
+                    title: Tr.view-descending;
+                    checkable: true;
+                    checked <=> root.mark-then-descending;
+                    enabled: root.view.then-key >= 0;
+                    activated => {
+                        if (root.view.then-ascending) {
+                            root.sort(root.view.then-key, true);
+                        }
+                        root.done();
+                    }
+                }
+            }
+            MenuItem {
+                title: Tr.view-folders-first;
+                checkable: true;
+                checked <=> root.mark-folders-first;
+                activated => {
+                    root.view-command("folders-first");
+                    root.done();
+                }
+            }
+        }
+        // The columns of 자세히 after the name (as the menu of its heads).
+        Menu {
+            title: Tr.view-columns;
+            enabled: root.view.mode == 0;
+
+            // The trash's (NAV-16): where an item was, and when it was trashed.
+            if root.view.place == 1: MenuItem {
+                title: Tr.column-original;
+                checkable: true;
+                checked <=> root.mark-col-9;
+                activated => {
+                    root.column-toggled(9);
+                    root.done();
+                }
+            }
+            if root.view.place == 1: MenuItem {
+                title: Tr.column-deleted;
+                checkable: true;
+                checked <=> root.mark-col-10;
+                activated => {
+                    root.column-toggled(10);
+                    root.done();
+                }
+            }
+
+            MenuItem {
+                title: Tr.column-size;
+                checkable: true;
+                checked <=> root.mark-col-1;
+                activated => {
+                    root.column-toggled(1);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-modified;
+                checkable: true;
+                checked <=> root.mark-col-2;
+                activated => {
+                    root.column-toggled(2);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-created;
+                checkable: true;
+                checked <=> root.mark-col-4;
+                activated => {
+                    root.column-toggled(4);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-accessed;
+                checkable: true;
+                checked <=> root.mark-col-7;
+                activated => {
+                    root.column-toggled(7);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.column-kind;
+                checkable: true;
+                checked <=> root.mark-col-3;
+                activated => {
+                    root.column-toggled(3);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.column-extension;
+                checkable: true;
+                checked <=> root.mark-col-5;
+                activated => {
+                    root.column-toggled(5);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-attributes;
+                checkable: true;
+                checked <=> root.mark-col-6;
+                activated => {
+                    root.column-toggled(6);
+                    root.done();
+                }
+            }
+            if root.view.place == 0: MenuItem {
+                title: Tr.column-path;
+                checkable: true;
+                checked <=> root.mark-col-8;
+                activated => {
+                    root.column-toggled(8);
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The order of the columns after the name: each moves a place left or right, as
+            // its head dragged.
+            Menu {
+                title: Tr.view-column-order;
+                enabled: root.view.columns.length > 1;
+
+                for column[i] in root.view.columns: Menu {
+                    title: column.title;
+
+                    MenuItem {
+                        title: Tr.view-column-left;
+                        enabled: i > 0;
+                        activated => {
+                            root.column-moved(i, i - 1);
+                            root.done();
+                        }
+                    }
+                    MenuItem {
+                        title: Tr.view-column-right;
+                        enabled: i < root.view.columns.length - 1;
+                        activated => {
+                            root.column-moved(i, i + 2);
+                            root.done();
+                        }
+                    }
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-fit-columns, Shortcuts.fit-columns);
+                enabled: root.view.columns.length > 0;
+                activated => {
+                    root.command("fit-columns");
+                    root.done();
+                }
+            }
+        }
+        MenuSeparator { }
+        Menu {
+            title: Tr.view-theme;
+
+            MenuItem {
+                title: Tr.view-theme-light;
+                checkable: true;
+                checked <=> root.light-mark;
+                activated => {
+                    root.mark-theme(1);
+                    root.theme-chosen(1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-theme-dark;
+                checkable: true;
+                checked <=> root.dark-mark;
+                activated => {
+                    root.mark-theme(2);
+                    root.theme-chosen(2);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-theme-high-contrast;
+                checkable: true;
+                checked <=> root.high-contrast-mark;
+                activated => {
+                    root.mark-theme(3);
+                    root.theme-chosen(3);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-theme-system;
+                checkable: true;
+                checked <=> root.system-mark;
+                activated => {
+                    root.mark-theme(0);
+                    root.theme-chosen(0);
+                    root.done();
+                }
+            }
+            // THEME-07: the rows' and the gaps' room, and the size of the text, apart. Their own
+            // items, as 설정's 끌어 놓기: … are, not sub-menus: a third level would open over the
+            // 보기 menu in a narrow window. No keys (keyboard.md: Ctrl++ is 모든 열 너비 맞추기).
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-density-compact;
+                checkable: true;
+                checked <=> root.compact-mark;
+                activated => {
+                    root.choose-density(0);
+                }
+            }
+            MenuItem {
+                title: Tr.view-density-normal;
+                checkable: true;
+                checked <=> root.normal-density-mark;
+                activated => {
+                    root.choose-density(1);
+                }
+            }
+            MenuItem {
+                title: Tr.view-density-roomy;
+                checkable: true;
+                checked <=> root.roomy-mark;
+                activated => {
+                    root.choose-density(2);
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-text-size-90;
+                checkable: true;
+                checked <=> root.scale-90-mark;
+                activated => {
+                    root.choose-font-scale(90);
+                }
+            }
+            MenuItem {
+                title: Tr.view-text-size-100;
+                checkable: true;
+                checked <=> root.scale-100-mark;
+                activated => {
+                    root.choose-font-scale(100);
+                }
+            }
+            MenuItem {
+                title: Tr.view-text-size-115;
+                checkable: true;
+                checked <=> root.scale-115-mark;
+                activated => {
+                    root.choose-font-scale(115);
+                }
+            }
+            MenuItem {
+                title: Tr.view-text-size-130;
+                checkable: true;
+                checked <=> root.scale-130-mark;
+                activated => {
+                    root.choose-font-scale(130);
+                }
+            }
+            // I18N-01: the language of the window, from the next start (a change without one is
+            // P1). Items of their own, as the density's, for the room of a 560px window: 설정 has
+            // none left. Each language is named in its own words (한국어, English).
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-language-system;
+                checkable: true;
+                checked <=> root.system-language-mark;
+                activated => {
+                    root.choose-language(0);
+                }
+            }
+            MenuItem {
+                title: Tr.view-language-ko;
+                checkable: true;
+                checked <=> root.korean-mark;
+                activated => {
+                    root.choose-language(1);
+                }
+            }
+            MenuItem {
+                title: Tr.view-language-en;
+                checkable: true;
+                checked <=> root.english-mark;
+                activated => {
+                    root.choose-language(2);
+                }
+            }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: Shortcuts.titled(Tr.view-show-hidden, Shortcuts.toggle-hidden);
+            checkable: true;
+            checked <=> root.show-hidden;
+            activated => {
+                root.command("toggle-hidden");
+            }
+        }
+        // File Explorer's 파일 확장명 (보기 ▸ 표시); no key there, nor in Finder.
+        MenuItem {
+            title: Tr.view-show-extensions;
+            checkable: true;
+            checked <=> root.show-extensions;
+            activated => {
+                root.command("toggle-extensions");
+            }
+        }
+        // The toolbar (LAY-10); hidden, the panes keep their path rows and F10 still opens this
+        // menu. No key: File Explorer has none for its command bar.
+        MenuItem {
+            title: Tr.view-toolbar;
+            checkable: true;
+            checked <=> root.show-toolbar;
+            activated => {
+                root.command("toggle-toolbar");
+            }
+        }
+        // The folder tree (LAY-03): one tree at the left that follows the active pane, a tree
+        // beside each pane that follows it, or none; the key of 트리 숨김 (Ctrl+B) also brings
+        // the tree back as it showed last. Then F6 to it, only to a tree that shows: F6 passes a
+        // hidden one by.
+        Menu {
+            title: Tr.tree-title;
+
+            MenuItem {
+                title: Tr.view-tree-shared;
+                checkable: true;
+                checked <=> root.shared-tree-mark;
+                activated => {
+                    root.choose-tree(0, "tree-shared");
+                }
+            }
+            MenuItem {
+                title: Tr.view-tree-per-pane;
+                checkable: true;
+                checked <=> root.per-pane-tree-mark;
+                activated => {
+                    root.choose-tree(1, "tree-per-pane");
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-tree-hidden, Shortcuts.toggle-tree);
+                checkable: true;
+                checked <=> root.hidden-tree-mark;
+                activated => {
+                    root.choose-tree(2, "tree-hidden");
+                }
+            }
+            MenuSeparator { }
+            // The window gives the tree the keys once the menus have closed.
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-focus-tree, Shortcuts.focus-tree);
+                enabled: root.show-tree;
+                activated => {
+                    root.command("focus-tree");
+                }
+            }
+        }
+        MenuItem {
+            title: Shortcuts.titled(Tr.view-preview, Shortcuts.toggle-preview);
+            checkable: true;
+            checked <=> root.show-preview;
+            activated => {
+                root.command("toggle-preview");
+            }
+        }
+        // Where the job panel shows (LAY-09): under the panes, or in a window of its own, whose
+        // close button puts it back. No key: neither file manager has such a panel.
+        Menu {
+            title: Tr.view-job-panel;
+
+            MenuItem {
+                title: Tr.view-jobs-window;
+                checkable: true;
+                checked <=> root.jobs-window;
+                activated => {
+                    root.command("toggle-jobs-window");
+                    root.done();
+                }
+            }
+        }
+        MenuSeparator { }
+        // The panes: one or two, beside or above each other, the divider between them (its
+        // items act only while two panes show), and the commands between them.
+        Menu {
+            title: Tr.view-layout;
+
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-dual-pane, Shortcuts.toggle-dual-pane);
+                checkable: true;
+                checked <=> root.dual-pane;
+                activated => {
+                    root.command("toggle-dual");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-split, Shortcuts.toggle-split);
+                checkable: true;
+                checked <=> root.stacked;
+                activated => {
+                    root.command("toggle-split");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-even-split;
+                enabled: root.dual-pane;
+                activated => {
+                    root.even-split();
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.stacked ? Tr.view-divider-up : Tr.view-divider-left;
+                enabled: root.dual-pane;
+                activated => {
+                    root.divider-moved(-0.1);
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.stacked ? Tr.view-divider-down : Tr.view-divider-right;
+                enabled: root.dual-pane;
+                activated => {
+                    root.divider-moved(0.1);
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            // The commands between the two panes; those for the other pane act only while two
+            // panes show.
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-swap-panes, Shortcuts.swap-panes);
+                activated => {
+                    root.command("swap-panes");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-same-folder, Shortcuts.same-folder);
+                enabled: root.dual-pane;
+                activated => {
+                    root.command("same-folder");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-sync, Shortcuts.sync-navigation);
+                enabled: root.dual-pane;
+                checkable: true;
+                checked <=> root.sync-navigation;
+                activated => {
+                    root.command("toggle-sync");
+                    root.done();
+                }
+            }
+        }
+        MenuSeparator { }
+        // The tab the active pane shows (as its own menu, and the keys to move it along the
+        // strip).
+        Menu {
+            title: Tr.view-tab;
+
+            MenuItem {
+                title: Tr.view-tab-duplicate;
+                activated => {
+                    root.tab-command("duplicate");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: root.tab-pinned ? Tr.view-tab-unpin : Tr.view-tab-pin;
+                activated => {
+                    root.tab-command("pin");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-tab-move-other;
+                enabled: root.view.tabs.length > 1;
+                activated => {
+                    root.tab-command("move-other");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-tab-move-left, Shortcuts.move-tab-left);
+                enabled: root.view.active-tab > 0;
+                activated => {
+                    root.tab-command("move-left");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Shortcuts.titled(Tr.view-tab-move-right, Shortcuts.move-tab-right);
+                enabled: root.view.active-tab < root.view.tabs.length - 1;
+                activated => {
+                    root.tab-command("move-right");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Shortcuts.titled(Tr.tab-reopen, Shortcuts.reopen-tab);
+                enabled: root.view.can-reopen;
+                activated => {
+                    root.tab-command("reopen");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.tab-close-others;
+                enabled: root.view.tabs[root.view.active-tab].can-close-others;
+                activated => {
+                    root.tab-command("close-others");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.tab-close-right;
+                enabled: root.view.tabs[root.view.active-tab].can-close-right;
+                activated => {
+                    root.tab-command("close-right");
+                    root.done();
+                }
+            }
+        }
+        // 경로 복사 of the active pane's items, as in an item's menu (the menu key, macOS ⌃↩):
+        // the forms beside the key's reach the keyboard here too (KEY-02).
+        Menu {
+            title: Tr.command-copy-path;
+
+            for form[i] in PathForms.titles: MenuItem {
+                title: PathForms.title(i);
+                activated => {
+                    root.command("copy-path-\{i}");
+                    root.done();
+                }
+            }
+        }
+        // The settings the app keeps that have no place elsewhere: what a drop does without a
+        // modifier key (DND-02), the toast that offers to undo a dragged move (DND-07), whether
+        // a copy or a move asks about each item that fails (XFER-09), and on
+        // Windows whether a right click shows Windows' own menu (OPS-05). The four defaults are
+        // its own items, not a sub-menu of it: a third level would open over the 보기 menu in a
+        // narrow window and hide this one. After 경로 복사 without a separator, for the room of
+        // a 560px window.
+        Menu {
+            title: Tr.view-settings;
+
+            MenuItem {
+                title: Tr.view-drop-move;
+                checkable: true;
+                checked <=> root.drag-move-mark;
+                activated => {
+                    root.choose-drag-default(0);
+                }
+            }
+            MenuItem {
+                title: Tr.view-drop-copy;
+                checkable: true;
+                checked <=> root.drag-copy-mark;
+                activated => {
+                    root.choose-drag-default(1);
+                }
+            }
+            // As the system's file manager does: a move within a drive, a copy to another.
+            MenuItem {
+                title: Tr.view-drop-system;
+                checkable: true;
+                checked <=> root.drag-system-mark;
+                activated => {
+                    root.choose-drag-default(2);
+                }
+            }
+            MenuItem {
+                title: Tr.view-drop-ask;
+                checkable: true;
+                checked <=> root.drag-ask-mark;
+                activated => {
+                    root.choose-drag-default(3);
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-show-thumbnails;
+                checkable: true;
+                checked <=> root.show-thumbnails;
+                activated => {
+                    root.command("toggle-thumbnails");
+                    root.done();
+                }
+            }
+            // The 선택 menu has this item too; here the keys reach it (F10, ↑↓, Enter; KEY-02).
+            MenuItem {
+                title: Tr.select-checkboxes;
+                checkable: true;
+                checked <=> root.checkbox-select;
+                activated => {
+                    root.command("toggle-checkboxes");
+                    root.done();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-long-press;
+                checkable: true;
+                checked <=> root.long-press;
+                activated => {
+                    root.command("toggle-long-press");
+                    root.done();
+                }
+            }
+            MenuItem {
+                title: Tr.view-long-press-300;
+                checkable: true;
+                checked <=> root.press-300-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(300);
+                }
+            }
+            MenuItem {
+                title: Tr.view-long-press-500;
+                checkable: true;
+                checked <=> root.press-500-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(500);
+                }
+            }
+            MenuItem {
+                title: Tr.view-long-press-800;
+                checkable: true;
+                checked <=> root.press-800-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(800);
+                }
+            }
+            MenuItem {
+                title: Tr.view-long-press-1200;
+                checkable: true;
+                checked <=> root.press-1200-mark;
+                enabled: root.long-press;
+                activated => {
+                    root.choose-long-press-ms(1200);
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: Tr.view-move-undo-toast;
+                checkable: true;
+                checked <=> root.move-undo-toast;
+                activated => {
+                    root.command("toggle-move-undo-toast");
+                    root.done();
+                }
+            }
+            // XFER-09: off (the default), a copy or a move carries on past an item that fails
+            // and lists the failed ones at its end, where 다시 시도 tries them again; on, it
+            // stops at each one and asks. With the other switch of what a transfer does after
+            // it, and no separator before it, for the room of a 560px window.
+            MenuItem {
+                title: Tr.view-ask-on-error;
+                checkable: true;
+                checked <=> root.ask-on-error;
+                activated => {
+                    root.command("toggle-ask-on-error");
+                    root.done();
+                }
+            }
+            // PICK-05: off (the default), the picker of a copy or a move starts at the other
+            // pane's folder; on, at the folder one went to last.
+            MenuItem {
+                title: Tr.view-pick-from-last;
+                checkable: true;
+                checked <=> root.pick-from-last;
+                activated => {
+                    root.command("toggle-pick-start");
+                    root.done();
+                }
+            }
+            if root.system-menu-offered: MenuItem {
+                title: Tr.view-system-menu-first;
+                checkable: true;
+                checked <=> root.system-menu-first;
+                activated => {
+                    root.command("toggle-system-menu-first");
+                    root.done();
+                }
+            }
+            // The way out of the app, at the very bottom, where the system offers one.
+            if root.removal-offer != 0: MenuSeparator { }
+            if root.removal-offer == 1: MenuItem {
+                title: root.remove-app-title;
+                activated => {
+                    root.command("remove-app");
+                    root.done();
+                }
+            }
+            if root.removal-offer == 2: MenuItem {
+                title: Tr.view-open-uninstaller;
+                activated => {
+                    root.command("open-uninstaller");
+                    root.done();
+                }
+            }
+        }
+    }
+}

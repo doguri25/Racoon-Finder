@@ -1,0 +1,22 @@
+[package]
+name = "rf-core"
+description = "Core types shared by every crate: VPath, Entry, errors, app identity and data paths."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = "2.13.2"
+serde = "1.0.229"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+proptest = "1.11.0"
+serde_json = "1.0.154"
+tempfile = "3.27.0"

@@ -1,0 +1,63 @@
+# 밝게: the light theme, the palette and sizes of the mockup. docs/ux/themes.md says what each
+# token means and which values a file may give it.
+
+[theme]
+scheme = "light"
+icon-style = "line"
+marks = false
+# How strong a cut item and a hidden item show (their opacity).
+dim-cut = 0.4
+dim-hidden = 0.5
+
+[color]
+bg = "#F6F7F9"
+panel = "#FFFFFF"
+raised = "#F0F2F5"
+text = "#1C2024"
+muted = "#5C6370"
+faint = "#8A919C"
+disabled = "#8A919C"
+border = "#E1E4E8"
+pressed = "#E1E4E8"
+folder = "#B7791F"
+# The folder amber, for icons only: on the panel it is 3.6:1, enough for a graphic (3:1) but
+# not for text (4.5:1); a warning's text stays `text`.
+warning = "#B7791F"
+accent = "#2F6FEB"
+on-accent = "#FFFFFF"
+# 12% of the accent over white.
+selection = "#E6EEFD"
+# The selected text in a field: the selection's color, and the text.
+text-selection = "#E6EEFD"
+on-text-selection = "#1C2024"
+toast-bg = "#1C2024"
+toast-text = "#F2F4F7"
+toast-link = "#9DBBFF"
+toast-hover = "#FFFFFF1F"
+toast-pressed = "#FFFFFF33"
+shadow = "#00000033"
+shadow-small = "#00000029"
+shadow-toast = "#0000003D"
+shadow-dialog = "#00000052"
+scrim = "#00000059"
+scrim-light = "#00000033"
+
+[font]
+ui = ""
+list = ""
+mono = ""
+small = 12
+note = 13
+body = 14
+app-name = 15
+heading = 16
+title = 20
+
+[size]
+gap-xs = 4
+gap-s = 8
+gap-m = 12
+gap-l = 16
+row-height = 32
+radius = 8
+radius-large = 12

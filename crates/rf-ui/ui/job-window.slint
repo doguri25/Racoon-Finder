@@ -1,0 +1,235 @@
+// The job panel in a window of its own (LAY-09): 보기 ▸ 작업 패널 ▸ 별도 창 opens it in place of
+// the panel under the panes, and its close button puts the panel back there. It shows what the
+// panel under the panes shows, from the same models, which Rust hands to both; its buttons are
+// the same callbacks. The window is always there while that choice is on, also with no job to
+// show, and says so then.
+//
+// The keys of the panel work here as under the panes (`panel-key`): the arrows move among the
+// buttons, Space and Enter press, the panel's own keys move a job that waits, and Esc, Tab and F6
+// give the keys back to the main window's panes. The window's other shortcuts are the main
+// window's: a key the panel does not use does nothing here.
+//
+// While a dialog shows over the main window (`blocked`), the panel here takes no click and no
+// key, as the panel under the panes takes none under a dialog: it dims, and a click on it asks
+// for the main window, where the dialog waits (`blocked-clicked`).
+//
+// It shows the theme of the settings, as `NoticeWindow` does: the globals of a window are its
+// own, so Rust gives it `theme-choice` as it gives the main window.
+//
+// The panel scrolls in the window (THEME-07): the lines of its lists are counted for 보통 at
+// 100 %, where it fits, and with a larger look (or a smaller window) the part it does not hold is
+// reached by the wheel, and by the keys, which bring their line into view (`reveal`). Its scroll
+// bar shows only while there is something to scroll to.
+
+import { Palette, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { JobPanel, JobRowView, RecentRowView, HistoryRowView } from "job-panel.slint";
+import { Tr } from "tr.slint";
+
+export component JobWindow inherits Window {
+    in property <string> window-title;
+    // The theme of the settings, numbered as the main window's `theme-choice`: 0 follows the
+    // system, 1 is light, 2 dark, 3 high contrast.
+    in property <int> theme-choice;
+    // The density and the size of text of the settings, as the main window's `density` and
+    // `font-scale` (THEME-07).
+    in property <int> density: 1;
+    in property <int> font-scale: 100;
+    // What the panel shows, named as the main window names it: the jobs a worker has taken up,
+    // those that wait, the keyboard cursor, 최근 완료 and 되돌리기 기록.
+    in property <[JobRowView]> job-rows;
+    in property <[JobRowView]> job-queue;
+    in property <int> panel-line: -1;
+    in property <int> panel-button: -1;
+    in property <[RecentRowView]> recent-rows;
+    // The head of 최근 완료, with how many jobs it lists (Rust words it).
+    in property <string> recent-title;
+    in property <bool> recent-open;
+    in property <string> history-title;
+    in property <bool> history-open;
+    in property <[HistoryRowView]> history-rows;
+    in property <int> history-heads;
+    // A dialog shows over the main window: the panel waits for it.
+    in property <bool> blocked;
+    // A click on the panel while it waits.
+    callback blocked-clicked();
+    // A key while the window has the keys; true when the panel used it.
+    callback panel-key(text: string, ctrl: bool, shift: bool, alt: bool, meta: bool) -> bool;
+    callback job-pause(index: int);
+    callback job-resume(index: int);
+    callback job-cancel(index: int);
+    callback job-move-up(index: int);
+    callback job-move-down(index: int);
+    callback recent-toggled();
+    callback recent-cleared();
+    callback recent-details(index: int);
+    callback recent-save(index: int);
+    callback history-toggled();
+    callback history-run(redo: bool, index: int);
+
+    // The panel takes the keys (F6 from the main window's tree).
+    public function take-keys() {
+        keys.focus();
+    }
+
+    // The part of the panel from `top` (from the panel's top) and `height` tall shows: the page
+    // scrolls as little as it can to it, to its top when it is taller than the window.
+    function reveal(top: length, height: length) {
+        let shown = -page.content-y;
+        let lowest = min(0px, page.visible-height - page.content-height);
+        if (top < shown || height > page.visible-height) {
+            page.content-y = max(lowest, -top);
+        } else if (top + height > shown + page.visible-height) {
+            page.content-y = max(lowest, page.visible-height - top - height);
+        }
+    }
+
+    // How many lines each of the panel's three lists shows at once: one in the smallest window,
+    // which then holds two running jobs, a waiting one and both lists open, and one more for
+    // each 150px beyond.
+    private property <int> lines: clamp(floor((root.height - 460px) / 150px) + 1, 1, 8);
+    private property <bool> nothing: root.job-rows.length == 0 && root.job-queue.length == 0 && root.recent-rows.length == 0 && root.history-title == "";
+
+    title: root.window-title;
+    preferred-width: 720px;
+    preferred-height: 620px;
+    min-width: 520px;
+    min-height: 460px;
+    background: Theme.panel;
+    default-font-size: Theme.font-body;
+    default-font-family: Theme.font-ui;
+    forward-focus: keys;
+
+    // As in the main window: the widgets' scheme, and the app's colors from it when the system's
+    // setting is followed.
+    private property <color> widget-background: Palette.background;
+    private property <bool> system-dark: root.widget-background.to-hsv().value < 0.5;
+    public function show-theme() {
+        // Following the system, its scheme comes first, so that `system-dark` is the system's.
+        if (root.theme-choice == 0) {
+            Palette.color-scheme = ColorScheme.unknown;
+        }
+        Theme.pick(root.theme-choice, root.system-dark, root.density, root.font-scale);
+        if (root.theme-choice != 0) {
+            Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        }
+    }
+    changed system-dark => {
+        root.show-theme();
+    }
+    changed theme-choice => {
+        root.show-theme();
+    }
+    changed density => {
+        root.show-theme();
+    }
+    changed font-scale => {
+        root.show-theme();
+    }
+
+    init => {
+        root.show-theme();
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            // The dialog over the main window comes first.
+            if (root.blocked) {
+                return accept;
+            }
+            if (root.panel-key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta)) {
+                return accept;
+            }
+            reject
+        }
+
+        if root.nothing: Text {
+            width: parent.width;
+            height: parent.height;
+            text: Tr.job-window-empty;
+            color: Theme.muted;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        page := ScrollView {
+            width: parent.width;
+            height: parent.height;
+            content-width: self.visible-width;
+            content-height: panel.preferred-height;
+
+            panel := JobPanel {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: self.preferred-height;
+                rows: root.job-rows;
+                queue: root.job-queue;
+                queue-lines: root.lines;
+                recent: root.recent-rows;
+                recent-title: root.recent-title;
+                recent-open: root.recent-open;
+                recent-lines: root.lines;
+                history-title: root.history-title;
+                history-open: root.history-open;
+                history: root.history-rows;
+                history-heads: root.history-heads;
+                history-lines: root.lines;
+                focus-line: keys.has-focus && !root.blocked ? root.panel-line : -1;
+                focus-button: keys.has-focus && !root.blocked ? root.panel-button : -1;
+                pause(index) => {
+                    root.job-pause(index);
+                }
+                resume(index) => {
+                    root.job-resume(index);
+                }
+                cancel(index) => {
+                    root.job-cancel(index);
+                }
+                move-up(index) => {
+                    root.job-move-up(index);
+                }
+                move-down(index) => {
+                    root.job-move-down(index);
+                }
+                recent-toggled => {
+                    root.recent-toggled();
+                }
+                recent-cleared => {
+                    root.recent-cleared();
+                }
+                recent-details(index) => {
+                    root.recent-details(index);
+                }
+                recent-save(index) => {
+                    root.recent-save(index);
+                }
+                history-toggled => {
+                    root.history-toggled();
+                }
+                history-run(redo, index) => {
+                    root.history-run(redo, index);
+                }
+                reveal(top, height) => {
+                    root.reveal(top, height);
+                }
+            }
+        }
+
+        // Over the panel while a dialog shows in the main window: it takes the clicks, and
+        // asks for that window.
+        if root.blocked: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: Theme.bg;
+            opacity: 0.6;
+
+            TouchArea {
+                clicked => {
+                    root.blocked-clicked();
+                }
+            }
+        }
+    }
+}

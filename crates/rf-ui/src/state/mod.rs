@@ -1,0 +1,1602 @@
+//! The main window's state, and what its keys, clicks and the loader's events do to it.
+//!
+//! [`AppState`] is plain data on the UI thread: the two panes and their tabs (module `tabs`
+//! for duplicating, reopening, reordering, pinning and moving them), which one has the keyboard,
+//! whether hidden items show, how the window lays them out ([`Layout`]) and whether navigation
+//! sync is on, the folder tree of the sidebar, the jobs of the job panel, the
+//! window that shows over the main window (a [`Modal`]), the destination picker's folder
+//! tree and recent targets ([`AppState::shown_picker`]), the items a drag of rows carries
+//! ([`AppState::drag`]), what its drop does (the keys held and the choices of 보기 ▸ 설정,
+//! module `drop_rule`), what a rest of it opens and the moves it made (module `drag`), the
+//! files another app drags onto the window (module `outside`), the favorites the user keeps in
+//! the sidebar and its group of recent folders (module `favorites`), the address bar's lists
+//! (module `address`: a folder's subfolders
+//! under the `›` of a piece of the path row, and the path field's completions), and the views
+//! remembered per folder (module `view`: the view modes, the columns and the orders), the selection
+//! tools, listing a folder again and the extensions shown or not (module `select`), the
+//! item the preview panel and quick look show (module `preview`), what it put on the
+//! system's clipboard and pastes from there (module `clipboard`), the properties window
+//! with the checksums of its files (module `properties`), the job panel from the keyboard
+//! and the order of its queue (module `panel`), the jobs that ended and their logs and
+//! notifications (module `report`),
+//! and the jobs going on behind the tray icon while the window is hidden (module `tray`). Its
+//! methods
+//! change it and return the [`Effect`]s that need a worker
+//! thread, the job engine or the screen, which the
+//! [`Controller`](crate::controller::Controller) carries out: a listing to start, a link to
+//! follow or a vanished folder's nearest parent to find, a file to open, a job to submit or a
+//! question to answer, a notice, a row to scroll to. Keeping the two apart lets the tests
+//! drive the state without a window.
+//!
+//! Every change of a file is a job ([`Effect::Job`]); nothing here or in the controller writes
+//! a file itself, but for the log of a job the user saves ([`Effect::SaveLog`]): a new file of
+//! the app's own, written on a worker thread and never over a file that is there.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
+
+use rf_core::{ErrorKind, Os, VPath};
+use rf_jobs::{CreatedItem, JobId, JobSpec, TransferMode, UndoRecord};
+use rf_platform::dnd::DragMods;
+use rf_vfs::{SortKey, VisibilityFilter};
+
+use crate::dialogs::{Failures, Modal};
+use crate::hashing::HashRequest;
+use crate::jobs::{History, JobEffect, JobRows, RecentJobs, SharedReport};
+use crate::keys::{Command, Mods};
+use crate::loader::{Followed, LoadEvent, LoadRequest, NamesRequest};
+use crate::notify::Notice;
+use crate::pane::{Handled, LoadStatus, OpenAction, Pane, SortRequest, Tab, ancestors};
+use crate::places::Place;
+use crate::preview::PreviewRequest;
+use crate::properties::MeasureRequest;
+use crate::selection::Pick;
+use crate::settings::{DragDefault, Found, OnError, PickStart, Session, SessionPane, Waiting};
+use crate::tree::{NodeId, Tree};
+use crate::words;
+
+mod address;
+mod clipboard;
+mod copies;
+mod drag;
+pub mod drop_rule;
+mod favorites;
+mod jobs;
+mod layout;
+mod links;
+pub mod long_press;
+mod outside;
+mod panel;
+mod pick;
+mod pointer;
+mod preview;
+mod properties;
+mod removal;
+mod report;
+mod select;
+mod shell;
+mod sidebar;
+mod tabs;
+mod trash;
+mod tray;
+mod undo_list;
+mod view;
+
+pub use address::{
+    Completion, Environment, FileUrl, MAX_NAMES, Names, Subfolders, Typed, expand_user_path,
+    is_remote_url, read_file_url, read_typed, shell_place_named, split_last,
+};
+pub use clipboard::{
+    CLEAR_TRIES, ClipboardFailure, ClipboardWork, CutLeft, PathForm, file_url, path_text,
+};
+pub use copies::copy_origins;
+pub use drag::{
+    Drag, DragOut, DropOffer, DropSpot, Hover, MOVE_TOAST_TIME, SPRING_DELAY, dropped_effect,
+};
+pub use favorites::{RECENT_FOLDERS, RecentAt, Unkept};
+use layout::Step;
+pub use layout::{
+    BOTTOM_EDGE, DEFAULT_WINDOW, EVEN_SHARE, FRAME, Layout, MAX_SHARE, MIN_SHARE, ON_SCREEN,
+    Placement, SavedPlace, Screen, TreeMode, placement,
+};
+pub use links::{LinkChoice, LinkFacts, link_facts, link_job};
+pub use panel::PanelButton;
+pub use pointer::{DOUBLE_CLICK, RowPress, SWIPE_DISTANCE, SlowClick, SlowTarget};
+pub use preview::{
+    PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, PREVIEW_MIN_WINDOW, PREVIEW_SHARE, PreviewShown,
+    preview_width,
+};
+pub use removal::{RemovalStop, RemovalWork};
+pub use select::{MATCH_STRETCH, MatchRequest, Matched, SelectState};
+pub use shell::{MenuFacts, MenuPlace, MenuShown, ShellWork, SystemMenuAsk, menu_facts};
+pub use trash::{TRASH_COMMANDS, changes_trash, computer_entries, place_capabilities};
+pub use tray::TrayCommand;
+pub use undo_list::{HistoryLine, HistoryView};
+pub use view::{
+    Chosen, Column, DEFAULT_THUMB_SIZE, FolderView, GridShape, KeyMove, MAX_COLUMN_WIDTH,
+    MAX_FOLDER_URI, MAX_FOLDER_VIEWS, MAX_THUMB_SIZE, MIN_COLUMN_WIDTH, MIN_THUMB_SIZE, Paging,
+    ShownColumn, StoredView, THUMB_STEPS, TILE_WIDTH, UnknownParts, ViewMode, ViewStore,
+    grid_shape, target, thumb_request_side,
+};
+
+/// The left pane's position in [`AppState::panes`].
+pub const LEFT: usize = 0;
+/// The right pane's position in [`AppState::panes`].
+pub const RIGHT: usize = 1;
+
+/// The shortest time between two automatic reloads of a folder whose watch ended while the
+/// folder is still there, so that a watch that keeps failing cannot reload it in a loop.
+pub const AUTO_RELOAD_GAP: Duration = Duration::from_secs(5);
+
+/// What a change of the [`AppState`] needs done outside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effect {
+    /// List and watch a tab's folder ([`Loader::request`](crate::loader::Loader::request)).
+    Load(LoadRequest),
+    /// Put a tab's rows in a new order on a worker thread ([`SortRequest::run`]), then hand them
+    /// to [`AppState::sorted`].
+    Sort(SortRequest),
+    /// Match the names of the pattern window's rows on a worker thread ([`MatchRequest::run`],
+    /// which a newer request stops), then hand what it found to [`AppState::pattern_matched`].
+    MatchNames(MatchRequest),
+    /// Make the preview of an item on the worker of the previews, after
+    /// [`PREVIEW_DELAY`](crate::preview::PREVIEW_DELAY) and in the place of (stopping) the one
+    /// asked for before ([`make_preview`](crate::preview::make_preview)), then hand it to
+    /// [`AppState::previewed`].
+    Preview(PreviewRequest),
+    /// Stop the preview asked for last: nothing it would show shows any more.
+    StopPreview,
+    /// Find out on the measure worker what the properties window's listing does not tell
+    /// ([`measure`](crate::properties::measure)), in the place of (stopping) the request before,
+    /// and hand its news to [`AppState::measure_news`] and its end to [`AppState::measured`].
+    Measure(MeasureRequest),
+    /// Stop the measure worker's request: the window closed, or 중지 stopped its count.
+    StopMeasure,
+    /// Hash the properties window's files on the worker of the checksums
+    /// ([`hash_files`](crate::hashing::hash_files)), in the place of (stopping) the request
+    /// before, and hand its news to [`AppState::hash_news`] (a failure to
+    /// [`AppState::hashes_failed`]).
+    Hash(HashRequest),
+    /// Stop the checksums under way: the window closed.
+    StopHashes,
+    /// The watch of the tab with `generation` ended, or the folder of a tab reopened under it is
+    /// gone: find on a worker thread where to go
+    /// ([`Loader::nearest_existing_parent`](crate::loader::Loader::nearest_existing_parent) of
+    /// `path`, after [`VANISHED_SETTLE`](crate::controller::VANISHED_SETTLE)), then call
+    /// [`AppState::found_existing`].
+    FindExisting { generation: u64, path: VPath },
+    /// The row opened in the tab with `generation` is a link: follow it on a worker thread
+    /// ([`Loader::follow`](crate::loader::Loader::follow)), then hand the result, which
+    /// carries `generation`, to [`AppState::followed`].
+    Follow { generation: u64, link: VPath },
+    /// Open the file with the system's default app.
+    OpenFile(VPath),
+    /// The folder of the tab with `generation` came back after its watch ended, within
+    /// [`AUTO_RELOAD_GAP`] of its last automatic reload: call [`AppState::reload_due`] after
+    /// `after` (a one-shot timer on the UI thread).
+    ReloadLater {
+        generation: u64,
+        path: VPath,
+        after: Duration,
+    },
+    /// Ask the system for something on a worker thread (`crate::open::shell`): 연결 프로그램, a
+    /// program run as administrator, a terminal, its properties window. A list of apps comes
+    /// back to [`AppState::apps_found`]; a failure shows as a notice.
+    Shell(ShellWork),
+    /// Show a menu that no click opened: from the keys, or once a worker found what it lists.
+    ShowMenu(MenuShown),
+    /// Show the system's own menu of items (Windows' shell menu, OPS-05) on the next turn of the
+    /// event loop, with no borrow of the state held; what is chosen there goes to
+    /// [`AppState::system_menu_chosen`].
+    SystemMenu(SystemMenuAsk),
+    /// Show the system's picker of the ways to share these items (macOS, 공유…) where the item
+    /// menu showed, on the next turn of the event loop.
+    Share(Vec<VPath>),
+    /// Show a notice in the corner of the window.
+    Notice(String),
+    /// Show the path of pane `side` as text to edit.
+    EditPath(usize),
+    /// Put `text` into the path field of pane `side`, while it is edited: a Tab that waited for
+    /// the completion list's first names has completed it.
+    FillPath { side: usize, text: String },
+    /// Put `text` into the destination picker's path field: a Tab that waited for the names
+    /// that complete it has completed it (PICK-03).
+    FillPickPath(String),
+    /// Give the toolbar's filter box (이 폴더에서 거르기) the keys.
+    FocusFilter,
+    /// Open the 보기 menu.
+    ShowViewMenu,
+    /// Give folder tree `n` the keys (module `state::sidebar`): 0 the shared one or the left
+    /// pane's, 1 the right pane's.
+    FocusTree(usize),
+    /// Give the keys back to the panes (from the tree, or from a part of the window that is
+    /// gone).
+    FocusPanes,
+    /// Give the job panel the keys (module `state::panel`).
+    FocusPanel,
+    /// Scroll pane `side` so that `row` shows.
+    ScrollTo { side: usize, row: usize },
+    /// Scroll 자세히 of pane `side` sideways, a step to the right or to the left, when its
+    /// columns are wider than the pane (← and → there).
+    ScrollSideways { side: usize, right: bool },
+    /// Fit each column of 자세히 of pane `side` to its texts in the rows on screen (모든 열 너비
+    /// 맞추기); the screen measures them, and hands each width back as a column's new width
+    /// ([`AppState::set_column_width`]).
+    FitColumns(usize),
+    /// List the folders in a folder of the tree
+    /// ([`Loader::list_folders`](crate::loader::Loader::list_folders)); the listing comes
+    /// back to [`AppState::loaded`].
+    LoadChildren(LoadRequest),
+    /// Scroll folder tree `tree` so that its row `row` shows: its pane's folder just found
+    /// there, or its keyboard cursor.
+    ScrollTree { tree: usize, row: usize },
+    /// Scroll the sidebar of tree `tree` so that the keyboard cursor in the group of recent
+    /// folders, at `at`, shows.
+    ScrollRecent { tree: usize, at: RecentAt },
+    /// Find out on a worker thread which of these folders (the recent ones and the favorites)
+    /// are folders still (`std::fs::metadata`), then call [`AppState::folders_checked`].
+    CheckFolders(Vec<VPath>),
+    /// Paths of another app's drag were dropped on the gap `index` of the list of favorites
+    /// (`None`: its end): find out on a worker thread which of `sources` are folders
+    /// (`std::fs::metadata`), then call [`AppState::folders_kept`] with `generation`.
+    KeepDropped {
+        generation: u64,
+        sources: Vec<VPath>,
+        index: Option<usize>,
+    },
+    /// List the names of folders for a list of the address bar
+    /// ([`Loader::list_names`](crate::loader::Loader::list_names)); they come back to
+    /// [`AppState::loaded`].
+    ListNames(NamesRequest),
+    /// Find out on a worker thread what is at `path`, the destination picker's target or a
+    /// path typed into it ([`Loader::inspect_target`](crate::loader::Loader::inspect_target),
+    /// with `from_dir`, the folder the items are in), and hand it to
+    /// [`AppState::target_inspected`] with `generation`.
+    InspectTarget {
+        generation: u64,
+        path: VPath,
+        from_dir: VPath,
+    },
+    /// Scroll the picker's folder tree so that row `row`, its target just found there, shows.
+    ScrollPickTree(usize),
+    /// Ask the job engine for something ([`Jobs::carry_out`](crate::jobs::Jobs::carry_out)).
+    /// A job it starts goes to [`AppState::track`], and what the history can do next then to
+    /// [`AppState::set_history`].
+    Job(JobEffect),
+    /// Find on a worker thread whether the location of `folder` has a trash
+    /// (`rf_platform::trash_supported`), then call [`AppState::trash_checked`] with `paths`.
+    CheckTrash { folder: VPath, paths: Vec<VPath> },
+    /// Read again on a worker thread the free space of the folders of `tabs` (with each tab's
+    /// generation, for [`AppState::loaded`] as a [`LoadEvent::Space`], which only a tab that
+    /// still has that generation takes) and of the drives `drives` (for
+    /// [`AppState::drive_space`]): a job that ended has changed it.
+    ReadSpace {
+        tabs: Vec<(u64, VPath)>,
+        drives: Vec<VPath>,
+    },
+    /// Find on a worker thread how each copy of `copies` (as its job left it, then its
+    /// original) is now, that job having ended at `at`
+    /// ([`Loader::check_copy`](crate::loader::Loader::check_copy)), then call
+    /// [`AppState::copies_checked`] with `token` and what was found, in order. The look stops
+    /// when the app ends.
+    CheckCopies {
+        token: u64,
+        copies: Vec<(CreatedItem, VPath)>,
+        at: Option<SystemTime>,
+    },
+    /// Ask the clipboard's worker for something; it carries out one request at a time, in the
+    /// order they come, and hands the answer to the method the request names.
+    Clipboard(ClipboardWork),
+    /// Show a toast with the message `text` and the button `action`, whose click comes back
+    /// to [`AppState::toast_clicked`] with `token`, for `time`, or for the window's usual time
+    /// (`None`).
+    Toast {
+        token: u64,
+        text: String,
+        action: String,
+        time: Option<Duration>,
+    },
+    /// Show `text` where the toasts show, without a button, until [`Effect::NotBusy`] with
+    /// `token` comes or a toast takes its place: a worker is at something the user waits for.
+    Busy { token: u64, text: String },
+    /// The work of the notice [`Effect::Busy`] `token` is over: the notice goes, unless a
+    /// toast has taken its place.
+    NotBusy(u64),
+    /// End the app ([`crate::jobs::close_down`] on a worker thread, then the end of the event
+    /// loop). [`AppState::begin_quit`] has closed the windows and stopped taking questions.
+    Quit,
+    /// Show a notification of the system ([`crate::notify::Notifier`]), without waiting for it.
+    Notify(Notice),
+    /// Hide the window: the jobs go on behind the tray icon, which shows
+    /// [`AppState::tray_view`] from now on (XFER-15).
+    ToTray,
+    /// Show the window again, in front, and take the tray icon away.
+    FromTray,
+    /// Write the log of the job that left `report` into `folder`, named by the job
+    /// ([`crate::jobs::log_name`]) or a free name beside it, on a worker thread
+    /// ([`crate::jobs::save_log`]), then hand what came of it to [`AppState::log_saved`].
+    SaveLog { report: SharedReport, folder: VPath },
+    /// A step of removing the app, on a worker thread ([`RemovalWork`]).
+    Removal(RemovalWork),
+    /// Find the places of the sidebar again on a worker thread (the well-known folders and the
+    /// drives, `crate::places`), then call [`AppState::set_places`]: F5 in 내 PC, whose list is
+    /// the sidebar's drives.
+    FindPlaces,
+}
+
+/// The pane of `saved`, its tabs pinned as they were and the one that showed showing, at
+/// `default` when it kept no tab; the requests of their listings go to `effects`.
+fn restored_pane(
+    saved: SessionPane,
+    default: VPath,
+    filter: VisibilityFilter,
+    effects: &mut Vec<Effect>,
+) -> Pane {
+    let SessionPane {
+        tabs,
+        active,
+        pinned,
+    } = saved;
+    let mut tabs = tabs.into_iter();
+    let (mut pane, request) = Pane::new(tabs.next().unwrap_or(default), filter);
+    effects.push(Effect::Load(request));
+    for tab in tabs {
+        effects.push(Effect::Load(pane.add_tab(tab)));
+    }
+    for (tab, pinned) in pane.tabs_mut().iter_mut().zip(pinned) {
+        tab.set_pinned(pinned);
+    }
+    pane.select_tab(active.min(pane.tabs().len() - 1));
+    pane
+}
+
+/// Makes each tab of `waiting` stand in at home for its folder of the last run
+/// ([`Tab::stand_in_for`]); one whose pane or place is not there is passed over.
+fn stand_in(panes: &mut [Pane; 2], waiting: &[Waiting]) {
+    for waiting in waiting {
+        if let Some(tab) = panes
+            .get_mut(waiting.side)
+            .and_then(|pane| pane.tabs_mut().get_mut(waiting.tab))
+        {
+            tab.stand_in_for(waiting.path.clone());
+        }
+    }
+}
+
+/// What the button of the toast on screen does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+    /// Undo the job that left `record`, if it is still the next one to undo.
+    Undo(UndoRecord),
+    /// Show the items the job could not process.
+    Details(Failures),
+    /// Take these items out of the trash to a folder the user chooses (위치를 골라 꺼내기…): a
+    /// restore found their original folders gone.
+    RestoreElsewhere(Vec<rf_vfs::TrashItem>),
+}
+
+/// The window's state on the UI thread: two panes, the one with the keyboard, whether hidden
+/// items show, and the folder tree that follows the active pane.
+#[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact of the window, not states of one machine"
+)]
+pub struct AppState {
+    panes: [Pane; 2],
+    active: usize,
+    show_hidden: bool,
+    /// The names of files show their extensions (NAV-11).
+    show_extensions: bool,
+    /// One pane or two, how they share the room, and the side panels.
+    layout: Layout,
+    /// Navigation sync is on ([`layout`]).
+    sync: bool,
+    /// What navigation sync waits for the other pane's listing to decide.
+    sync_wait: Option<layout::SyncWait>,
+    /// The sidebar's folder trees, whose roots are the places: tree 0 is the shared one, and
+    /// the left pane's while each pane has its own; tree 1 the right pane's then
+    /// ([`Layout::tree_shows`]).
+    trees: [Tree; 2],
+    /// The node of the keyboard cursor ([`sidebar`]) in tree [`tree_keys`](Self::tree_keys),
+    /// once that tree had the keys.
+    tree_cursor: Option<NodeId>,
+    /// The tree that had the keys last, whose keyboard cursor `tree_cursor` is.
+    tree_keys: usize,
+    /// The mode the sidebar shows in again after it was hidden (Ctrl+B): the last one it
+    /// showed in.
+    tree_back: TreeMode,
+    /// The folder tree of the destination picker, whose roots are the places too: made anew
+    /// for each picker, and dropped when it closes.
+    pick_tree: Tree,
+    /// The sidebar's places, once found: the roots of both trees, and the favorites the
+    /// picker offers. The favorites come first (the user's, or the system's until they edit the
+    /// list), then the drives.
+    places: Vec<Place>,
+    /// The favorites the user keeps and the folders visited last (module `favorites`).
+    kept: favorites::Kept,
+    /// The folders the picker offers as recent targets, the last one chosen first.
+    recent: Vec<VPath>,
+    /// Where a tab goes when its folder and every parent of it are gone.
+    home: Option<VPath>,
+    /// When each folder was last reloaded because its watch ended ([`AUTO_RELOAD_GAP`]).
+    auto_reloads: HashMap<VPath, Instant>,
+    /// The tabs, by generation, with a reload waiting for its gap ([`Effect::ReloadLater`]):
+    /// one at most each.
+    pending_reloads: HashSet<u64>,
+    /// The jobs of the job panel.
+    jobs: JobRows,
+    /// What the engine's history can undo and redo next, as the engine last told.
+    history: History,
+    /// When each record of [`history`](Self::history) was first seen (module `undo_list`), in
+    /// the order of the undo list, then the redo list.
+    history_stamps: Vec<(UndoRecord, SystemTime)>,
+    /// Whether the job panel's 되돌리기 기록 shows its rows below its head.
+    history_open: bool,
+    /// The window over the main window, if one shows.
+    modal: Option<Modal>,
+    /// The windows waiting for the one that shows to close, in the order they came.
+    later: VecDeque<Modal>,
+    /// The toast on screen whose button does something, by its token.
+    toast: Option<(u64, ToastAction)>,
+    /// The token of the last toast.
+    toast_token: u64,
+    /// The app is ending: no window opens and no question shows any more.
+    quitting: bool,
+    /// What the bottom of 보기 ▸ 설정 offers for removing the app.
+    removal_offer: Option<crate::removal::Offer>,
+    /// A worker is listing what 완전 삭제… would delete.
+    planning_removal: bool,
+    /// 완전 삭제… works (the app is `quitting` meanwhile, so the window is the closing note).
+    removing: bool,
+    /// The windows and job questions that were open when 완전 삭제… began, kept aside until it
+    /// is known whether it goes on.
+    removal_stash: Vec<Modal>,
+    /// Whether the notice of a journal error has shown (once is enough).
+    journal_error_told: bool,
+    /// For each job under way, how far the user had changed the selection of each tab when it
+    /// was submitted (the tab's id and [`Tab::selection_epoch`]): the item the job makes is
+    /// selected when it ends only in a tab whose selection the user has not changed since.
+    selections_at_submit: HashMap<JobId, Vec<(u64, u64)>>,
+    /// The copies an undo of a copy could not trash, and where they came from.
+    copies: copies::Copies,
+    /// The items the last press on a row readied a drag of, under the id its payload carries.
+    drag: Option<Drag>,
+    /// The click a press on a selected row left for its release.
+    pending_click: Option<drag::PendingClick>,
+    /// The rename a Tab of the name window applied, whose end opens the next item's (OPS-02).
+    rename_walk: Option<jobs::RenameWalk>,
+    /// The modifier keys held now, as the window last told ([`AppState::modifiers_changed`]).
+    drag_mods: DragMods,
+    /// What a drop does without a modifier key (보기 ▸ 설정).
+    drag_default: DragDefault,
+    /// A dragged move offers its undo once it is done (보기 ▸ 설정, DND-07).
+    move_undo_toast: bool,
+    /// What a copy or a move does about an item that fails (보기 ▸ 설정, XFER-09): carry on and
+    /// list it at the end, or ask about each one.
+    on_error: OnError,
+    /// Where the destination picker starts (보기 ▸ 설정, PICK-05).
+    pick_start: PickStart,
+    /// The jobs whose failed items were tried again (다시 시도 of the window of failed items):
+    /// none of their windows offers it a second time. Kept apart from 최근 완료, whose 지우기
+    /// must not bring the offer back while the job's toast still shows.
+    retried_jobs: HashSet<JobId>,
+    /// A right click shows Windows' own menu first (보기 ▸ 설정, OPS-05).
+    system_menu_first: bool,
+    /// The icon views show the files' thumbnails (보기 ▸ 설정, VIEW-09).
+    show_thumbnails: bool,
+    /// A press held on a row opens its menu (보기 ▸ 설정, PICK-02), and for how many
+    /// milliseconds (module `pointer`).
+    long_press: bool,
+    long_press_ms: u16,
+    /// The rows show a checkbox that selects them (선택 ▸ 체크박스로 선택, NAV-15).
+    checkbox_select: bool,
+    /// What decides whether the mouse's buttons and a trackpad's swipe act, and the swipe under
+    /// way (module `pointer`).
+    pointer: pointer::PointerContext,
+    swipe: pointer::Swipe,
+    /// The drop that waits for the menu of 놓을 때 묻기 to choose.
+    asked_drop: Option<drag::AskedDrop>,
+    /// The moves drops submitted that the engine has not started yet, with how many items each
+    /// carries ([`AppState::track`] notes each under its job).
+    drag_submits: Vec<(JobSpec, usize)>,
+    /// The moves drops made, by job, with how many items each carries: the end of one offers to
+    /// undo it (DND-07).
+    dragged_moves: HashMap<JobId, usize>,
+    /// The drag of another app over the window, while the system tells of one (module
+    /// `outside`).
+    outside: Option<outside::Outside>,
+    /// The list of a folder's subfolders that the `›` after a piece of a path row opened.
+    subfolders: Option<Subfolders>,
+    /// The completion list of the path field being edited.
+    completion: Option<Completion>,
+    /// Where `~` and the variables of a typed path come from.
+    environment: Environment,
+    /// The views remembered per folder (module `view`).
+    views: ViewStore,
+    /// What the pattern window works with (module `select`).
+    pattern: select::PatternWork,
+    /// What the preview panel and quick look show (module `preview`).
+    preview: preview::PreviewWork,
+    /// What the window put on the clipboard and the pastes on their way (module `clipboard`).
+    clipboard: clipboard::ClipWork,
+    /// The properties window (module `properties`).
+    properties: properties::PropertiesWork,
+    /// The item menu and the system's ways to open an item (module `shell`).
+    shell: shell::ShellState,
+    /// The line and the button of the job panel's keyboard cursor (module `panel`), as last
+    /// moved; [`AppState::panel_cursor`] keeps it within the lines there are.
+    panel_at: (usize, usize),
+    /// The job the keys moved in the queue last (module `panel`): the cursor stays on its line
+    /// as the queue's new order comes, until the keys move the cursor.
+    panel_follows: Option<JobId>,
+    /// The jobs that ended, for the job panel's 최근 완료 (module `report`), and whether the
+    /// list is open below its head.
+    recent_jobs: RecentJobs,
+    recent_open: bool,
+    /// The app's folder for logs, where a job's log goes unless the user chooses another.
+    log_dir: Option<VPath>,
+    /// Whether the window is the one in front, as the window last told (module `report`).
+    window_active: bool,
+    /// Whether the jobs can go on behind a tray icon while the window is hidden (module `tray`),
+    /// and whether they do now.
+    tray: bool,
+    background: bool,
+    /// A job that ended while the window was hidden left items it could not process: once the
+    /// last one has ended, the window comes back rather than the app ending (module `tray`).
+    background_failed: bool,
+    /// The listing of the trash that 휴지통 비우기… waits for, by its generation, to ask with
+    /// the items as they are then (module `trash`).
+    pending_empty: Option<u64>,
+}
+
+impl AppState {
+    /// The left pane at `left`, the right one at `right`, the left one active, and the
+    /// requests for their listings.
+    pub fn new(left: VPath, right: VPath, home: Option<VPath>) -> (AppState, Vec<Effect>) {
+        AppState::restore(left, right, Session::default(), &[], home)
+    }
+
+    /// The window as `session` left it: the tabs of each pane in their order, pinned or not,
+    /// with the one that showed, the pane with the keyboard, the hidden items shown or not, the
+    /// layout; and the requests for the tabs' listings. Navigation sync starts off. A pane
+    /// without tabs opens at `left` or `right`. The tabs of `waiting` show home in place of their
+    /// folder, which they stand in for ([`Tab::stand_in_for`]) until they move, or
+    /// [`AppState::restored_folder`] takes what is found.
+    pub fn restore(
+        left: VPath,
+        right: VPath,
+        session: Session,
+        waiting: &[Waiting],
+        home: Option<VPath>,
+    ) -> (AppState, Vec<Effect>) {
+        let filter = VisibilityFilter {
+            show_hidden: session.show_hidden,
+            ..VisibilityFilter::default()
+        };
+        let [left_saved, right_saved] = session.panes;
+        let mut effects = Vec::new();
+        let mut panes = [(left_saved, left), (right_saved, right)]
+            .map(|(saved, default)| restored_pane(saved, default, filter, &mut effects));
+        stand_in(&mut panes, waiting);
+        let state = AppState {
+            panes,
+            active: session.active_pane.min(RIGHT),
+            show_hidden: filter.show_hidden,
+            show_extensions: !session.hide_extensions,
+            layout: session.layout,
+            sync: false,
+            sync_wait: None,
+            trees: [Tree::new(filter), Tree::new(filter)],
+            tree_cursor: None,
+            tree_keys: LEFT,
+            tree_back: session.layout.tree.shown(),
+            pick_tree: Tree::new(filter),
+            places: Vec::new(),
+            kept: favorites::Kept::default(),
+            recent: Vec::new(),
+            home,
+            auto_reloads: HashMap::new(),
+            pending_reloads: HashSet::new(),
+            jobs: JobRows::default(),
+            history: History::default(),
+            history_stamps: Vec::new(),
+            history_open: false,
+            modal: None,
+            later: VecDeque::new(),
+            toast: None,
+            toast_token: 0,
+            quitting: false,
+            removal_offer: None,
+            planning_removal: false,
+            removing: false,
+            removal_stash: Vec::new(),
+            journal_error_told: false,
+            selections_at_submit: HashMap::new(),
+            copies: copies::Copies::default(),
+            drag: None,
+            pending_click: None,
+            rename_walk: None,
+            drag_mods: DragMods::default(),
+            drag_default: DragDefault::default(),
+            move_undo_toast: true,
+            on_error: OnError::default(),
+            pick_start: PickStart::default(),
+            retried_jobs: HashSet::new(),
+            system_menu_first: false,
+            show_thumbnails: true,
+            long_press: true,
+            long_press_ms: crate::settings::LONG_PRESS_DEFAULT_MS,
+            checkbox_select: false,
+            pointer: pointer::PointerContext::default(),
+            swipe: pointer::Swipe::default(),
+            asked_drop: None,
+            drag_submits: Vec::new(),
+            dragged_moves: HashMap::new(),
+            outside: None,
+            subfolders: None,
+            completion: None,
+            environment: Environment::default(),
+            views: ViewStore::default(),
+            pattern: select::PatternWork::default(),
+            preview: preview::PreviewWork::default(),
+            clipboard: clipboard::ClipWork::default(),
+            properties: properties::PropertiesWork::default(),
+            shell: shell::ShellState::default(),
+            panel_at: (0, 0),
+            panel_follows: None,
+            recent_jobs: RecentJobs::default(),
+            recent_open: false,
+            log_dir: None,
+            window_active: true,
+            tray: false,
+            background: false,
+            background_failed: false,
+            pending_empty: None,
+        };
+        (state, effects)
+    }
+
+    /// What the window shows, to keep for the next run: the tabs in their order, which of them
+    /// are pinned (a flag for each, as far as the last pinned one), the one that shows. A tab
+    /// that stands in at home for a folder of the last run (a slow drive, an unplugged one)
+    /// keeps that folder.
+    pub fn session(&self) -> Session {
+        let pane = |pane: &Pane| SessionPane {
+            tabs: pane
+                .tabs()
+                .iter()
+                .map(|tab| tab.stands_in_for().unwrap_or(tab.location()).clone())
+                .collect(),
+            active: pane.active(),
+            pinned: crate::settings::pinned_flags(pane.tabs().iter().map(Tab::pinned)),
+        };
+        Session {
+            panes: [pane(&self.panes[LEFT]), pane(&self.panes[RIGHT])],
+            active_pane: self.active,
+            show_hidden: self.show_hidden,
+            hide_extensions: !self.show_extensions,
+            layout: self.layout,
+        }
+    }
+
+    /// What a worker found at `path`, a folder of the last run that tabs stand in for at home
+    /// (a slow drive's): each tab that still stands in for it goes to it when it is there,
+    /// stops standing in when it is gone, and keeps standing in when its drive is not there.
+    pub fn restored_folder(&mut self, path: &VPath, found: Found) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for tab in self.panes.iter_mut().flat_map(Pane::tabs_mut) {
+            if tab.stands_in_for() != Some(path) {
+                continue;
+            }
+            match found {
+                Found::Folder => effects.push(Effect::Load(tab.navigate(path.clone()))),
+                Found::Gone => tab.end_stand_in(),
+                Found::Offline => {}
+            }
+        }
+        effects
+    }
+
+    pub fn panes(&self) -> &[Pane; 2] {
+        &self.panes
+    }
+
+    /// The pane with the keyboard: [`LEFT`] or [`RIGHT`].
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// The sidebar's first folder tree: the shared one, or the left pane's.
+    pub fn tree(&self) -> &Tree {
+        &self.trees[LEFT]
+    }
+
+    /// Both folder trees of the sidebar: the shared one (or the left pane's), then the right
+    /// pane's ([`Layout::tree_shows`] says which show).
+    pub fn trees(&self) -> &[Tree; 2] {
+        &self.trees
+    }
+
+    /// The pane tree `tree` follows: the active one for the shared tree, its own pane for a
+    /// tree of each pane.
+    pub fn tree_pane(&self, tree: usize) -> usize {
+        self.layout.tree_pane(tree, self.active)
+    }
+
+    /// The generation of every tab's last request, of every listing the trees wait for and of
+    /// the listings of the address bar's lists: the loads still worth running.
+    pub fn generations(&self) -> HashSet<u64> {
+        self.panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .map(Tab::generation)
+            .chain(self.trees.iter().flat_map(Tree::generations))
+            .chain(self.pick_tree.generations())
+            .chain(self.address_generations())
+            .collect()
+    }
+
+    /// Gives pane `side` the keyboard (a key, or a click on the pane or its rows), which ends
+    /// the name being typed to select (NAV-14) in either pane.
+    pub fn activate(&mut self, side: usize) {
+        self.active = side.min(RIGHT);
+        // A click on a pane or its rows ends a name being typed: a Space after it opens quick
+        // look.
+        for pane in &mut self.panes {
+            pane.active_tab_mut().end_typing();
+        }
+    }
+
+    /// Carries out the shortcut `command`, held with `mods`, on the active pane. `paging` is how
+    /// the active pane lays its rows out: how many items a line of the view holds and how many
+    /// lines `PageUp` and `PageDown` move. `None` would leave the key to the system, for a
+    /// command of the shortcut table the window does not do; the window does every one, so it
+    /// is always `Some`.
+    pub fn key(
+        &mut self,
+        command: Command,
+        mods: Mods,
+        paging: Paging,
+        now: Instant,
+    ) -> Option<Vec<Effect>> {
+        // A command of the window closes the list of subfolders under a `›` (the keys of the
+        // list itself go to `AppState::subfolders_key` instead), and ends the Tab of a rename.
+        self.interrupted();
+        // A window over the main window takes the keys itself; one that comes here anyway (or
+        // one pressed while the app ends) does nothing.
+        if self.modal.is_some() || self.quitting {
+            return Some(Vec::new());
+        }
+        let side = self.active;
+        // Any other key ends the name being typed: a Space after it opens quick look.
+        if !matches!(command, Command::TypeToSelect(_)) {
+            self.tab_mut(side).end_typing();
+        }
+        // A list of the shell (휴지통, 내 PC) does some commands its own way, and refuses those
+        // its capabilities leave out, saying why.
+        let shell = self.shell_refusal(side, &command);
+        let effects = shell.unwrap_or_else(|| self.command(side, command, mods, paging, now));
+        Some(effects)
+    }
+
+    /// [`AppState::key`]'s `command` in pane `side`, as it does it in a folder.
+    fn command(
+        &mut self,
+        side: usize,
+        command: Command,
+        mods: Mods,
+        paging: Paging,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let pick = pick_of(mods);
+        match command {
+            // With one pane, Tab stays on it: the other is hidden.
+            Command::SwitchPane => {
+                if self.layout.dual {
+                    self.active = RIGHT - side;
+                }
+                Vec::new()
+            }
+            Command::NextTab => self.step_tab(side, 1),
+            Command::PrevTab => self.step_tab(side, -1),
+            Command::ReopenTab => self.reopen_tab(side),
+            Command::MoveTabLeft => self.shift_tab(side, self.panes[side].active(), -1),
+            Command::MoveTabRight => self.shift_tab(side, self.panes[side].active(), 1),
+            Command::FocusFilter => self.focus_filter(),
+            Command::ViewMenu => vec![Effect::ShowViewMenu],
+            Command::Open => self.open_cursor(side),
+            Command::Up => self.go(side, Step::Up),
+            Command::Back => self.go(side, Step::Back),
+            Command::Forward => self.go(side, Step::Forward),
+            Command::HistoryMenu => self.history_menu(),
+            Command::CursorUp => self.step_cursor(side, KeyMove::Up, pick, paging),
+            Command::CursorDown => self.step_cursor(side, KeyMove::Down, pick, paging),
+            Command::CursorLeft => self.step_cursor(side, KeyMove::Left, pick, paging),
+            Command::CursorRight => self.step_cursor(side, KeyMove::Right, pick, paging),
+            Command::CursorHome => self.step_cursor(side, KeyMove::Home, pick, paging),
+            Command::CursorEnd => self.step_cursor(side, KeyMove::End, pick, paging),
+            Command::PageUp => self.step_cursor(side, KeyMove::PageUp, pick, paging),
+            Command::PageDown => self.step_cursor(side, KeyMove::PageDown, pick, paging),
+            Command::ToggleSelect
+            | Command::SelectAll
+            | Command::ClearSelection
+            | Command::InvertSelection
+            | Command::SelectPattern
+            | Command::SelectSameExtension => self.select(side, &command),
+            Command::Refresh => self.refresh(side),
+            Command::ToggleExtensions => self.toggle_extensions(),
+            Command::EditPath => vec![Effect::EditPath(side)],
+            Command::NewTab => self.add_tab(side),
+            Command::CloseTab => {
+                let tab = self.panes[side].active();
+                self.close_tab(side, tab)
+            }
+            Command::ToggleHidden => self.toggle_hidden(),
+            Command::TypeToSelect(text) => self
+                .tab_mut(side)
+                .type_to_select(&text, now)
+                .map(|row| Effect::ScrollTo { side, row })
+                .into_iter()
+                .collect(),
+            Command::NewFolder => self.new_folder(side),
+            Command::Rename => self.rename(side),
+            Command::Trash => self.trash(side),
+            Command::DeletePermanently => self.delete_permanently(side),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
+            Command::CopyTo => self.open_picker(side, TransferMode::Copy),
+            Command::MoveTo => self.open_picker(side, TransferMode::Move),
+            Command::ToggleDualPane => self.toggle_dual(),
+            Command::ToggleSplit => self.toggle_split(),
+            Command::ToggleTree => self.toggle_tree(),
+            Command::FocusTree => self.focus_tree(),
+            Command::TogglePreview => self.toggle_preview(),
+            Command::SwapPanes => self.swap_panes(),
+            Command::SameFolderInOther => self.same_folder_in_other(side),
+            Command::SyncNavigation => self.toggle_sync(),
+            Command::ViewDetails => self.set_view_mode(side, ViewMode::Details),
+            Command::ViewList => self.set_view_mode(side, ViewMode::List),
+            Command::ViewSmallIcons => self.set_view_mode(side, ViewMode::SmallIcons),
+            Command::ViewMediumIcons => self.set_view_mode(side, ViewMode::MediumIcons),
+            Command::ViewLargeIcons => self.set_view_mode(side, ViewMode::LargeIcons),
+            Command::ViewExtraLargeIcons => self.set_view_mode(side, ViewMode::ExtraLargeIcons),
+            Command::ViewThumbnails => self.show_thumbnail_view(side),
+            Command::ViewTiles => self.set_view_mode(side, ViewMode::Tiles),
+            Command::FitColumns => self.fit_columns(side),
+            Command::QuickLook => self.toggle_quick_look(side),
+            Command::Copy => self.put_on_clipboard(side, false),
+            Command::Cut => self.put_on_clipboard(side, true),
+            Command::Paste => self.paste(side, false),
+            Command::PasteMove => self.paste(side, true),
+            Command::CopyPath => self.copy_paths(side, PathForm::of_key(Os::CURRENT)),
+            Command::Properties => self.open_properties(side),
+            Command::ContextMenu => self.context_menu(side),
+            Command::SystemMenu => self.system_menu_key(side, mods.shift),
+            Command::OpenWith => self.open_with(side),
+            Command::RunAsAdmin => self.run_as_admin(side),
+            Command::OpenTerminal => self.open_terminal(side),
+            Command::SystemProperties => self.system_properties(side),
+            Command::GoComputer => self.go_to(rf_vfs::ShellPlace::Computer.path()),
+        }
+    }
+
+    /// A left press anywhere in the window (or a finger's): the rename the name window applied
+    /// opens no other window over what the press does (OPS-02).
+    pub fn left_pressed(&mut self) {
+        self.rename_walk = None;
+    }
+
+    /// A command of the window came: the list of subfolders under a `›` closes, and the rename
+    /// a Tab of the name window applied opens no next one over what the command does.
+    fn interrupted(&mut self) {
+        self.subfolders = None;
+        self.rename_walk = None;
+    }
+
+    /// Shows the tab `delta` places after (a negative `delta`: before) the one pane `side`
+    /// shows, going round from the last tab to the first and back.
+    fn step_tab(&mut self, side: usize, delta: isize) -> Vec<Effect> {
+        let pane = &mut self.panes[side];
+        let count = pane.tabs().len();
+        let next = pane.active().cast_signed().saturating_add(delta);
+        pane.select_tab(usize::try_from(next.rem_euclid(count.cast_signed())).unwrap_or(0));
+        Vec::new()
+    }
+
+    /// A right click on row `row` of pane `side`, before its menu opens: the pane gets the
+    /// keyboard, and the row the cursor. A row that is not selected becomes the selection, as
+    /// a click would make it; a selected one leaves the selection as it is, so that the menu
+    /// acts on all of it. The menu offers what [`AppState::item_menu`] then says.
+    pub fn row_menu(&mut self, side: usize, row: usize) -> Vec<Effect> {
+        self.activate(side);
+        let (selection, rows) = self.tab_mut(side).selection_mut();
+        match rows.get(row) {
+            Some(entry) if selection.is_selected(&entry.name) => selection.set_cursor(row, rows),
+            Some(_) => selection.click(row, rows),
+            None => {}
+        }
+        self.note_item_menu(side);
+        Vec::new()
+    }
+
+    /// A click on row `row` of pane `side`: Ctrl flips the row, Shift selects the range from
+    /// the anchor, a plain click selects the row alone. The pane gets the keyboard.
+    pub fn click_row(&mut self, side: usize, row: usize, ctrl: bool, shift: bool) -> Vec<Effect> {
+        self.activate(side);
+        let (selection, rows) = self.tab_mut(side).selection_mut();
+        if shift {
+            selection.extend_to(row, rows);
+        } else if ctrl {
+            selection.toggle(row, rows);
+        } else {
+            selection.click(row, rows);
+        }
+        Vec::new()
+    }
+
+    /// Opens row `row` of pane `side` (Enter or a double click): a folder shows in the tab, or
+    /// in a new tab beside a pinned one (and in the other pane with navigation sync), a file
+    /// opens in its app, and a link is followed first.
+    pub fn open_row(&mut self, side: usize, row: usize) -> Vec<Effect> {
+        self.activate(side);
+        if let Some(place) = self.shell_place_of(side) {
+            return self.open_row_in_shell(side, row, place);
+        }
+        let tab = self.tab_mut(side);
+        match tab.open_target(row) {
+            Some(OpenAction::Navigate(folder)) => {
+                let name = folder.file_name().map(std::ffi::OsStr::to_os_string);
+                let mut effects = load(self.navigate_shown(side, folder));
+                if let Some(name) = name {
+                    effects.extend(self.sync_open(side, &name));
+                }
+                effects
+            }
+            Some(OpenAction::OpenFile(file)) => vec![Effect::OpenFile(file)],
+            Some(OpenAction::Follow(link)) => vec![Effect::Follow {
+                generation: tab.generation(),
+                link,
+            }],
+            None => Vec::new(),
+        }
+    }
+
+    /// Shows tab `index` of pane `side`.
+    pub fn select_tab(&mut self, side: usize, index: usize) -> Vec<Effect> {
+        self.activate(side);
+        self.panes[side].select_tab(index);
+        Vec::new()
+    }
+
+    /// Closes tab `index` of pane `side`, pinned or not, unless it is the pane's last one; the
+    /// pane keeps it to reopen.
+    pub fn close_tab(&mut self, side: usize, index: usize) -> Vec<Effect> {
+        self.activate(side);
+        self.close_one(side, index);
+        Vec::new()
+    }
+
+    /// Opens a tab in pane `side` at the folder the pane shows.
+    pub fn add_tab(&mut self, side: usize) -> Vec<Effect> {
+        self.activate(side);
+        let here = self.tab(side).location().clone();
+        vec![Effect::Load(self.panes[side].add_tab(here))]
+    }
+
+    /// Goes to piece `index` of the path row of pane `side` (0 is the root).
+    pub fn open_crumb(&mut self, side: usize, index: usize) -> Vec<Effect> {
+        self.activate(side);
+        let Some(folder) = ancestors(self.tab(side).location()).into_iter().nth(index) else {
+            return Vec::new();
+        };
+        load(self.navigate_shown(side, folder))
+    }
+
+    /// Sorts pane `side` by `key` alone, the other way round when it already sorts by it (a
+    /// click on a column head, [`FolderView::sort_by`]); the folder remembers it.
+    pub fn sort(&mut self, side: usize, key: SortKey) -> Vec<Effect> {
+        self.sort_by(side, key, false)
+    }
+
+    /// The toolbar's filter box (이 폴더에서 거르기) changed to `text`: the active pane shows
+    /// only the rows whose names hold it (all of them for an empty one), and scrolls to its
+    /// cursor.
+    pub fn filter_edited(&mut self, text: &str) -> Vec<Effect> {
+        // A rename the name window applied opens no other window over the filter.
+        self.rename_walk = None;
+        let side = self.active;
+        let tab = self.tab_mut(side);
+        tab.set_name_filter(text);
+        let row = tab.selection().cursor().unwrap_or(0);
+        vec![Effect::ScrollTo { side, row }]
+    }
+
+    /// What the filter box shows: the filter of the active pane's tab.
+    pub fn filter_text(&self) -> &str {
+        self.tab(self.active).name_filter()
+    }
+
+    /// Lists the folder of pane `side` again ("다시 시도"), as F5 does: the rows stay until
+    /// the new listing replaces them.
+    pub fn retry(&mut self, side: usize) -> Vec<Effect> {
+        self.activate(side);
+        self.refresh(side)
+    }
+
+    /// Shows `folder` in the active pane (in a new tab beside a pinned one).
+    pub fn go_to(&mut self, folder: VPath) -> Vec<Effect> {
+        let side = self.active;
+        load(self.navigate_shown(side, folder))
+    }
+
+    /// Makes `places` (the well-known folders, then the others in their order: 내 PC, the
+    /// drives and 휴지통, as the controller finds them, [`crate::places::shell_places`]) the
+    /// roots of the folder tree, which starts again from them, closed, and finds the folder it
+    /// follows again; and of the picker's tree (without the places of the shell, which take no
+    /// items), when a picker is open. The well-known folders are the favorites the sidebar lists
+    /// until the user edits the list; after that the user's own come in their place. The same
+    /// places found again keep the trees as they are, with their new spaces. A tab that shows
+    /// 내 PC lists the drives again.
+    pub fn set_places(&mut self, places: &[Place]) -> Vec<Effect> {
+        self.kept.known = places
+            .iter()
+            .filter(|place| place.kind.is_favorite())
+            .cloned()
+            .collect();
+        let drives = places.iter().filter(|place| !place.kind.is_favorite());
+        let new: Vec<Place> = self
+            .shown_favorites()
+            .into_iter()
+            .chain(drives.cloned())
+            .collect();
+        // The same places found again (F5 in 내 PC) take their new spaces, and the trees stay as
+        // the user opened them; other places start them again.
+        let root = |place: &Place| (place.label.clone(), place.path.clone(), place.kind);
+        let same = new.iter().map(root).eq(self.places.iter().map(root));
+        self.places = new;
+        let mut effects = if same {
+            Vec::new()
+        } else {
+            self.reroot_places()
+        };
+        effects.extend(self.relist_shell(rf_vfs::ShellPlace::Computer));
+        effects
+    }
+
+    /// The free space of the drive at `path`, as a worker read it again
+    /// ([`Effect::ReadSpace`]): the sidebar shows it from now on. Nothing for a drive that is no
+    /// longer among the places.
+    pub fn drive_space(&mut self, path: &VPath, space: rf_platform::DiskSpace) {
+        for place in &mut self.places {
+            if place.kind == crate::places::PlaceKind::Drive && place.path == *path {
+                place.space = Some(space);
+            }
+        }
+    }
+
+    /// The room the sidebar knows on the drive that holds `path`, the deepest drive of the
+    /// places, once a worker has read it: what a pane's status line shows until the pane has
+    /// read the room of its own folder (NAV-12). Nothing looks at the disk here.
+    pub fn drive_free_of(&self, path: &VPath) -> Option<u64> {
+        self.places
+            .iter()
+            .filter(|place| {
+                place.kind == crate::places::PlaceKind::Drive && path.starts_with(&place.path)
+            })
+            .max_by_key(|place| ancestors(&place.path).len())
+            .and_then(|place| place.space)
+            .map(|space| space.available)
+    }
+
+    /// What a job that changed the folders `folders` has to have read again: the free space of
+    /// the drives they are on (the deepest drive of the places that holds each), and of every
+    /// listed tab on those drives, with its generation. Without known drives, a tab counts as on
+    /// the drive of a folder when both have one root.
+    fn space_to_read(&self, folders: &[VPath]) -> Effect {
+        let drives: Vec<&VPath> = self
+            .places
+            .iter()
+            .filter(|place| place.kind == crate::places::PlaceKind::Drive)
+            .map(|place| &place.path)
+            .collect();
+        let drive_of = |path: &VPath| -> Option<VPath> {
+            let deepest = drives
+                .iter()
+                .filter(|drive| path.starts_with(drive))
+                .max_by_key(|drive| ancestors(drive).len())
+                .map(|drive| (*drive).clone());
+            if drives.is_empty() {
+                ancestors(path).into_iter().next()
+            } else {
+                deepest
+            }
+        };
+        let mut touched: Vec<VPath> = Vec::new();
+        for drive in folders.iter().filter_map(drive_of) {
+            if !touched.contains(&drive) {
+                touched.push(drive);
+            }
+        }
+        let tabs = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .filter(|tab| tab.status() == LoadStatus::Ready)
+            .filter(|tab| drive_of(tab.location()).is_some_and(|drive| touched.contains(&drive)))
+            .map(|tab| (tab.generation(), tab.location().clone()))
+            .collect();
+        let drives = if drives.is_empty() {
+            Vec::new()
+        } else {
+            touched
+        };
+        Effect::ReadSpace { tabs, drives }
+    }
+
+    /// Shows the folder of row `row` of tree `tree` in the pane the tree follows (a click on
+    /// the row): the active pane for the shared tree, the tree's own pane, which gets the
+    /// keyboard, for a tree of each pane. The row is the tree's selection from then on, even
+    /// when another row shows the same folder.
+    pub fn open_tree_row(&mut self, tree: usize, row: usize) -> Vec<Effect> {
+        if tree > RIGHT {
+            return Vec::new();
+        }
+        let Some(id) = self.trees[tree].node_at(row) else {
+            return Vec::new();
+        };
+        let Some(folder) = self.trees[tree].node(id).map(|node| node.path.clone()) else {
+            return Vec::new();
+        };
+        if self.kept.missing.contains(&folder) {
+            return vec![Effect::Notice(words::start_folder_gone(&folder))];
+        }
+        self.trees[tree].select(id);
+        self.activate_tree_pane(tree);
+        self.go_to(folder)
+    }
+
+    /// Opens or closes row `row` of tree `tree` (a click on its chevron); the first opening
+    /// lists the folder. The other tree stays as it is.
+    pub fn toggle_tree_row(&mut self, tree: usize, row: usize) -> Vec<Effect> {
+        match self.trees.get(tree).and_then(|shown| shown.node_at(row)) {
+            Some(id) => self.with_tree(tree, |shown| shown.toggle(id).into_iter().collect()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Makes each tree that shows follow its pane (LAY-03): the shared tree the active pane,
+    /// a tree of each pane that pane. When the folder its pane shows is not the one the tree
+    /// follows (the pane, its tab or its folder changed), the tree opens the folders on the
+    /// way to it and selects it. The controller calls this after every change; it does nothing
+    /// while the folder stays the same, so a folder the user closed in a tree stays closed, and
+    /// nothing to a tree that does not show, which finds its pane's folder once it shows again.
+    /// The trees list their folders on the loader's workers, as the panes do.
+    pub fn follow_active(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for tree in self.layout.shown_trees(self.active) {
+            let location = self.tab(self.tree_pane(tree)).location();
+            if self.trees[tree].target() == Some(location) {
+                continue;
+            }
+            let location = location.clone();
+            effects.extend(self.with_tree(tree, |shown| shown.reveal(&location)));
+        }
+        effects
+    }
+
+    /// Takes an event of the loader. A rescan lists the folder again; a vanished folder is
+    /// looked for on a worker thread. The ticket of a vanished folder stays: its listing, if
+    /// still running, still comes. The names a list of the address bar waits for go to it; an
+    /// event that no tab asked for goes to the folder tree.
+    pub fn loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
+        // The listing of a list of the address bar.
+        let event = match self.address_loaded(event) {
+            Ok(effects) => return effects,
+            Err(event) => event,
+        };
+        // A tab reopened at a folder that is gone by now goes where the tab of a vanished
+        // folder goes, the nearest folder above it that is left, rather than to the error.
+        if let LoadEvent::Failed {
+            generation,
+            kind: ErrorKind::NotFound,
+        } = event
+            && let Some(tab) = self.tab_by_generation(generation)
+            && tab.take_reopened()
+        {
+            let path = tab.location().clone();
+            return vec![Effect::FindExisting { generation, path }];
+        }
+        let Some(side) = self.side_of(event.generation()) else {
+            return self.tree_loaded(event);
+        };
+        let new_rows = matches!(event, LoadEvent::Listed { .. } | LoadEvent::Changes { .. });
+        let generation = event.generation();
+        let finished = matches!(event, LoadEvent::Listed { .. } | LoadEvent::Failed { .. });
+        match self.panes[side].handle(event) {
+            Handled::Stale => Vec::new(),
+            // A row a job made may have come: it was selected, and shows.
+            Handled::Applied { tab } => {
+                // The trees' nodes of the folder take its folders, once the listing is whole;
+                // a reveal that lacked one of them may go on.
+                let mut effects = Vec::new();
+                let listed = &self.panes[side].tabs()[tab];
+                if new_rows && listed.status() == LoadStatus::Ready {
+                    let (folder, entries) = (listed.location(), listed.all());
+                    let before = [LEFT, RIGHT].map(|tree| self.trees[tree].selected());
+                    let picked = self.pick_tree.selected();
+                    let synced =
+                        [LEFT, RIGHT].map(|tree| self.trees[tree].sync_folder(folder, entries));
+                    let pick = self.pick_tree.sync_folder(folder, entries);
+                    for (tree, requests) in synced.into_iter().enumerate() {
+                        effects.extend(self.tree_effects(
+                            tree,
+                            before[tree],
+                            requests.unwrap_or_default(),
+                        ));
+                    }
+                    effects.extend(self.pick_tree_effects(picked, pick.unwrap_or_default()));
+                }
+                let shows = tab == self.panes[side].active();
+                effects.extend(
+                    self.panes[side].tabs_mut()[tab]
+                        .take_revealed()
+                        .filter(|_| shows)
+                        .map(|row| Effect::ScrollTo { side, row }),
+                );
+                // Navigation sync may wait for this listing, and so may 휴지통 비우기….
+                if finished {
+                    effects.extend(self.sync_listed(generation));
+                    effects.extend(self.empty_listed(generation));
+                }
+                // The pattern window may select among its rows.
+                if new_rows {
+                    effects.extend(self.pattern_rows_changed(side, tab));
+                }
+                effects
+            }
+            Handled::Reload { request, .. } => {
+                self.relisted(generation, request.generation);
+                vec![Effect::Load(request)]
+            }
+            Handled::Vanished {
+                generation, path, ..
+            } => vec![Effect::FindExisting { generation, path }],
+        }
+    }
+
+    /// Takes where the tab with `generation`, whose folder `path` vanished, can go: `found`,
+    /// the nearest folder of `path` that is still there, or home when none is. A tab that has
+    /// moved on since takes nothing. When `found` is `path` itself (the folder was replaced,
+    /// or only its watch failed), the folder is listed again; within [`AUTO_RELOAD_GAP`] of
+    /// its last automatic reload, that waits for the gap to pass ([`Effect::ReloadLater`]),
+    /// so a watch that keeps failing cannot reload it in a loop and a folder replaced twice
+    /// in quick succession still shows the second one. Otherwise the tab goes to `found`, and
+    /// when its pane shows it, a notice says why; when navigation sync waited to open folders
+    /// in it, sync turns off, and the same notice says so.
+    pub fn found_existing(
+        &mut self,
+        generation: u64,
+        path: &VPath,
+        found: Option<VPath>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        let Some(target) = found.or_else(|| self.home.clone()) else {
+            return Vec::new();
+        };
+        if target == *path {
+            if self.tab_by_generation(generation).is_none() {
+                return Vec::new();
+            }
+            let since = self
+                .auto_reloads
+                .get(path)
+                .map(|&at| now.saturating_duration_since(at))
+                .filter(|&since| since < AUTO_RELOAD_GAP);
+            if let Some(since) = since {
+                if !self.pending_reloads.insert(generation) {
+                    return Vec::new();
+                }
+                return vec![Effect::ReloadLater {
+                    generation,
+                    path: path.clone(),
+                    after: AUTO_RELOAD_GAP.saturating_sub(since),
+                }];
+            }
+            return self.auto_reload(generation, path, now);
+        }
+        let shown = self
+            .panes
+            .iter()
+            .any(|pane| pane.active_tab().generation() == generation);
+        let Some(tab) = self.tab_by_generation(generation) else {
+            return Vec::new();
+        };
+        let to_parent = path.starts_with(&target);
+        let mut effects = vec![Effect::Load(tab.navigate(target))];
+        // Navigation sync cannot open in it the folders it waited to open there: it turns off
+        // when the tab shows.
+        let sync_lost = self.sync_wait_vanished(generation) && shown;
+        if sync_lost {
+            self.sync = false;
+        }
+        // The pane that shows it moves: the user is told why, in one notice.
+        if shown {
+            let name = path.file_name().map_or_else(
+                || path.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let text = if sync_lost {
+                words::folder_vanished_sync_off(&name, to_parent)
+            } else {
+                words::folder_vanished(&name, to_parent)
+            };
+            effects.push(Effect::Notice(text));
+        }
+        effects
+    }
+
+    /// The time of the reload [`Effect::ReloadLater`] asked for has come: the tab with
+    /// `generation` lists its folder `path` again, unless it has moved on since.
+    pub fn reload_due(&mut self, generation: u64, path: &VPath, now: Instant) -> Vec<Effect> {
+        if !self.pending_reloads.remove(&generation) {
+            return Vec::new();
+        }
+        self.auto_reload(generation, path, now)
+    }
+
+    /// Lists the folder `path` of the tab with `generation` again after its watch ended, and
+    /// notes when; nothing for a tab that has moved on.
+    fn auto_reload(&mut self, generation: u64, path: &VPath, now: Instant) -> Vec<Effect> {
+        self.pending_reloads.remove(&generation);
+        let Some(tab) = self.tab_by_generation(generation) else {
+            return Vec::new();
+        };
+        let request = tab.reload();
+        // Navigation sync may wait for its listing.
+        self.relisted(generation, request.generation);
+        self.auto_reloads
+            .retain(|_, &mut at| now.saturating_duration_since(at) < AUTO_RELOAD_GAP);
+        self.auto_reloads.insert(path.clone(), now);
+        vec![Effect::Load(request)]
+    }
+
+    /// Takes what following a link gave ([`Loader::follow`](crate::loader::Loader::follow)).
+    /// Only the tab that still has the generation the result carries takes it: a tab that has
+    /// moved on since takes nothing. A pinned tab stays: the folder opens in a new tab beside
+    /// it.
+    pub fn followed(&mut self, followed: Followed) -> Vec<Effect> {
+        let Followed { generation, result } = followed;
+        let Some((side, index)) = self.place_of(generation) else {
+            return Vec::new();
+        };
+        match result {
+            Ok(OpenAction::Navigate(folder)) => load(self.navigate_tab(side, index, folder)),
+            Ok(OpenAction::OpenFile(file)) => vec![Effect::OpenFile(file)],
+            // Following never gives another link to follow.
+            Ok(OpenAction::Follow(_)) => Vec::new(),
+            Err(kind) => vec![Effect::Notice(words::cannot_open(kind))],
+        }
+    }
+
+    /// Takes an event of a listing of a folder tree: the picker's, when it waits for it, or
+    /// else the sidebar's tree that does (the second one when it does, else the first). One
+    /// that no node waits for is dropped. A listing that failed leaves
+    /// the node empty, with no notice. Then a tab that shows the folder, whole, gives the node
+    /// its folders as they are now when the tree's listing failed, or when the tab's watch
+    /// told of a change while that listing was on its way ([`Tree::listing_is_behind`]),
+    /// which may have been read before it.
+    fn tree_loaded(&mut self, event: LoadEvent) -> Vec<Effect> {
+        let generation = event.generation();
+        let in_picker = self
+            .pick_tree
+            .generations()
+            .any(|waited| waited == generation);
+        let side = usize::from(
+            self.trees[RIGHT]
+                .generations()
+                .any(|waited| waited == generation),
+        );
+        let tree = if in_picker {
+            &self.pick_tree
+        } else {
+            &self.trees[side]
+        };
+        let failed = matches!(event, LoadEvent::Failed { .. });
+        let folder = tree
+            .listing_of(generation)
+            .filter(|_| failed || tree.listing_is_behind(generation))
+            .cloned();
+        let take = |tree: &mut Tree| match event {
+            LoadEvent::Listed {
+                generation,
+                entries,
+            } => tree.apply_children(generation, entries),
+            LoadEvent::Failed { generation, .. } => {
+                tree.listing_failed(generation);
+                Vec::new()
+            }
+            // A listing of folders sends nothing else.
+            LoadEvent::Changes { .. }
+            | LoadEvent::Rescan { .. }
+            | LoadEvent::Vanished { .. }
+            | LoadEvent::Space { .. }
+            | LoadEvent::TrashItems { .. }
+            | LoadEvent::Names { .. } => Vec::new(),
+        };
+        let mut effects = if in_picker {
+            self.with_pick_tree(take)
+        } else {
+            self.with_tree(side, take)
+        };
+        let Some(folder) = folder else {
+            return effects;
+        };
+        let Some(shown) = self
+            .panes
+            .iter()
+            .flat_map(Pane::tabs)
+            .find(|tab| tab.status() == LoadStatus::Ready && *tab.location() == folder)
+        else {
+            return effects;
+        };
+        if in_picker {
+            let before = self.pick_tree.selected();
+            let requests = self.pick_tree.sync_folder(&folder, shown.all());
+            effects.extend(self.pick_tree_effects(before, requests.unwrap_or_default()));
+        } else {
+            let before = self.trees[side].selected();
+            let requests = self.trees[side].sync_folder(&folder, shown.all());
+            effects.extend(self.tree_effects(side, before, requests.unwrap_or_default()));
+        }
+        effects
+    }
+
+    /// Changes tree `tree` with `f` and turns what it asks for into effects
+    /// ([`AppState::tree_effects`]).
+    fn with_tree(
+        &mut self,
+        tree: usize,
+        f: impl FnOnce(&mut Tree) -> Vec<LoadRequest>,
+    ) -> Vec<Effect> {
+        let before = self.trees[tree].selected();
+        let requests = f(&mut self.trees[tree]);
+        self.tree_effects(tree, before, requests)
+    }
+
+    /// The effects of `requests`, the listings tree `tree` asked for in a change: those
+    /// listings, and a scroll to the row of its pane's folder when the tree has just found it
+    /// (its selection was `before` the change).
+    fn tree_effects(
+        &self,
+        tree: usize,
+        before: Option<NodeId>,
+        requests: Vec<LoadRequest>,
+    ) -> Vec<Effect> {
+        let mut effects: Vec<Effect> = requests.into_iter().map(Effect::LoadChildren).collect();
+        if self.trees[tree].selected() != before
+            && let Some(row) = self.trees[tree].selected_row()
+        {
+            effects.push(Effect::ScrollTree { tree, row });
+        }
+        effects
+    }
+
+    fn tab(&self, side: usize) -> &Tab {
+        self.panes[side].active_tab()
+    }
+
+    fn tab_mut(&mut self, side: usize) -> &mut Tab {
+        self.panes[side].active_tab_mut()
+    }
+
+    fn tab_by_generation(&mut self, generation: u64) -> Option<&mut Tab> {
+        self.panes
+            .iter_mut()
+            .find_map(|pane| pane.tab_by_generation_mut(generation))
+    }
+
+    /// The pane one of whose tabs made the request `generation`.
+    fn side_of(&self, generation: u64) -> Option<usize> {
+        self.place_of(generation).map(|(side, _)| side)
+    }
+
+    /// The pane and the position of the tab whose last request is `generation`.
+    fn place_of(&self, generation: u64) -> Option<(usize, usize)> {
+        self.panes.iter().enumerate().find_map(|(side, pane)| {
+            let tabs = pane.tabs();
+            let index = tabs.iter().position(|tab| tab.generation() == generation)?;
+            Some((side, index))
+        })
+    }
+
+    /// Moves the active tab of pane `side` with `step` (back, forward, up), if it can go (a
+    /// pinned one stays, and a new tab beside it makes the move); with navigation sync, the
+    /// other pane makes the same move.
+    fn go(&mut self, side: usize, step: Step) -> Vec<Effect> {
+        let Some(request) = self.move_shown(side, |tab| step.run(tab)) else {
+            return Vec::new();
+        };
+        let mut effects = vec![Effect::Load(request)];
+        effects.extend(self.sync_step(side, step));
+        effects
+    }
+
+    /// Enter: opens the cursor's row of pane `side`. A folder opens from a cursor the list
+    /// placed, which only moves the tab, so the keys go down folder by folder; a file, or a
+    /// link that may lead to one, is launched only from a row the user chose
+    /// ([`Selection::user_cursor`](crate::selection::Selection::user_cursor)).
+    fn open_cursor(&mut self, side: usize) -> Vec<Effect> {
+        let tab = self.tab(side);
+        let Some(row) = tab.selection().cursor() else {
+            return Vec::new();
+        };
+        let chosen = tab.selection().user_cursor().is_some();
+        if !chosen && !matches!(tab.open_target(row), Some(OpenAction::Navigate(_))) {
+            return Vec::new();
+        }
+        self.open_row(side, row)
+    }
+
+    /// Shows or hides the hidden items in every tab of both panes, and the hidden folders of
+    /// the trees.
+    fn toggle_hidden(&mut self) -> Vec<Effect> {
+        self.show_hidden = !self.show_hidden;
+        for pane in &mut self.panes {
+            for tab in pane.tabs_mut() {
+                tab.set_show_hidden(self.show_hidden);
+            }
+        }
+        let show = self.show_hidden;
+        let mut effects = self.with_tree(LEFT, |tree| tree.set_show_hidden(show));
+        effects.extend(self.with_tree(RIGHT, |tree| tree.set_show_hidden(show)));
+        effects.extend(self.with_pick_tree(|tree| tree.set_show_hidden(show)));
+        effects
+    }
+}
+
+/// What a cursor key held with `mods` does to the selection: Shift selects a range, Ctrl moves
+/// the cursor alone (Windows and Linux), and a plain key selects the row it goes to.
+fn pick_of(mods: Mods) -> Pick {
+    if mods.shift {
+        Pick::Extend
+    } else if mods.ctrl {
+        Pick::Focus
+    } else {
+        Pick::Select
+    }
+}
+
+/// The listing `request` asks for, if there is one: the effect of a move that may not be made.
+fn load(request: Option<LoadRequest>) -> Vec<Effect> {
+    request.map(Effect::Load).into_iter().collect()
+}
+
+/// The folders the panes start at: the left one at `start` (made absolute against
+/// `current_dir`) or else home, the right one at the documents folder or else home. Without
+/// a home folder, `root` stands in. `None` when there is no folder at all.
+pub fn start_folders(
+    start: Option<&Path>,
+    current_dir: Option<&Path>,
+    home: Option<&VPath>,
+    documents: Option<&VPath>,
+    root: Option<&VPath>,
+) -> Option<(VPath, VPath)> {
+    let fallback = home.or(root)?;
+    let left = start
+        .and_then(|path| match current_dir {
+            Some(dir) if path.is_relative() => VPath::local(dir.join(path)).ok(),
+            _ => VPath::local(path).ok(),
+        })
+        .unwrap_or_else(|| fallback.clone());
+    let right = documents.unwrap_or(fallback).clone();
+    Some((left, right))
+}
+
+#[cfg(test)]
+mod tests;

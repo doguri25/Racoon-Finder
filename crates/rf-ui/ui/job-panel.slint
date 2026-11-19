@@ -1,0 +1,752 @@
+// The job panel under the panes, or in a window of its own (`job-window.slint`, LAY-09): one row
+// for each job a worker runs, with its title, what it works on, its bar and its progress line,
+// the graph of its speed over the last minute where it moves bytes, the file it works on now, and
+// its pause and cancel buttons (XFER-01); then one short row for each job that waits, in the
+// order of the queue, with the same buttons and 위로 and 아래로, which move it a place along the
+// queue; under them the
+// head of 최근 완료, the jobs that ended (XFER-14), and, while it is open, their lines: how each
+// ended, what it did and how long it took, its 자세히 and its 로그 저장…. Under that the head of
+// 되돌리기 기록 (OPS-12) and, while it is open, what can be undone and what can be done again,
+// the latest first, each with what was done, when, and the button of the same name as Ctrl+Z
+// and Ctrl+Y, which only the first row of a list can press. It takes room only while a job
+// runs or waits, a finished one is listed or the history holds a record (the window gives it no
+// height otherwise). F6 gives it the keys after the tree (KEY-02): the button they are on has the
+// dialogs' focus border.
+//
+// The graph is a line in a box on `Theme.raised`, drawn in `Theme.accent`, or in `Theme.muted`
+// while the job is paused, as its bar is. `JobGraph` below is the one place that says how large
+// the line's box is: Rust makes the line's points for it (`ui_bridge::graph_box`).
+//
+// 위로 and 아래로 show their keys (KEY-03, `Shortcuts.move-job-up` and `move-job-down`) in their
+// tooltips, and say them to a screen reader.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icon } from "icons.slint";
+import { Shortcuts } from "shortcuts.slint";
+import { ProgressBar, OutlineButton } from "widgets.slint";
+import { Tr } from "tr.slint";
+
+// The box the line of a job's speed graph is drawn in, in the units of the line's points, a
+// pixel each on screen: the row's `Path` has this viewbox and this size, and Rust reads it here
+// to make the points (`ui_bridge::graph_box`). A second's sample is 120 / 59, about 2, wide, so
+// a minute of them fills the box.
+export global JobGraph {
+    out property <float> width: 120;
+    out property <float> height: 28;
+    // The room between the line's box and the edge of the box the row shows.
+    out property <length> pad-x: 2px;
+    out property <length> pad-y: 3px;
+}
+
+// One row, as Rust words it.
+export struct JobRowView {
+    title: string,
+    detail: string,
+    // 0 to 1.
+    progress: float,
+    progress-text: string,
+    paused: bool,
+    // The job waits for the answer to its question.
+    waiting: bool,
+    // The name of the file the job works on now, a long one shortened in the middle (Rust does
+    // that); empty while none is known.
+    current: string,
+    // The job moves bytes, and has a graph of its speed.
+    graphed: bool,
+    // The line of that graph, as the commands of a path in the box of `JobGraph`; empty until the
+    // job has two samples.
+    graph: string,
+    // A job that waits in the queue (a row of `queue`): it can go a place up, or down.
+    can-up: bool,
+    can-down: bool,
+}
+
+// One job that ended, as Rust words it.
+export struct RecentRowView {
+    title: string,
+    detail: string,
+    // What it did: 복사 12개 · 건너뜀 1개 · 오류 0개 · 평균 48 MB/s · 걸린 시간 1분 20초.
+    stats: string,
+    // It has items to tell of: its 자세히 shows.
+    details: bool,
+    // It did all it was asked, without a failure.
+    ok: bool,
+}
+
+// One row of 되돌리기 기록, as Rust words it: the head of one of its two lists, or a record.
+export struct HistoryRowView {
+    // The head of a list (only `title` is set).
+    head: bool,
+    // What was done (or what doing it again does), or the head's words.
+    title: string,
+    // When: 14:32.
+    time: string,
+    // The second line: whether it is the next one, why it waits, or why it cannot run.
+    note: string,
+    // The row the list's button acts on.
+    next: bool,
+    // Its button can be pressed.
+    enabled: bool,
+    // The record can no longer be undone (or done again).
+    dimmed: bool,
+    // It stands in the list of what can be done again.
+    redo: bool,
+    // The button's words: 되돌리기 or 다시 실행.
+    button: string,
+    // The place of the row among the rows of the keys (0 for the first row of the undo list);
+    // -1 for a head.
+    line: int,
+    // The row's place in its own list, for the button.
+    index: int,
+    // How many heads come before this row.
+    heads-before: int,
+}
+
+export component JobPanel inherits Rectangle {
+    // The jobs a worker has taken up.
+    in property <[JobRowView]> rows;
+    // The jobs that wait, in the order of the queue.
+    in property <[JobRowView]> queue;
+    // How many of them show at once; the list scrolls for the others.
+    in property <int> queue-lines: 3;
+    in property <[RecentRowView]> recent;
+    // The head of 최근 완료, with how many jobs it lists (Rust words it: a count).
+    in property <string> recent-title;
+    in property <bool> recent-open;
+    // How many lines of 최근 완료 show at once; the list scrolls for the others.
+    in property <int> recent-lines: 3;
+    // The line and the button the keys are on; -1 while the panel does not have them. The
+    // lines are the jobs' rows (0 일시정지 or 계속, 1 취소), then the rows of the jobs that wait
+    // (the same two, then 2 위로, 3 아래로), then the head of 최근 완료 (0 펼치기
+    // or 접기, 1 지우기), then its lines (자세히 where it shows, then 로그 저장…).
+    in property <int> focus-line: -1;
+    in property <int> focus-button: -1;
+    // 되돌리기 기록: the head's words (empty while the history holds nothing, and then the group
+    // does not show), whether its rows show, the rows, and how many of them are heads.
+    in property <string> history-title;
+    in property <bool> history-open;
+    in property <[HistoryRowView]> history;
+    in property <int> history-heads;
+    // How many records of the history show at once besides the heads; the list scrolls for the
+    // others.
+    in property <int> history-lines: 3;
+    // The buttons of a job: `index` counts the rows of `rows`, then those of `queue`.
+    callback pause(index: int);
+    callback resume(index: int);
+    callback cancel(index: int);
+    // 위로 and 아래로 of a job that waits (`index` as above).
+    callback move-up(index: int);
+    callback move-down(index: int);
+    callback recent-toggled();
+    callback recent-cleared();
+    callback recent-details(index: int);
+    callback recent-save(index: int);
+    callback history-toggled();
+    // The button of row `index` of the list of what can be undone (or, with `redo`, done again).
+    callback history-run(redo: bool, index: int);
+    // The keys moved to another line: the part of the panel that line is in, from the panel's
+    // top (the jobs' rows together, a list of lines, or a head), for a window that scrolls the
+    // panel to show it (`job-window.slint`).
+    callback reveal(top: length, height: length);
+
+    // The line of the head of 최근 완료: after the rows of the jobs, running and waiting.
+    private property <int> head-line: root.rows.length + root.queue.length;
+    // The rows follow the theme (THEME-07): a waiting job's line is the theme's row height and
+    // 12px more (its buttons); a finished job's two lines, and an undo list's, 20px more, and at
+    // least what the two lines take with 12px around them; at 보통 and 100 % 44 and 52.
+    private property <length> queue-height: Theme.row-height + 12px;
+    private property <length> recent-height: max(Theme.row-height + 20px, Theme.line(Theme.font-body) + Theme.line(Theme.font-small) + 12px);
+    // The line of the head of 되돌리기 기록: after the jobs' rows, the head of 최근 완료 and its
+    // lines while they show.
+    private property <int> history-head-line: root.head-line + (root.recent.length > 0 ? 1 + (root.recent-open ? root.recent.length : 0) : 0);
+    private property <length> history-row-height: root.recent-height;
+    // A head of the undo list: a line of small text with 10px around it (28px at 12px text).
+    private property <length> history-head-height: max(28px, Theme.line(Theme.font-small) + 10px);
+    private property <length> history-content: (root.history.length - root.history-heads) * root.history-row-height + root.history-heads * root.history-head-height;
+
+    background: Theme.panel;
+    accessible-role: groupbox;
+    accessible-label: Tr.job-panel-title;
+
+    // The part of the panel the keys' line is in ([`reveal`]). The lists keep their place in the
+    // panel while their lines scroll, so it holds before and after a list scrolls to its line.
+    function reveal-keys() {
+        let line = root.focus-line;
+        let queue-end = queue-list.y + queue-list.height;
+        let recent-end = recent-list.y + recent-list.height;
+        if (line < 0) {
+            return;
+        } else if (line < root.rows.length) {
+            // A job's row shows itself, alone (`keyed`): their block can be taller than the
+            // window.
+            return;
+        } else if (line < root.head-line) {
+            root.reveal(queue-list.y, queue-list.height);
+        } else if (line == root.head-line && root.recent.length > 0) {
+            root.reveal(queue-end, recent-list.y - queue-end);
+        } else if (line < root.history-head-line) {
+            root.reveal(recent-list.y, recent-list.height);
+        } else if (line == root.history-head-line) {
+            root.reveal(recent-end, history-list.y - recent-end);
+        } else {
+            root.reveal(history-list.y, history-list.height);
+        }
+    }
+
+    // The keys on a job that waits, or on a line of 최근 완료, that does not show: its list
+    // scrolls to it.
+    changed focus-line => {
+        root.reveal-keys();
+        let waiting = root.focus-line - root.rows.length;
+        if (waiting >= 0 && waiting < root.queue.length) {
+            let top = waiting * root.queue-height;
+            if (top < -queue-list.content-y) {
+                queue-list.content-y = -top;
+            } else if (top + root.queue-height > -queue-list.content-y + queue-list.visible-height) {
+                queue-list.content-y = queue-list.visible-height - top - root.queue-height;
+            }
+            return;
+        }
+        let index = root.focus-line - root.head-line - 1;
+        if (index < 0 || index >= root.recent.length) {
+            return;
+        }
+        let top = index * root.recent-height;
+        if (top < -recent-list.content-y) {
+            recent-list.content-y = -top;
+        } else if (top + root.recent-height > -recent-list.content-y + recent-list.visible-height) {
+            recent-list.content-y = recent-list.visible-height - top - root.recent-height;
+        }
+    }
+
+    VerticalLayout {
+        for row[i] in root.rows: Rectangle {
+            // The keys came to this job's row: the row shows, the one line they are on
+            // ([`reveal`]), not the block of the running jobs.
+            property <bool> keyed: root.focus-line == i;
+            changed keyed => {
+                if (self.keyed) {
+                    root.reveal(self.y, self.height);
+                }
+            }
+
+            VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 6px;
+
+                HorizontalLayout {
+                    spacing: 24px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+                        alignment: center;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            Text {
+                                horizontal-stretch: 0;
+                                text: row.title;
+                                font-weight: 700;
+                                color: Theme.text;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: row.detail;
+                                color: Theme.muted;
+                                overflow: elide;
+                            }
+                        }
+                        ProgressBar {
+                            value: row.progress;
+                            bar-color: row.paused ? Theme.muted : Theme.accent;
+                            accessible-label: row.title;
+                        }
+                        Text {
+                            text: row.progress-text;
+                            font-size: Theme.font-small;
+                            color: Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+
+                    // The speed of the last minute, a sample a second: the line grows from the
+                    // right, and its highest point is the fastest second.
+                    if row.graphed: VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        Rectangle {
+                            width: JobGraph.width * 1px + 2 * JobGraph.pad-x;
+                            height: JobGraph.height * 1px + 2 * JobGraph.pad-y;
+                            border-radius: Theme.radius;
+                            background: Theme.raised;
+                            accessible-role: AccessibleRole.image;
+                            accessible-label: Tr.job-panel-speed;
+
+                            Path {
+                                x: JobGraph.pad-x;
+                                y: JobGraph.pad-y;
+                                width: JobGraph.width * 1px;
+                                height: JobGraph.height * 1px;
+                                viewbox-x: 0;
+                                viewbox-y: 0;
+                                viewbox-width: JobGraph.width;
+                                viewbox-height: JobGraph.height;
+                                fill: transparent;
+                                stroke: row.paused ? Theme.muted : Theme.accent;
+                                stroke-width: 1.5px;
+                                stroke-line-join: round;
+                                commands: row.graph;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        spacing: Theme.gap-s;
+                        alignment: center;
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            // As wide for 계속 as for 일시정지: the graph and the buttons
+                            // of the rows stand in line.
+                            OutlineButton {
+                                button-height: 44px;
+                                min-width: 88px;
+                                text: row.paused ? Tr.job-panel-resume : Tr.job-panel-pause;
+                                focused: root.focus-line == i && root.focus-button == 0;
+                                clicked => {
+                                    if (row.paused) {
+                                        root.resume(i);
+                                    } else {
+                                        root.pause(i);
+                                    }
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+
+                            OutlineButton {
+                                button-height: 44px;
+                                text: Tr.job-panel-cancel;
+                                focused: root.focus-line == i && root.focus-button == 1;
+                                clicked => {
+                                    root.cancel(i);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // The file it works on now. The line keeps its room while none is known, so
+                // that the row does not change its height between two files.
+                Text {
+                    text: row.current;
+                    font-size: Theme.font-small;
+                    color: Theme.muted;
+                    overflow: elide;
+                }
+            }
+
+            // A line between rows, and above the first one.
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The jobs that wait, in the order they will run: each can be paused, cancelled, and
+        // moved a place up or down. A screen reader hears 위로 as 작업 순서 위로: the toolbar
+        // has a 위로 too, to the folder above.
+        queue-list := ScrollView {
+            visible: root.queue.length > 0;
+            height: self.visible ? min(root.queue.length, root.queue-lines) * root.queue-height : 0px;
+            content-width: self.visible-width;
+            content-height: root.queue.length * root.queue-height;
+            accessible-role: list;
+            accessible-label: Tr.job-panel-waiting;
+
+            for row[i] in root.queue: Rectangle {
+                y: i * root.queue-height;
+                width: parent.width;
+                height: root.queue-height;
+
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 12px;
+
+                    Text {
+                        horizontal-stretch: 0;
+                        text: row.title;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: row.detail;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            min-width: 88px;
+                            text: row.paused ? Tr.job-panel-resume : Tr.job-panel-pause;
+                            focused: root.focus-line == root.rows.length + i && root.focus-button == 0;
+                            clicked => {
+                                if (row.paused) {
+                                    root.resume(root.rows.length + i);
+                                } else {
+                                    root.pause(root.rows.length + i);
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: Tr.job-panel-cancel;
+                            focused: root.focus-line == root.rows.length + i && root.focus-button == 1;
+                            clicked => {
+                                root.cancel(root.rows.length + i);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: Tr.job-panel-move-up;
+                            spoken: Tr.job-panel-move-up-spoken;
+                            keys: Shortcuts.move-job-up;
+                            enabled: row.can-up;
+                            focused: root.focus-line == root.rows.length + i && root.focus-button == 2;
+                            clicked => {
+                                root.move-up(root.rows.length + i);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: Tr.job-panel-move-down;
+                            spoken: Tr.job-panel-move-down-spoken;
+                            keys: Shortcuts.move-job-down;
+                            enabled: row.can-down;
+                            focused: root.focus-line == root.rows.length + i && root.focus-button == 3;
+                            clicked => {
+                                root.move-down(root.rows.length + i);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+
+        // The head of 최근 완료: how many jobs it lists, and its buttons.
+        if root.recent.length > 0: Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: Theme.gap-s;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.recent-title;
+                    font-weight: 600;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: root.recent-open ? Tr.job-panel-collapse : Tr.job-panel-expand;
+                    focused: root.focus-line == root.head-line && root.focus-button == 0;
+                    clicked => {
+                        root.recent-toggled();
+                    }
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: Tr.job-panel-clear;
+                    focused: root.focus-line == root.head-line && root.focus-button == 1;
+                    clicked => {
+                        root.recent-cleared();
+                    }
+                }
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // The lines of 최근 완료, the newest first.
+        recent-list := ScrollView {
+            visible: root.recent-open && root.recent.length > 0;
+            height: self.visible ? min(root.recent.length, root.recent-lines) * root.recent-height : 0px;
+            content-width: self.visible-width;
+            content-height: root.recent.length * root.recent-height;
+            accessible-role: list;
+            accessible-label: Tr.job-panel-recent;
+
+            for entry[i] in root.recent: Rectangle {
+                y: i * root.recent-height;
+                width: parent.width;
+                height: root.recent-height;
+
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        Icon {
+                            width: 18px;
+                            height: 18px;
+                            name: entry.ok ? "check" : "warning";
+                            color: entry.ok ? Theme.accent : Theme.folder;
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            Text {
+                                horizontal-stretch: 0;
+                                text: entry.title;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: entry.detail;
+                                color: Theme.muted;
+                                overflow: elide;
+                            }
+                        }
+                        Text {
+                            text: entry.stats;
+                            font-size: Theme.font-small;
+                            color: Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    if entry.details: VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: Tr.job-panel-details;
+                            focused: root.focus-line == root.head-line + 1 + i && root.focus-button == 0;
+                            clicked => {
+                                root.recent-details(i);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: Tr.job-panel-save-log;
+                            focused: root.focus-line == root.head-line + 1 + i && root.focus-button == (entry.details ? 1 : 0);
+                            clicked => {
+                                root.recent-save(i);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+
+        // The head of 되돌리기 기록: how many records it lists, and its button.
+        if root.history-title != "": Rectangle {
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: Theme.gap-s;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.history-title;
+                    font-weight: 600;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                }
+                OutlineButton {
+                    button-height: 28px;
+                    text: root.history-open ? Tr.job-panel-collapse : Tr.job-panel-expand;
+                    focused: root.focus-line == root.history-head-line && root.focus-button == 0;
+                    clicked => {
+                        root.history-toggled();
+                    }
+                }
+            }
+
+            Rectangle {
+                y: 0;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // What can be undone, then what can be done again, the latest first.
+        history-list := ScrollView {
+            visible: root.history-open && root.history-title != "";
+            height: self.visible ? min(root.history-content, root.history-lines * root.history-row-height + root.history-head-height) : 0px;
+            content-width: self.visible-width;
+            content-height: root.history-content;
+            accessible-role: list;
+            accessible-label: Tr.job-panel-history;
+
+            for entry[i] in root.history: Rectangle {
+                // The keys are on this row: it scrolls into view.
+                private property <bool> keys-here: !entry.head && root.focus-line == root.history-head-line + 1 + entry.line;
+
+                y: (i - entry.heads-before) * root.history-row-height + entry.heads-before * root.history-head-height;
+                width: parent.width;
+                height: entry.head ? root.history-head-height : root.history-row-height;
+
+                changed keys-here => {
+                    if (self.keys-here) {
+                        if (self.y < -history-list.content-y) {
+                            history-list.content-y = -self.y;
+                        } else if (self.y + self.height > -history-list.content-y + history-list.visible-height) {
+                            history-list.content-y = history-list.visible-height - self.y - self.height;
+                        }
+                    }
+                }
+
+                if entry.head: Rectangle {
+                    background: Theme.raised;
+
+                    Text {
+                        x: 20px;
+                        width: parent.width - 40px;
+                        text: entry.title;
+                        font-size: Theme.font-small;
+                        font-weight: 600;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                if !entry.head: HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            if entry.next && !entry.dimmed: Text {
+                                horizontal-stretch: 0;
+                                text: Tr.job-panel-next;
+                                font-size: Theme.font-small;
+                                font-weight: 700;
+                                color: Theme.accent;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: entry.title;
+                                font-weight: 600;
+                                color: entry.dimmed ? Theme.faint : Theme.text;
+                                overflow: elide;
+                            }
+                            Text {
+                                horizontal-stretch: 0;
+                                text: entry.time;
+                                font-size: Theme.font-small;
+                                color: Theme.muted;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: entry.note;
+                            font-size: Theme.font-small;
+                            color: entry.dimmed ? Theme.faint : Theme.muted;
+                            overflow: elide;
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 0;
+                        alignment: center;
+
+                        OutlineButton {
+                            button-height: 30px;
+                            text: entry.button;
+                            enabled: entry.enabled;
+                            focused: root.focus-line == root.history-head-line + 1 + entry.line && root.focus-button == 0;
+                            clicked => {
+                                root.history-run(entry.redo, entry.index);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+    }
+}

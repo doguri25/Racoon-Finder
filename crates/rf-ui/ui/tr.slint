@@ -1,0 +1,321 @@
+// The words of the window (I18N-01): one property for each text a screen shows that has no
+// argument (a menu item, a button, a label, a tooltip, an accessible name), named as its message in
+// `crates/rf-ui/i18n/<language>/ui.ftl` (`Tr.command-new-folder` is `command-new-folder`).
+//
+// A global is per window: Rust fills every property of each window, the tray icon's too, right
+// after it is made (`ui_bridge::new_main_window` and its kin, through `ui_bridge::speak`), in the
+// language of the run. A text with a name, a number or a key in it is made by Rust and given as
+// a property or a field of a model (screen.ftl). Nothing here has a value of its own: a property
+// that was not filled shows nothing, and a test fills every one in each language. Only
+// `in property <string> name;` lines go here, with comments: the build reads them (build.rs).
+
+export global Tr {
+    // The toolbar.
+    in property <string> toolbar-back;
+    in property <string> toolbar-forward;
+    in property <string> toolbar-up;
+    in property <string> toolbar-visits;
+    in property <string> toolbar-delete;
+    in property <string> toolbar-select;
+    in property <string> toolbar-view;
+    in property <string> toolbar-filter;
+
+    // Commands: the toolbar and the menus of items and folders.
+    in property <string> command-new-folder;
+    in property <string> command-copy-to;
+    in property <string> command-move-to;
+    in property <string> command-rename;
+    in property <string> command-undo;
+    in property <string> command-redo;
+    in property <string> command-cut;
+    in property <string> command-copy;
+    in property <string> command-paste;
+    in property <string> command-paste-move;
+    in property <string> command-copy-path;
+    in property <string> command-create-link;
+    in property <string> command-share;
+    in property <string> command-new-file;
+    in property <string> command-new-text-file;
+    in property <string> command-open;
+    in property <string> command-run-as-admin;
+    in property <string> command-open-with;
+    in property <string> command-quick-look;
+    in property <string> command-open-terminal;
+    in property <string> command-add-favorite;
+    in property <string> command-trash;
+    in property <string> command-delete-permanently;
+    in property <string> command-properties;
+    in property <string> command-system-properties;
+    in property <string> command-more-options;
+    in property <string> command-restore;
+    in property <string> command-restore-to;
+    in property <string> command-delete-from-trash;
+    in property <string> command-empty-trash;
+    in property <string> command-refresh;
+    in property <string> command-show-toolbar;
+
+    // The menu of a drop that asks.
+    in property <string> drop-menu-move;
+    in property <string> drop-menu-copy;
+    in property <string> drop-menu-link;
+    in property <string> drop-menu-cancel;
+
+    // The forms of Copy Path.
+    in property <string> path-form-full;
+    in property <string> path-form-name;
+    in property <string> path-form-quoted;
+    in property <string> path-form-unc;
+    in property <string> path-form-slashes;
+    in property <string> path-form-url;
+
+    // The column heads of Details, which the View menu's columns and sort, the heads' menu and
+    // Rust use too.
+    in property <string> column-name;
+    in property <string> column-size;
+    in property <string> column-modified;
+    in property <string> column-created;
+    in property <string> column-kind;
+    in property <string> column-extension;
+    in property <string> column-attributes;
+    in property <string> column-accessed;
+    in property <string> column-path;
+    in property <string> column-original;
+    in property <string> column-deleted;
+
+    // The View menu.
+    in property <string> view-mode;
+    in property <string> view-thumbnails;
+    in property <string> view-extra-large-icons;
+    in property <string> view-large-icons;
+    in property <string> view-medium-icons;
+    in property <string> view-small-icons;
+    in property <string> view-list;
+    in property <string> view-details;
+    in property <string> view-tiles;
+    in property <string> view-thumb-size;
+    in property <string> view-apply-to-subfolders;
+    in property <string> view-reset-to-default;
+    in property <string> view-sort;
+    in property <string> view-ascending;
+    in property <string> view-descending;
+    in property <string> view-then-sort;
+    in property <string> view-then-none;
+    in property <string> view-folders-first;
+    in property <string> view-columns;
+    in property <string> view-column-order;
+    in property <string> view-column-left;
+    in property <string> view-column-right;
+    in property <string> view-fit-columns;
+    in property <string> view-theme;
+    in property <string> view-theme-light;
+    in property <string> view-theme-dark;
+    in property <string> view-theme-high-contrast;
+    in property <string> view-theme-system;
+    in property <string> view-density-compact;
+    in property <string> view-density-normal;
+    in property <string> view-density-roomy;
+    in property <string> view-text-size-90;
+    in property <string> view-text-size-100;
+    in property <string> view-text-size-115;
+    in property <string> view-text-size-130;
+    in property <string> view-show-hidden;
+    in property <string> view-show-extensions;
+    in property <string> view-toolbar;
+    in property <string> view-tree-shared;
+    in property <string> view-tree-per-pane;
+    in property <string> view-tree-hidden;
+    in property <string> view-focus-tree;
+    in property <string> view-preview;
+    in property <string> view-job-panel;
+    in property <string> view-jobs-window;
+    in property <string> view-layout;
+    in property <string> view-dual-pane;
+    in property <string> view-split;
+    in property <string> view-even-split;
+    in property <string> view-divider-up;
+    in property <string> view-divider-left;
+    in property <string> view-divider-down;
+    in property <string> view-divider-right;
+    in property <string> view-swap-panes;
+    in property <string> view-same-folder;
+    in property <string> view-sync;
+    in property <string> view-tab;
+    in property <string> view-tab-duplicate;
+    in property <string> view-tab-unpin;
+    in property <string> view-tab-pin;
+    in property <string> view-tab-move-other;
+    in property <string> view-tab-move-left;
+    in property <string> view-tab-move-right;
+    in property <string> view-settings;
+    in property <string> view-drop-move;
+    in property <string> view-drop-copy;
+    in property <string> view-drop-system;
+    in property <string> view-drop-ask;
+    in property <string> view-show-thumbnails;
+    in property <string> view-long-press;
+    in property <string> view-long-press-300;
+    in property <string> view-long-press-500;
+    in property <string> view-long-press-800;
+    in property <string> view-long-press-1200;
+    in property <string> view-move-undo-toast;
+    in property <string> view-ask-on-error;
+    in property <string> view-pick-from-last;
+    in property <string> view-system-menu-first;
+    in property <string> view-open-uninstaller;
+
+    // The Select menu.
+    in property <string> select-all;
+    in property <string> select-none;
+    in property <string> select-invert;
+    in property <string> select-pattern;
+    in property <string> select-same-extension;
+    in property <string> select-checkboxes;
+
+    // The panes.
+    in property <string> pane-left;
+    in property <string> pane-right;
+    in property <string> pane-path;
+    in property <string> pane-loading;
+    in property <string> pane-cannot-open;
+    in property <string> pane-retry;
+    in property <string> pane-thumb-size;
+    in property <string> pane-subfolders-tip;
+    in property <string> pane-subfolders;
+    in property <string> pane-path-completion;
+    in property <string> pane-link;
+    in property <string> list-items;
+    in property <string> list-select-all;
+    in property <string> row-cut;
+
+    // Tabs.
+    in property <string> tab-pinned;
+    in property <string> tab-close-others;
+    in property <string> tab-close-right;
+    in property <string> tab-duplicate;
+    in property <string> tab-unpin;
+    in property <string> tab-pin;
+    in property <string> tab-move-other;
+    in property <string> tab-reopen;
+    in property <string> tab-close-button;
+    in property <string> tab-new;
+    in property <string> common-close;
+
+    // The sidebar.
+    in property <string> tree-title;
+    in property <string> sidebar-open-other;
+    in property <string> sidebar-remove-favorite;
+    in property <string> sidebar-move-up;
+    in property <string> sidebar-move-down;
+    in property <string> sidebar-add-current;
+    in property <string> sidebar-add-this;
+    in property <string> sidebar-favorites;
+    in property <string> sidebar-drives;
+    in property <string> sidebar-insert-here;
+
+    // The preview and the notices.
+    in property <string> preview-title;
+    in property <string> preview-nothing;
+    in property <string> toast-close;
+
+    // The tray icon's menu.
+    in property <string> tray-open-window;
+    in property <string> tray-resume-all;
+    in property <string> tray-pause-all;
+    in property <string> tray-quit;
+
+    // The language, in View ▸ Theme.
+    in property <string> view-language-system;
+    in property <string> view-language-ko;
+    in property <string> view-language-en;
+
+    // Buttons the dialogs share.
+    in property <string> common-cancel;
+    in property <string> common-ok;
+    in property <string> common-continue;
+
+    // What to do about a name that is taken: the conflict window's and the picker's.
+    in property <string> policy-overwrite;
+    in property <string> policy-skip;
+    in property <string> policy-if-newer;
+    in property <string> policy-if-size-differs;
+
+    // The name conflict window.
+    in property <string> conflict-newer-badge;
+    in property <string> conflict-size-label;
+    in property <string> conflict-modified-label;
+    in property <string> conflict-question;
+    in property <string> conflict-choice-keep-both;
+    in property <string> conflict-apply-all;
+    in property <string> conflict-cancel-job;
+
+    // The destination picker.
+    in property <string> pick-mode;
+    in property <string> pick-mode-move;
+    in property <string> pick-mode-copy;
+    in property <string> pick-target;
+    in property <string> pick-target-hint;
+    in property <string> pick-filter;
+    in property <string> pick-tree;
+    in property <string> pick-quick;
+    in property <string> pick-on-conflict;
+    in property <string> pick-choice-ask;
+    in property <string> pick-choice-rename;
+    in property <string> pick-choice-if-newer;
+    in property <string> pick-choice-if-size-differs;
+    in property <string> pick-follow-links;
+
+    // The properties window.
+    in property <string> properties-window;
+    in property <string> properties-stop;
+    in property <string> properties-checksum;
+    in property <string> properties-checksums;
+    in property <string> properties-algorithm;
+    in property <string> properties-copy;
+    in property <string> properties-copied;
+    in property <string> properties-stop-hashing;
+    in property <string> properties-compare;
+    in property <string> properties-compare-hint;
+
+    // The job panel, and its own window.
+    in property <string> job-panel-title;
+    in property <string> job-panel-speed;
+    in property <string> job-panel-pause;
+    in property <string> job-panel-resume;
+    in property <string> job-panel-cancel;
+    in property <string> job-panel-move-up;
+    in property <string> job-panel-move-up-spoken;
+    in property <string> job-panel-move-down;
+    in property <string> job-panel-move-down-spoken;
+    in property <string> job-panel-waiting;
+    in property <string> job-panel-expand;
+    in property <string> job-panel-collapse;
+    in property <string> job-panel-clear;
+    in property <string> job-panel-recent;
+    in property <string> job-panel-details;
+    in property <string> job-panel-save-log;
+    in property <string> job-panel-history;
+    in property <string> job-panel-next;
+    in property <string> job-window-empty;
+
+    // The dialogs.
+    in property <string> pattern-title;
+    in property <string> pattern-example-wildcards;
+    in property <string> pattern-example-regex;
+    in property <string> pattern-field;
+    in property <string> pattern-syntax;
+    in property <string> pattern-wildcards;
+    in property <string> pattern-regex;
+    in property <string> pattern-ignore-case;
+    in property <string> pattern-mode;
+    in property <string> pattern-replace;
+    in property <string> pattern-add;
+    in property <string> pattern-select;
+    in property <string> failures-retry;
+    in property <string> error-ask-apply-all;
+    in property <string> error-ask-stop;
+    in property <string> error-ask-skip;
+    in property <string> error-ask-retry;
+    in property <string> recovery-discard;
+    in property <string> recovery-run-again;
+    in property <string> preflight-skip-blocked;
+}
