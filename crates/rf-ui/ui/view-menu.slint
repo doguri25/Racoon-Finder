@@ -23,6 +23,7 @@
 
 import { Shortcuts, PathForms } from "shortcuts.slint";
 import { PaneView } from "pane.slint";
+import { Tr } from "tr.slint";
 
 export component ViewMenu inherits ContextMenuArea {
     // What the active pane shows.
@@ -322,13 +323,13 @@ export component ViewMenu inherits ContextMenuArea {
     Menu {
         // 내 PC shows its drives as tiles, in their order, and nothing else (NAV-16).
         Menu {
-            title: "보기 방식";
+            title: Tr.view-mode;
             enabled: root.view.place != 2;
 
             // The thumbnails at a size of their own (NAV-06), the slider in the status bar. No
             // key, as 특대 and 타일 (keyboard.md).
             MenuItem {
-                title: "썸네일";
+                title: Tr.view-thumbnails;
                 checkable: true;
                 checked <=> root.mark-mode-6;
                 activated => {
@@ -339,7 +340,7 @@ export component ViewMenu inherits ContextMenuArea {
             // No key: File Explorer's Ctrl+Shift+1 is not assigned (keyboard.md). Ctrl+wheel
             // and a pinch step to it too.
             MenuItem {
-                title: "특대 아이콘";
+                title: Tr.view-extra-large-icons;
                 checkable: true;
                 checked <=> root.mark-mode-5;
                 activated => {
@@ -348,7 +349,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("큰 아이콘", Shortcuts.view-large-icons);
+                title: Shortcuts.titled(Tr.view-large-icons, Shortcuts.view-large-icons);
                 checkable: true;
                 checked <=> root.mark-mode-4;
                 activated => {
@@ -357,7 +358,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("보통 아이콘", Shortcuts.view-medium-icons);
+                title: Shortcuts.titled(Tr.view-medium-icons, Shortcuts.view-medium-icons);
                 checkable: true;
                 checked <=> root.mark-mode-3;
                 activated => {
@@ -366,7 +367,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("작은 아이콘", Shortcuts.view-small-icons);
+                title: Shortcuts.titled(Tr.view-small-icons, Shortcuts.view-small-icons);
                 checkable: true;
                 checked <=> root.mark-mode-2;
                 activated => {
@@ -375,7 +376,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("목록", Shortcuts.view-list);
+                title: Shortcuts.titled(Tr.view-list, Shortcuts.view-list);
                 checkable: true;
                 checked <=> root.mark-mode-1;
                 activated => {
@@ -384,7 +385,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("자세히", Shortcuts.view-details);
+                title: Shortcuts.titled(Tr.view-details, Shortcuts.view-details);
                 checkable: true;
                 checked <=> root.mark-mode-0;
                 activated => {
@@ -394,7 +395,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             // File Explorer's 타일, after 자세히 as there; its Ctrl+Shift+7 is not assigned.
             MenuItem {
-                title: "타일";
+                title: Tr.view-tiles;
                 checkable: true;
                 checked <=> root.mark-mode-7;
                 activated => {
@@ -406,7 +407,7 @@ export component ViewMenu inherits ContextMenuArea {
             // The keys to the thumbnails' size slider, once the menus have closed (the window
             // gives it them, as 폴더 트리로 가기 the tree): ← → move it.
             MenuItem {
-                title: "썸네일 크기 조절";
+                title: Tr.view-thumb-size;
                 enabled: root.view.mode == 6;
                 activated => {
                     root.view-command("focus-size");
@@ -414,14 +415,14 @@ export component ViewMenu inherits ContextMenuArea {
             }
             // The view of this folder for its subfolders too, or the folder's own view forgotten.
             MenuItem {
-                title: "하위 폴더에 적용";
+                title: Tr.view-apply-to-subfolders;
                 activated => {
                     root.view-command("apply-below");
                     root.done();
                 }
             }
             MenuItem {
-                title: "기본값으로 되돌리기";
+                title: Tr.view-reset-to-default;
                 enabled: root.view.own-view;
                 activated => {
                     root.view-command("reset-view");
@@ -432,11 +433,11 @@ export component ViewMenu inherits ContextMenuArea {
         // The order: the key and its direction (as a click on a head, which flips the direction
         // of the key that sorts already), the second key and its direction, folders first.
         Menu {
-            title: "정렬";
+            title: Tr.view-sort;
             enabled: root.view.place != 2;
 
             MenuItem {
-                title: "이름";
+                title: Tr.column-name;
                 checkable: true;
                 checked <=> root.mark-sort-0;
                 activated => {
@@ -445,7 +446,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "크기";
+                title: Tr.column-size;
                 checkable: true;
                 checked <=> root.mark-sort-1;
                 activated => {
@@ -454,7 +455,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "수정한 날짜";
+                title: Tr.column-modified;
                 checkable: true;
                 checked <=> root.mark-sort-2;
                 activated => {
@@ -463,7 +464,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "만든 날짜";
+                title: Tr.column-created;
                 checkable: true;
                 checked <=> root.mark-sort-4;
                 activated => {
@@ -472,7 +473,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "접근한 날짜";
+                title: Tr.column-accessed;
                 checkable: true;
                 checked <=> root.mark-sort-7;
                 activated => {
@@ -481,7 +482,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "종류";
+                title: Tr.column-kind;
                 checkable: true;
                 checked <=> root.mark-sort-3;
                 activated => {
@@ -490,7 +491,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "확장자";
+                title: Tr.column-extension;
                 checkable: true;
                 checked <=> root.mark-sort-5;
                 activated => {
@@ -500,7 +501,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             // The trash's (NAV-16): where an item was, and when it was trashed.
             if root.view.place == 1: MenuItem {
-                title: "원래 위치";
+                title: Tr.column-original;
                 checkable: true;
                 checked <=> root.mark-sort-9;
                 activated => {
@@ -509,7 +510,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 1: MenuItem {
-                title: "삭제한 날짜";
+                title: Tr.column-deleted;
                 checkable: true;
                 checked <=> root.mark-sort-10;
                 activated => {
@@ -519,7 +520,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "오름차순";
+                title: Tr.view-ascending;
                 checkable: true;
                 checked <=> root.mark-ascending;
                 activated => {
@@ -530,7 +531,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "내림차순";
+                title: Tr.view-descending;
                 checkable: true;
                 checked <=> root.mark-descending;
                 activated => {
@@ -543,10 +544,10 @@ export component ViewMenu inherits ContextMenuArea {
             MenuSeparator { }
             // The second key (Shift+click on a head), which breaks the ties of the first.
             Menu {
-                title: "2차 정렬";
+                title: Tr.view-then-sort;
 
                 MenuItem {
-                    title: "없음";
+                    title: Tr.view-then-none;
                     checkable: true;
                     checked <=> root.mark-then-none;
                     activated => {
@@ -555,7 +556,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 MenuItem {
-                    title: "이름";
+                    title: Tr.column-name;
                     checkable: true;
                     checked <=> root.mark-then-0;
                     enabled: root.view.sort-key != 0;
@@ -565,7 +566,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 MenuItem {
-                    title: "크기";
+                    title: Tr.column-size;
                     checkable: true;
                     checked <=> root.mark-then-1;
                     enabled: root.view.sort-key != 1;
@@ -575,7 +576,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 if root.view.place == 0: MenuItem {
-                    title: "수정한 날짜";
+                    title: Tr.column-modified;
                     checkable: true;
                     checked <=> root.mark-then-2;
                     enabled: root.view.sort-key != 2;
@@ -585,7 +586,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 if root.view.place == 0: MenuItem {
-                    title: "만든 날짜";
+                    title: Tr.column-created;
                     checkable: true;
                     checked <=> root.mark-then-4;
                     enabled: root.view.sort-key != 4;
@@ -595,7 +596,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 if root.view.place == 0: MenuItem {
-                    title: "접근한 날짜";
+                    title: Tr.column-accessed;
                     checkable: true;
                     checked <=> root.mark-then-7;
                     enabled: root.view.sort-key != 7;
@@ -605,7 +606,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 MenuItem {
-                    title: "종류";
+                    title: Tr.column-kind;
                     checkable: true;
                     checked <=> root.mark-then-3;
                     enabled: root.view.sort-key != 3;
@@ -615,7 +616,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 MenuItem {
-                    title: "확장자";
+                    title: Tr.column-extension;
                     checkable: true;
                     checked <=> root.mark-then-5;
                     enabled: root.view.sort-key != 5;
@@ -625,7 +626,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 if root.view.place == 1: MenuItem {
-                    title: "원래 위치";
+                    title: Tr.column-original;
                     checkable: true;
                     checked <=> root.mark-then-9;
                     enabled: root.view.sort-key != 9;
@@ -635,7 +636,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 if root.view.place == 1: MenuItem {
-                    title: "삭제한 날짜";
+                    title: Tr.column-deleted;
                     checkable: true;
                     checked <=> root.mark-then-10;
                     enabled: root.view.sort-key != 10;
@@ -646,7 +647,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
                 MenuSeparator { }
                 MenuItem {
-                    title: "오름차순";
+                    title: Tr.view-ascending;
                     checkable: true;
                     checked <=> root.mark-then-ascending;
                     enabled: root.view.then-key >= 0;
@@ -658,7 +659,7 @@ export component ViewMenu inherits ContextMenuArea {
                     }
                 }
                 MenuItem {
-                    title: "내림차순";
+                    title: Tr.view-descending;
                     checkable: true;
                     checked <=> root.mark-then-descending;
                     enabled: root.view.then-key >= 0;
@@ -671,7 +672,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "폴더 먼저";
+                title: Tr.view-folders-first;
                 checkable: true;
                 checked <=> root.mark-folders-first;
                 activated => {
@@ -682,12 +683,12 @@ export component ViewMenu inherits ContextMenuArea {
         }
         // The columns of 자세히 after the name (as the menu of its heads).
         Menu {
-            title: "열";
+            title: Tr.view-columns;
             enabled: root.view.mode == 0;
 
             // The trash's (NAV-16): where an item was, and when it was trashed.
             if root.view.place == 1: MenuItem {
-                title: "원래 위치";
+                title: Tr.column-original;
                 checkable: true;
                 checked <=> root.mark-col-9;
                 activated => {
@@ -696,7 +697,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 1: MenuItem {
-                title: "삭제한 날짜";
+                title: Tr.column-deleted;
                 checkable: true;
                 checked <=> root.mark-col-10;
                 activated => {
@@ -706,7 +707,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
 
             MenuItem {
-                title: "크기";
+                title: Tr.column-size;
                 checkable: true;
                 checked <=> root.mark-col-1;
                 activated => {
@@ -715,7 +716,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "수정한 날짜";
+                title: Tr.column-modified;
                 checkable: true;
                 checked <=> root.mark-col-2;
                 activated => {
@@ -724,7 +725,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "만든 날짜";
+                title: Tr.column-created;
                 checkable: true;
                 checked <=> root.mark-col-4;
                 activated => {
@@ -733,7 +734,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "접근한 날짜";
+                title: Tr.column-accessed;
                 checkable: true;
                 checked <=> root.mark-col-7;
                 activated => {
@@ -742,7 +743,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "종류";
+                title: Tr.column-kind;
                 checkable: true;
                 checked <=> root.mark-col-3;
                 activated => {
@@ -751,7 +752,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "확장자";
+                title: Tr.column-extension;
                 checkable: true;
                 checked <=> root.mark-col-5;
                 activated => {
@@ -760,7 +761,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "속성";
+                title: Tr.column-attributes;
                 checkable: true;
                 checked <=> root.mark-col-6;
                 activated => {
@@ -769,7 +770,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.view.place == 0: MenuItem {
-                title: "경로";
+                title: Tr.column-path;
                 checkable: true;
                 checked <=> root.mark-col-8;
                 activated => {
@@ -781,14 +782,14 @@ export component ViewMenu inherits ContextMenuArea {
             // The order of the columns after the name: each moves a place left or right, as
             // its head dragged.
             Menu {
-                title: "열 순서";
+                title: Tr.view-column-order;
                 enabled: root.view.columns.length > 1;
 
                 for column[i] in root.view.columns: Menu {
                     title: column.title;
 
                     MenuItem {
-                        title: "왼쪽으로";
+                        title: Tr.view-column-left;
                         enabled: i > 0;
                         activated => {
                             root.column-moved(i, i - 1);
@@ -796,7 +797,7 @@ export component ViewMenu inherits ContextMenuArea {
                         }
                     }
                     MenuItem {
-                        title: "오른쪽으로";
+                        title: Tr.view-column-right;
                         enabled: i < root.view.columns.length - 1;
                         activated => {
                             root.column-moved(i, i + 2);
@@ -806,7 +807,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("모든 열 너비 맞추기", Shortcuts.fit-columns);
+                title: Shortcuts.titled(Tr.view-fit-columns, Shortcuts.fit-columns);
                 enabled: root.view.columns.length > 0;
                 activated => {
                     root.command("fit-columns");
@@ -816,10 +817,10 @@ export component ViewMenu inherits ContextMenuArea {
         }
         MenuSeparator { }
         Menu {
-            title: "테마";
+            title: Tr.view-theme;
 
             MenuItem {
-                title: "밝게";
+                title: Tr.view-theme-light;
                 checkable: true;
                 checked <=> root.light-mark;
                 activated => {
@@ -829,7 +830,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "어둡게";
+                title: Tr.view-theme-dark;
                 checkable: true;
                 checked <=> root.dark-mark;
                 activated => {
@@ -839,7 +840,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "고대비";
+                title: Tr.view-theme-high-contrast;
                 checkable: true;
                 checked <=> root.high-contrast-mark;
                 activated => {
@@ -849,7 +850,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "시스템 설정 따르기";
+                title: Tr.view-theme-system;
                 checkable: true;
                 checked <=> root.system-mark;
                 activated => {
@@ -863,7 +864,7 @@ export component ViewMenu inherits ContextMenuArea {
             // 보기 menu in a narrow window. No keys (keyboard.md: Ctrl++ is 모든 열 너비 맞추기).
             MenuSeparator { }
             MenuItem {
-                title: "표시 밀도: 촘촘하게";
+                title: Tr.view-density-compact;
                 checkable: true;
                 checked <=> root.compact-mark;
                 activated => {
@@ -871,7 +872,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "표시 밀도: 보통";
+                title: Tr.view-density-normal;
                 checkable: true;
                 checked <=> root.normal-density-mark;
                 activated => {
@@ -879,7 +880,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "표시 밀도: 넉넉하게";
+                title: Tr.view-density-roomy;
                 checkable: true;
                 checked <=> root.roomy-mark;
                 activated => {
@@ -888,7 +889,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "글자 크기: 90%";
+                title: Tr.view-text-size-90;
                 checkable: true;
                 checked <=> root.scale-90-mark;
                 activated => {
@@ -896,7 +897,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "글자 크기: 100%";
+                title: Tr.view-text-size-100;
                 checkable: true;
                 checked <=> root.scale-100-mark;
                 activated => {
@@ -904,7 +905,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "글자 크기: 115%";
+                title: Tr.view-text-size-115;
                 checkable: true;
                 checked <=> root.scale-115-mark;
                 activated => {
@@ -912,7 +913,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "글자 크기: 130%";
+                title: Tr.view-text-size-130;
                 checkable: true;
                 checked <=> root.scale-130-mark;
                 activated => {
@@ -922,7 +923,7 @@ export component ViewMenu inherits ContextMenuArea {
         }
         MenuSeparator { }
         MenuItem {
-            title: Shortcuts.titled("숨김 파일 보기", Shortcuts.toggle-hidden);
+            title: Shortcuts.titled(Tr.view-show-hidden, Shortcuts.toggle-hidden);
             checkable: true;
             checked <=> root.show-hidden;
             activated => {
@@ -931,7 +932,7 @@ export component ViewMenu inherits ContextMenuArea {
         }
         // File Explorer's 파일 확장명 (보기 ▸ 표시); no key there, nor in Finder.
         MenuItem {
-            title: "파일 확장자 보기";
+            title: Tr.view-show-extensions;
             checkable: true;
             checked <=> root.show-extensions;
             activated => {
@@ -941,7 +942,7 @@ export component ViewMenu inherits ContextMenuArea {
         // The toolbar (LAY-10); hidden, the panes keep their path rows and F10 still opens this
         // menu. No key: File Explorer has none for its command bar.
         MenuItem {
-            title: "툴바";
+            title: Tr.view-toolbar;
             checkable: true;
             checked <=> root.show-toolbar;
             activated => {
@@ -953,10 +954,10 @@ export component ViewMenu inherits ContextMenuArea {
         // the tree back as it showed last. Then F6 to it, only to a tree that shows: F6 passes a
         // hidden one by.
         Menu {
-            title: "폴더 트리";
+            title: Tr.tree-title;
 
             MenuItem {
-                title: "공유 트리";
+                title: Tr.view-tree-shared;
                 checkable: true;
                 checked <=> root.shared-tree-mark;
                 activated => {
@@ -964,7 +965,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "패널별 트리";
+                title: Tr.view-tree-per-pane;
                 checkable: true;
                 checked <=> root.per-pane-tree-mark;
                 activated => {
@@ -972,7 +973,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("트리 숨김", Shortcuts.toggle-tree);
+                title: Shortcuts.titled(Tr.view-tree-hidden, Shortcuts.toggle-tree);
                 checkable: true;
                 checked <=> root.hidden-tree-mark;
                 activated => {
@@ -982,7 +983,7 @@ export component ViewMenu inherits ContextMenuArea {
             MenuSeparator { }
             // The window gives the tree the keys once the menus have closed.
             MenuItem {
-                title: Shortcuts.titled("폴더 트리로 가기", Shortcuts.focus-tree);
+                title: Shortcuts.titled(Tr.view-focus-tree, Shortcuts.focus-tree);
                 enabled: root.show-tree;
                 activated => {
                     root.command("focus-tree");
@@ -990,7 +991,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
         }
         MenuItem {
-            title: Shortcuts.titled("미리 보기 패널", Shortcuts.toggle-preview);
+            title: Shortcuts.titled(Tr.view-preview, Shortcuts.toggle-preview);
             checkable: true;
             checked <=> root.show-preview;
             activated => {
@@ -1000,10 +1001,10 @@ export component ViewMenu inherits ContextMenuArea {
         // Where the job panel shows (LAY-09): under the panes, or in a window of its own, whose
         // close button puts it back. No key: neither file manager has such a panel.
         Menu {
-            title: "작업 패널";
+            title: Tr.view-job-panel;
 
             MenuItem {
-                title: "별도 창";
+                title: Tr.view-jobs-window;
                 checkable: true;
                 checked <=> root.jobs-window;
                 activated => {
@@ -1016,10 +1017,10 @@ export component ViewMenu inherits ContextMenuArea {
         // The panes: one or two, beside or above each other, the divider between them (its
         // items act only while two panes show), and the commands between them.
         Menu {
-            title: "배치";
+            title: Tr.view-layout;
 
             MenuItem {
-                title: Shortcuts.titled("듀얼 패널", Shortcuts.toggle-dual-pane);
+                title: Shortcuts.titled(Tr.view-dual-pane, Shortcuts.toggle-dual-pane);
                 checkable: true;
                 checked <=> root.dual-pane;
                 activated => {
@@ -1028,7 +1029,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("위아래로 나누기", Shortcuts.toggle-split);
+                title: Shortcuts.titled(Tr.view-split, Shortcuts.toggle-split);
                 checkable: true;
                 checked <=> root.stacked;
                 activated => {
@@ -1038,7 +1039,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "두 패널을 같은 크기로";
+                title: Tr.view-even-split;
                 enabled: root.dual-pane;
                 activated => {
                     root.even-split();
@@ -1046,7 +1047,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: root.stacked ? "분할선을 위로" : "분할선을 왼쪽으로";
+                title: root.stacked ? Tr.view-divider-up : Tr.view-divider-left;
                 enabled: root.dual-pane;
                 activated => {
                     root.divider-moved(-0.1);
@@ -1054,7 +1055,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: root.stacked ? "분할선을 아래로" : "분할선을 오른쪽으로";
+                title: root.stacked ? Tr.view-divider-down : Tr.view-divider-right;
                 enabled: root.dual-pane;
                 activated => {
                     root.divider-moved(0.1);
@@ -1065,14 +1066,14 @@ export component ViewMenu inherits ContextMenuArea {
             // The commands between the two panes; those for the other pane act only while two
             // panes show.
             MenuItem {
-                title: Shortcuts.titled("패널 바꾸기", Shortcuts.swap-panes);
+                title: Shortcuts.titled(Tr.view-swap-panes, Shortcuts.swap-panes);
                 activated => {
                     root.command("swap-panes");
                     root.done();
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("같은 폴더를 반대편에", Shortcuts.same-folder);
+                title: Shortcuts.titled(Tr.view-same-folder, Shortcuts.same-folder);
                 enabled: root.dual-pane;
                 activated => {
                     root.command("same-folder");
@@ -1080,7 +1081,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("탐색 동기화", Shortcuts.sync-navigation);
+                title: Shortcuts.titled(Tr.view-sync, Shortcuts.sync-navigation);
                 enabled: root.dual-pane;
                 checkable: true;
                 checked <=> root.sync-navigation;
@@ -1094,24 +1095,24 @@ export component ViewMenu inherits ContextMenuArea {
         // The tab the active pane shows (as its own menu, and the keys to move it along the
         // strip).
         Menu {
-            title: "탭";
+            title: Tr.view-tab;
 
             MenuItem {
-                title: "탭 복제";
+                title: Tr.view-tab-duplicate;
                 activated => {
                     root.tab-command("duplicate");
                     root.done();
                 }
             }
             MenuItem {
-                title: root.tab-pinned ? "탭 고정 풀기" : "탭 고정";
+                title: root.tab-pinned ? Tr.view-tab-unpin : Tr.view-tab-pin;
                 activated => {
                     root.tab-command("pin");
                     root.done();
                 }
             }
             MenuItem {
-                title: "탭을 반대 패널로 옮기기";
+                title: Tr.view-tab-move-other;
                 enabled: root.view.tabs.length > 1;
                 activated => {
                     root.tab-command("move-other");
@@ -1119,7 +1120,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("탭을 왼쪽으로", Shortcuts.move-tab-left);
+                title: Shortcuts.titled(Tr.view-tab-move-left, Shortcuts.move-tab-left);
                 enabled: root.view.active-tab > 0;
                 activated => {
                     root.tab-command("move-left");
@@ -1127,7 +1128,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: Shortcuts.titled("탭을 오른쪽으로", Shortcuts.move-tab-right);
+                title: Shortcuts.titled(Tr.view-tab-move-right, Shortcuts.move-tab-right);
                 enabled: root.view.active-tab < root.view.tabs.length - 1;
                 activated => {
                     root.tab-command("move-right");
@@ -1136,7 +1137,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: Shortcuts.titled("닫은 탭 다시 열기", Shortcuts.reopen-tab);
+                title: Shortcuts.titled(Tr.tab-reopen, Shortcuts.reopen-tab);
                 enabled: root.view.can-reopen;
                 activated => {
                     root.tab-command("reopen");
@@ -1144,7 +1145,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "다른 탭 닫기";
+                title: Tr.tab-close-others;
                 enabled: root.view.tabs[root.view.active-tab].can-close-others;
                 activated => {
                     root.tab-command("close-others");
@@ -1152,7 +1153,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "오른쪽 탭 닫기";
+                title: Tr.tab-close-right;
                 enabled: root.view.tabs[root.view.active-tab].can-close-right;
                 activated => {
                     root.tab-command("close-right");
@@ -1163,7 +1164,7 @@ export component ViewMenu inherits ContextMenuArea {
         // 경로 복사 of the active pane's items, as in an item's menu (the menu key, macOS ⌃↩):
         // the forms beside the key's reach the keyboard here too (KEY-02).
         Menu {
-            title: "경로 복사";
+            title: Tr.command-copy-path;
 
             for form[i] in PathForms.titles: MenuItem {
                 title: PathForms.title(i);
@@ -1181,10 +1182,10 @@ export component ViewMenu inherits ContextMenuArea {
         // narrow window and hide this one. After 경로 복사 without a separator, for the room of
         // a 560px window.
         Menu {
-            title: "설정";
+            title: Tr.view-settings;
 
             MenuItem {
-                title: "끌어 놓기: 이동";
+                title: Tr.view-drop-move;
                 checkable: true;
                 checked <=> root.drag-move-mark;
                 activated => {
@@ -1192,7 +1193,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "끌어 놓기: 복사";
+                title: Tr.view-drop-copy;
                 checkable: true;
                 checked <=> root.drag-copy-mark;
                 activated => {
@@ -1201,7 +1202,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             // As the system's file manager does: a move within a drive, a copy to another.
             MenuItem {
-                title: "끌어 놓기: OS 방식";
+                title: Tr.view-drop-system;
                 checkable: true;
                 checked <=> root.drag-system-mark;
                 activated => {
@@ -1209,7 +1210,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "끌어 놓기: 매번 묻기";
+                title: Tr.view-drop-ask;
                 checkable: true;
                 checked <=> root.drag-ask-mark;
                 activated => {
@@ -1218,7 +1219,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "썸네일 보이기";
+                title: Tr.view-show-thumbnails;
                 checkable: true;
                 checked <=> root.show-thumbnails;
                 activated => {
@@ -1228,7 +1229,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             // The 선택 menu has this item too; here the keys reach it (F10, ↑↓, Enter; KEY-02).
             MenuItem {
-                title: "체크박스로 선택";
+                title: Tr.select-checkboxes;
                 checkable: true;
                 checked <=> root.checkbox-select;
                 activated => {
@@ -1238,7 +1239,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "길게 눌러 메뉴 열기";
+                title: Tr.view-long-press;
                 checkable: true;
                 checked <=> root.long-press;
                 activated => {
@@ -1247,7 +1248,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "길게 누르기 시간: 300 ms";
+                title: Tr.view-long-press-300;
                 checkable: true;
                 checked <=> root.press-300-mark;
                 enabled: root.long-press;
@@ -1256,7 +1257,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "길게 누르기 시간: 500 ms";
+                title: Tr.view-long-press-500;
                 checkable: true;
                 checked <=> root.press-500-mark;
                 enabled: root.long-press;
@@ -1265,7 +1266,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "길게 누르기 시간: 800 ms";
+                title: Tr.view-long-press-800;
                 checkable: true;
                 checked <=> root.press-800-mark;
                 enabled: root.long-press;
@@ -1274,7 +1275,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             MenuItem {
-                title: "길게 누르기 시간: 1200 ms";
+                title: Tr.view-long-press-1200;
                 checkable: true;
                 checked <=> root.press-1200-mark;
                 enabled: root.long-press;
@@ -1284,7 +1285,7 @@ export component ViewMenu inherits ContextMenuArea {
             }
             MenuSeparator { }
             MenuItem {
-                title: "끌어서 옮긴 뒤 되돌리기 알림";
+                title: Tr.view-move-undo-toast;
                 checkable: true;
                 checked <=> root.move-undo-toast;
                 activated => {
@@ -1297,7 +1298,7 @@ export component ViewMenu inherits ContextMenuArea {
             // stops at each one and asks. With the other switch of what a transfer does after
             // it, and no separator before it, for the room of a 560px window.
             MenuItem {
-                title: "복사·이동 오류는 파일마다 묻기";
+                title: Tr.view-ask-on-error;
                 checkable: true;
                 checked <=> root.ask-on-error;
                 activated => {
@@ -1308,7 +1309,7 @@ export component ViewMenu inherits ContextMenuArea {
             // PICK-05: off (the default), the picker of a copy or a move starts at the other
             // pane's folder; on, at the folder one went to last.
             MenuItem {
-                title: "복사·이동 창을 최근 위치의 첫 폴더로 열기";
+                title: Tr.view-pick-from-last;
                 checkable: true;
                 checked <=> root.pick-from-last;
                 activated => {
@@ -1317,7 +1318,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.system-menu-offered: MenuItem {
-                title: "오른쪽 클릭에 Windows 메뉴 바로 띄우기";
+                title: Tr.view-system-menu-first;
                 checkable: true;
                 checked <=> root.system-menu-first;
                 activated => {
@@ -1335,7 +1336,7 @@ export component ViewMenu inherits ContextMenuArea {
                 }
             }
             if root.removal-offer == 2: MenuItem {
-                title: "제거 프로그램 열기";
+                title: Tr.view-open-uninstaller;
                 activated => {
                     root.command("open-uninstaller");
                     root.done();

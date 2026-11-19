@@ -18,6 +18,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
+import { Tr } from "tr.slint";
 
 // A column after the name, as Rust says: its number (1 size, 2 modified, 3 kind, 4 created,
 // 5 extension, 6 attributes, 7 accessed, 8 path), what its head says, how wide it is, whether
@@ -364,7 +365,7 @@ export component FileHead inherits Rectangle {
             Menu {
                 // The trash's (NAV-16): where an item was, and when it was trashed.
                 if root.place == 1: MenuItem {
-                    title: "원래 위치";
+                    title: Tr.column-original;
                     checkable: true;
                     checked <=> root.mark-original;
                     activated => {
@@ -372,7 +373,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 if root.place == 1: MenuItem {
-                    title: "삭제한 날짜";
+                    title: Tr.column-deleted;
                     checkable: true;
                     checked <=> root.mark-deleted;
                     activated => {
@@ -380,7 +381,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 MenuItem {
-                    title: "크기";
+                    title: Tr.column-size;
                     checkable: true;
                     checked <=> root.mark-size;
                     activated => {
@@ -388,7 +389,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 if root.place == 0: MenuItem {
-                    title: "수정한 날짜";
+                    title: Tr.column-modified;
                     checkable: true;
                     checked <=> root.mark-modified;
                     activated => {
@@ -396,7 +397,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 if root.place == 0: MenuItem {
-                    title: "만든 날짜";
+                    title: Tr.column-created;
                     checkable: true;
                     checked <=> root.mark-created;
                     activated => {
@@ -404,7 +405,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 if root.place == 0: MenuItem {
-                    title: "접근한 날짜";
+                    title: Tr.column-accessed;
                     checkable: true;
                     checked <=> root.mark-accessed;
                     activated => {
@@ -412,7 +413,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 MenuItem {
-                    title: "종류";
+                    title: Tr.column-kind;
                     checkable: true;
                     checked <=> root.mark-kind;
                     activated => {
@@ -420,7 +421,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 MenuItem {
-                    title: "확장자";
+                    title: Tr.column-extension;
                     checkable: true;
                     checked <=> root.mark-extension;
                     activated => {
@@ -428,7 +429,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 if root.place == 0: MenuItem {
-                    title: "속성";
+                    title: Tr.column-attributes;
                     checkable: true;
                     checked <=> root.mark-attributes;
                     activated => {
@@ -438,7 +439,7 @@ export component FileHead inherits Rectangle {
                 // The folder of each item: one folder's on every row here, many once a view
                 // lists the items of many (search, a flat view).
                 if root.place == 0: MenuItem {
-                    title: "경로";
+                    title: Tr.column-path;
                     checkable: true;
                     checked <=> root.mark-path;
                     activated => {
@@ -448,21 +449,21 @@ export component FileHead inherits Rectangle {
                 MenuSeparator { }
                 // The order and the widths from the keys, as a head or a border dragged.
                 Menu {
-                    title: "열 순서";
+                    title: Tr.view-column-order;
                     enabled: root.columns.length > 1;
 
                     for column[i] in root.columns: Menu {
                         title: column.title;
 
                         MenuItem {
-                            title: "왼쪽으로";
+                            title: Tr.view-column-left;
                             enabled: i > 0;
                             activated => {
                                 root.column-moved(i, i - 1);
                             }
                         }
                         MenuItem {
-                            title: "오른쪽으로";
+                            title: Tr.view-column-right;
                             enabled: i < root.columns.length - 1;
                             activated => {
                                 root.column-moved(i, i + 2);
@@ -471,7 +472,7 @@ export component FileHead inherits Rectangle {
                     }
                 }
                 MenuItem {
-                    title: Shortcuts.titled("모든 열 너비 맞추기", Shortcuts.fit-columns);
+                    title: Shortcuts.titled(Tr.view-fit-columns, Shortcuts.fit-columns);
                     enabled: root.columns.length > 0;
                     activated => {
                         root.fit-all();
@@ -495,7 +496,7 @@ export component FileHead inherits Rectangle {
             width: 22px;
             height: parent.height;
             state: root.select-state;
-            label: "모든 항목 선택";
+            label: Tr.list-select-all;
             toggled => {
                 root.all-toggled();
             }
@@ -503,7 +504,7 @@ export component FileHead inherits Rectangle {
         HeadCell {
             x: root.pad + (root.checkboxes ? root.check-room : 0px);
             width: root.name-end - self.x;
-            text: "이름";
+            text: Tr.column-name;
             sorted: root.sort-key == 0 ? 1 : root.then-key == 0 ? 2 : 0;
             ascending: root.sort-key == 0 ? root.sort-ascending : root.then-ascending;
             clicked(shift) => {

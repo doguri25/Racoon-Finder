@@ -27,6 +27,7 @@ import { Icon, StateBadge } from "icons.slint";
 import { FileRow, RowWords } from "file-list.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
+import { Tr } from "tr.slint";
 
 // What the pointer did to an item.
 enum TileEvent {
@@ -250,7 +251,7 @@ component Tile inherits Rectangle {
         y: root.big ? 2px : 0px;
         height: root.big ? 24px : parent.height;
         state: root.item.selected ? 1 : 0;
-        label: root.item.name + " 선택";
+        label: root.item.select;
         toggled => {
             root.event(TileEvent.check, false, false, "");
         }
@@ -542,7 +543,7 @@ export component FileGrid inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 visible: !root.columnar;
-                accessible-label: "항목 목록";
+                accessible-label: Tr.list-items;
                 changed content-y => {
                     let y = settle.corrected(self.content-y);
                     if (y != self.content-y) {
@@ -598,7 +599,7 @@ export component FileGrid inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     accessible-role: list;
-                    accessible-label: "항목 목록";
+                    accessible-label: Tr.list-items;
                     content-width: root.column-count * root.tile-w + 2 * root.pad;
                     content-height: self.visible-height;
 

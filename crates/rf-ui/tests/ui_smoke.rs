@@ -9,6 +9,7 @@ use i_slint_core::input::{InternalKeyEvent, KeyEventType};
 use rf_core::{Entry, EntryKind, Os, VPath};
 use rf_platform::shell::WindowPoint;
 use rf_platform::{DiskSpace, KnownFolder};
+use rf_ui::i18n::{Lang, Localizer};
 use rf_ui::keys::PanelKey;
 use rf_ui::loader::LoadEvent;
 use rf_ui::pane::Pane;
@@ -25,9 +26,9 @@ use rf_ui::ui_bridge::{self, FileRows, PaneModels, RecentBlock, RecentFolder, Ro
 use rf_ui::{
     ConfirmView, ConflictView, DialogKind, DragPointer, DropPlace, ErrorView, FactRow, FileRow,
     FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView, IconLines, ItemMenu, JobGraph,
-    JobRowView, JobTray, JobWindow, MainWindow, MessageView, NameView, NoticeWindow, PaneView,
-    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecentRowView, RecoveryView, StatusFit, Theme, VisitEntry,
+    JobRowView, MainWindow, MessageView, NameView, PaneView, PatternView, PickTarget, PickView,
+    PreflightView, PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView,
+    StatusFit, Theme, VisitEntry,
 };
 use rf_vfs::VisibilityFilter;
 use slint::language::DragAction;
@@ -37,7 +38,7 @@ use slint::{Color, ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc
 /// A shown main window at the default size, on the testing backend.
 fn window() -> MainWindow {
     i_slint_backend_testing::init_no_event_loop();
-    let window = MainWindow::new().expect("MainWindow builds");
+    let window = ui_bridge::new_main_window().expect("MainWindow builds");
     window.window().set_size(LogicalSize::new(1280.0, 800.0));
     // As the controller wires it: the status lines take as many parts as their panes are wide.
     window
@@ -101,7 +102,7 @@ fn tokens_of(choice: i32) -> theme::Tokens {
 fn the_notice_window_shows_the_theme_it_is_given() {
     i_slint_backend_testing::init_no_event_loop();
     for choice in [1, 2, 3, 0] {
-        let notice = NoticeWindow::new().expect("NoticeWindow builds");
+        let notice = ui_bridge::new_notice_window().expect("NoticeWindow builds");
         ui_bridge::follow_theme(&notice);
         notice.set_theme_choice(choice);
         notice.invoke_show_theme();
@@ -120,7 +121,7 @@ fn the_notice_window_shows_the_theme_it_is_given() {
 #[test]
 fn main_window_builds_with_theme() {
     i_slint_backend_testing::init_no_event_loop();
-    let window = MainWindow::new().expect("MainWindow builds");
+    let window = ui_bridge::new_main_window().expect("MainWindow builds");
     assert_eq!(
         ui_bridge::shown_theme(&window),
         theme::Builtin::Light.tokens()
@@ -143,8 +144,8 @@ fn main_window_builds_with_theme() {
 #[test]
 fn a_theme_chosen_shows_at_once_in_every_window() {
     let window = window();
-    let own = JobWindow::new().expect("JobWindow builds");
-    let notice = NoticeWindow::new().expect("NoticeWindow builds");
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
+    let notice = ui_bridge::new_notice_window().expect("NoticeWindow builds");
     ui_bridge::follow_theme(&window);
     ui_bridge::follow_theme(&own);
     ui_bridge::follow_theme(&notice);
@@ -2325,7 +2326,7 @@ fn the_picker_of_a_log_has_no_toggle_and_no_conflict_policy() {
 #[test]
 fn the_tray_icon_builds_with_its_menu_s_words() {
     i_slint_backend_testing::init_no_event_loop();
-    let tray = JobTray::new().expect("the tray builds");
+    let tray = ui_bridge::new_job_tray().expect("the tray builds");
     tray.set_status("앱\n복사 중 25%".into());
     tray.set_label("25%".into());
     tray.set_all_paused(true);
@@ -5376,7 +5377,7 @@ fn the_name_window_s_tab_moves_on_and_its_arrows_reach_its_buttons() {
 #[test]
 fn the_notice_window_closes_from_the_keys_on_its_button() {
     i_slint_backend_testing::init_no_event_loop();
-    let notice = NoticeWindow::new().expect("NoticeWindow builds");
+    let notice = ui_bridge::new_notice_window().expect("NoticeWindow builds");
     let closed = Rc::new(RefCell::new(0));
     let count = Rc::clone(&closed);
     notice.on_closed(move || *count.borrow_mut() += 1);
@@ -5759,6 +5760,107 @@ fn the_tree_and_the_preview_panel_come_and_go() {
     assert!(preview_at.x > right_at.x + right.width);
     assert!(preview.width >= 200.0);
     assert!(preview_at.x + preview.width <= 1280.0);
+}
+
+/// The 보기 menu and each of its sub-menus fit a 900x560 window in Korean and in English, whose
+/// words are longer (I18N-01): with every item there is, every column and the largest look, each
+/// menu is shorter than the window, and the menus that show side by side (a sub-menu beside its
+/// menu) are narrower than it together. At the default size the menu's last item ends well
+/// before 500px in both. (The testing backend tells the size of a menu and the places of its
+/// items in it, not where it is in the window.)
+#[test]
+fn the_view_menu_fits_the_smallest_window_in_both_languages() {
+    let window = window();
+    let mut pane = listed_pane(vec![entry("a.txt", EntryKind::File, 10)]);
+    pane.active_tab_mut().set_view(FolderView {
+        columns: Column::OPTIONAL.into_iter().map(ShownColumn::new).collect(),
+        ..FolderView::default()
+    });
+    let models = PaneModels::default();
+    window.set_left_pane(models.view(&pane, true));
+    window.set_system_menu_offered(true);
+    window.set_removal_offer(2);
+    for lang in [Lang::Ko, Lang::En] {
+        let words = Localizer::new(lang);
+        ui_bridge::speak_in(&window, &words);
+        let say = |key: &str| words.text(key, &[]);
+        window.window().set_size(LogicalSize::new(1280.0, 800.0));
+        window.set_density(1);
+        window.set_font_scale(100);
+        slint::platform::update_timers_and_animations();
+        let button = labelled(&window, &say("toolbar-view"), AccessibleRole::Button).remove(0);
+        let open = |subs: &[&str]| {
+            button.invoke_accessible_default_action();
+            for sub in subs {
+                choose_item(&window, &say(sub));
+            }
+        };
+        open(&[]);
+        let last = ElementHandle::find_by_accessible_label(&window, &say("view-settings"))
+            .find(|item| item.accessible_role() == Some(AccessibleRole::Text))
+            .expect("the menu shows 설정");
+        let end = last.absolute_position().y + last.size().height;
+        assert!(
+            end < 490.0,
+            "{lang:?}: the menu is {end}px tall to its last item"
+        );
+        press(&window, Key::Escape);
+
+        window.window().set_size(LogicalSize::new(900.0, 560.0));
+        window.set_density(2);
+        window.set_font_scale(130);
+        slint::platform::update_timers_and_animations();
+        let fits = |shown: &str, count: usize| {
+            let sizes: Vec<LogicalSize> =
+                ElementHandle::find_by_element_type_name(&window, "MenuFrame")
+                    .map(|frame| frame.size())
+                    .collect();
+            assert_eq!(sizes.len(), count, "{lang:?} {shown}: the menus that show");
+            let wide: f32 = sizes.iter().map(|size| size.width).sum();
+            assert!(
+                wide <= 900.0,
+                "{lang:?} {shown}: the menus side by side are {wide}px wide: {sizes:?}"
+            );
+            for size in &sizes {
+                assert!(
+                    size.height <= 560.0,
+                    "{lang:?} {shown}: a menu {}px tall",
+                    size.height
+                );
+            }
+        };
+        open(&[]);
+        fits("view", 1);
+        press(&window, Key::Escape);
+        for sub in [
+            "view-mode",
+            "view-sort",
+            "view-columns",
+            "view-theme",
+            "tree-title",
+            "view-job-panel",
+            "view-layout",
+            "view-tab",
+            "command-copy-path",
+            "view-settings",
+        ] {
+            open(&[sub]);
+            fits(sub, 2);
+            for _ in 0..2 {
+                press(&window, Key::Escape);
+            }
+        }
+        for (sub, then) in [
+            ("view-sort", "view-then-sort"),
+            ("view-columns", "view-column-order"),
+        ] {
+            open(&[sub, then]);
+            fits(then, 3);
+            for _ in 0..3 {
+                press(&window, Key::Escape);
+            }
+        }
+    }
 }
 
 /// The default layout, as Rust sets it back after a checkable item of the 보기 menu flipped
@@ -6385,7 +6487,7 @@ fn a_running_job_shows_the_file_it_works_on_and_the_graph_of_its_speed() {
 #[test]
 fn the_buttons_that_move_a_job_show_their_keys_in_both_windows() {
     let window = window();
-    let own = JobWindow::new().expect("JobWindow builds");
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
     own.show().expect("the window shows");
     // One job runs and two wait, in the panel under the panes and in the panel's own window.
     let rows = Rc::new(slint::VecModel::from(vec![job_row("복사 중")]));
@@ -6562,7 +6664,7 @@ fn the_job_panel_goes_to_a_window_of_its_own_and_back() {
     assert_eq!(in_main("최근 완료 1개", AccessibleRole::Text), 1);
 
     // The window of its own, with the same models, as the controller gives them to both.
-    let own = JobWindow::new().expect("JobWindow builds");
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
     own.set_window_title("작업 - 앱".into());
     own.set_job_rows(ModelRc::from(Rc::clone(&rows)));
     own.set_job_queue(ModelRc::from(Rc::clone(&queue)));
@@ -6621,7 +6723,7 @@ fn the_job_panel_goes_to_a_window_of_its_own_and_back() {
 #[test]
 fn the_job_window_takes_the_panels_keys_shows_the_theme_and_says_when_it_is_empty() {
     i_slint_backend_testing::init_no_event_loop();
-    let own = JobWindow::new().expect("JobWindow builds");
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
     let calls = Calls::default();
     let record = calls.clone();
     let down = special(Key::DownArrow);
@@ -6700,7 +6802,7 @@ fn the_job_window_takes_the_panels_keys_shows_the_theme_and_says_when_it_is_empt
 #[test]
 fn the_job_window_at_its_smallest_holds_the_panel_with_every_list_open() {
     i_slint_backend_testing::init_no_event_loop();
-    let own = JobWindow::new().expect("JobWindow builds");
+    let own = ui_bridge::new_job_window().expect("JobWindow builds");
     own.window().set_size(LogicalSize::new(520.0, 460.0));
     // Two jobs run (one in each lane), one waits, and both lists are open.
     let rows = Rc::new(slint::VecModel::from(vec![
@@ -11063,7 +11165,7 @@ fn the_conflict_dialog_scrolls_under_its_buttons_at_the_largest_look() {
         let window = if first.replace(false) {
             window()
         } else {
-            let window = MainWindow::new().expect("MainWindow builds");
+            let window = ui_bridge::new_main_window().expect("MainWindow builds");
             window.show().expect("the window shows");
             window
         };
@@ -11189,7 +11291,7 @@ fn the_picker_s_conflict_choice_goes_under_its_heading_where_it_does_not_fit_bes
         let window = if first.replace(false) {
             window()
         } else {
-            let window = MainWindow::new().expect("MainWindow builds");
+            let window = ui_bridge::new_main_window().expect("MainWindow builds");
             window.show().expect("the window shows");
             window
         };

@@ -3,7 +3,10 @@
 // got, the menu bar shows the first one's percent beside it, and its menu opens the window,
 // pauses or resumes every job, or ends the app. A click on the icon opens the window too.
 // Rust makes it when the window hides and drops it when the window shows again; it has no
-// window of its own, and no globals shared with the main window (it uses none).
+// window of its own, and its globals are its own: its words (`Tr`) are filled as it is made
+// (`ui_bridge::new_job_tray`).
+
+import { Tr } from "tr.slint";
 
 export component JobTray inherits SystemTrayIcon {
     in property <image> picture;
@@ -26,13 +29,13 @@ export component JobTray inherits SystemTrayIcon {
 
     Menu {
         MenuItem {
-            title: "창 열기";
+            title: Tr.tray-open-window;
             activated => {
                 root.open-window();
             }
         }
         MenuItem {
-            title: root.all-paused ? "모두 계속" : "모두 일시정지";
+            title: root.all-paused ? Tr.tray-resume-all : Tr.tray-pause-all;
             activated => {
                 if (root.all-paused) {
                     root.resume-all();
@@ -43,7 +46,7 @@ export component JobTray inherits SystemTrayIcon {
         }
         MenuSeparator { }
         MenuItem {
-            title: "끝내기";
+            title: Tr.tray-quit;
             activated => {
                 root.quit();
             }

@@ -3,6 +3,8 @@
 // them from its shortcut table (`keys.rs`, `ui_bridge::show_shortcuts`); a command without a
 // key there has an empty one.
 
+import { Tr } from "tr.slint";
+
 export global Shortcuts {
     in property <string> back;
     in property <string> forward;
@@ -89,7 +91,7 @@ export global Shortcuts {
 // The forms of 경로 복사 (OPS-07), in the order of their numbers (`PathForm::number`): a menu
 // item `i` runs the command `copy-path-i`.
 export global PathForms {
-    out property <[string]> titles: ["전체 경로", "이름만", "따옴표 포함", "UNC 경로", "슬래시 형식", "파일 URL"];
+    out property <[string]> titles: [Tr.path-form-full, Tr.path-form-name, Tr.path-form-quoted, Tr.path-form-unc, Tr.path-form-slashes, Tr.path-form-url];
 
     // The title of form `i`, with the key after it for the form the key copies.
     public pure function title(i: int) -> string {

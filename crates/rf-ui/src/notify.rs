@@ -23,6 +23,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
 use crate::JobTray;
 use crate::state::TrayCommand;
+use crate::ui_bridge;
 
 /// A job that took longer than this is told of by a notification when it ends while the window
 /// is not in front, or hidden behind the tray icon.
@@ -232,7 +233,7 @@ impl SlintTray {
 
     /// The component, made with its picture and its menu's callbacks.
     fn make(&self) -> Result<JobTray, slint::PlatformError> {
-        let tray = JobTray::new()?;
+        let tray = ui_bridge::new_job_tray()?;
         tray.set_picture(tray_icon());
         let later = |command: TrayCommand| {
             let on_command = Rc::clone(&self.on_command);

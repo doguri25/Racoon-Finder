@@ -4175,7 +4175,7 @@ impl Controller {
     /// handlers. Its close button puts the panel back under the panes
     /// ([`Controller::dock_jobs`]).
     fn open_job_window(&self) -> Result<(), slint::PlatformError> {
-        let own = JobWindow::new()?;
+        let own = ui_bridge::new_job_window()?;
         own.set_window_title(words::job_window_title().into());
         ui_bridge::follow_theme(&own);
         let look = self.look.get();
@@ -4699,7 +4699,7 @@ mod tests {
     #[test]
     fn the_pointer_that_leaves_with_the_button_up_leaves_no_hover_behind() {
         i_slint_backend_testing::init_no_event_loop();
-        let window = MainWindow::new().expect("the window");
+        let window = ui_bridge::new_main_window().expect("the window");
         window
             .window()
             .set_size(slint::LogicalSize::new(1280.0, 800.0));
@@ -4747,7 +4747,7 @@ mod tests {
         use crate::theme::Builtin;
 
         i_slint_backend_testing::init_no_event_loop();
-        let window = MainWindow::new().expect("the window");
+        let window = ui_bridge::new_main_window().expect("the window");
         window.show().expect("it shows");
         let dir = tempfile::tempdir().expect("a temporary folder");
         let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
@@ -5086,7 +5086,7 @@ mod tests {
         use crate::{DropAt, DropPlace};
 
         i_slint_backend_testing::init_no_event_loop();
-        let window = MainWindow::new().expect("the window");
+        let window = ui_bridge::new_main_window().expect("the window");
         window.show().expect("it shows");
         let dir = tempfile::tempdir().expect("a temporary folder");
         let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
@@ -5149,7 +5149,7 @@ mod tests {
             use rf_core::{Entry, EntryKind};
 
             i_slint_backend_testing::init_no_event_loop();
-            let window = MainWindow::new().expect("the window");
+            let window = ui_bridge::new_main_window().expect("the window");
             window
                 .window()
                 .set_size(slint::LogicalSize::new(1280.0, 800.0));

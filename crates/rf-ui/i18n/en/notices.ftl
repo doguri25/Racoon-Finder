@@ -1,4 +1,4 @@
-# The window's notices and the words of the panes and views: folder lists, columns, views,
+# The window's notices and the words of the panes and views: folder lists, views,
 # selecting by pattern, navigation sync, tabs, settings.
 
 ## Locations and folder lists
@@ -27,38 +27,6 @@ notice-folder-gone-sync-off =
 notice-start-folder-gone = Can't find the folder to open: { $path }
 notice-background-failed = The system is low on resources, so the work couldn't start. Try again in a moment
 notice-sort-failed = Couldn't sort this folder, so it keeps its earlier order
-
-## The column heads of Details (the View menu's columns and sort use the same names)
-
-column-name = Name
-column-size = Size
-column-modified = { $os ->
-        [windows] Date modified
-       *[other] Date Modified
-    }
-column-created = { $os ->
-        [windows] Date created
-       *[other] Date Created
-    }
-column-kind = { $os ->
-        [macos] Kind
-       *[other] Type
-    }
-column-extension = Extension
-column-attributes = Attributes
-column-accessed = { $os ->
-        [windows] Date accessed
-       *[other] Date Accessed
-    }
-column-path = Path
-column-original = { $os ->
-        [windows] Original location
-       *[other] Original Location
-    }
-column-deleted = { $os ->
-        [windows] Date deleted
-       *[other] Date Deleted
-    }
 
 ## The view of a folder
 

@@ -1,8 +1,8 @@
 //! What the Slint screens are given: the row models of a file list and of the folder trees,
 //! the conversions from the panes' state, the address bar's lists, the dialogs, the
 //! destination picker and the properties window to Slint structs, the payload of a drag of
-//! rows, the keys the toolbar and the menus show, and [`post`], which brings a worker thread's
-//! result back to the UI thread.
+//! rows, the keys the toolbar and the menus show, the words of every window ([`speak`]), and
+//! [`post`], which brings a worker thread's result back to the UI thread.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +37,7 @@ use crate::format::{
 };
 use crate::hashing::Algorithm;
 use crate::history::{HISTORY_KEY_MENU, HISTORY_MENU, Way};
+use crate::i18n::{self, Localizer};
 use crate::jobs::{JobRow, RecentRow, speed_points};
 use crate::keys::{self, Command, PanelKey};
 use crate::pane::{LoadStatus, Pane, ancestors};
@@ -57,10 +58,10 @@ use crate::words;
 use crate::{
     ColumnView, ConfirmView, ConflictView, Crumb, DialogKind, DragPointer, DropAt, DropPlace,
     ErrorView, FactRow, FileRow, FolderMenuRow, FolderMenuView, HashRowView, HistoryRowView,
-    ItemMenu, JobGraph, JobRowView, LinkEntry, MainWindow, MessageView, NameView, PaneView,
-    PatternView, PickTarget, PickView, PreflightView, PreviewKind, PreviewView, PropertiesView,
-    RecentRowView, RecoveryView, RowKind, SectionHead, Shortcuts, TabItem, Theme, TreeRow,
-    VisitEntry,
+    ItemMenu, JobGraph, JobRowView, JobTray, JobWindow, LinkEntry, MainWindow, MessageView,
+    NameView, NoticeWindow, PaneView, PatternView, PickTarget, PickView, PreflightView,
+    PreviewKind, PreviewView, PropertiesView, RecentRowView, RecoveryView, RowKind, SectionHead,
+    Shortcuts, TabItem, Theme, Tr, TreeRow, VisitEntry,
 };
 
 /// What separates the parts of a pane's status line in `PaneView.status`:
@@ -1236,8 +1237,10 @@ pub fn file_row(entry: &Entry, selected: bool, tz: &TimeZone, show_extensions: b
             .unwrap_or_default()
             .into()
     };
+    let name = shown_name(entry, show_extensions);
     FileRow {
-        name: shown_name(entry, show_extensions).into(),
+        select: words::row_select(&name).into(),
+        name: name.into(),
         size: if entry.kind == EntryKind::File {
             format_size(entry.size).into()
         } else {
@@ -1278,9 +1281,13 @@ pub fn crumbs(ancestors: &[VPath]) -> Vec<Crumb> {
     ancestors
         .iter()
         .zip(0..)
-        .map(|(path, index)| Crumb {
-            label: folder_label(path).into(),
-            index,
+        .map(|(path, index)| {
+            let label = folder_label(path);
+            Crumb {
+                subfolders: words::crumb_subfolders(&label).into(),
+                label: label.into(),
+                index,
+            }
         })
         .collect()
 }
@@ -1632,8 +1639,97 @@ fn visit_title(path: &VPath) -> String {
     words::history_entry(&folder_label(path), place.as_deref())
 }
 
+/// A property of the window's words (the `Tr` global, `ui/tr.slint`): the key of its message in
+/// `ui.ftl`, which is its name, then how to set it and how to read it.
+type TrProperty = (
+    &'static str,
+    fn(&Tr<'_>, SharedString),
+    fn(&Tr<'_>) -> SharedString,
+);
+
+/// Every property of `Tr`, in the order of `ui/tr.slint`, as the build lists them (build.rs).
+static TR_PROPERTIES: &[TrProperty] = &include!(concat!(env!("OUT_DIR"), "/tr_properties.rs"));
+
+/// The keys of the window's words, one for each property of `Tr` (the names of its properties),
+/// in the order of `ui/tr.slint`.
+pub fn tr_keys() -> impl Iterator<Item = &'static str> {
+    TR_PROPERTIES.iter().map(|&(key, _, _)| key)
+}
+
+/// Gives `window` its words in the language of the run (I18N-01): every property of its `Tr`,
+/// from `ui.ftl`. A global is per window, so each window, the tray icon too, is given them right
+/// after it is made: [`new_main_window`], [`new_notice_window`], [`new_job_window`] and
+/// [`new_job_tray`] make them so, and nothing else makes them.
+pub fn speak<'a, W>(window: &'a W)
+where
+    Tr<'a>: slint::Global<'a, W>,
+{
+    fill_words(window, |key| i18n::t(key, &[]));
+}
+
+/// Gives `window` the words of `words` ([`speak`] in a language of its own): for the tests of
+/// the screens in English, where the language of the run stays Korean.
+pub fn speak_in<'a, W>(window: &'a W, words: &Localizer)
+where
+    Tr<'a>: slint::Global<'a, W>,
+{
+    fill_words(window, |key| words.text(key, &[]));
+}
+
+/// Sets every property of `window`'s `Tr` to `text` of its key.
+fn fill_words<'a, W>(window: &'a W, text: impl Fn(&str) -> String)
+where
+    Tr<'a>: slint::Global<'a, W>,
+{
+    let tr = <Tr<'a> as slint::Global<'a, W>>::get(window);
+    for (key, set, _) in TR_PROPERTIES {
+        set(&tr, text(key).into());
+    }
+}
+
+/// The words `window` shows ([`speak`]), each with its key, in the order of `ui/tr.slint`: for
+/// the tests.
+pub fn spoken<'a, W>(window: &'a W) -> Vec<(&'static str, SharedString)>
+where
+    Tr<'a>: slint::Global<'a, W>,
+{
+    let tr = <Tr<'a> as slint::Global<'a, W>>::get(window);
+    TR_PROPERTIES
+        .iter()
+        .map(|(key, _, get)| (*key, get(&tr)))
+        .collect()
+}
+
+/// The main window, with its words ([`speak`]).
+pub fn new_main_window() -> Result<MainWindow, slint::PlatformError> {
+    let window = MainWindow::new()?;
+    speak(&window);
+    Ok(window)
+}
+
+/// The small window of a notice, with its words ([`speak`]).
+pub fn new_notice_window() -> Result<NoticeWindow, slint::PlatformError> {
+    let window = NoticeWindow::new()?;
+    speak(&window);
+    Ok(window)
+}
+
+/// The job panel's own window (LAY-09), with its words ([`speak`]).
+pub fn new_job_window() -> Result<JobWindow, slint::PlatformError> {
+    let window = JobWindow::new()?;
+    speak(&window);
+    Ok(window)
+}
+
+/// The tray icon (XFER-15), with the words of its menu ([`speak`]).
+pub fn new_job_tray() -> Result<JobTray, slint::PlatformError> {
+    let tray = JobTray::new()?;
+    speak(&tray);
+    Ok(tray)
+}
+
 /// Gives the window's toolbar, tooltips and menus the keys of their commands on `os`, from the
-/// shortcut table (KEY-03).
+/// shortcut table (KEY-03), and the hint of quick look the key that closes it.
 pub fn show_shortcuts(window: &MainWindow, os: Os) {
     let shown = window.global::<Shortcuts<'_>>();
     let key =
@@ -1690,6 +1786,7 @@ pub fn show_shortcuts(window: &MainWindow, os: Os) {
     shown.set_open_terminal(key(Command::OpenTerminal));
     shown.set_system_menu(key(Command::SystemMenu));
     show_panel_shortcuts(window, os);
+    window.set_quick_look_hint(words::quick_look_hint(&key(Command::QuickLook)).into());
 }
 
 /// Gives a window that shows the job panel, the main one or the panel's own (LAY-09), the keys
@@ -2740,7 +2837,94 @@ mod tests {
     use slint::SharedPixelBuffer;
 
     use super::*;
+    use crate::i18n::Lang;
     use crate::loader::LoadEvent;
+
+    /// Every word of `shown` is the message of its key in `words`, and none is empty or the key
+    /// itself (a message missing in every language).
+    fn all_said(shown: &[(&'static str, SharedString)], words: &Localizer, of: &str) {
+        assert_eq!(
+            shown.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            tr_keys().collect::<Vec<_>>(),
+            "{of}"
+        );
+        for (key, text) in shown {
+            assert!(!text.is_empty(), "{of}: {key} is empty");
+            assert_ne!(text.as_str(), *key, "{of}: {key} has no message");
+            assert_eq!(text.as_str(), words.text(key, &[]), "{of}: {key}");
+        }
+    }
+
+    /// Each window, the tray icon too, is made with every one of its words (`Tr`, a global of
+    /// its own), in the language of the run (Korean in the tests); a window given English shows
+    /// every word in English.
+    #[test]
+    fn every_window_is_made_with_all_its_words_in_korean_or_in_english() {
+        i_slint_backend_testing::init_no_event_loop();
+        let korean = Localizer::new(Lang::Ko);
+        let main = new_main_window().expect("the main window");
+        all_said(&spoken(&main), &korean, "main window");
+        let notice = new_notice_window().expect("the notice window");
+        all_said(&spoken(&notice), &korean, "notice window");
+        let jobs = new_job_window().expect("the job window");
+        all_said(&spoken(&jobs), &korean, "job window");
+        let tray = new_job_tray().expect("the tray icon");
+        all_said(&spoken(&tray), &korean, "tray icon");
+        assert_eq!(
+            spoken(&main)
+                .iter()
+                .find(|(key, _)| *key == "command-new-folder")
+                .map(|(_, text)| text.as_str()),
+            Some("새 폴더")
+        );
+
+        let english = Localizer::new(Lang::En);
+        speak_in(&main, &english);
+        all_said(&spoken(&main), &english, "main window in English");
+        let shown = spoken(&main);
+        let said = |key: &str| {
+            shown
+                .iter()
+                .find(|(shown_key, _)| *shown_key == key)
+                .map(|(_, text)| text.to_string())
+        };
+        assert_eq!(said("command-new-folder").as_deref(), Some("New Folder"));
+        assert_eq!(said("view-dual-pane").as_deref(), Some("Dual Pane"));
+        // A window's words are its own: the others keep theirs.
+        all_said(
+            &spoken(&jobs),
+            &korean,
+            "job window after the main one's English",
+        );
+    }
+
+    /// The words Rust makes for the window with a name or a key in them (screen.ftl).
+    #[test]
+    fn the_window_s_words_with_a_name_hold_it() {
+        let root = system_root();
+        let docs = root.join("docs").expect("a plain name");
+        let shown = crumbs(&[docs]);
+        assert_eq!(shown[0].subfolders.as_str(), "‘docs’ 하위 폴더");
+        let entry = Entry::new("a.txt", EntryKind::File);
+        let row = file_row(&entry, false, &TimeZone::UTC, true);
+        assert_eq!(row.select.as_str(), "a.txt 선택");
+        // Without its extension shown, the name the row shows.
+        let row = file_row(&entry, false, &TimeZone::UTC, false);
+        assert_eq!(row.select.as_str(), "a 선택");
+        assert_eq!(
+            words::quick_look_hint("Space"),
+            "← → 이전·다음 파일 · Space 닫기"
+        );
+        let english = Localizer::new(Lang::En);
+        assert_eq!(
+            english.text("crumb-subfolders", &[("name", "docs".into())]),
+            "Subfolders of “docs”"
+        );
+        assert_eq!(
+            english.text("row-select", &[("name", "a.txt".into())]),
+            "Select a.txt"
+        );
+    }
 
     fn names(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
@@ -3253,11 +3437,13 @@ mod tests {
             shown,
             [
                 Crumb {
+                    subfolders: format!("‘{label}’ 하위 폴더").into(),
                     label: label.into(),
                     index: 0,
                 },
                 Crumb {
                     label: "docs".into(),
+                    subfolders: "‘docs’ 하위 폴더".into(),
                     index: 1,
                 },
             ]

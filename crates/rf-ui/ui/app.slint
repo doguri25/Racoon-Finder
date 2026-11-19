@@ -22,6 +22,7 @@ import { Theme } from "theme.slint";
 import { Icon } from "icons.slint";
 import { ToolButton, TextButton, Toast, Field } from "widgets.slint";
 import { Shortcuts } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 import { FileRow, ColumnView } from "file-list.slint";
 import { IconLines } from "file-grid.slint";
 import {
@@ -48,7 +49,7 @@ import { ItemMenu, LinkEntry, OpenWithMenu, DropMenu, DragPointer, LongPressRing
 export {
     Theme, FileRow, ColumnView, PaneView, TabItem, TabDrop, Crumb, TreeRow, SectionHead, RowKind, JobRowView, RecentRowView, HistoryRowView, StatusFit, JobTray, NameView,
     ConfirmView, MessageView, RecoveryView, PreflightView, ConflictView, ErrorView, PickView, PickTarget,
-    NoticeWindow, JobWindow, JobGraph, Shortcuts, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
+    NoticeWindow, JobWindow, JobGraph, Shortcuts, Tr, FolderMenuView, FolderMenuRow, PatternView, PreviewView, PreviewKind,
     PropertiesView, FactRow, HashRowView, ItemMenu, LinkEntry, DragPointer, LongPressRing, DropPlace, DropAt,
     VisitEntry, IconLines
 }
@@ -220,6 +221,9 @@ export component MainWindow inherits Window {
     // and whether quick look shows (over everything but a dialog).
     in property <PreviewView> preview;
     in property <bool> quick-look;
+    // The hint at quick look's foot, with the key that closes it (Rust's words,
+    // `ui_bridge::show_shortcuts`).
+    in property <string> quick-look-hint;
     // The preview panel's width, and whether the window has room for it (Rust sets both from
     // the window's width: `state::preview_width`); without room it hides, and `show-preview`,
     // the setting, stays.
@@ -1151,8 +1155,8 @@ export component MainWindow inherits Window {
                         back-button := ToolButton {
                             icon: "back";
                             keys: Shortcuts.back;
-                            label: "뒤로";
-                            note: Shortcuts.tip("방문 기록", Shortcuts.visits-menu);
+                            label: Tr.toolbar-back;
+                            note: Shortcuts.tip(Tr.toolbar-visits, Shortcuts.visits-menu);
                             enabled: root.can-back;
                             clicked => {
                                 root.command("back");
@@ -1164,8 +1168,8 @@ export component MainWindow inherits Window {
                         forward-button := ToolButton {
                             icon: "forward";
                             keys: Shortcuts.forward;
-                            label: "앞으로";
-                            note: Shortcuts.tip("방문 기록", Shortcuts.visits-menu);
+                            label: Tr.toolbar-forward;
+                            note: Shortcuts.tip(Tr.toolbar-visits, Shortcuts.visits-menu);
                             enabled: root.can-forward;
                             clicked => {
                                 root.command("forward");
@@ -1177,7 +1181,7 @@ export component MainWindow inherits Window {
                         ToolButton {
                             icon: "up";
                             keys: Shortcuts.up;
-                            label: "위로";
+                            label: Tr.toolbar-up;
                             enabled: root.can-up;
                             clicked => {
                                 root.command("up");
@@ -1202,7 +1206,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "new-folder";
                             keys: Shortcuts.new-folder;
-                            text: "새 폴더";
+                            text: Tr.command-new-folder;
                             clicked => {
                                 root.command("new-folder");
                             }
@@ -1211,7 +1215,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "copy";
                             keys: Shortcuts.copy-to;
-                            text: "복사…";
+                            text: Tr.command-copy-to;
                             clicked => {
                                 root.command("copy");
                             }
@@ -1220,7 +1224,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "move";
                             keys: Shortcuts.move-to;
-                            text: "이동…";
+                            text: Tr.command-move-to;
                             clicked => {
                                 root.command("move");
                             }
@@ -1229,7 +1233,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "delete";
                             keys: Shortcuts.trash;
-                            text: "삭제";
+                            text: Tr.toolbar-delete;
                             clicked => {
                                 root.command("delete");
                             }
@@ -1238,7 +1242,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "rename";
                             keys: Shortcuts.rename;
-                            text: "이름 바꾸기";
+                            text: Tr.command-rename;
                             clicked => {
                                 root.command("rename");
                             }
@@ -1247,7 +1251,7 @@ export component MainWindow inherits Window {
                             compact: root.compact;
                             icon: "undo";
                             keys: Shortcuts.undo;
-                            text: "되돌리기";
+                            text: Tr.command-undo;
                             enabled: ItemMenu.can-undo;
                             clicked => {
                                 root.command("undo");
@@ -1271,7 +1275,7 @@ export component MainWindow inherits Window {
                         select-button := TextButton {
                             compact: root.compact;
                             icon: "select";
-                            text: "선택";
+                            text: Tr.toolbar-select;
                             clicked => {
                                 select-menu.open(0, select-button.height + 4px);
                             }
@@ -1283,7 +1287,7 @@ export component MainWindow inherits Window {
                         view-button := TextButton {
                             compact: root.compact;
                             icon: "list-view";
-                            text: "보기";
+                            text: Tr.toolbar-view;
                             keys: Shortcuts.view-menu;
                             clicked => {
                                 root.open-view-menu();
@@ -1300,8 +1304,8 @@ export component MainWindow inherits Window {
                         height: 32px;
                         horizontal-stretch: 0;
                         icon: "search";
-                        hint: Shortcuts.tip("이 폴더에서 거르기", Shortcuts.filter);
-                        label: "이 폴더에서 거르기";
+                        hint: Shortcuts.tip(Tr.toolbar-filter, Shortcuts.filter);
+                        label: Tr.toolbar-filter;
                         edited(text) => {
                             root.filter-edited(text);
                         }
@@ -1538,7 +1542,7 @@ export component MainWindow inherits Window {
                         width: split.left-width - split.left-shift;
                         height: split.left-height;
                         visible: split.two || root.active-side == 0;
-                        label: "왼쪽 패널";
+                        label: Tr.pane-left;
                         view: root.left-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
@@ -1703,7 +1707,7 @@ export component MainWindow inherits Window {
                         width: split.right-width - split.right-shift;
                         height: split.right-height;
                         visible: split.two || root.active-side == 1;
-                        label: "오른쪽 패널";
+                        label: Tr.pane-right;
                         view: root.right-pane;
                         drag-data: root.drag-data;
                         tab-drag-data: root.tab-drag-data;
@@ -1993,7 +1997,7 @@ export component MainWindow inherits Window {
         y: root.subfolders-up ? max(8px, root.subfolders-top - 2px - self.height) : min(root.subfolders-bottom + 2px, max(8px, root.height - self.height - 8px));
         max-rows: root.subfolders-rows;
         view: root.subfolders;
-        label: "하위 폴더";
+        label: Tr.pane-subfolders;
         chosen(index) => {
             root.subfolder-chosen(index);
         }
@@ -2006,7 +2010,7 @@ export component MainWindow inherits Window {
         y: root.completion-up ? max(8px, root.completion-top - 2px - self.height) : min(root.completion-bottom + 2px, max(8px, root.height - self.height - 8px));
         max-rows: root.completion-rows;
         view: root.completion;
-        label: "경로 자동 완성";
+        label: Tr.pane-path-completion;
         chosen(index) => {
             let side = root.completing;
             if (side == 1) {
@@ -2105,6 +2109,7 @@ export component MainWindow inherits Window {
     quick-look := QuickLook {
         visible: root.quick-look && root.dialog == DialogKind.none;
         view: root.preview;
+        hint: root.quick-look-hint;
         key(text, ctrl, shift, alt, meta) => {
             root.quick-look-key(text, ctrl, shift, alt, meta);
         }

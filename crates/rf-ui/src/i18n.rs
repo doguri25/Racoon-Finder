@@ -27,6 +27,10 @@
 //!   elsewhere where Korean says 휴지통 on both. A caller that names a system passes `os` itself.
 //! - A function that returns `&'static str` asks [`t_static`], for a message without arguments
 //!   (other than `$os`).
+//! - The screens' words without arguments (menus, buttons, labels, accessible names) are those of
+//!   `ui.ftl`: each key is a property of the Slint global `Tr` (`ui/tr.slint`), which
+//!   [`crate::ui_bridge::speak`] fills as each window is made. A screen's words with a name or a
+//!   key in them are made in Rust from `screen.ftl` and given to the window.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -151,7 +155,7 @@ macro_rules! area {
 }
 
 /// The areas, each a file in every language's folder (a test holds the folders to this list).
-const AREAS: [(&str, &str, &str); 18] = [
+const AREAS: [(&str, &str, &str); 20] = [
     area!("conflict"),
     area!("drop"),
     area!("errors"),
@@ -166,10 +170,12 @@ const AREAS: [(&str, &str, &str); 18] = [
     area!("preview"),
     area!("properties"),
     area!("removal"),
+    area!("screen"),
     area!("shell"),
     area!("startup"),
     area!("status"),
     area!("trash"),
+    area!("ui"),
 ];
 
 type Bundle = FluentBundle<FluentResource>;
@@ -351,8 +357,16 @@ mod tests {
 
     /// The messages of `lang`, each with the names of the arguments it uses, from its files.
     fn messages(lang: Lang) -> BTreeMap<String, BTreeSet<String>> {
+        messages_in(lang, |_| true)
+    }
+
+    /// The messages of `lang` in the files of the areas `wanted` takes, as [`messages`].
+    fn messages_in(
+        lang: Lang,
+        wanted: impl Fn(&str) -> bool,
+    ) -> BTreeMap<String, BTreeSet<String>> {
         let mut all = BTreeMap::new();
-        for (area, source) in lang.sources() {
+        for (area, source) in lang.sources().filter(|(area, _)| wanted(area)) {
             let resource = match FluentResource::try_new(source.to_owned()) {
                 Ok(resource) => resource,
                 Err((_, errors)) => panic!("{}/{area}.ftl: {errors:?}", lang.code()),
@@ -1531,5 +1545,423 @@ mod tests {
         );
         assert_eq!(en.text("link-name-shortcut", &[]), "Shortcut");
         assert_eq!(en.text("link-name-alias", &[]), "alias");
+    }
+
+    /// The folder of the screens, `crates/rf-ui/ui`.
+    fn ui_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui")
+    }
+
+    /// The `.slint` files of the screens, by name, in order, each with its text.
+    fn slint_files() -> Vec<(String, String)> {
+        let mut files: Vec<(String, String)> = std::fs::read_dir(ui_dir())
+            .expect("the screens' folder")
+            .map(|entry| entry.expect("an entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "slint"))
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                let text = std::fs::read_to_string(&path).expect("a .slint file");
+                (name, text)
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// The string literals of the Slint source `chars`, comments left out, each with its line:
+    /// a literal's text outside its `\{…}` parts, and the literals in those parts on their own.
+    fn slint_literals(chars: &[char]) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            match (chars[i], chars.get(i + 1)) {
+                ('/', Some('/')) => {
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                ('/', Some('*')) => {
+                    i += 2;
+                    while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                ('"', _) => i = slint_string(chars, i, &mut found),
+                _ => i += 1,
+            }
+        }
+        found
+    }
+
+    /// Reads the Slint string literal of `chars` that opens at `at` into `found` ([`slint_literals`])
+    /// and tells where it ends, after its closing quote.
+    fn slint_string(chars: &[char], at: usize, found: &mut Vec<(usize, String)>) -> usize {
+        let line = chars[..at].iter().filter(|&&c| c == '\n').count() + 1;
+        let mut text = String::new();
+        let mut i = at + 1;
+        while i < chars.len() && chars[i] != '"' {
+            if chars[i] == '\\' && chars.get(i + 1) == Some(&'{') {
+                // An expression, to its `}`: a string in it is a literal of its own.
+                let mut depth = 1;
+                i += 2;
+                while i < chars.len() && depth > 0 {
+                    match chars[i] {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        '"' => {
+                            i = slint_string(chars, i, found);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            } else if chars[i] == '\\' {
+                text.extend(chars.get(i..(i + 2).min(chars.len())).unwrap_or_default());
+                i += 2;
+            } else {
+                text.push(chars[i]);
+                i += 1;
+            }
+        }
+        found.push((line, text));
+        i + 1
+    }
+
+    /// The files whose words Task 10b moves to `Tr`, which still hold Hangul literals: each
+    /// must hold one, or its allowance goes.
+    const SLINT_NOT_YET: [&str; 6] = [
+        "conflict-dialog.slint",
+        "dialogs.slint",
+        "job-panel.slint",
+        "job-window.slint",
+        "pick-dialog.slint",
+        "properties.slint",
+    ];
+
+    /// The rule of I18N-01 for the screens: their words come from `Tr` (ui/tr.slint, filled from
+    /// `ui.ftl`), so no `.slint` file holds a Hangul string literal (comments may be Korean), but
+    /// those [`SLINT_NOT_YET`] allows. `tr.slint` has no values of its own either.
+    #[test]
+    fn no_slint_file_holds_a_hangul_string_literal() {
+        let files = slint_files();
+        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        for reached in ["tr.slint", "app.slint", "view-menu.slint", "dialogs.slint"] {
+            assert!(names.contains(&reached), "{reached}: {names:?}");
+        }
+        let mut found = Vec::new();
+        let mut needed = Vec::new();
+        for (name, text) in &files {
+            let chars: Vec<char> = text.chars().collect();
+            for (line, literal) in slint_literals(&chars) {
+                if !literal.chars().any(is_hangul) {
+                    continue;
+                }
+                if SLINT_NOT_YET.contains(&name.as_str()) {
+                    needed.push(name.as_str());
+                } else {
+                    found.push(format!("{name}:{line}: {literal:?}"));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "Hangul literals in the screens (give them a key in i18n/<language>/ui.ftl and \
+             a property of Tr): {found:#?}"
+        );
+        for name in SLINT_NOT_YET {
+            assert!(
+                needed.contains(&name),
+                "{name} holds no Hangul literal any more: take it out of SLINT_NOT_YET"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slint_scan_reads_interpolations_and_skips_comments() {
+        let source = concat!(
+            "// \"주석\" ‘하나’\n",
+            "/* \"블록\" */ text: \"보임\";\n",
+            "label: \"‘\\{root.name}’ 하위\" + \"\\{Tr.a} · \\{f(\"안\")} 끝\";\n",
+            "tip: @markdown(\"\\{Tr.b}\"); plain: \"\\\"따옴\\\"\";\n",
+        );
+        let chars: Vec<char> = source.chars().collect();
+        let shown: Vec<(usize, String)> = slint_literals(&chars);
+        assert_eq!(
+            shown,
+            [
+                (2, "보임".to_owned()),
+                (3, "‘’ 하위".to_owned()),
+                (3, "안".to_owned()),
+                (3, " ·  끝".to_owned()),
+                (4, String::new()),
+                (4, "\\\"따옴\\\"".to_owned()),
+            ]
+        );
+    }
+
+    /// The names of the properties of `Tr` as `ui/tr.slint` declares them, read here on their
+    /// own (not through the list the build makes of them): every line that declares a property
+    /// must be `in property <string> name;`, with no value.
+    fn tr_declared() -> Vec<String> {
+        let source = std::fs::read_to_string(ui_dir().join("tr.slint")).expect("ui/tr.slint");
+        let mut declared = Vec::new();
+        for line in source.lines() {
+            let code = line.split("//").next().unwrap_or_default().trim();
+            if !code.contains("property") {
+                continue;
+            }
+            let name = code
+                .strip_prefix("in property <string> ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                .unwrap_or_else(|| {
+                    panic!("tr.slint: {line:?} is not `in property <string> name;`")
+                });
+            assert!(!name.contains([':', ' ']), "tr.slint: {line:?} has a value");
+            declared.push(name.to_owned());
+        }
+        declared
+    }
+
+    /// `Tr`'s properties and `ui.ftl`'s keys are one to one, in both languages (ui/tr.slint read
+    /// on its own here, and the list the build makes from it, which fills the windows, agree);
+    /// a message of `ui.ftl` takes no argument but `$os`; every property is shown somewhere.
+    #[test]
+    fn the_window_s_words_and_ui_ftl_are_one_to_one() {
+        let declared = tr_declared();
+        assert!(declared.len() > 150, "{} properties", declared.len());
+        let filled: Vec<String> = crate::ui_bridge::tr_keys().map(str::to_owned).collect();
+        assert_eq!(declared, filled, "ui/tr.slint and the build's list of it");
+        let declared: BTreeSet<String> = declared.into_iter().collect();
+        for lang in Lang::ALL {
+            let ui = messages_in(lang, |area| area == "ui");
+            let keys: BTreeSet<String> = ui.keys().cloned().collect();
+            assert_eq!(
+                declared.difference(&keys).collect::<Vec<_>>(),
+                Vec::<&String>::new(),
+                "properties of Tr without a message in {}/ui.ftl",
+                lang.code()
+            );
+            assert_eq!(
+                keys.difference(&declared).collect::<Vec<_>>(),
+                Vec::<&String>::new(),
+                "messages of {}/ui.ftl without a property of Tr",
+                lang.code()
+            );
+            for (key, names) in &ui {
+                assert!(
+                    names.iter().all(|name| name == OS_ARG),
+                    "{}/ui.ftl: {key} takes {names:?} (Rust makes the words with arguments: screen.ftl)",
+                    lang.code()
+                );
+            }
+        }
+        // Each is shown: some screen says `Tr.<name>`.
+        let screens: String = slint_files()
+            .into_iter()
+            .filter(|(name, _)| name != "tr.slint")
+            .map(|(_, text)| text)
+            .collect();
+        for name in &declared {
+            let used = screens
+                .match_indices(&format!("Tr.{name}"))
+                .any(|(at, found)| {
+                    !screens[at + found.len()..]
+                        .starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
+                });
+            assert!(used, "Tr.{name} is shown nowhere");
+        }
+    }
+
+    /// Every Rust file under `dir`, tests and all, but the build's output.
+    fn every_rust_file(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                if path.file_name().is_none_or(|name| name != "target") {
+                    every_rust_file(&path, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Where the function `name` of the masked source `masked` is, from its `fn` to the end of
+    /// its body (in bytes).
+    fn fn_body(masked: &str, name: &str) -> Option<std::ops::Range<usize>> {
+        let start = masked.find(&format!("fn {name}("))?;
+        let open = start + masked[start..].find('{')?;
+        let mut depth = 0;
+        for (at, c) in masked[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(start..open + at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The window components and the function of `ui_bridge` that alone makes each, with its
+    /// words: a global is per window, so a window made any other way would show no words.
+    const MADE_BY: [(&str, &str); 4] = [
+        ("MainWindow", "new_main_window"),
+        ("NoticeWindow", "new_notice_window"),
+        ("JobWindow", "new_job_window"),
+        ("JobTray", "new_job_tray"),
+    ];
+
+    /// Every window is made with its words: nothing in the app or its tests (code, not
+    /// comments) makes a window component but its maker in `ui_bridge` ([`MADE_BY`]).
+    #[test]
+    fn every_window_is_made_with_its_words() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace");
+        let mut files = Vec::new();
+        every_rust_file(&workspace.join("crates"), &mut files);
+        every_rust_file(&workspace.join("apps"), &mut files);
+        let bridge = manifest.join("src").join("ui_bridge.rs");
+        assert!(files.contains(&bridge));
+        assert!(files.contains(&manifest.join("tests").join("ui_smoke.rs")));
+        let mut found = Vec::new();
+        let mut makers = 0;
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("a Rust file");
+            let chars: Vec<char> = source.chars().collect();
+            let masked: String = scan(&chars).masked.into_iter().collect();
+            for (component, maker) in MADE_BY {
+                let call = format!("{component}::new(");
+                for (at, _) in masked.match_indices(&call) {
+                    if masked[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    let in_maker = *path == bridge
+                        && fn_body(&masked, maker).is_some_and(|body| body.contains(&at));
+                    if in_maker {
+                        makers += 1;
+                    } else {
+                        let line = masked[..at].matches('\n').count() + 1;
+                        found.push(format!("{}:{line}: {call}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "windows made without their words (call ui_bridge::{{new_main_window, \
+             new_notice_window, new_job_window, new_job_tray}}): {found:#?}"
+        );
+        assert_eq!(makers, MADE_BY.len());
+    }
+
+    /// The menus and buttons of the window that English messages name: the message, then the
+    /// `Tr` keys of the path it names, joined by " ▸ ". The Korean message names the same path,
+    /// so the window's titles and the messages agree in both languages.
+    const NAMED_IN_MESSAGES: [(&str, &[&str]); 4] = [
+        (
+            "tab-moved-to-hidden",
+            &["toolbar-view", "view-layout", "view-dual-pane"],
+        ),
+        ("failure-original-folder-gone", &["command-restore-to"]),
+        ("trash-place-unknown", &["command-restore-to"]),
+        ("computer-drive-gone", &["command-refresh"]),
+    ];
+
+    /// What messages name that Task 10b's files still title with a Hangul literal: the message,
+    /// the file, the literal. Once the file titles it from `Tr`, its entry goes to
+    /// [`NAMED_IN_MESSAGES`].
+    const NAMED_NOT_YET: [(&str, &str, &str); 4] = [
+        (
+            "tray-all-done-with-failures",
+            "job-panel.slint",
+            "최근 완료",
+        ),
+        ("tray-all-done-with-failures", "job-panel.slint", "자세히"),
+        ("pattern-uncounted", "dialogs.slint", "선택"),
+        ("removal-with-jobs", "dialogs.slint", "취소"),
+    ];
+
+    /// Messages whose " ▸ " path is the system's own settings, not the app's menus.
+    const NAMES_THE_SYSTEM_S: [&str; 1] = ["shell-finder-not-allowed"];
+
+    /// Every menu name an English message quotes is the title of that menu in the window, as is
+    /// its Korean name in the Korean message, on every system.
+    #[test]
+    fn the_menus_the_messages_name_are_titled_so() {
+        let korean = Localizer::new(Lang::Ko);
+        let english = Localizer::new(Lang::En);
+        let all = messages(Lang::En);
+        let ui = messages_in(Lang::En, |area| area == "ui");
+        let said = |words: &Localizer, key: &str, os: Os| {
+            let mut args: Vec<Arg<'_>> = all[key]
+                .iter()
+                .map(|name| (name.as_str(), FluentValue::from("x")))
+                .collect();
+            args.push((OS_ARG, os_arg(os)));
+            words.text(key, &args)
+        };
+        for os in [Os::Windows, Os::MacOs, Os::Other] {
+            for (message, path) in NAMED_IN_MESSAGES {
+                for words in [&korean, &english] {
+                    for key in path {
+                        assert!(ui.contains_key(*key), "{key} is not a word of the window");
+                    }
+                    let titles: Vec<String> = path.iter().map(|key| said(words, key, os)).collect();
+                    let named = titles.join(" ▸ ");
+                    let text = said(words, message, os);
+                    assert!(
+                        text.contains(&named),
+                        "{}: {message} ({os:?}) does not name {named:?}: {text:?}",
+                        words.lang().code()
+                    );
+                }
+            }
+            // A path in a message is one of these.
+            for key in all.keys() {
+                let text = said(&english, key, os);
+                let listed = NAMED_IN_MESSAGES.iter().any(|(message, _)| message == key)
+                    || NAMES_THE_SYSTEM_S.contains(&key.as_str());
+                assert!(
+                    !text.contains('▸') || listed,
+                    "{key} names a menu: list it in NAMED_IN_MESSAGES ({text:?})"
+                );
+            }
+        }
+        // The names in 10b's files: still literals there, and in the Korean messages.
+        let files = slint_files();
+        for (message, file, title) in NAMED_NOT_YET {
+            assert!(
+                said(&korean, message, Os::Other).contains(title),
+                "{message}"
+            );
+            let (_, text) = files
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("no {file}"));
+            let chars: Vec<char> = text.chars().collect();
+            assert!(
+                slint_literals(&chars)
+                    .iter()
+                    .any(|(_, literal)| literal == title),
+                "{file} titles {title:?} from Tr now: move {message} to NAMED_IN_MESSAGES"
+            );
+        }
     }
 }

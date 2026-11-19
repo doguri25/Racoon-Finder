@@ -14,8 +14,8 @@
 
 use std::time::Duration;
 
-use rf_ui::JobTray;
 use rf_ui::notify::tray_icon;
+use rf_ui::ui_bridge;
 
 fn main() {
     let asked = std::env::args().any(|arg| arg == "--ignored" || arg == "--include-ignored");
@@ -30,7 +30,7 @@ fn main() {
 }
 
 fn the_tray_icon_shows_its_status_and_menu() {
-    let tray = JobTray::new().expect("the tray builds");
+    let tray = ui_bridge::new_job_tray().expect("the tray builds");
     tray.set_picture(tray_icon());
     tray.set_status("복사 중 25%\n3 / 12 항목 · 48 MB/s".into());
     tray.set_label("25%".into());

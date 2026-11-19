@@ -1,4 +1,4 @@
-# 창의 알림과 패널·보기의 말: 폴더 목록, 열, 보기, 패턴 선택, 탐색 동기화, 탭, 설정.
+# 창의 알림과 패널·보기의 말: 폴더 목록, 보기, 패턴 선택, 탐색 동기화, 탭, 설정.
 
 ## 위치와 폴더 목록
 
@@ -26,20 +26,6 @@ notice-folder-gone-sync-off =
 notice-start-folder-gone = 열려던 폴더를 찾을 수 없습니다: { $path }
 notice-background-failed = 시스템 자원이 부족해 일을 시작하지 못했습니다. 잠시 뒤에 다시 해 보세요
 notice-sort-failed = 이 폴더를 정렬하지 못해 이전 순서로 둡니다
-
-## 자세히의 열 머리 (보기 메뉴의 열과 정렬도 같은 이름이다)
-
-column-name = 이름
-column-size = 크기
-column-modified = 수정한 날짜
-column-created = 만든 날짜
-column-kind = 종류
-column-extension = 확장자
-column-attributes = 속성
-column-accessed = 접근한 날짜
-column-path = 경로
-column-original = 원래 위치
-column-deleted = 삭제한 날짜
 
 ## 폴더의 보기
 

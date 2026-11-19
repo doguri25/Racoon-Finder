@@ -6,6 +6,7 @@
 
 import { Theme } from "theme.slint";
 import { Shortcuts, PathForms } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 
 // What a drag is over: a pane's list, a pane's tab, a row of the tree, or the list of favorites
 // between its items (or its empty part).
@@ -126,26 +127,26 @@ export component DropMenu inherits ContextMenuArea {
 
     Menu {
         if root.moves: MenuItem {
-            title: "여기로 이동";
+            title: Tr.drop-menu-move;
             activated => {
                 root.chosen("move");
             }
         }
         if root.copies: MenuItem {
-            title: "여기로 복사";
+            title: Tr.drop-menu-copy;
             activated => {
                 root.chosen("copy");
             }
         }
         if root.links: MenuItem {
-            title: "여기에 링크 만들기";
+            title: Tr.drop-menu-link;
             activated => {
                 root.chosen("link");
             }
         }
         MenuSeparator { }
         MenuItem {
-            title: "취소";
+            title: Tr.drop-menu-cancel;
             activated => {
                 root.chosen("cancel");
             }
@@ -241,46 +242,46 @@ export component RowMenu inherits ContextMenuArea {
 
     Menu {
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("이동…", Shortcuts.move-to);
+            title: Shortcuts.titled(Tr.command-move-to, Shortcuts.move-to);
             activated => {
                 root.command("move");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("복사…", Shortcuts.copy-to);
+            title: Shortcuts.titled(Tr.command-copy-to, Shortcuts.copy-to);
             activated => {
                 root.command("copy");
             }
         }
         if root.place == 0: MenuSeparator { }
         if root.place == 0 && (Shortcuts.cut != ""): MenuItem {
-            title: Shortcuts.titled("잘라내기", Shortcuts.cut);
+            title: Shortcuts.titled(Tr.command-cut, Shortcuts.cut);
             activated => {
                 root.command("cut");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("복사", Shortcuts.copy);
+            title: Shortcuts.titled(Tr.command-copy, Shortcuts.copy);
             activated => {
                 root.command("copy-files");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            title: Shortcuts.titled(Tr.command-paste, Shortcuts.paste);
             enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-into");
             }
         }
         if root.place == 0 && (Shortcuts.paste-move != ""): MenuItem {
-            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            title: Shortcuts.titled(Tr.command-paste-move, Shortcuts.paste-move);
             enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-move-into");
             }
         }
         if root.place == 0: Menu {
-            title: "경로 복사";
+            title: Tr.command-copy-path;
 
             for form[i] in PathForms.titles: MenuItem {
                 title: PathForms.title(i);
@@ -290,7 +291,7 @@ export component RowMenu inherits ContextMenuArea {
             }
         }
         if root.place == 0 && (ItemMenu.links.length > 0): Menu {
-            title: "링크 만들기";
+            title: Tr.command-create-link;
 
             for link[i] in ItemMenu.links: MenuItem {
                 title: link.title;
@@ -301,7 +302,7 @@ export component RowMenu inherits ContextMenuArea {
             }
         }
         if root.place == 0 && (ItemMenu.shares): MenuItem {
-            title: "공유…";
+            title: Tr.command-share;
             activated => {
                 root.command("share");
             }
@@ -309,10 +310,10 @@ export component RowMenu inherits ContextMenuArea {
         // A new file beside the item, in the pane's folder, as the folder's menu makes one. Its
         // kinds of file, each made through its name window.
         if root.place == 0: Menu {
-            title: "새 파일";
+            title: Tr.command-new-file;
 
             MenuItem {
-                title: "빈 텍스트 파일";
+                title: Tr.command-new-text-file;
                 activated => {
                     root.command("new-file");
                 }
@@ -320,56 +321,56 @@ export component RowMenu inherits ContextMenuArea {
         }
         if root.place == 0: MenuSeparator { }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("열기", Shortcuts.open);
+            title: Shortcuts.titled(Tr.command-open, Shortcuts.open);
             activated => {
                 root.command("open");
             }
         }
         if root.place == 0 && (ItemMenu.runnable): MenuItem {
-            title: "관리자 권한으로 실행";
+            title: Tr.command-run-as-admin;
             activated => {
                 root.command("run-as-admin");
             }
         }
         if root.place == 0 && (ItemMenu.one-file): MenuItem {
-            title: "연결 프로그램으로 열기…";
+            title: Tr.command-open-with;
             activated => {
                 root.command("open-with");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("빠른 보기", Shortcuts.quick-look);
+            title: Shortcuts.titled(Tr.command-quick-look, Shortcuts.quick-look);
             activated => {
                 root.command("quick-look");
             }
         }
         if root.place == 0 && (ItemMenu.one-folder): MenuItem {
-            title: Shortcuts.titled("터미널에서 열기", Shortcuts.open-terminal);
+            title: Shortcuts.titled(Tr.command-open-terminal, Shortcuts.open-terminal);
             activated => {
                 root.command("open-terminal");
             }
         }
         if root.place == 0 && (ItemMenu.one-dir): MenuItem {
-            title: "즐겨찾기에 추가";
+            title: Tr.command-add-favorite;
             activated => {
                 root.command("add-favorite");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
+            title: Shortcuts.titled(Tr.command-rename, Shortcuts.rename);
             activated => {
                 root.command("rename");
             }
         }
         if root.place == 0: MenuSeparator { }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("휴지통으로 보내기", Shortcuts.trash);
+            title: Shortcuts.titled(Tr.command-trash, Shortcuts.trash);
             activated => {
                 root.command("delete");
             }
         }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("영구 삭제", Shortcuts.delete-permanently);
+            title: Shortcuts.titled(Tr.command-delete-permanently, Shortcuts.delete-permanently);
             activated => {
                 root.command("delete-permanently");
             }
@@ -377,20 +378,20 @@ export component RowMenu inherits ContextMenuArea {
         if root.place == 0: MenuSeparator { }
         // The app's own window (OPS-06), then the system's.
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("속성", Shortcuts.properties);
+            title: Shortcuts.titled(Tr.command-properties, Shortcuts.properties);
             activated => {
                 root.command("properties");
             }
         }
         if root.place == 0 && (ItemMenu.one-item): MenuItem {
-            title: "OS 속성 창 열기";
+            title: Tr.command-system-properties;
             activated => {
                 root.command("system-properties");
             }
         }
         if root.place == 0 && (Shortcuts.system-menu != ""): MenuSeparator { }
         if root.place == 0 && (Shortcuts.system-menu != ""): MenuItem {
-            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            title: Shortcuts.titled(Tr.command-more-options, Shortcuts.system-menu);
             activated => {
                 root.command("more-options");
             }
@@ -399,28 +400,28 @@ export component RowMenu inherits ContextMenuArea {
         // out to a folder the user chooses, or deleted for good after a question; nothing that
         // writes into a folder, nor reads the item.
         if root.place == 1: MenuItem {
-            title: "복원";
+            title: Tr.command-restore;
             enabled: ItemMenu.can-restore;
             activated => {
                 root.command("restore");
             }
         }
         if root.place == 1: MenuItem {
-            title: "위치를 골라 꺼내기…";
+            title: Tr.command-restore-to;
             activated => {
                 root.command("restore-elsewhere");
             }
         }
         if root.place == 1: MenuSeparator { }
         if root.place == 1: MenuItem {
-            title: Shortcuts.titled("영구 삭제…", Shortcuts.trash);
+            title: Shortcuts.titled(Tr.command-delete-from-trash, Shortcuts.trash);
             activated => {
                 root.command("delete-from-trash");
             }
         }
         // A drive of 내 PC opens at its top folder; nothing else is done to it here.
         if root.place == 2: MenuItem {
-            title: Shortcuts.titled("열기", Shortcuts.open);
+            title: Shortcuts.titled(Tr.command-open, Shortcuts.open);
             activated => {
                 root.command("open");
             }
@@ -452,24 +453,24 @@ export component BlankMenu inherits ContextMenuArea {
     Menu {
         // The trash's own (NAV-16): it is emptied after a question that says what goes.
         if root.place == 1: MenuItem {
-            title: "휴지통 비우기…";
+            title: Tr.command-empty-trash;
             activated => {
                 root.command("empty-trash");
             }
         }
         if root.place == 1: MenuSeparator { }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("새 폴더", Shortcuts.new-folder);
+            title: Shortcuts.titled(Tr.command-new-folder, Shortcuts.new-folder);
             activated => {
                 root.command("new-folder");
             }
         }
         // The kinds of new file, each made through its name window.
         if root.place == 0: Menu {
-            title: "새 파일";
+            title: Tr.command-new-file;
 
             MenuItem {
-                title: "빈 텍스트 파일";
+                title: Tr.command-new-text-file;
                 activated => {
                     root.command("new-file");
                 }
@@ -477,28 +478,28 @@ export component BlankMenu inherits ContextMenuArea {
         }
         if root.place == 0: MenuSeparator { }
         if root.place == 0: MenuItem {
-            title: Shortcuts.titled("붙여넣기", Shortcuts.paste);
+            title: Shortcuts.titled(Tr.command-paste, Shortcuts.paste);
             enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste");
             }
         }
         if root.place == 0 && (Shortcuts.paste-move != ""): MenuItem {
-            title: Shortcuts.titled("여기로 이동", Shortcuts.paste-move);
+            title: Shortcuts.titled(Tr.command-paste-move, Shortcuts.paste-move);
             enabled: !ItemMenu.no-files-to-paste();
             activated => {
                 root.command("paste-move");
             }
         }
         MenuItem {
-            title: Shortcuts.titled("되돌리기", Shortcuts.undo);
+            title: Shortcuts.titled(Tr.command-undo, Shortcuts.undo);
             enabled: ItemMenu.can-undo;
             activated => {
                 root.command("undo");
             }
         }
         MenuItem {
-            title: Shortcuts.titled("다시 실행", Shortcuts.redo);
+            title: Shortcuts.titled(Tr.command-redo, Shortcuts.redo);
             enabled: ItemMenu.can-redo;
             activated => {
                 root.command("redo");
@@ -506,7 +507,7 @@ export component BlankMenu inherits ContextMenuArea {
         }
         MenuSeparator { }
         MenuItem {
-            title: Shortcuts.titled("새로 고침", Shortcuts.refresh);
+            title: Shortcuts.titled(Tr.command-refresh, Shortcuts.refresh);
             activated => {
                 root.command("refresh");
             }
@@ -514,7 +515,7 @@ export component BlankMenu inherits ContextMenuArea {
         // The folder's, whatever is chosen: no key beside it, since the key (Shift+F4) opens a
         // folder that is chosen when there is one.
         if root.place == 0: MenuItem {
-            title: "터미널에서 열기";
+            title: Tr.command-open-terminal;
             activated => {
                 root.command("folder-terminal");
             }
@@ -523,14 +524,14 @@ export component BlankMenu inherits ContextMenuArea {
         // The folder's, whatever is chosen: no key beside it, since the key (Alt+Enter, ⌘I)
         // shows the chosen items' when there are some.
         if root.place == 0: MenuItem {
-            title: "속성";
+            title: Tr.command-properties;
             activated => {
                 root.command("folder-properties");
             }
         }
         if root.place == 0 && (Shortcuts.system-menu != ""): MenuSeparator { }
         if root.place == 0 && (Shortcuts.system-menu != ""): MenuItem {
-            title: Shortcuts.titled("더 많은 옵션 표시", Shortcuts.system-menu);
+            title: Shortcuts.titled(Tr.command-more-options, Shortcuts.system-menu);
             activated => {
                 root.command("folder-more-options");
             }
@@ -539,7 +540,7 @@ export component BlankMenu inherits ContextMenuArea {
         // keys have F10 and the 보기 menu's 툴바).
         if !ItemMenu.toolbar-shown: MenuSeparator { }
         if !ItemMenu.toolbar-shown: MenuItem {
-            title: "툴바 보이기";
+            title: Tr.command-show-toolbar;
             activated => {
                 root.command("toggle-toolbar");
             }

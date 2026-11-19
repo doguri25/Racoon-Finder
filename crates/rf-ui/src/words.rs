@@ -198,6 +198,22 @@ pub fn more_folders(n: usize) -> String {
     t("tree-more-folders", &[("count", count(n))])
 }
 
+/// The name of the `›` after the piece `name` of a path row, which opens the list of that
+/// folder's subfolders (`Crumb.subfolders`).
+pub fn crumb_subfolders(name: &str) -> String {
+    t("crumb-subfolders", &[("name", name.into())])
+}
+
+/// The name of the checkbox at the start of the row `name` (`FileRow.select`, NAV-15).
+pub fn row_select(name: &str) -> String {
+    t("row-select", &[("name", name.into())])
+}
+
+/// The hint under quick look: the arrow keys go to the next file, and `key` closes it.
+pub fn quick_look_hint(key: &str) -> String {
+    t("quick-look-hint", &[("key", key.into())])
+}
+
 /// The notice of a drop the window did not make: the rows changed under the pointer (a
 /// folder's watch) since it showed where the items would go, so they would go elsewhere.
 pub fn drop_moved() -> &'static str {

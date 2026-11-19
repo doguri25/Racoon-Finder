@@ -18,6 +18,7 @@ import { Icon, StateBadge } from "icons.slint";
 import { FileHead, ColumnView } from "file-head.slint";
 import { ScrollCue, EdgeScroll, SelectBox } from "widgets.slint";
 import { RowMenu, BlankMenu, KeyMenus, ItemMenu, DropFrame, DragPointer, DragSeen, ListSettle, ListScroll, DropPlace, DropAt } from "list-parts.slint";
+import { Tr } from "tr.slint";
 
 export { ColumnView }
 
@@ -52,12 +53,14 @@ export struct FileRow {
     // The file's thumbnail, once it came (VIEW-09): the medium icons and larger, the thumbnails
     // and the tiles show it in the place of the icon. Empty (0 × 0) until then, and for a folder.
     thumb: image,
+    // The name of the checkbox that selects the row (NAV-15; Rust's words: they hold the name).
+    select: string,
 }
 
 // What a screen reader hears of an item besides its name: that it was cut.
 export global RowWords {
     public pure function description(row: FileRow) -> string {
-        return row.cut ? "잘라낸 항목" : "";
+        return row.cut ? Tr.row-cut : "";
     }
 }
 
@@ -370,7 +373,7 @@ export component FileList inherits Rectangle {
                     list := ListView {
                         width: parent.width;
                         height: parent.height;
-                        accessible-label: "항목 목록";
+                        accessible-label: Tr.list-items;
                         // The list's own sideways bar would lie over its last row: the one
                         // under the rows takes its place.
                         horizontal-scrollbar-policy: always-off;
@@ -453,7 +456,7 @@ export component FileList inherits Rectangle {
                                 width: 22px;
                                 height: parent.height;
                                 state: row.selected ? 1 : 0;
-                                label: row.name + " 선택";
+                                label: row.select;
                                 toggled => {
                                     root.row-checkbox(i);
                                 }

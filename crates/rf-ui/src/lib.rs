@@ -127,7 +127,7 @@ pub fn run(start: Option<PathBuf>) -> Result<(), RunError> {
     // once, and the window needs its size and theme before its first frame.
     let loaded = settings::load(paths.config_dir());
     let saver = settings::Saver::new(paths.config_dir().to_owned(), loaded.writable);
-    let window = MainWindow::new()?;
+    let window = ui_bridge::new_main_window()?;
     window.set_app_title(rf_core::identity::DISPLAY_NAME.into());
     let jobs = jobs::Jobs::start(
         paths.data_dir(),
@@ -270,7 +270,7 @@ fn io_kind(path: &std::path::Path, source: &std::io::Error) -> rf_core::ErrorKin
 /// Shows `message` in a small window of its own, in the theme, the density and the size of text
 /// of `look`, until it is closed.
 fn show_notice(message: &str, look: settings::Look) -> Result<(), slint::PlatformError> {
-    let window = NoticeWindow::new()?;
+    let window = ui_bridge::new_notice_window()?;
     ui_bridge::follow_theme(&window);
     window.set_theme_choice(controller::theme_number(look.theme));
     window.set_density(controller::density_number(look.density));

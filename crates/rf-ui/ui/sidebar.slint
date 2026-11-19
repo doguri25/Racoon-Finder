@@ -22,6 +22,7 @@ import { Icon, StateBadge } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
 import { DragPointer, DragSeen, DropPlace, DropAt } from "list-parts.slint";
 import { ScrollCue, EdgeScroll } from "widgets.slint";
+import { Tr } from "tr.slint";
 
 // The head above a row: the first favorite starts "즐겨찾기", the first of 내 PC and the drives
 // "이 PC"; 휴지통 comes after them under no head.
@@ -93,40 +94,40 @@ component FavoriteMenu inherits ContextMenuArea {
 
     Menu {
         MenuItem {
-            title: Shortcuts.titled("열기", Shortcuts.open);
+            title: Shortcuts.titled(Tr.command-open, Shortcuts.open);
             activated => {
                 root.command("open");
             }
         }
         MenuItem {
-            title: "반대 패널에 열기";
+            title: Tr.sidebar-open-other;
             activated => {
                 root.command("open-other");
             }
         }
         MenuSeparator { }
         MenuItem {
-            title: Shortcuts.titled("이름 바꾸기", Shortcuts.rename);
+            title: Shortcuts.titled(Tr.command-rename, Shortcuts.rename);
             activated => {
                 root.command("rename");
             }
         }
         MenuItem {
-            title: Shortcuts.titled("즐겨찾기에서 제거", Shortcuts.trash);
+            title: Shortcuts.titled(Tr.sidebar-remove-favorite, Shortcuts.trash);
             activated => {
                 root.command("remove");
             }
         }
         MenuSeparator { }
         MenuItem {
-            title: "위로";
+            title: Tr.sidebar-move-up;
             enabled: root.can-up;
             activated => {
                 root.command("up");
             }
         }
         MenuItem {
-            title: "아래로";
+            title: Tr.sidebar-move-down;
             enabled: root.can-down;
             activated => {
                 root.command("down");
@@ -145,7 +146,7 @@ component FavoritesBlankMenu inherits ContextMenuArea {
 
     Menu {
         MenuItem {
-            title: "현재 폴더를 즐겨찾기에 추가";
+            title: Tr.sidebar-add-current;
             activated => {
                 root.command("add-current");
             }
@@ -161,7 +162,7 @@ component RowAddMenu inherits ContextMenuArea {
 
     Menu {
         MenuItem {
-            title: "이 폴더를 즐겨찾기에 추가";
+            title: Tr.sidebar-add-this;
             activated => {
                 root.command("add-this");
             }
@@ -260,7 +261,7 @@ component TreeItem inherits Rectangle {
     if root.item.head != SectionHead.none: Text {
         x: 18px;
         y: root.head-height - self.height - 4px;
-        text: root.item.head == SectionHead.favorites ? "즐겨찾기" : "이 PC";
+        text: root.item.head == SectionHead.favorites ? Tr.sidebar-favorites : Tr.sidebar-this-pc;
         font-size: Theme.font-small;
         font-weight: 700;
         color: Theme.muted;
@@ -558,7 +559,7 @@ component TreeItem inherits Rectangle {
             border-radius: 1px;
             background: Theme.accent;
             accessible-role: image;
-            accessible-label: "끼워 넣을 자리";
+            accessible-label: Tr.sidebar-insert-here;
         }
         if root.item.is-favorite && ((drop.has-drag && drop.zone == 2) || (root.item.favorite-last && root.outside-gap > root.item.favorite)): Rectangle {
             x: 2px;
@@ -568,7 +569,7 @@ component TreeItem inherits Rectangle {
             border-radius: 1px;
             background: Theme.accent;
             accessible-role: image;
-            accessible-label: "끼워 넣을 자리";
+            accessible-label: Tr.sidebar-insert-here;
         }
     }
 }
@@ -581,7 +582,7 @@ export component Sidebar inherits Rectangle {
     // between the favorites and the drives.
     in property <[TreeRow]> rows;
     // The list's name for screen readers.
-    in property <string> label: "폴더 트리";
+    in property <string> label: Tr.tree-title;
     // Whether the rows take dragged rows into their folders.
     in property <bool> accepts-drops;
     // The row of the keyboard cursor (its place in the list), while the tree has the keys; -1

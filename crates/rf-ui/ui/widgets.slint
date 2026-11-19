@@ -7,6 +7,7 @@
 import { Theme, DashedFrame } from "theme.slint";
 import { Icon } from "icons.slint";
 import { Shortcuts } from "shortcuts.slint";
+import { Tr } from "tr.slint";
 
 // Icon-only 32×32 button. `label` is required: it is the button's only name for
 // screen readers.
@@ -331,7 +332,7 @@ export component Toast inherits Rectangle {
             }
             ToastButton {
                 icon: "close";
-                label: "알림 닫기";
+                label: Tr.toast-close;
                 clicked => {
                     root.closed();
                 }
