@@ -2035,6 +2035,12 @@ pub fn delete_permanently(n: usize) -> String {
     t("delete-permanently", &[("count", count(n))])
 }
 
+/// The question before 다시 시도 deletes for good again the `n` items a permanent delete could
+/// not delete (XFER-09): that it skips the trash and that nothing brings them back.
+pub fn retry_delete_for_good(n: usize) -> String {
+    t("retry-delete-for-good", &[("count", count(n))])
+}
+
 /// The question before items of the trash are deleted for good (휴지통 ▸ 영구 삭제…, NAV-16):
 /// how many, their size when the trash knows it for every one, and that nothing brings them
 /// back.

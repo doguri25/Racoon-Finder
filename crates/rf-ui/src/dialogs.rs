@@ -454,6 +454,11 @@ pub enum ConfirmPurpose {
     /// [`ConfirmPurpose::DeleteFromTrash`] does. The retry of `job` is used up only once this is
     /// accepted; a cancel keeps it for its window of failed items.
     RetryDeleteFromTrash { job: JobId, items: Vec<TrashItem> },
+    /// 다시 시도 of the delete for good `job`: delete for good again what it could not, as
+    /// `spec` (the failed paths, with the method and the error policy of `job`) says. The retry
+    /// of `job` is used up only once this is accepted; a cancel keeps it for its window of
+    /// failed items.
+    RetryDeleteForGood { job: JobId, spec: DeleteSpec },
     /// Empty the trash (휴지통 비우기…) of exactly these items, the stamped records of the
     /// listing the question counted: what came into the trash since stays there, and an item that
     /// changed since is not deleted (`TrashItemChanged`).
@@ -631,6 +636,26 @@ impl Confirm {
         )
     }
 
+    /// The question before 다시 시도 of the delete for good `job` deletes for good again what it
+    /// could not, the paths of `spec`: how many, their names, and that it cannot be undone. Only
+    /// its button deletes them, never Enter alone (`danger`), and it uses the retry up only
+    /// when it is accepted ([`ConfirmPurpose::RetryDeleteForGood`]).
+    pub fn retry_delete_for_good(job: JobId, spec: DeleteSpec) -> Confirm {
+        Confirm {
+            title: words::delete_permanently_title().to_owned(),
+            message: words::retry_delete_for_good(spec.paths.len()),
+            detail: words::names_line(&spec.paths),
+            lines: Vec::new(),
+            question: String::new(),
+            ok: words::delete_permanently_button().to_owned(),
+            danger: true,
+            alt: String::new(),
+            check: String::new(),
+            checked: false,
+            purpose: ConfirmPurpose::RetryDeleteForGood { job, spec },
+        }
+    }
+
     /// The question before `items` of the trash are deleted for good, for `purpose`.
     fn trash_delete(
         purpose: impl FnOnce(Vec<TrashItem>) -> ConfirmPurpose,
@@ -683,6 +708,7 @@ impl Confirm {
         match &self.purpose {
             ConfirmPurpose::DeletePermanently(paths) => Some(permanent_delete(paths.clone())),
             ConfirmPurpose::DeleteCopies { spec, .. } => Some(JobSpec::DeleteCopies(spec.clone())),
+            ConfirmPurpose::RetryDeleteForGood { spec, .. } => Some(JobSpec::Delete(spec.clone())),
             // On every system, the items the question counted, each while it is that very item:
             // never the whole trash as a job would find it, which would take what came in since,
             // by this app's own jobs queued before it too (there is no such job).

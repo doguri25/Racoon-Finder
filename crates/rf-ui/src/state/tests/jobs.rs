@@ -1522,9 +1522,9 @@ fn only_the_failures_a_transfer_can_take_up_again_offer_a_retry() {
     });
     assert_eq!(details(&mut state).retry, None);
 
-    // A trash that failed is not tried again from the window: only copies and moves are.
-    let trash = delete(vec![in_a("a.txt")], DeleteMethod::Trash);
-    finish(&mut state, 3, &trash, JobWork::Trash, |report| {
+    // An undo that failed is not tried again from the window: the history undoes it again.
+    let undo = JobSpec::Undo(moved("a.txt"));
+    finish(&mut state, 3, &undo, JobWork::Undo, |report| {
         report.outcome = Outcome::CompletedWithErrors;
         report
             .failures
@@ -2233,5 +2233,201 @@ fn what_the_user_does_before_the_rename_lands_keeps_the_next_one_from_opening() 
         let renames =
             matches!(state.modal(), Some(Modal::Name(dialog)) if dialog.renames().is_some());
         assert!(!renames, "case {case}: {:?}", state.modal());
+    }
+}
+
+/// The window of failed items that shows, or a panic.
+fn failures_shown(state: &AppState) -> Failures {
+    let Some(Modal::Failures(failures)) = state.modal() else {
+        panic!("the failed items show: {:?}", state.modal());
+    };
+    failures.clone()
+}
+
+/// The confirmation that shows, or a panic.
+fn confirm_shown(state: &AppState) -> crate::dialogs::Confirm {
+    let Some(Modal::Confirm(confirm)) = state.modal() else {
+        panic!("a confirmation: {:?}", state.modal());
+    };
+    confirm.clone()
+}
+
+#[test]
+fn a_failed_trash_is_retried_without_a_question_and_undone_by_itself() {
+    let mut state = ready(vec![file("a.txt"), file("b.txt"), file("c.txt")], vec![]);
+    // a.txt went to the trash; b.txt is locked; the trash refused c.txt, which is offered for a
+    // permanent delete of its own and is not tried again.
+    let spec = delete(
+        vec![in_a("a.txt"), in_a("b.txt"), in_a("c.txt")],
+        DeleteMethod::Trash,
+    );
+    let first = trashed(&[in_a("a.txt")]);
+    state.set_history(History {
+        top: Some(first.clone()),
+        undo: vec![first.clone()],
+        ..History::default()
+    });
+    let effects = finish(&mut state, 1, &spec, JobWork::Trash, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.undo = Some(first.clone());
+        report
+            .failures
+            .push(failure(in_a("b.txt"), ErrorKind::PermissionDenied, None));
+        report.failures.push(failure(
+            in_a("c.txt"),
+            ErrorKind::Unsupported,
+            Some(FailureReason::TrashRefused),
+        ));
+    });
+    let (token, text, _) = the_toast(&effects);
+    assert_eq!(text, "항목 1개를 처리하지 못했습니다");
+    // The refused item is asked about first; once that is put off, the toast lists b.txt.
+    assert_eq!(
+        confirm_shown(&state).purpose,
+        ConfirmPurpose::DeletePermanently(vec![in_a("c.txt")])
+    );
+    state.dialog_cancelled();
+    state.toast_clicked(token);
+    let failures = failures_shown(&state);
+    assert_eq!(failures.lines.len(), 1);
+    let retry = delete(vec![in_a("b.txt")], DeleteMethod::Trash);
+    assert_eq!(failures.retry.map(|retry| retry.spec), Some(retry.clone()));
+
+    // 다시 시도 sends b.txt alone to the trash, at once: a trash can be undone, so nothing asks.
+    let (submitted, _) = the_submit(&state.failures_retried());
+    assert_eq!(submitted, retry);
+    assert_eq!(state.modal(), None);
+    assert_eq!(state.recent_details(0), []);
+    assert_eq!(failures_shown(&state).retry, None, "the retry is used up");
+    state.dialog_cancelled();
+
+    // The retry is a job of its own, with an undo record of its own: its toast undoes it alone,
+    // and the trash of a.txt is still there to undo after it.
+    let second = trashed(&[in_a("b.txt")]);
+    state.set_history(History {
+        top: Some(second.clone()),
+        undo: vec![first.clone(), second.clone()],
+        ..History::default()
+    });
+    let effects = finish(&mut state, 2, &retry, JobWork::Trash, |report| {
+        report.undo = Some(second.clone());
+    });
+    let (token, text, action) = the_toast(&effects);
+    assert_eq!(
+        (text.as_str(), action.as_str()),
+        ("항목 1개를 휴지통으로 보냈습니다", "되돌리기")
+    );
+    assert_eq!(state.toast_clicked(token), [Effect::Job(JobEffect::Undo)]);
+    state.set_history(History {
+        top: Some(first.clone()),
+        undo: vec![first],
+        can_redo: true,
+        redo: vec![second],
+        ..History::default()
+    });
+    assert!(state.can_undo());
+    assert_eq!(
+        press(&mut state, "z", CTRL),
+        Some(vec![Effect::Job(JobEffect::Undo)])
+    );
+}
+
+#[test]
+fn a_retry_of_a_delete_for_good_asks_again_and_a_cancel_keeps_it() {
+    let mut state = ready(vec![file("b.txt")], vec![dir("d")]);
+    // A delete for good of d and b.txt under a policy of its own: a mount point in d is never
+    // entered, and b.txt is locked. d stays, for what is in it.
+    let spec = JobSpec::Delete(DeleteSpec {
+        paths: vec![in_a("d"), in_a("b.txt")],
+        method: DeleteMethod::Permanent,
+        errors: ErrorPolicy::Ask,
+    });
+    let mount = in_a("d").join("mnt").expect("a plain name");
+    let effects = finish(&mut state, 1, &spec, JobWork::Delete, |report| {
+        report.outcome = Outcome::CompletedWithErrors;
+        report.failures.push(failure(
+            mount.clone(),
+            ErrorKind::Unsupported,
+            Some(FailureReason::OtherVolume),
+        ));
+        report
+            .failures
+            .push(failure(in_a("b.txt"), ErrorKind::PermissionDenied, None));
+    });
+    let (token, _, _) = the_toast(&effects);
+    state.toast_clicked(token);
+    let failures = failures_shown(&state);
+    // Both are listed; the mount point is not tried again, which would empty its volume.
+    assert_eq!(failures.lines.len(), 2);
+    let retry = DeleteSpec {
+        paths: vec![in_a("b.txt")],
+        method: DeleteMethod::Permanent,
+        errors: ErrorPolicy::Ask,
+    };
+    assert_eq!(
+        failures.retry.map(|retry| retry.spec),
+        Some(JobSpec::Delete(retry.clone()))
+    );
+
+    // 다시 시도 asks first, as the delete itself did: it cannot be undone.
+    assert_eq!(state.failures_retried(), []);
+    let confirm = confirm_shown(&state);
+    assert_eq!(
+        confirm.purpose,
+        ConfirmPurpose::RetryDeleteForGood {
+            job: JobId(1),
+            spec: retry.clone()
+        }
+    );
+    assert!(confirm.danger);
+    assert_eq!(
+        (confirm.title.as_str(), confirm.ok.as_str()),
+        ("영구 삭제", "영구 삭제")
+    );
+    assert_eq!(
+        confirm.message,
+        "지우지 못한 항목 1개를 다시 영구 삭제할까요?\n휴지통을 거치지 않으며 되돌릴 수 없습니다."
+    );
+    assert_eq!(confirm.detail, words::names_line(&retry.paths));
+    // A cancel deletes nothing and keeps the retry.
+    assert_eq!(state.dialog_cancelled(), []);
+    assert_eq!(state.modal(), None);
+    assert_eq!(state.recent_details(0), []);
+    assert!(failures_shown(&state).retry.is_some(), "a cancel keeps it");
+
+    // Asked again and answered yes: b.txt alone goes, under the delete's own policy, and the
+    // retry is used up.
+    assert_eq!(state.failures_retried(), []);
+    assert_eq!(
+        the_submit(&state.confirm_accepted()),
+        (JobSpec::Delete(retry), None)
+    );
+    assert_eq!(state.recent_details(0), []);
+    assert_eq!(failures_shown(&state).retry, None);
+    // The window without the button submits nothing.
+    assert_eq!(state.failures_retried(), []);
+}
+
+#[test]
+fn a_delete_whose_failures_no_retry_can_help_offers_none() {
+    let mut state = ready(vec![], vec![dir("d")]);
+    for (id, method, work) in [
+        (1, DeleteMethod::Permanent, JobWork::Delete),
+        (2, DeleteMethod::Trash, JobWork::Trash),
+    ] {
+        let spec = delete(vec![in_a("d")], method);
+        let effects = finish(&mut state, id, &spec, work, |report| {
+            report.outcome = Outcome::CompletedWithErrors;
+            report.failures.push(failure(
+                in_a("d").join("mnt").expect("a plain name"),
+                ErrorKind::Unsupported,
+                Some(FailureReason::OtherVolume),
+            ));
+        });
+        let (token, _, _) = the_toast(&effects);
+        state.toast_clicked(token);
+        let failures = failures_shown(&state);
+        assert_eq!((failures.lines.len(), failures.retry), (1, None));
+        state.dialog_cancelled();
     }
 }

@@ -512,6 +512,20 @@ job-items-left = { $count ->
        *[other] { $count } items
     } left
 
+## Retry in the window of the items a job couldn't process (XFER-09)
+
+# Asked before the items a permanent delete couldn't delete are permanently deleted again. The
+# title and the button are delete-permanently-*.
+retry-delete-for-good =
+    Try again to permanently delete { $count ->
+        [one] the item
+       *[other] the { $count } items
+    } that couldn't be deleted?
+    This skips the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    } and can't be undone.
+
 ## Quitting while jobs run, and the jobs the last run did not finish
 
 quit-title = Quit?

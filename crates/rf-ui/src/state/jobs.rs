@@ -522,7 +522,8 @@ impl AppState {
                 spec.map(|spec| submit(spec, None)).into_iter().collect()
             }
             // The retry is used up now that its question was answered yes, once for its job.
-            ConfirmPurpose::RetryDeleteFromTrash { job, .. } => {
+            ConfirmPurpose::RetryDeleteFromTrash { job, .. }
+            | ConfirmPurpose::RetryDeleteForGood { job, .. } => {
                 let (job, spec) = (*job, confirm.job());
                 self.close();
                 if !self.retried_jobs.insert(job) {
@@ -577,9 +578,11 @@ impl AppState {
 
     /// 다시 시도 of the window of failed items (XFER-09): the job of the failed items alone is
     /// submitted ([`Retry`]), the window closes, and the job they come from offers them no
-    /// second time (its retry tells of its own failures). A delete from the trash asks first,
-    /// and its retry is used up only when that question is answered yes: a cancel keeps it.
-    /// Nothing for a window without the button.
+    /// second time (its retry tells of its own failures). A delete from the trash and a delete
+    /// for good ask first ([`Confirm::retry_delete_from_trash`],
+    /// [`Confirm::retry_delete_for_good`]), and their retry is used up only when that question
+    /// is answered yes: a cancel keeps it. A send to the trash goes at once, as a job of its
+    /// own with an undo record of its own. Nothing for a window without the button.
     pub fn failures_retried(&mut self) -> Vec<Effect> {
         let Some(Modal::Failures(failures)) = &self.modal else {
             return Vec::new();
@@ -592,13 +595,22 @@ impl AppState {
         if self.retried_jobs.contains(&job) {
             return Vec::new();
         }
-        // What deletes for good is asked about again, the items named: it cannot be undone.
-        if let JobSpec::DeleteFromTrash { items } = spec {
-            self.open(Modal::Confirm(Confirm::retry_delete_from_trash(job, items)));
-            return Vec::new();
+        // What deletes for good is asked about again, the items named: it cannot be undone. A
+        // trash can, and goes at once.
+        match spec {
+            JobSpec::DeleteFromTrash { items } => {
+                self.open(Modal::Confirm(Confirm::retry_delete_from_trash(job, items)));
+                Vec::new()
+            }
+            JobSpec::Delete(delete) if delete.method == DeleteMethod::Permanent => {
+                self.open(Modal::Confirm(Confirm::retry_delete_for_good(job, delete)));
+                Vec::new()
+            }
+            spec => {
+                self.retried_jobs.insert(job);
+                vec![submit(spec, None)]
+            }
         }
-        self.retried_jobs.insert(job);
-        vec![submit(spec, None)]
     }
 
     /// The pre-flight window was answered with button `choice`
@@ -1312,13 +1324,15 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 
 /// What 다시 시도 of the window of the failed items of `report` submits (XFER-09): for a copy or
 /// a move, the transfer of the failed items alone, with the mode, the targets and the policies
-/// of the job they come from; for a restore from the trash and a delete from it (an emptying is
-/// one, of the items its question counted), the items that failed, as the trash's list showed
-/// them (`JobReport::retry_spec`; a delete for good asks again before it goes,
-/// [`AppState::failures_retried`]). `None` for another kind of job, and for one none of whose
-/// failures can be tried again (a source that could not be removed after its copy was in place,
-/// a link that leads back to its own folder, an item of the trash that changed since it was
-/// listed).
+/// of the job they come from; for a send to the trash and a delete for good, the paths that
+/// failed, with the method and the error policy of the job, but not what the trash refused
+/// (offered for a delete for good of its own); for a restore from the trash and a delete from
+/// it (an emptying is one, of the items its question counted), the items that failed, as the
+/// trash's list showed them (`rf_jobs::retry_spec`; a delete for good asks again before it
+/// goes, [`AppState::failures_retried`]). `None` for another kind of job, and for one none of
+/// whose failures can be tried again (a source that could not be removed after its copy was in
+/// place, a link that leads back to its own folder, a folder on another volume, an item of the
+/// trash that changed since it was listed).
 ///
 /// `None` too for a job that was stopped (`Outcome::Aborted`): the items it never came to are
 /// no failures, and the report does not name them (it counts them at most), so a retry would
@@ -1327,14 +1341,28 @@ pub(super) fn submit(spec: JobSpec, origin: Option<usize>) -> Effect {
 pub(super) fn retry_of(report: &JobReport) -> Option<Retry> {
     let retried = matches!(
         report.spec,
-        JobSpec::Transfer(_) | JobSpec::RestoreFromTrash { .. } | JobSpec::DeleteFromTrash { .. }
+        JobSpec::Transfer(_)
+            | JobSpec::Delete(_)
+            | JobSpec::RestoreFromTrash { .. }
+            | JobSpec::DeleteFromTrash { .. }
     );
     if !retried || report.outcome == Outcome::Aborted {
         return None;
     }
-    // An emptying of the trash tries again the items it listed and could not delete, never what
-    // was trashed since.
-    let spec = report.retry_spec()?;
+    // What the trash refused is offered for a delete for good of its own (OPS-03), never sent to
+    // the trash again. An emptying of the trash tries again the items it listed and could not
+    // delete, never what was trashed since.
+    let trash = matches!(
+        &report.spec,
+        JobSpec::Delete(delete) if delete.method == DeleteMethod::Trash
+    );
+    let failed: Vec<ItemFailure> = report
+        .failures
+        .iter()
+        .filter(|failure| !(trash && failure.reason == Some(FailureReason::TrashRefused)))
+        .cloned()
+        .collect();
+    let spec = rf_jobs::retry_spec(&report.spec, &failed)?;
     Some(Retry {
         job: report.id,
         spec,
