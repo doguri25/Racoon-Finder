@@ -38,6 +38,17 @@ pick-problem-shell-place = Nothing can be put in the { $os ->
         [windows] Recycle Bin or This PC
        *[other] Trash or Computer
     }
+# Restore To…: an item comes out of the trash by a rename, which can't cross volumes.
+pick-problem-other-volume = On another { $os ->
+        [macos] volume
+       *[other] drive
+    }, so the items can't go here: items in the { $os ->
+        [windows] Recycle Bin
+       *[other] Trash
+    } go only to a folder on their own { $os ->
+        [macos] volume
+       *[other] drive
+    }
 pick-problem-not-writable = A read-only location: the job may fail
 # $need (rounded up), $available (rounded down): sizes.
 pick-problem-space = There may not be enough space: { $need } needed, { $available } free

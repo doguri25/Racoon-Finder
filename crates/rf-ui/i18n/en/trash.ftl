@@ -85,6 +85,17 @@ trash-folders-gone = { $count ->
        *[other] Couldn't restore { $count } items: their original folders are gone
     }
 trash-restore-elsewhere = Restore To…
+# Restore To… for items in the trashes of more than one volume.
+trash-restore-two-volumes = The items are in the { $os ->
+        [windows] Recycle Bins
+       *[other] Trash
+    } of more than one { $os ->
+        [macos] volume
+       *[other] drive
+    }, so they can't go to one folder. Take out the items of each { $os ->
+        [macos] volume
+       *[other] drive
+    } on their own.
 trash-item-not-opened = Items in the { $os ->
         [windows] Recycle Bin
        *[other] Trash

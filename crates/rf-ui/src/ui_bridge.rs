@@ -3967,6 +3967,7 @@ mod tests {
                 writable: true,
                 available: Some(1 << 30),
                 same_volume: false,
+                other_volume: false,
             },
         );
         assert_eq!(view(&picker).space, "남은 공간 1 GB");

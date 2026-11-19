@@ -110,6 +110,10 @@ pub enum Validity {
         need: u64,
         available: u64,
     },
+    /// Items of the trash cannot go there (위치를 골라 꺼내기…): the folder is on another volume
+    /// than the trash that holds them, and a restore puts an item back by renaming it, which
+    /// cannot cross volumes ([`Picker::validity`]). A copy or a move goes there all the same.
+    OtherVolume,
 }
 
 impl Validity {
@@ -135,6 +139,10 @@ pub struct TargetFacts {
     /// Whether the folder is on the volume of the folder the items are in: a move there only
     /// renames, and needs no room.
     pub same_volume: bool,
+    /// Whether the folder is known to be on another volume than the folder the items are in:
+    /// both volumes are known and differ. Neither this nor `same_volume` when a volume is not
+    /// known.
+    pub other_volume: bool,
 }
 
 /// One folder the picker offers.
@@ -507,17 +515,25 @@ impl Picker {
     }
 
     /// Whether the target can take the items, with what is known about it; `None` without a
-    /// target.
+    /// target. Items of the trash go only to a folder on the volume of the trash that holds
+    /// them (`Validity::OtherVolume` once a worker found the target on another one).
     pub fn validity(&self) -> Option<Validity> {
         let target = self.target.as_ref()?;
-        Some(validate(&self.request, target, self.facts.as_ref()))
+        let validity = validate(&self.request, target, self.facts.as_ref());
+        let other_volume = self.facts.as_ref().is_some_and(|facts| facts.other_volume);
+        if self.for_restore() && other_volume && validity.can_choose() {
+            return Some(Validity::OtherVolume);
+        }
+        Some(validity)
     }
 
     /// Whether the confirm button works: a target that can be chosen, and the path field
-    /// showing it (no path typed and not entered, or entered and still being looked at).
+    /// showing it (no path typed and not entered, or entered and still being looked at). Items
+    /// of the trash go only once a worker has looked at the target, which tells its volume.
     pub fn can_confirm(&self) -> bool {
         !self.path_edited
             && self.typed.is_none()
+            && (self.facts.is_some() || !self.for_restore())
             && self.validity().is_some_and(Validity::can_choose)
     }
 
@@ -683,6 +699,7 @@ mod tests {
             writable: true,
             available,
             same_volume,
+            other_volume: false,
         }
     }
 

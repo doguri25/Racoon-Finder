@@ -186,6 +186,16 @@ fn only_the_failed_items_of_a_job_on_the_trash_are_tried_again() {
         Some(JobSpec::DeleteFromTrash { items: vec![b] })
     );
     assert_eq!(rf_jobs::retry_spec(&delete, &[]), None);
+    // A restore that would cross volumes (to a folder the user chose on another one) fails the
+    // same way again: it is not offered.
+    let crossed = rf_jobs::ItemFailure {
+        kind: ErrorKind::CrossesDevices,
+        ..failed
+    };
+    assert_eq!(
+        rf_jobs::retry_spec(&restore, std::slice::from_ref(&crossed)),
+        None
+    );
 }
 
 /// A freedesktop trash in a temporary folder, the local disk whose trash it is, and the trash as

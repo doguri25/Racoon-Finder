@@ -2091,6 +2091,12 @@ pub fn restore_folders_gone(n: usize) -> String {
     t("trash-folders-gone", &[("count", count(n))])
 }
 
+/// The notice when 위치를 골라 꺼내기… is asked for items that lie in the trashes of more than
+/// one volume: a restore renames, so no one folder can take them all.
+pub fn restore_from_two_volumes() -> &'static str {
+    t_static("trash-restore-two-volumes")
+}
+
 /// The label of the button that takes items out of the trash to a folder the user chooses.
 pub fn restore_elsewhere_action() -> &'static str {
     t_static("trash-restore-elsewhere")
@@ -2608,6 +2614,7 @@ pub fn pick_problem(validity: Validity, mode: TransferMode, at_least: bool) -> S
         Validity::NotAFolder => "pick-problem-not-a-folder",
         Validity::ShellPlace | Validity::ForeignToTrash => "pick-problem-shell-place",
         Validity::NotWritable => "pick-problem-not-writable",
+        Validity::OtherVolume => "pick-problem-other-volume",
         Validity::NotEnoughSpace { need, available } => {
             return t(
                 if at_least {
@@ -2872,8 +2879,12 @@ pub fn drop_refused(validity: Validity) -> String {
         Validity::NotAFolder => "drop-refused-not-a-folder",
         Validity::ShellPlace => "drop-refused-shell-place",
         Validity::ForeignToTrash => "drop-refused-foreign-to-trash",
-        // A place that takes them with a warning is no refusal.
-        Validity::Ok | Validity::NotWritable | Validity::NotEnoughSpace { .. } => "drop-refused",
+        // A place that takes them with a warning is no refusal; a drop never takes items out of
+        // the trash.
+        Validity::Ok
+        | Validity::NotWritable
+        | Validity::NotEnoughSpace { .. }
+        | Validity::OtherVolume => "drop-refused",
     })
     .to_owned()
 }

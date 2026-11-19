@@ -229,6 +229,7 @@ fn with_shift_the_picker_finds_the_folder_and_the_links_go_there() {
         writable: true,
         available: None,
         same_volume: true,
+        other_volume: false,
     };
     assert_eq!(state.target_inspected(generation, &path, facts), []);
     let (spec, origin) = the_submit(&state.pick_confirmed());

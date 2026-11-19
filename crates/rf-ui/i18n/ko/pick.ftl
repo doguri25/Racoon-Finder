@@ -28,6 +28,8 @@ pick-problem-into-linked = 링크를 만드는 항목 안이라 고를 수 없�
 pick-problem-same-folder = 원래 있던 폴더라 고를 수 없음
 pick-problem-not-a-folder = 폴더를 찾을 수 없어 고를 수 없음
 pick-problem-shell-place = 휴지통과 내 PC에는 넣을 수 없음
+# 위치를 골라 꺼내기…: 휴지통의 항목은 이름을 바꿔 꺼내므로 다른 볼륨으로 갈 수 없다.
+pick-problem-other-volume = 다른 드라이브라 꺼낼 수 없음: 휴지통의 항목은 같은 드라이브(볼륨)의 폴더로만 꺼냅니다
 pick-problem-not-writable = 읽기 전용 위치라 작업이 실패할 수 있습니다
 # $need(올림), $available(내림): 크기.
 pick-problem-space = 공간이 부족할 수 있습니다: 필요 { $need }, 남은 공간 { $available }

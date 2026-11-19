@@ -524,7 +524,8 @@ pub fn retry_spec(original: &JobSpec, failed: &[ItemFailure]) -> Option<JobSpec>
 
 /// Whether one of `failed` names the item at `location` in the trash as its source, for a reason
 /// a retry can get past: not for an item that is no longer the one listed (`TrashItemChanged`),
-/// which a retry is refused again.
+/// which a retry is refused again, nor for a restore to another volume (`CrossesDevices`: an item
+/// comes out of the trash by a rename), which would fail the same way.
 fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
     let Ok(location) = VPath::local(location) else {
         return false;
@@ -532,6 +533,7 @@ fn failed_in_trash(location: &std::path::Path, failed: &[ItemFailure]) -> bool {
     failed.iter().any(|failure| {
         failure.source.as_ref() == Some(&location)
             && failure.reason != Some(FailureReason::TrashItemChanged)
+            && failure.kind != ErrorKind::CrossesDevices
     })
 }
 

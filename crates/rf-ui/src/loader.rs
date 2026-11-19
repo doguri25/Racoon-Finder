@@ -398,6 +398,7 @@ impl Loader {
             writable: false,
             available: None,
             same_volume: false,
+            other_volume: false,
         };
         let provider = match self.vfs.provider(target) {
             Ok(provider) => provider,
@@ -414,20 +415,19 @@ impl Loader {
             .ok()
             .flatten()
             .map(|space| space.available);
-        let same_volume = self
+        let volumes = self
             .vfs
             .provider(from_dir)
             .ok()
             .filter(|source| source.scheme() == provider.scheme())
             .and_then(|source| source.stat_target(from_dir).ok())
-            .is_some_and(|source| {
-                source.volume_id.is_some() && source.volume_id == entry.volume_id
-            });
+            .and_then(|source| source.volume_id.zip(entry.volume_id));
         TargetFacts {
             folder: Ok(()),
             writable,
             available,
-            same_volume,
+            same_volume: volumes.is_some_and(|(from, to)| from == to),
+            other_volume: volumes.is_some_and(|(from, to)| from != to),
         }
     }
 

@@ -88,6 +88,7 @@ fn folder_facts() -> TargetFacts {
         writable: true,
         available: Some(512 * MB),
         same_volume: false,
+        other_volume: false,
     }
 }
 

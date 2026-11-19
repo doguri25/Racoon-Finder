@@ -492,6 +492,7 @@ fn restore_goes_to_the_original_place_and_an_unknown_one_offers_the_picker_alone
             writable: true,
             available: Some(1 << 30),
             same_volume: false,
+            other_volume: false,
         },
     );
     let effects = state.pick_confirmed();
@@ -501,6 +502,102 @@ fn restore_goes_to_the_original_place_and_an_unknown_one_offers_the_picker_alone
         [&JobSpec::RestoreFromTrash {
             items: vec![(unknown, local)]
         }]
+    );
+}
+
+/// What a worker finds at a folder that can take items, on the items' volume or on `other`.
+fn found_folder(other: bool) -> crate::pick::TargetFacts {
+    crate::pick::TargetFacts {
+        folder: Ok(()),
+        writable: true,
+        available: Some(1 << 30),
+        same_volume: !other,
+        other_volume: other,
+    }
+}
+
+#[test]
+fn taking_items_out_refuses_a_folder_on_another_volume_up_front() {
+    let a = item("a.txt", None, Some(5));
+    let mut state = in_trash(std::slice::from_ref(&a));
+    choose(&mut state, "a.txt");
+    let effects = state
+        .trash_command("restore-elsewhere")
+        .expect("a command of the trash");
+    let (look, target, from_dir) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::InspectTarget {
+                generation,
+                path,
+                from_dir,
+            } => Some((*generation, path.clone(), from_dir.clone())),
+            _ => None,
+        })
+        .expect("the picker looks at its first target");
+    // The worker compares the target with the folder of the trash that holds the items: a
+    // restore renames, which cannot cross volumes.
+    let bin = a.location.parent().expect("the trash's folder");
+    assert_eq!(from_dir, VPath::local(bin).expect("a local path"));
+    // Nothing goes before the target was looked at.
+    assert_eq!(state.pick_confirmed(), []);
+    assert!(matches!(state.modal(), Some(Modal::Pick(_))));
+    // On another volume: refused, and the picker says why.
+    state.target_inspected(look, &target, found_folder(true));
+    let Some(Modal::Pick(picker)) = state.modal() else {
+        panic!("the picker shows: {:?}", state.modal());
+    };
+    let picker = picker.clone();
+    assert_eq!(picker.validity(), Some(crate::pick::Validity::OtherVolume));
+    assert!(!picker.can_confirm());
+    assert_eq!(
+        words::pick_problem(
+            crate::pick::Validity::OtherVolume,
+            TransferMode::Move,
+            false
+        ),
+        "다른 드라이브라 꺼낼 수 없음: 휴지통의 항목은 같은 드라이브(볼륨)의 폴더로만 꺼냅니다"
+    );
+    assert_eq!(state.pick_confirmed(), []);
+    // A copy or a move goes to another volume, though (it copies, then deletes).
+    let mut moving = picker.clone();
+    moving.purpose = PickPurpose::Transfer;
+    assert_eq!(moving.validity(), Some(crate::pick::Validity::Ok));
+    // On the items' volume, it goes.
+    state.target_inspected(look, &target, found_folder(false));
+    let effects = state.pick_confirmed();
+    let local = target.as_local().expect("a local folder").join("a.txt");
+    assert_eq!(
+        submitted(&effects),
+        [&JobSpec::RestoreFromTrash {
+            items: vec![(a, local)]
+        }]
+    );
+}
+
+#[test]
+fn items_of_two_trashes_are_not_taken_out_to_one_folder() {
+    let a = item("a.txt", None, Some(5));
+    let mut b = TrashItem::at(
+        std::env::temp_dir()
+            .join("Other volume")
+            .join(".Trashes")
+            .join("b.txt"),
+        false,
+    );
+    b.size = Some(5);
+    let mut state = in_trash(&[a, b]);
+    state.click_row(LEFT, 0, false, false);
+    state.click_row(LEFT, 1, true, false);
+    let effects = state
+        .trash_command("restore-elsewhere")
+        .expect("a command of the trash");
+    assert_eq!(state.modal(), None);
+    assert_eq!(
+        notices(&effects),
+        [
+            "고른 항목이 여러 드라이브(볼륨)의 휴지통에 있어 한 폴더로 꺼낼 수 없습니다. 드라이브마다 따로 골라 꺼내세요."
+        ]
     );
 }
 

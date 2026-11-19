@@ -27,7 +27,9 @@
 //!   with the bar of how full each is; opening one goes to its top folder. F5 there finds the
 //!   drives again ([`Effect::FindPlaces`]).
 
+use std::collections::HashSet;
 use std::ffi::OsString;
+use std::path::Path;
 
 use rf_core::{EntryKind, VPath};
 use rf_jobs::{FailureReason, JobReport, JobSpec, Outcome, UndoRecord};
@@ -69,7 +71,7 @@ pub fn computer_entries(places: &[Place]) -> Vec<rf_core::Entry> {
         .map(|place| {
             let mut entry = rf_core::Entry::new(drive_name(&place.path), EntryKind::Dir);
             entry.label = Some(OsString::from(&place.label));
-            entry.origin = place.path.as_local().map(std::path::Path::to_path_buf);
+            entry.origin = place.path.as_local().map(Path::to_path_buf);
             entry.size = place.space.map_or(0, |space| space.total);
             entry
         })
@@ -326,11 +328,22 @@ impl AppState {
 
     /// The picker for taking `items` of the trash out, asked for in pane `side`: its request is
     /// made of the items themselves (their rows, wherever the pane is now), as a move out of the
-    /// trash.
+    /// folder of the trash that holds them, so that the worker that looks at a target tells
+    /// whether it is on their volume (a restore renames: [`crate::pick::Picker::validity`]). Items of the
+    /// trashes of more than one volume are refused, saying why: no one folder takes them all.
     fn pick_restore(&mut self, side: usize, items: Vec<TrashItem>) -> Vec<Effect> {
         if self.quitting || items.is_empty() {
             return Vec::new();
         }
+        let bins: HashSet<&Path> = items
+            .iter()
+            .filter_map(|item| item.location.parent())
+            .collect();
+        let bin = match bins.into_iter().collect::<Vec<_>>().as_slice() {
+            [bin] => VPath::local(bin).ok(),
+            [] => None,
+            _ => return vec![Effect::Notice(words::restore_from_two_volumes().to_owned())],
+        };
         let trash = ShellPlace::Trash.path();
         let request = PickRequest {
             mode: rf_jobs::TransferMode::Move,
@@ -345,7 +358,7 @@ impl AppState {
                 .fold(0, u64::saturating_add),
             folder_count: items.iter().filter(|item| item.is_dir).count(),
             other_count: 0,
-            from_dir: trash,
+            from_dir: bin.unwrap_or_else(|| trash.clone()),
         };
         let opposite = self.tab(super::RIGHT - side).location().clone();
         let tabs = self.open_tab_folders();
