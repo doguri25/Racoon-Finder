@@ -939,4 +939,103 @@ mod tests {
             assert_eq!(ko.text("place-trash", &on(os)), "휴지통");
         }
     }
+
+    #[test]
+    fn english_counts_names_the_work_and_the_system() {
+        let en = Localizer::new(Lang::En);
+        let ko = Localizer::new(Lang::Ko);
+        let n = |key: &str, value: usize| en.text(key, &[("count", count(value))]);
+        // Plurals.
+        assert_eq!(n("status-items", 1), "1 item");
+        assert_eq!(n("status-items", 9), "9 items");
+        assert_eq!(n("status-plus-folders", 1), "+1 folder");
+        assert_eq!(n("pattern-count", 0), "0 matches");
+        assert_eq!(en.text("size-bytes", &[("bytes", number(1))]), "1 byte");
+        assert_eq!(
+            en.text("size-bytes", &[("bytes", number(512))]),
+            "512 bytes"
+        );
+        assert_eq!(
+            en.text(
+                "job-progress-items",
+                &[("done", number(1)), ("total", number(1))]
+            ),
+            "1 / 1 item"
+        );
+        assert_eq!(
+            en.text(
+                "duration-minutes-seconds",
+                &[("minutes", number(1)), ("seconds", number(20))]
+            ),
+            "1 minute 20 seconds"
+        );
+        // A job's sentence, whole in English, and the trash as the system names it.
+        let work =
+            |work: &'static str, os: Os| [("work", FluentValue::from(work)), (OS_ARG, os_arg(os))];
+        assert_eq!(en.text("job-done", &work("copy", Os::Other)), "Copied");
+        assert_eq!(
+            en.text("job-done", &work("trash", Os::Windows)),
+            "Moved to the Recycle Bin"
+        );
+        assert_eq!(
+            en.text("job-done", &work("trash", Os::MacOs)),
+            "Moved to the Trash"
+        );
+        assert_eq!(
+            en.text("job-cancelled", &work("move", Os::Other)),
+            "Moving cancelled"
+        );
+        assert_eq!(
+            en.text(
+                "job-notice-done-with-errors",
+                &[("work", "copy".into()), ("failed", count(1))]
+            ),
+            "Copying finished, but 1 item couldn't be processed"
+        );
+        assert_eq!(
+            en.text(
+                "job-report-done",
+                &[("work", "link".into()), ("count", count(2))]
+            ),
+            "2 links created"
+        );
+        // A work the messages do not know reads as the general one, in both languages.
+        assert_eq!(en.text("job-done", &work("compress", Os::Other)), "Done");
+        assert_eq!(
+            ko.text("job-done", &work("compress", Os::Other)),
+            "작업을 마쳤습니다"
+        );
+        assert_eq!(
+            ko.text("job-done", &work("trash", Os::Windows)),
+            "휴지통으로 보냈습니다"
+        );
+    }
+
+    #[test]
+    fn every_key_the_moved_code_asks_for_is_in_both_languages() {
+        let ko = messages(Lang::Ko);
+        let en = messages(Lang::En);
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut asked = 0;
+        for file in ["words.rs", "format.rs"] {
+            let source = std::fs::read_to_string(src.join(file)).expect("a Rust file");
+            // The code above 9b's marker and outside the tests.
+            let moved = source.split(SPLIT_MARKER).next().unwrap_or_default();
+            let moved = moved.split("#[cfg(test)]").next().unwrap_or_default();
+            let chars: Vec<char> = moved.chars().collect();
+            for (_, literal) in scan(&chars).literals {
+                let is_key = literal.contains('-')
+                    && !literal.starts_with('-')
+                    && literal
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                if is_key {
+                    asked += 1;
+                    assert!(ko.contains_key(&literal), "{file}: {literal} is not in ko");
+                    assert!(en.contains_key(&literal), "{file}: {literal} is not in en");
+                }
+            }
+        }
+        assert!(asked > 200, "{asked} keys");
+    }
 }
