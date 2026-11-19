@@ -4181,6 +4181,14 @@ impl Controller {
             with(Controller::dock_jobs);
             CloseRequestResponse::HideWindow
         });
+        // As the main window does: coming to the front, it looks at the system's high contrast
+        // setting again, for both windows.
+        own.window().on_winit_window_event(|_, event| {
+            if matches!(event, WinitEvent::Focused(true)) {
+                with(Controller::look_at_system_theme);
+            }
+            EventResult::Propagate
+        });
         *self.panel.window.borrow_mut() = Some(own.clone_strong());
         own.show()
     }
@@ -4706,6 +4714,47 @@ mod tests {
         slint::platform::update_timers_and_animations();
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(9));
         assert!(shown().is_none(), "no hover left behind");
+        drop(controller);
+        assert!(jobs.close_down(Duration::from_secs(10)));
+    }
+
+    /// As the window comes to the front, the theme of the system's setting is picked again:
+    /// for 시스템 설정 따르기 alone, never for a theme chosen in the 보기 menu.
+    #[test]
+    fn the_window_in_front_looks_at_the_system_s_theme_again_while_it_follows_it() {
+        use crate::theme::Builtin;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let window = MainWindow::new().expect("the window");
+        window.show().expect("it shows");
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let jobs = Jobs::start(&dir.path().join("journal"), |_| {}, |_| false).expect("the engine");
+        let saver = Saver::new(dir.path().join("config"), true);
+        let settings = Settings {
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        let controller = Controller::new(&window, jobs.clone(), settings, saver);
+        ui_bridge::follow_theme(&window);
+        window.set_theme_choice(theme_number(ThemeChoice::Dark));
+        window.invoke_show_theme();
+        assert_eq!(ui_bridge::shown_theme(&window), Builtin::Dark.tokens());
+        // A theme of its own: the window keeps what it shows (here put there by hand).
+        ui_bridge::show_theme(&window, &Builtin::Light.tokens());
+        controller.look_at_system_theme();
+        assert_eq!(ui_bridge::shown_theme(&window), Builtin::Light.tokens());
+        // Following the system (the testing backend's is light): picked again, with the high
+        // contrast setting as the system has it now.
+        controller.choose_theme(ThemeChoice::System);
+        slint::platform::update_timers_and_animations();
+        ui_bridge::show_theme(&window, &Builtin::Dark.tokens());
+        controller.look_at_system_theme();
+        let system = crate::theme::builtin(
+            ThemeChoice::System,
+            false,
+            rf_platform::desktop::high_contrast(),
+        );
+        assert_eq!(ui_bridge::shown_theme(&window), system);
         drop(controller);
         assert!(jobs.close_down(Duration::from_secs(10)));
     }

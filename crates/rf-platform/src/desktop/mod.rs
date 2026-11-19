@@ -139,8 +139,16 @@ mod tests {
 
     #[test]
     fn the_high_contrast_setting_can_be_read() {
-        // What it says depends on the system's setting; it answers at once, with no error.
-        let _ = high_contrast();
+        // What it says depends on the system's setting (the runner's is off); it answers at
+        // once, without panicking, and the same twice while nothing changes it. Linux answers
+        // from `GTK_THEME` as `names_high_contrast` reads it.
+        let first = high_contrast();
+        assert_eq!(high_contrast(), first);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        assert_eq!(
+            first,
+            std::env::var("GTK_THEME").is_ok_and(|theme| names_high_contrast(&theme))
+        );
     }
 
     #[test]
